@@ -28,6 +28,7 @@ mod event_bridge;
 mod log_buffer;
 mod status_server;
 mod token_store;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

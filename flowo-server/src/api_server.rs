@@ -23,7 +23,7 @@
 
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Sse},
     routing::{delete, get, post},
@@ -81,31 +81,7 @@ pub struct ApiState {
 /// this server. With count=1 and header "1.2.3.4, 10.0.0.1", returns 1.2.3.4.
 /// Falls back to the TCP source IP if: count is 0, header is absent/malformed,
 /// or fewer IPs are present than the trust count.
-fn extract_client_ip(req: &Request, trusted_proxy_count: usize) -> IpAddr {
-    let tcp_ip = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-
-    if trusted_proxy_count == 0 {
-        return tcp_ip;
-    }
-
-    let xff = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
-    if ips.len() < trusted_proxy_count {
-        return tcp_ip;
-    }
-
-    let idx = ips.len().saturating_sub(trusted_proxy_count + 1);
-    ips[idx].parse::<IpAddr>().unwrap_or(tcp_ip)
-}
+use crate::util::extract_client_ip;
 
 /// Loads the 32-byte HMAC key from `path`, or generates and persists it on first run.
 ///
@@ -345,7 +321,8 @@ pub async fn run(
         .with_state(state)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
         .layer(cors)
-        .layer(rate_limit_layer);
+        .layer(rate_limit_layer)
+        .layer(middleware::from_fn(security_headers_middleware));
 
     let addr     = format!("{}:{}", bind, port);
     let listener = tokio::net::TcpListener::bind(&addr).await
@@ -764,12 +741,33 @@ fn default_token_scopes() -> Vec<String> {
     vec!["read".to_string(), "write".to_string()]
 }
 
+/// Adds defensive HTTP response headers to every API response.
+async fn security_headers_middleware(req: axum::extract::Request, next: axum::middleware::Next) -> impl IntoResponse {
+    let mut response = next.run(req).await;
+    let h = response.headers_mut();
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("x-frame-options",        HeaderValue::from_static("DENY"));
+    h.insert("referrer-policy",        HeaderValue::from_static("strict-origin-when-cross-origin"));
+    response
+}
+
+const VALID_SCOPES: &[&str] = &["read", "write", "admin"];
+
 async fn create_token_handler(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
     Json(b):           Json<CreateTokenBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin(&caller) { return e.into_response(); }
+    let invalid: Vec<&str> = b.scopes.iter()
+        .map(|s| s.as_str())
+        .filter(|s| !VALID_SCOPES.contains(s))
+        .collect();
+    if !invalid.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": format!("Invalid scopes: {:?}. Allowed: read, write, admin", invalid)
+        }))).into_response();
+    }
     let scopes_ref: Vec<&str> = b.scopes.iter().map(|s| s.as_str()).collect();
     match s.token_store.create_token(&b.label, &scopes_ref) {
         Ok(raw) => (StatusCode::CREATED, Json(json!({

@@ -1,7 +1,7 @@
 use axum::{
-    extract::{ConnectInfo, Form, Path, Query, Request, State},
-    http::{HeaderMap, StatusCode},
-    middleware::Next,
+    extract::{Form, Path, Query, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -11,11 +11,13 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use blake3;
 use serde_json::{json, Value};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use flowo_engine::db::WorkflowDb;
+
+use crate::util::extract_client_ip;
 
 use crate::event_bridge::SharedRunState;
 use crate::log_buffer::LogBuffer;
@@ -50,35 +52,22 @@ pub fn router(state: StatusState) -> Router {
         .route("/api/runs",      get(api_runs))
         .route("/api/runs/:id",  get(api_run_detail))
         .layer(axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(middleware::from_fn(security_headers_middleware))
         .with_state(state)
 }
 
-/// Extracts the real client IP from X-Forwarded-For when behind trusted proxies.
-/// See api_server.rs for full documentation of this logic.
-fn extract_client_ip(req: &Request, trusted_proxy_count: usize) -> IpAddr {
-    let tcp_ip = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-
-    if trusted_proxy_count == 0 {
-        return tcp_ip;
-    }
-
-    let xff = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
-    if ips.len() < trusted_proxy_count {
-        return tcp_ip;
-    }
-
-    let idx = ips.len().saturating_sub(trusted_proxy_count + 1);
-    ips[idx].parse::<IpAddr>().unwrap_or(tcp_ip)
+/// Adds defensive HTTP response headers to every status server response.
+async fn security_headers_middleware(req: Request, next: Next) -> impl IntoResponse {
+    let mut response = next.run(req).await;
+    let h = response.headers_mut();
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("x-frame-options",        HeaderValue::from_static("DENY"));
+    h.insert("referrer-policy",        HeaderValue::from_static("strict-origin-when-cross-origin"));
+    h.insert(
+        "content-security-policy",
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"),
+    );
+    response
 }
 
 /// Per-IP rate limiter: 120 requests per 60-second window per client address.
