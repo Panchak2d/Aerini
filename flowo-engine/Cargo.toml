@@ -1,0 +1,100 @@
+[package]
+name = "flowo-engine"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "flowo_engine"
+
+[dependencies]
+# Async
+tokio       = { version = "1.0", features = ["full"] }
+tokio-util  = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+
+# Serde
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Graph
+petgraph = "0.6"
+
+# SQLite
+rusqlite    = { version = "0.38", features = ["bundled"] }
+r2d2        = "0.8"
+r2d2_sqlite = { version = "0.32", features = ["bundled"] }
+dashmap     = "6.1"
+
+# Encryption (credential store)
+aes-gcm = "0.10"
+rand    = "0.8"
+base64  = "0.22"
+
+# HTTP node
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+url     = "2"
+
+# Webhook node HTTP server (already transitive via reqwest; listed explicitly for clarity)
+hyper          = { version = "1", features = ["server", "http1"] }
+hyper-util     = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Email node
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+    "hostname",
+] }
+
+# Security
+subtle = "2.6"
+blake3 = "1"
+
+# Diagnostics
+tracing = "0.1"
+
+# Utils
+uuid      = { version = "1.8", features = ["v4"] }
+chrono    = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow    = "1.0"
+once_cell = "1"
+
+# JSON Schema validation (Phase 4)
+# default-features = false: omits HTTP/TLS resolver — not needed since Flowo schemas are inline.
+jsonschema = { version = "0.46", default-features = false }
+
+# OS keychain integration (Phase 8)
+# All four feature flags are safe to list together — each is gated behind
+# platform detection inside the keyring crate itself.
+# apple-native  → macOS Keychain (security-framework)
+# windows-native → Windows Credential Manager (windows-sys)
+# sync-secret-service + crypto-rust → Linux SecretService (D-Bus, pure-Rust crypto)
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+
+# Database node — Postgres + MySQL (Phase 12)
+# no default-features: avoids pulling in compile-time query macros (DATABASE_URL not needed).
+# any     — AnyPool runtime URL dispatch
+# postgres — Postgres driver
+# mysql   — MySQL/MariaDB driver
+# runtime-tokio-rustls — tokio executor + rustls TLS (matches existing reqwest choice)
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "mysql", "runtime-tokio-rustls"] }
+
+# Redis node (Phase 12)
+# tokio-comp — async Tokio connection manager (MultiplexedConnection)
+redis = { version = "1.0", features = ["tokio-comp"] }
+
+# S3 / object storage node (Phase 13)
+# default-features = false: avoid native-tls (pulls in OpenSSL) — use rustls instead,
+# matching reqwest's TLS choice throughout the project.
+# tokio-rustls-tls: tokio runtime + rustls TLS backend.
+# NOTE: If compilation fails with "unknown feature tokio-rustls-tls", change to
+#       default-features = true (tokio + native-tls) — native-tls works on all platforms
+#       but adds an OpenSSL dependency on Linux.
+rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["test-util"] }
+tempfile = "3"

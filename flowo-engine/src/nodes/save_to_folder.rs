@@ -1,0 +1,418 @@
+// SaveToFolder Node
+//
+// Writes media contract files to disk. Two modes:
+//
+//   Subfolder mode (config.subfolders non-empty):
+//     One dynamic input port per subfolder. Each port's source_expr is resolved
+//     by the executor to a JSON string containing a media contract or files array.
+//     Files are written to folder_path/<subfolder.name>/.
+//
+//   Flat mode (no subfolders):
+//     Single static input port "input". config["files"] holds the files array
+//     (resolved from a user-specified expression) and written directly to folder_path.
+//
+// Dynamic ports: YES — implements is_dynamic_ports() + ports_from_config().
+//
+// Path traversal protection: all '/', '\', '..' stripped from every filename
+// before any path is constructed. folder_path is user-selected and not sanitized.
+//
+// Concurrent writes: tokio::spawn per file (all spawned before any awaited).
+//
+// Output: { saved, count, folder, skipped, errors }
+
+use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use tokio::fs;
+
+use crate::error::NodeError;
+use crate::model::{NodeInput, NodeOutput, NodeType};
+use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+
+pub struct SaveToFolderNode;
+
+#[async_trait]
+impl Node for SaveToFolderNode {
+    fn type_id(&self) -> &'static str { "save_to_folder" }
+    fn display_name(&self) -> &'static str { "Save to Folder" }
+    fn node_type(&self) -> NodeType { NodeType::Action }
+    fn version(&self) -> &'static str { "1.0.0" }
+
+    fn input_schema(&self) -> Value {
+        // folder_path and overwrite are excluded from properties — the custom UI
+        // in popover-config.ts renders them (folder picker + checkbox). Including
+        // them here would produce duplicate generic text inputs.
+        json!({
+            "type": "object",
+            "properties": {
+                "filename_prefix": {
+                    "type": "string",
+                    "description": "Optional prefix prepended to every saved filename"
+                }
+            }
+        })
+    }
+
+    fn output_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "saved":   { "type": "array",  "description": "Successfully saved file records" },
+                "count":   { "type": "number", "description": "Number of files saved" },
+                "folder":  { "type": "string", "description": "Destination folder path" },
+                "skipped": { "type": "number", "description": "Files skipped (overwrite=false)" },
+                "errors":  { "type": "array",  "description": "Files that failed to write" }
+            }
+        })
+    }
+
+    fn is_dynamic_ports(&self) -> bool { true }
+
+    fn ports_from_config(&self, config: &Value) -> Option<NodePorts> {
+        Some(derive_ports(config))
+    }
+
+    // Static ports() returns minimum-state ports for defensive correctness
+    // (called only for descriptor generation, not during execution).
+    fn ports(&self) -> NodePorts {
+        derive_ports(&Value::Null)
+    }
+
+    async fn execute(&self, input: NodeInput) -> NodeOutput {
+        let cfg = &input.input;
+
+        let folder_path = match cfg["folder_path"].as_str() {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => return NodeOutput::failure(NodeError::unrecoverable(
+                "MISSING_FOLDER_PATH",
+                "folder_path is required — set it using the Choose Folder button",
+            )),
+        };
+
+        // Server mode: enforce __file_sandbox_dir if set, matching the same policy as FileNode.
+        if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
+            if let Some(sandbox_str) = sandbox_val.as_str() {
+                // Early rejection of path traversal sequences, matching FileNode policy.
+                if folder_path.contains("..") {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "INVALID_PATH",
+                        "Path traversal sequences (..) are not permitted",
+                    ));
+                }
+                let sandbox = std::path::Path::new(sandbox_str);
+                // Resolve relative paths against sandbox root, matching FileNode behaviour.
+                let canonical = if folder_path.starts_with('/') {
+                    std::path::PathBuf::from(&folder_path)
+                } else {
+                    sandbox.join(&folder_path)
+                };
+                let mut components: Vec<std::ffi::OsString> = Vec::new();
+                for c in canonical.components() {
+                    use std::path::Component;
+                    match c {
+                        Component::ParentDir => { components.pop(); }
+                        Component::CurDir    => {}
+                        other                => components.push(other.as_os_str().to_owned()),
+                    }
+                }
+                let resolved: std::path::PathBuf = components.iter().collect();
+                if !resolved.starts_with(sandbox) {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "PATH_OUTSIDE_SANDBOX",
+                        format!("folder_path '{}' is outside the permitted sandbox directory '{}'",
+                            folder_path, sandbox_str),
+                    ));
+                }
+            }
+        }
+
+        let overwrite = cfg["overwrite"].as_bool().unwrap_or(true);
+        // Sanitize prefix: strip path separators to prevent directory traversal.
+        let raw_prefix = cfg["filename_prefix"].as_str().unwrap_or("").to_string();
+        let prefix: String = raw_prefix.chars().filter(|&c| c != '/' && c != '\\').collect();
+
+        let subfolders = cfg["subfolders"].as_array().cloned().unwrap_or_default();
+
+        if subfolders.is_empty() {
+            flat_mode(cfg, &folder_path, &prefix, overwrite).await
+        } else {
+            subfolder_mode(&subfolders, &folder_path, &prefix, overwrite).await
+        }
+    }
+}
+
+// ── Execution modes ────────────────────────────────────────────────────────────
+
+async fn flat_mode(
+    cfg: &Value,
+    folder_path: &str,
+    prefix: &str,
+    overwrite: bool,
+) -> NodeOutput {
+    let files = extract_config_files(&cfg["files"]);
+
+    if files.is_empty() {
+        return NodeOutput::success_with_logs(
+            json!({ "saved": [], "count": 0, "folder": folder_path, "skipped": 0, "errors": [] }),
+            vec!["Flat mode: files field is empty or unresolved".to_string()],
+        );
+    }
+
+    let base = PathBuf::from(folder_path);
+    if let Err(e) = fs::create_dir_all(&base).await {
+        return NodeOutput::failure(NodeError::unrecoverable(
+            "CREATE_DIR_FAILED",
+            format!("Could not create '{}': {}", folder_path, e),
+        ));
+    }
+
+    let results = write_files_concurrent(&files, &base, prefix, overwrite).await;
+    build_output(results, folder_path)
+}
+
+async fn subfolder_mode(
+    subfolders: &[Value],
+    folder_path: &str,
+    prefix: &str,
+    overwrite: bool,
+) -> NodeOutput {
+    let mut all_results: Vec<Result<Value, Value>> = Vec::new();
+    let mut logs: Vec<String> = Vec::new();
+
+    for sf in subfolders {
+        let sf_name      = sf["name"].as_str().unwrap_or("unnamed");
+        let source_expr  = sf["source_expr"].as_str().unwrap_or("").trim();
+
+        if source_expr.is_empty() {
+            logs.push(format!("Subfolder '{}': no source_expr — skipped", sf_name));
+            continue;
+        }
+
+        let parsed = parse_source_expr(source_expr);
+        let files  = extract_files_array(&parsed);
+
+        if files.is_empty() {
+            logs.push(format!("Subfolder '{}': resolved to 0 files — skipped", sf_name));
+            continue;
+        }
+
+        let target_dir = PathBuf::from(folder_path).join(sf_name);
+        if let Err(e) = fs::create_dir_all(&target_dir).await {
+            all_results.push(Err(json!({
+                "filename": format!("<{}/...>", sf_name),
+                "reason": format!("Could not create directory: {}", e)
+            })));
+            continue;
+        }
+
+        logs.push(format!("Subfolder '{}': {} file(s)", sf_name, files.len()));
+        let results = write_files_concurrent(&files, &target_dir, prefix, overwrite).await;
+        all_results.extend(results);
+    }
+
+    let (saved, errors): (Vec<_>, Vec<_>) = all_results.into_iter().partition(|r| r.is_ok());
+    let saved: Vec<Value>  = saved.into_iter().map(|r| r.unwrap()).collect();
+    let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
+    let count = saved.len();
+
+    NodeOutput::success_with_logs(
+        json!({ "saved": saved, "count": count, "folder": folder_path, "skipped": 0, "errors": errors }),
+        logs,
+    )
+}
+
+// ── Port derivation ────────────────────────────────────────────────────────────
+
+pub fn derive_ports(config: &Value) -> NodePorts {
+    let mut inputs: Vec<PortDefinition> = Vec::new();
+
+    if let Some(subfolders) = config["subfolders"].as_array() {
+        if !subfolders.is_empty() {
+            for sf in subfolders {
+                let id    = sf["id"].as_str().unwrap_or("input").to_string();
+                let label = sf["name"].as_str().unwrap_or("Subfolder").to_string();
+                inputs.push(PortDefinition { id, label, position: PortPosition::Left });
+            }
+        }
+    }
+
+    if inputs.is_empty() {
+        inputs.push(PortDefinition {
+            id:       "input".to_string(),
+            label:    "In".to_string(),
+            position: PortPosition::Left,
+        });
+    }
+
+    NodePorts {
+        inputs,
+        outputs: vec![PortDefinition {
+            id:       "output".to_string(),
+            label:    "Out".to_string(),
+            position: PortPosition::Right,
+        }],
+    }
+}
+
+// ── Concurrent file writing ───────────────────────────────────────────────────
+
+/// Spawn one task per file. All tasks run concurrently (all spawned before any awaited).
+async fn write_files_concurrent(
+    files: &[Value],
+    dir: &PathBuf,
+    prefix: &str,
+    overwrite: bool,
+) -> Vec<Result<Value, Value>> {
+    let handles: Vec<_> = files.iter().map(|file| {
+        let dir      = dir.clone();
+        let prefix   = prefix.to_string();
+        let file     = file.clone();
+        tokio::spawn(async move {
+            write_single_file(&file, &dir, &prefix, overwrite).await
+        })
+    }).collect();
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(r) => results.push(r),
+            Err(e) => results.push(Err(json!({
+                "filename": "unknown",
+                "reason": format!("task panicked: {}", e)
+            }))),
+        }
+    }
+    results
+}
+
+async fn write_single_file(
+    file: &Value,
+    dir: &PathBuf,
+    prefix: &str,
+    overwrite: bool,
+) -> Result<Value, Value> {
+    let raw_name  = file["filename"].as_str().unwrap_or("file.bin");
+    let sanitized = sanitize_filename(raw_name);
+    let filename  = if prefix.is_empty() {
+        sanitized.clone()
+    } else {
+        format!("{}{}", prefix, sanitized)
+    };
+
+    let path = dir.join(&filename);
+
+    if !overwrite && path.exists() {
+        return Ok(json!({
+            "filename": filename,
+            "path":     path.display().to_string(),
+            "bytes":    0,
+            "skipped":  true
+        }));
+    }
+
+    let data_str = match file["data"].as_str() {
+        Some(d) => d,
+        None => return Err(json!({ "filename": filename, "reason": "missing data field" })),
+    };
+
+    let bytes = match decode_base64(data_str) {
+        Ok(b)  => b,
+        Err(e) => return Err(json!({ "filename": filename, "reason": e })),
+    };
+
+    let byte_count = bytes.len();
+    if let Err(e) = fs::write(&path, &bytes).await {
+        return Err(json!({ "filename": filename, "reason": format!("write failed: {}", e) }));
+    }
+
+    Ok(json!({
+        "filename": filename,
+        "path":     path.display().to_string(),
+        "bytes":    byte_count
+    }))
+}
+
+fn build_output(results: Vec<Result<Value, Value>>, folder: &str) -> NodeOutput {
+    let (saved, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
+    let saved: Vec<Value>  = saved.into_iter().map(|r| r.unwrap()).collect();
+    let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
+    let count = saved.len();
+    NodeOutput::success(json!({
+        "saved":   saved,
+        "count":   count,
+        "folder":  folder,
+        "skipped": 0,
+        "errors":  errors
+    }))
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+/// Strip path separators and `..` sequences from a filename.
+/// An empty result falls back to "file.bin".
+fn sanitize_filename(name: &str) -> String {
+    let no_sep: String = name.chars()
+        .filter(|&c| c != '/' && c != '\\')
+        .collect();
+    let no_dotdot = no_sep.split("..").collect::<Vec<_>>().join("");
+    if no_dotdot.trim().is_empty() {
+        "file.bin".to_string()
+    } else {
+        no_dotdot
+    }
+}
+
+/// Decode base64. Strips a `data:<mime>;base64,` prefix if present.
+fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
+    let raw = if let Some(pos) = data.find(',') {
+        &data[pos + 1..]
+    } else {
+        data
+    };
+    general_purpose::STANDARD
+        .decode(raw.trim())
+        .map_err(|e| format!("base64 decode failed: {}", e))
+}
+
+/// Parse a resolved source_expr string into a Value.
+/// After executor expression resolution, source_expr is a JSON string whose
+/// content is either a media contract object or a files array.
+fn parse_source_expr(expr: &str) -> Value {
+    let trimmed = expr.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    }
+}
+
+/// Extract a files array from a resolved media contract or bare files array.
+///   { "files": [...], ... }  →  the files array
+///   [...]                    →  the array itself
+fn extract_files_array(val: &Value) -> Vec<Value> {
+    match val {
+        Value::Object(obj) => {
+            if let Some(Value::Array(files)) = obj.get("files") {
+                files.clone()
+            } else {
+                vec![]
+            }
+        }
+        Value::Array(arr) => arr.clone(),
+        _                 => vec![],
+    }
+}
+
+/// Extract files from config["files"].
+/// Handles:
+///   - Value::Array: direct files array (rare; usually config holds strings)
+///   - Value::String: resolved expression JSON string (common path)
+///   - Everything else: empty
+fn extract_config_files(val: &Value) -> Vec<Value> {
+    match val {
+        Value::Array(arr) => arr.clone(),
+        Value::String(s)  => extract_files_array(&parse_source_expr(s)),
+        _                 => vec![],
+    }
+}

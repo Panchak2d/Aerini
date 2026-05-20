@@ -1,0 +1,92 @@
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
+import { showImportPreview } from "./modal-manager";
+import { isTauri } from "./utils";
+
+type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
+
+export function bindDropImport(toast: ToastFn): void {
+  const overlay = document.getElementById("drop-overlay")!;
+  const area    = document.getElementById("canvas-area")!;
+
+  // DOM drag-drop (browser mode / in-app drag)
+  let dragCounter = 0;
+  area.addEventListener("dragenter", e => {
+    e.preventDefault(); dragCounter++; overlay.classList.add("active");
+  });
+  area.addEventListener("dragleave", () => {
+    dragCounter--; if (dragCounter <= 0) { dragCounter = 0; overlay.classList.remove("active"); }
+  });
+  area.addEventListener("dragover", e => e.preventDefault());
+  area.addEventListener("drop", e => {
+    e.preventDefault(); dragCounter = 0; overlay.classList.remove("active");
+    const file = e.dataTransfer?.files[0];
+    if (file) readAndPreviewFile(file, toast);
+  });
+
+  // Tauri v2 native OS file-drop (drag from file manager)
+  if (isTauri()) {
+    getCurrentWebviewWindow().onDragDropEvent(event => {
+      const { type } = event.payload;
+
+      if (type === "enter" || type === "over") {
+        overlay.classList.add("active");
+        return;
+      }
+      if (type === "leave") {
+        overlay.classList.remove("active");
+        return;
+      }
+      if (type === "drop") {
+        overlay.classList.remove("active");
+        const paths = (event.payload as { type: string; paths: string[] }).paths;
+        if (!paths?.length) return;
+
+        const flowoPath = paths.find(p =>
+          p.endsWith(".flowo") || p.endsWith(".json")
+        );
+        if (!flowoPath) {
+          toast("Drop a .flowo file to import a workflow", "info");
+          return;
+        }
+
+        // Use read_text_file command — capability grants all file reads in tauri.conf.json
+        invoke<string>("read_text_file", { path: flowoPath })
+          .then(content => {
+            try {
+              const obj = JSON.parse(content);
+              showImportPreview(obj);
+            } catch {
+              toast("Could not parse the dropped file — is it a valid .flowo file?", "error");
+            }
+          })
+          .catch(e => toast(`Could not read file: ${e}`, "error"));
+      }
+    }).catch(e => console.error("onDragDropEvent registration failed:", e));
+  }
+
+  document.getElementById("empty-state-import-btn")?.addEventListener("click", () => {
+    document.getElementById("file-input")!.click();
+  });
+}
+
+export function bindFileInput(toast: ToastFn): void {
+  document.getElementById("file-input")!.addEventListener("change", e => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) readAndPreviewFile(file, toast);
+    (e.target as HTMLInputElement).value = "";
+  });
+}
+
+function readAndPreviewFile(file: File, toast: ToastFn): void {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const obj = JSON.parse(e.target?.result as string);
+      showImportPreview(obj);
+    } catch {
+      toast("Invalid .flowo file — could not parse JSON", "error");
+    }
+  };
+  reader.readAsText(file);
+}

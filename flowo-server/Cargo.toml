@@ -1,0 +1,50 @@
+[package]
+name = "flowo-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "flowo-server"
+path = "src/main.rs"
+
+[dependencies]
+flowo-engine = { path = "../flowo-engine" }
+
+# Async
+tokio        = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# HTTP
+axum       = { version = "0.7", features = ["tokio"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# HTTP client (for control commands)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serde
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Auth
+uuid    = { version = "1.8", features = ["v4"] }
+subtle  = "2.6"
+dashmap = "6.1"
+blake3  = "1"
+rand    = "0.8"
+
+# SQLite (for TokenStore; SQLite already bundled via flowo-engine)
+rusqlite    = { version = "0.38", features = ["bundled"] }
+
+# Utils
+chrono      = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "src-tauri",
+    "flowo-engine",
+    "flowo-server",
+]
+resolver = "2"
