@@ -90,7 +90,6 @@ fn evaluate(expr: &str) -> bool {
                 .trim_matches('\'')
                 .trim_matches('"');
 
-            // Numeric comparison
             if let (Ok(l), Ok(r)) = (lhs.parse::<f64>(), rhs.parse::<f64>()) {
                 return match *op {
                     ">=" => l >= r,
@@ -98,11 +97,10 @@ fn evaluate(expr: &str) -> bool {
                     "!=" => (l - r).abs() > f64::EPSILON,
                     ">"  => l > r,
                     "<"  => l < r,
-                    _    => (l - r).abs() <= f64::EPSILON, // == or =
+                    _    => (l - r).abs() <= f64::EPSILON,
                 };
             }
 
-            // String comparison (case-insensitive for == and =)
             return match *op {
                 "==" | "=" => lhs.to_lowercase() == rhs.to_lowercase(),
                 "!="       => lhs.to_lowercase() != rhs.to_lowercase(),
@@ -111,17 +109,15 @@ fn evaluate(expr: &str) -> bool {
         }
     }
 
-    // "contains" keyword
     if let Some(pos) = expr.find(" contains ") {
         let lhs = expr[..pos].trim().trim_matches('\'').trim_matches('"');
         let rhs = expr[pos + 10..].trim().trim_matches('\'').trim_matches('"');
         return lhs.contains(rhs);
     }
 
-    // Bare boolean
     match expr.to_lowercase().as_str() {
         "true" | "yes" | "1" => true,
         "false" | "no" | "0" | "null" | "" => false,
-        other => !other.is_empty() && other != "null" && other != "undefined",
+        other => other != "undefined",
     }
 }

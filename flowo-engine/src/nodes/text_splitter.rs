@@ -72,27 +72,16 @@ impl Node for TextSplitterNode {
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         // Resolve text — either from direct config or from a field in previous node output
-        let text = if let Some(field) = input.input["source_field"].as_str() {
-            if !field.is_empty() {
-                let mut found = String::new();
-                for output_val in input.context.node_outputs.values() {
-                    let candidate = traverse_dotpath(output_val, field);
-                    if let Some(s) = candidate.as_str() {
-                        found = s.to_string();
-                        break;
-                    }
-                }
-                if found.is_empty() {
-                    input.input["text"].as_str().unwrap_or("").to_string()
-                } else {
-                    found
-                }
-            } else {
-                input.input["text"].as_str().unwrap_or("").to_string()
-            }
-        } else {
-            input.input["text"].as_str().unwrap_or("").to_string()
-        };
+        let text: String = input.input["source_field"]
+            .as_str()
+            .filter(|f| !f.is_empty())
+            .and_then(|field| {
+                input.context.node_outputs.values().find_map(|v| {
+                    let val = traverse_dotpath(v, field);
+                    val.as_str().map(|s| s.to_string())
+                })
+            })
+            .unwrap_or_else(|| input.input["text"].as_str().unwrap_or("").to_string());
 
         if text.trim().is_empty() {
             return NodeOutput::failure(NodeError::unrecoverable("MISSING_TEXT",
@@ -102,36 +91,21 @@ impl Node for TextSplitterNode {
         let mode = input.input["mode"].as_str().unwrap_or("chars");
         let total_chars = text.chars().count();
 
+        let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(match mode {
+            "sentences" => 5, "paragraphs" => 3, "words" => 200, _ => 1000
+        }) as usize;
+        let overlap = input.input["overlap"].as_u64().unwrap_or(match mode {
+            "sentences" => 1, "paragraphs" => 0, "words" => 20, _ => 100
+        }) as usize;
+
         let chunks: Vec<String> = match mode {
-            "sentences" => {
-                let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(5) as usize;
-                let overlap = input.input["overlap"].as_u64().unwrap_or(1) as usize;
-                split_by_sentences(&text, chunk_size, overlap)
-            }
-            "paragraphs" => {
-                let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(3) as usize;
-                let overlap = input.input["overlap"].as_u64().unwrap_or(0) as usize;
-                split_by_paragraphs(&text, chunk_size, overlap)
-            }
-            "words" => {
-                let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(200) as usize;
-                let overlap = input.input["overlap"].as_u64().unwrap_or(20) as usize;
-                split_by_words(&text, chunk_size, overlap)
-            }
-            _ => {
-                let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(1000) as usize;
-                let overlap = input.input["overlap"].as_u64().unwrap_or(100) as usize;
-                split_by_chars(&text, chunk_size, overlap)
-            }
+            "sentences"  => split_by_sentences(&text, chunk_size, overlap),
+            "paragraphs" => split_by_paragraphs(&text, chunk_size, overlap),
+            "words"      => split_by_words(&text, chunk_size, overlap),
+            _            => split_by_chars(&text, chunk_size, overlap),
         };
 
         let total_chunks = chunks.len();
-        let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(match mode {
-            "sentences" => 5, "paragraphs" => 3, "words" => 200, _ => 1000
-        });
-        let overlap = input.input["overlap"].as_u64().unwrap_or(match mode {
-            "sentences" => 1, "words" => 20, _ => 100
-        });
 
         NodeOutput::success_with_logs(
             json!({
@@ -181,16 +155,16 @@ fn split_by_words(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
 fn split_by_sentences(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     // Simple sentence splitter on . ! ?
     let mut sentences: Vec<String> = Vec::new();
-    let mut current = String::new();
+    let mut sentence = String::new();
     for ch in text.chars() {
-        current.push(ch);
-        if matches!(ch, '.' | '!' | '?') && current.len() > 3 {
-            let trimmed = current.trim().to_string();
+        sentence.push(ch);
+        if matches!(ch, '.' | '!' | '?') && sentence.len() > 3 {
+            let trimmed = sentence.trim().to_string();
             if !trimmed.is_empty() { sentences.push(trimmed); }
-            current = String::new();
+            sentence = String::new();
         }
     }
-    if !current.trim().is_empty() { sentences.push(current.trim().to_string()); }
+    if !sentence.trim().is_empty() { sentences.push(sentence.trim().to_string()); }
 
     if chunk_size == 0 { return sentences; }
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };

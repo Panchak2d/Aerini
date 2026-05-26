@@ -71,7 +71,7 @@ impl Node for CodeNode {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "CODE_DISABLED",
                 "Code (JS) node is disabled in this deployment. \
-                 Pass --disable-code=false to the server to enable it.",
+                 Pass --allow-code to the server to enable it.",
             ));
         }
 
@@ -134,25 +134,55 @@ function output(v) {{ __result = v; }}
             let _ = stdin.write_all(wrapper.as_bytes()).await;
         }
 
+        // Spawn tasks to drain stdout/stderr concurrently with wait().
+        // child.wait() takes &mut self so child stays owned here for kill() on timeout.
+        let stdout_task = tokio::spawn({
+            use tokio::io::AsyncReadExt;
+            let mut pipe = child.stdout.take();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                buf
+            }
+        });
+        let stderr_task = tokio::spawn({
+            use tokio::io::AsyncReadExt;
+            let mut pipe = child.stderr.take();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                buf
+            }
+        });
+
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            child.wait_with_output()
+            child.wait(),
         ).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
-            Err(_) => NodeOutput::failure(
-                NodeError::unrecoverable("TIMEOUT", format!("Code exceeded {}s timeout", timeout_secs))
-            ),
-            Ok(Err(e)) => NodeOutput::failure(
-                NodeError::unrecoverable("EXEC_ERROR", e.to_string())
-            ),
-            Ok(Ok(out)) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(_) => {
+                let _ = child.kill().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                NodeOutput::failure(
+                    NodeError::unrecoverable("TIMEOUT", format!("Code exceeded {}s timeout", timeout_secs))
+                )
+            }
+            Ok(Err(e)) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                NodeOutput::failure(NodeError::unrecoverable("EXEC_ERROR", e.to_string()))
+            }
+            Ok(Ok(status)) => {
+                let stdout_bytes = stdout_task.await.unwrap_or_default();
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+                let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
 
-                if !out.status.success() && stdout.is_empty() {
+                if !status.success() && stdout.is_empty() {
                     return NodeOutput::failure(
                         NodeError::unrecoverable("RUNTIME_ERROR",
                             if stderr.is_empty() { "Code exited with non-zero status".to_string() }

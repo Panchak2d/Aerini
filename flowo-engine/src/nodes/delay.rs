@@ -3,12 +3,12 @@ use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::NodePorts;
+use crate::node::{Node, NodePorts};
 
 pub struct DelayNode;
 
 #[async_trait]
-impl crate::node::Node for DelayNode {
+impl Node for DelayNode {
     fn type_id(&self) -> &'static str { "delay" }
     fn display_name(&self) -> &'static str { "Delay" }
     fn node_type(&self) -> NodeType { NodeType::Utility }

@@ -50,7 +50,6 @@ impl Node for FileNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_PATH", "path is required")),
         };
 
-        // Reject path traversal sequences before any I/O.
         if raw_path.contains("..") {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "INVALID_PATH",
@@ -59,8 +58,6 @@ impl Node for FileNode {
         }
 
         // In server mode the executor injects __file_sandbox_dir into context metadata.
-        // Validate that the resolved absolute path stays within the sandbox directory.
-        //
         // fs::canonicalize fully dereferences all symlinks and requires the target
         // (or its parent, for write/append) to exist on disk. A symlink inside the
         // sandbox whose ultimate target resolves outside is detected and rejected.
@@ -81,12 +78,16 @@ impl Node for FileNode {
                     )),
                 };
 
-                // Resolve relative paths against the canonical sandbox root.
                 let abs: std::path::PathBuf = if raw_path.starts_with('/') {
                     std::path::PathBuf::from(&raw_path)
                 } else {
                     sandbox.join(&raw_path)
                 };
+
+                let outside = || NodeOutput::failure(NodeError::unrecoverable(
+                    "PATH_OUTSIDE_SANDBOX",
+                    format!("File access is restricted to '{}'", sandbox_str),
+                ));
 
                 match operation.as_str() {
                     "write" | "append" => {
@@ -105,10 +106,7 @@ impl Node for FileNode {
                             Ok(cp) if cp.starts_with(&sandbox) => {
                                 cp.join(fname).to_string_lossy().into_owned()
                             }
-                            Ok(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                                "PATH_OUTSIDE_SANDBOX",
-                                format!("File access is restricted to '{}'", sandbox_str),
-                            )),
+                            Ok(_)  => return outside(),
                             Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
                                 "INVALID_PATH",
                                 "Path parent does not exist or cannot be resolved",
@@ -126,16 +124,10 @@ impl Node for FileNode {
                             Ok(cp) if cp.starts_with(&sandbox) => {
                                 cp.to_string_lossy().into_owned()
                             }
-                            Ok(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                                "PATH_OUTSIDE_SANDBOX",
-                                format!("File access is restricted to '{}'", sandbox_str),
-                            )),
+                            Ok(_)  => return outside(),
                             Err(_) => {
                                 if !abs.starts_with(&sandbox) {
-                                    return NodeOutput::failure(NodeError::unrecoverable(
-                                        "PATH_OUTSIDE_SANDBOX",
-                                        format!("File access is restricted to '{}'", sandbox_str),
-                                    ));
+                                    return outside();
                                 }
                                 abs.to_string_lossy().into_owned()
                             }
@@ -148,10 +140,7 @@ impl Node for FileNode {
                             Ok(cp) if cp.starts_with(&sandbox) => {
                                 cp.to_string_lossy().into_owned()
                             }
-                            Ok(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                                "PATH_OUTSIDE_SANDBOX",
-                                format!("File access is restricted to '{}'", sandbox_str),
-                            )),
+                            Ok(_)  => return outside(),
                             Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
                                 "INVALID_PATH",
                                 "Path does not exist or cannot be resolved",
@@ -168,6 +157,21 @@ impl Node for FileNode {
 
         match operation.as_str() {
             "read" => {
+                const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
+                match fs::metadata(&path).await {
+                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable("READ_ERR", e.to_string())),
+                    Ok(meta) if meta.len() > MAX_READ_BYTES => {
+                        return NodeOutput::failure(NodeError::unrecoverable(
+                            "FILE_TOO_LARGE",
+                            format!(
+                                "File exceeds {}MB read limit ({} bytes). Use a streaming approach for large files.",
+                                MAX_READ_BYTES / (1024 * 1024),
+                                meta.len()
+                            ),
+                        ));
+                    }
+                    Ok(_) => {}
+                }
                 match fs::read(&path).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("READ_ERR", e.to_string())),
                     Ok(bytes) => {

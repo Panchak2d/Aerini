@@ -84,7 +84,8 @@ impl EventSink for EventBridge {
             "scheduler-status" => {
                 let status     = payload["status"].as_str().unwrap_or("?");
                 let next_run   = payload["next_run_at"].as_str().map(|s| s.to_string());
-                let last_error = payload["last_error"].as_str().map(|s| s.to_string());
+                let last_error = payload["last_error"].as_str()
+                    .map(|s| flowo_engine::nodes::util::scrub_url_in_error(s));
                 let run_count  = payload["run_count"].as_u64().unwrap_or(0);
 
                 // Extract last_result as owned Value before any borrows extend further.

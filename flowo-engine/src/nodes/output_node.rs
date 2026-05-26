@@ -13,10 +13,10 @@ pub struct OutputNode;
 
 #[async_trait]
 impl Node for OutputNode {
-    fn type_id(&self)      -> &'static str { "output" }
+    fn type_id(&self) -> &'static str { "output" }
     fn display_name(&self) -> &'static str { "Output" }
-    fn node_type(&self)    -> NodeType     { NodeType::Utility }
-    fn version(&self)      -> &'static str { "1.0.0" }
+    fn node_type(&self) -> NodeType { NodeType::Utility }
+    fn version(&self) -> &'static str { "1.0.0" }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -54,9 +54,8 @@ impl Node for OutputNode {
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let label = input.input["label"].as_str().unwrap_or("Result").to_string();
-        let field  = input.input["field"].as_str().unwrap_or("").to_string();
+        let field = input.input["field"].as_str().unwrap_or("").to_string();
 
-        // Resolve source: explicit source_node, or the incoming input itself
         let source: Value = if let Some(src_id) = input.input["source_node"].as_str() {
             input.context.node_outputs.get(src_id).cloned().unwrap_or(Value::Null)
         } else {
@@ -71,7 +70,6 @@ impl Node for OutputNode {
             last.unwrap_or(input.input.clone())
         };
 
-        // Optionally extract a specific field
         let value = if field.is_empty() {
             source
         } else {

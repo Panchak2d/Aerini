@@ -146,6 +146,20 @@ impl WorkflowDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
+    /// Returns only workflow IDs — cheaper than `list()` for containment checks.
+    /// Used by exec_locks pruning in the server binary.
+    pub fn list_ids(&self) -> Result<std::collections::HashSet<String>, String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM workflows")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ids)
+    }
+
     /// Paginated list with server-side LIMIT/OFFSET. Returns (items, total_count).
     /// Preferred over `list()` for API endpoints to avoid loading all rows into memory.
     pub fn list_paginated(&self, limit: usize, offset: usize) -> Result<(Vec<WorkflowSummary>, usize), String> {

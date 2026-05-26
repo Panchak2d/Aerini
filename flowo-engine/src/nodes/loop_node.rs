@@ -83,7 +83,6 @@ impl Node for LoopNode {
         let item_var  = input.input["item_var"].as_str().unwrap_or("item").to_string();
         let index_var = input.input["index_var"].as_str().unwrap_or("index").to_string();
 
-        // Resolve source data
         let source_data: Value = if let Some(source_node) = input.input["source_node"].as_str() {
             input.context.node_outputs.get(source_node).cloned().unwrap_or(Value::Null)
         } else {
@@ -135,7 +134,6 @@ impl Node for LoopNode {
             .unwrap_or(0) as usize;
 
         if current_index >= total {
-            // All items processed — route to "done"
             let all_results: Vec<Value> = (0..total)
                 .filter_map(|i| {
                     input.context.metadata
@@ -168,9 +166,9 @@ impl Node for LoopNode {
             json!({
                 "total": total,
                 "item": current_item,
-                item_var.clone(): current_item,
+                item_var: current_item,
                 "index": current_index,
-                index_var.clone(): current_index,
+                index_var: current_index,
                 "all_results": [],
                 "done": false,
                 "__loop_node_id": input.node_id,
@@ -181,4 +179,3 @@ impl Node for LoopNode {
         )
     }
 }
-

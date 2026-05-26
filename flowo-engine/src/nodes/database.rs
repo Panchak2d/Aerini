@@ -10,6 +10,14 @@ use std::time::{Duration, Instant};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::nodes::util::scrub_url_in_error;
+
+/// Returns a BLAKE3 hex hash of the connection URL, used as the DashMap pool
+/// cache key. This prevents the plaintext URL (which may contain a password)
+/// from being stored as a map key in process memory.
+fn pool_key(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
 
 // ── Connection pool registries ────────────────────────────────────────────────
 
@@ -77,57 +85,61 @@ fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager>, String> 
 // ── sqlx pool (Postgres / MySQL) ──────────────────────────────────────────────
 
 async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
+    let key = pool_key(url);
     PG_POOLS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
-    if let Some(mut entry) = PG_POOLS.get_mut(url) {
+    if let Some(mut entry) = PG_POOLS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
     let pool = sqlx::PgPool::connect(url)
         .await
-        .map_err(|e| format!("Postgres connection failed: {}", e))?;
-    let entry = PG_POOLS.entry(url.to_string()).or_insert(PoolEntry { pool, last_used: Instant::now() });
+        .map_err(|e| scrub_url_in_error(&format!("Postgres connection failed: {}", e)))?;
+    let entry = PG_POOLS.entry(key).or_insert(PoolEntry { pool, last_used: Instant::now() });
     Ok(entry.pool.clone())
 }
 
 async fn get_mysql_pool(url: &str) -> Result<sqlx::MySqlPool, String> {
+    let key = pool_key(url);
     MYSQL_POOLS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
-    if let Some(mut entry) = MYSQL_POOLS.get_mut(url) {
+    if let Some(mut entry) = MYSQL_POOLS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
     let pool = sqlx::MySqlPool::connect(url)
         .await
-        .map_err(|e| format!("MySQL connection failed: {}", e))?;
-    let entry = MYSQL_POOLS.entry(url.to_string()).or_insert(PoolEntry { pool, last_used: Instant::now() });
+        .map_err(|e| scrub_url_in_error(&format!("MySQL connection failed: {}", e)))?;
+    let entry = MYSQL_POOLS.entry(key).or_insert(PoolEntry { pool, last_used: Instant::now() });
     Ok(entry.pool.clone())
 }
 
 // ── Redis client + connection helpers ────────────────────────────────────────
 
 fn get_redis_client(url: &str) -> Result<redis::Client, String> {
-    if let Some(c) = REDIS_CLIENTS.get(url) {
+    let key = pool_key(url);
+    if let Some(c) = REDIS_CLIENTS.get(&key) {
         return Ok(c.clone());
     }
     let client = redis::Client::open(url)
-        .map_err(|e| format!("Redis URL invalid: {}", e))?;
-    let entry = REDIS_CLIENTS.entry(url.to_string()).or_insert(client);
+        .map_err(|e| scrub_url_in_error(&format!("Redis URL invalid: {}", e)))?;
+    let entry = REDIS_CLIENTS.entry(key).or_insert(client);
     Ok(entry.clone())
 }
 
 /// Returns a cached MultiplexedConnection for `url`, creating one if absent.
 async fn get_redis_conn(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
+    let key = pool_key(url);
     REDIS_CONNS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
-    if let Some(mut entry) = REDIS_CONNS.get_mut(url) {
+    if let Some(mut entry) = REDIS_CONNS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
     let client = get_redis_client(url)?;
     match client.get_multiplexed_async_connection().await {
         Ok(c) => {
-            let entry = REDIS_CONNS.entry(url.to_string()).or_insert(PoolEntry { pool: c, last_used: Instant::now() });
+            let entry = REDIS_CONNS.entry(key).or_insert(PoolEntry { pool: c, last_used: Instant::now() });
             Ok(entry.pool.clone())
         }
-        Err(e) => Err(format!("Redis connection failed: {}", e)),
+        Err(e) => Err(scrub_url_in_error(&format!("Redis connection failed: {}", e))),
     }
 }
 
@@ -145,7 +157,7 @@ where
     match build_cmd().query_async::<T>(&mut conn).await {
         Ok(val) => Ok(val),
         Err(e) if e.is_connection_dropped() || e.is_io_error() => {
-            REDIS_CONNS.remove(url);
+            REDIS_CONNS.remove(&pool_key(url));
             let mut fresh = get_redis_conn(url).await.map_err(|ce| {
                 redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::NotConnected, ce))
             })?;
@@ -253,6 +265,24 @@ impl Node for DatabaseNode {
 
 // ── SQLite execution ──────────────────────────────────────────────────────────
 
+/// Checks whether a resolved SQL query string contains single-quoted literals that
+/// may indicate direct expression interpolation instead of parameterized binding.
+/// Returns a warning string when suspicious patterns are found.
+///
+/// Users must always use `?` placeholders and the `params` array for any value
+/// that comes from workflow data or external input. Inline expression substitution
+/// bypasses parameterized query protection.
+fn check_query_for_inline_values(query: &str) -> Option<String> {
+    if query.trim().contains('\'') {
+        return Some(
+            "SQL INJECTION WARNING: This query contains single-quoted string literals.              If any quoted value originates from a workflow expression or external input,              use `?` placeholders and the `params` array instead of inline expressions.              Inline expression substitution bypasses parameterized query protection."
+            .to_string()
+        );
+    }
+    None
+}
+
+
 async fn execute_sqlite(input: NodeInput) -> NodeOutput {
     let db_path = match input.input["db_path"].as_str() {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -268,6 +298,7 @@ async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         .map(|o| o == "execute")
         .unwrap_or(false);
     let params = parse_params(&input.input["params"]);
+    let inline_warning_sqlite = check_query_for_inline_values(&query);
 
     if let Err(e) = validate_db_path(&db_path) {
         return NodeOutput::failure(NodeError::unrecoverable("INVALID_PATH", e));
@@ -275,7 +306,37 @@ async fn execute_sqlite(input: NodeInput) -> NodeOutput {
 
     if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
         if let Some(sandbox_str) = sandbox_val.as_str() {
-            if !std::path::Path::new(&db_path).starts_with(sandbox_str) {
+            // Canonicalize the sandbox root so symlinks in the configured path
+            // don't defeat the containment check.
+            let sandbox = match std::fs::canonicalize(sandbox_str) {
+                Ok(p) => p,
+                Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
+                    "INVALID_PATH",
+                    "Configured sandbox directory does not exist or cannot be resolved",
+                )),
+            };
+            // Resolve the canonical db path. SQLite creates the file on first open,
+            // so the file may not exist yet. Strategy mirrors file.rs write mode:
+            // 1. Try full canonicalize — handles existing files and dereferences symlinks
+            //    (catches sandbox/escape.db -> /external.db).
+            // 2. On failure (file not yet on disk), canonicalize the parent directory
+            //    and rejoin the filename — the parent must exist.
+            let db_path_buf = std::path::PathBuf::from(&db_path);
+            let canonical_db = match std::fs::canonicalize(&db_path_buf) {
+                Ok(p) => p,
+                Err(_) => {
+                    let parent = db_path_buf.parent().unwrap_or_else(|| std::path::Path::new("."));
+                    let fname  = db_path_buf.file_name().unwrap_or_default();
+                    match std::fs::canonicalize(parent) {
+                        Ok(cp) => cp.join(fname),
+                        Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
+                            "INVALID_PATH",
+                            "Database file's parent directory does not exist or cannot be resolved",
+                        )),
+                    }
+                }
+            };
+            if !canonical_db.starts_with(&sandbox) {
                 return NodeOutput::failure(NodeError::unrecoverable(
                     "PATH_OUTSIDE_SANDBOX",
                     format!("Database access is restricted to '{}'", sandbox_str),
@@ -305,7 +366,9 @@ async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         Ok(Err(e))   => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e)),
         Ok(Ok(data)) => {
             let row_count = data["rows"].as_array().map(|a| a.len()).unwrap_or(0);
-            NodeOutput::success_with_logs(data, vec![format!("Query returned {} row(s)", row_count)])
+            let mut logs = vec![format!("Query returned {} row(s)", row_count)];
+            if let Some(w) = inline_warning_sqlite { logs.push(w); }
+            NodeOutput::success_with_logs(data, logs)
         }
     }
 }
@@ -403,8 +466,9 @@ async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         .map(|o| o == "execute")
         .unwrap_or(false);
     let params = parse_params(&input.input["params"]);
+    let inline_warning = check_query_for_inline_values(&query);
 
-    if db_type == "mysql" {
+    let mut output = if db_type == "mysql" {
         if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
@@ -428,7 +492,11 @@ async fn execute_sqlx(input: NodeInput) -> NodeOutput {
                 pg_run_query(&pool, &query, &params).await
             },
         }
+    };
+    if let Some(w) = inline_warning {
+        output.logs.push(w);
     }
+    output
 }
 
 // ── Postgres ──────────────────────────────────────────────────────────────────

@@ -56,7 +56,6 @@ impl Node for TransformNode {
             ),
         };
 
-        // Determine source: explicit source_node or context's node_outputs
         let source: Value = if let Some(source_node) = input.input["source_node"].as_str() {
             match input.context.node_outputs.get(source_node) {
                 Some(v) => v.clone(),
@@ -68,7 +67,6 @@ impl Node for TransformNode {
                 ),
             }
         } else {
-            // Default: use the entire context node_outputs as source
             serde_json::to_value(&input.context.node_outputs).unwrap_or(Value::Null)
         };
 
@@ -105,13 +103,8 @@ fn resolve_pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
         return Some(value);
     }
 
-    let parts: Vec<&str> = pointer
-        .trim_start_matches('/')
-        .split('/')
-        .collect();
-
     let mut current = value;
-    for part in parts {
+    for part in pointer.trim_start_matches('/').split('/') {
         // Unescape JSON pointer tokens
         let key = part.replace("~1", "/").replace("~0", "~");
         current = match current {

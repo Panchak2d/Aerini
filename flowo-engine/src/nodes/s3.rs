@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::nodes::util::check_host_ssrf_from_url;
 
 pub struct S3Node;
 
@@ -122,7 +123,7 @@ impl Node for S3Node {
             )),
         };
 
-        let bucket = match build_bucket(&input.input) {
+        let bucket = match build_bucket(&input.input).await {
             Ok(b)  => b,
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("CONFIG_ERROR", e)),
         };
@@ -143,7 +144,7 @@ impl Node for S3Node {
 
 // ── Bucket construction ────────────────────────────────────────────────────────
 
-fn build_bucket(cfg: &Value) -> Result<Box<Bucket>, String> {
+async fn build_bucket(cfg: &Value) -> Result<Box<Bucket>, String> {
     let access_key = cfg["access_key_id"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -172,6 +173,7 @@ fn build_bucket(cfg: &Value) -> Result<Box<Bucket>, String> {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .ok_or("endpoint is required for R2. Example: https://ACCOUNT_ID.r2.cloudflarestorage.com")?;
+            check_host_ssrf_from_url(endpoint).await.map_err(|e| format!("SSRF check failed for R2 endpoint: {}", e))?;
             (Region::Custom { region: region_str.to_string(), endpoint: endpoint.to_string() }, true)
         }
         "minio" => {
@@ -179,6 +181,7 @@ fn build_bucket(cfg: &Value) -> Result<Box<Bucket>, String> {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .ok_or("endpoint is required for MinIO. Example: http://host:9000")?;
+            check_host_ssrf_from_url(endpoint).await.map_err(|e| format!("SSRF check failed for MinIO endpoint: {}", e))?;
             (Region::Custom { region: region_str.to_string(), endpoint: endpoint.to_string() }, true)
         }
         _ => {

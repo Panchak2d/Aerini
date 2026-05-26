@@ -146,12 +146,7 @@ impl Node for GitHubNode {
                 }
             }
             Err(e) => {
-                let recoverable = e.is_timeout() || e.is_connect();
-                if recoverable {
-                    NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", e.to_string()))
-                } else {
-                    NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
-                }
+                super::util::http_err_output(&e)
             }
         }
     }

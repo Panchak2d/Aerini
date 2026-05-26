@@ -188,21 +188,19 @@ async fn call_dalle3_once(
         .json(&body)
         .send()
         .await
-        .map_err(|e| network_err(e))?;
+        .map_err(network_err)?;
 
     let status = resp.status().as_u16();
     let json: Value = resp.json().await.map_err(|e| {
         NodeError::unrecoverable("PARSE_ERROR", e.to_string())
     })?;
 
-    // API-level error
     if let Some(err) = json["error"].as_object() {
         return Err(map_dalle3_error(status, err));
     }
 
     let data = &json["data"][0];
 
-    // b64_json path
     if let Some(b64) = data["b64_json"].as_str() {
         // Strip any accidental data: URI prefix
         let raw = strip_data_uri_prefix(b64);
@@ -373,7 +371,7 @@ async fn download_to_base64(client: &reqwest::Client, url: &str) -> Result<Strin
         .get(url)
         .send()
         .await
-        .map_err(|e| network_err(e))?
+        .map_err(network_err)?
         .bytes()
         .await
         .map_err(|e| NodeError::unrecoverable("DOWNLOAD_ERROR", e.to_string()))?;

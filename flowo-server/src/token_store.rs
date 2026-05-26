@@ -12,6 +12,9 @@
 //! An `admin`-scoped token satisfies any scope check.
 
 use chrono::Utc;
+use rand::RngCore;
+use base64;
+use base64::Engine;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex};
@@ -28,6 +31,7 @@ pub struct TokenRecord {
     pub label:      String,
     pub scopes:     Vec<String>,
     pub created_at: String,
+    pub expires_at: Option<String>,
 }
 
 impl TokenRecord {
@@ -44,6 +48,7 @@ pub struct TokenInfo {
     pub scopes:     Vec<String>,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 pub struct TokenStore {
@@ -64,21 +69,39 @@ impl TokenStore {
                 revoked_at TEXT
             );",
         )?;
+        // Schema migration: add expires_at column for existing databases that predate M-1 fix.
+        let has_expires: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tokens') WHERE name='expires_at'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).map(|c| c > 0).unwrap_or(false);
+        if !has_expires {
+            conn.execute("ALTER TABLE tokens ADD COLUMN expires_at TEXT", [])?;
+        }
         Ok(Self { conn: Mutex::new(conn), key })
     }
 
     /// Create a new token. Returns the raw (unhashed) token string — shown once.
-    pub fn create_token(&self, label: &str, scopes: &[&str]) -> rusqlite::Result<String> {
-        let raw      = Uuid::new_v4().to_string().replace('-', "");
+    /// `expires_in_secs`: optional TTL in seconds. None = non-expiring.
+    pub fn create_token(&self, label: &str, scopes: &[&str], expires_in_secs: Option<u64>) -> rusqlite::Result<String> {
+        // 32 bytes from OsRng → 256 bits of entropy, URL-safe base64 encoded.
+        // Replaces UUID v4 which had only 122 bits due to fixed version/variant bits.
+        let mut raw_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut raw_bytes);
+        let raw      = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
         let token_id = Uuid::new_v4().to_string();
         let hash     = hash_token(&self.key, &raw);
         let scopes_j = serde_json::to_string(scopes).unwrap_or_else(|_| "[]".to_string());
-        let now      = Utc::now().to_rfc3339();
+        let now      = Utc::now();
+        let expires_at: Option<String> = expires_in_secs.map(|secs| {
+            let secs_i64 = i64::try_from(secs).unwrap_or(i64::MAX);
+            (now + chrono::Duration::seconds(secs_i64)).to_rfc3339()
+        });
         let conn     = self.conn.lock().expect("token store mutex poisoned");
         conn.execute(
-            "INSERT INTO tokens (token_id, token_hash, label, scopes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![token_id, hash, label, scopes_j, now],
+            "INSERT INTO tokens (token_id, token_hash, label, scopes, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![token_id, hash, label, scopes_j, now.to_rfc3339(), expires_at],
         )?;
         Ok(raw)
     }
@@ -107,14 +130,16 @@ impl TokenStore {
         Ok(())
     }
 
-    /// Verify a raw bearer token. Returns `None` if not found or revoked.
+    /// Verify a raw bearer token. Returns `None` if not found, revoked, or expired.
     pub fn verify_token(&self, raw: &str) -> Option<TokenRecord> {
         let hash = hash_token(&self.key, raw);
         let conn = self.conn.lock().expect("token store mutex poisoned");
         conn.query_row(
-            "SELECT token_id, label, scopes, created_at
+            "SELECT token_id, label, scopes, created_at, expires_at
              FROM tokens
-             WHERE token_hash = ?1 AND revoked_at IS NULL",
+             WHERE token_hash = ?1
+               AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > datetime('now'))",
             params![hash],
             |row| {
                 let scopes_j: String = row.get(2)?;
@@ -125,6 +150,7 @@ impl TokenStore {
                     label:      row.get(1)?,
                     scopes,
                     created_at: row.get(3)?,
+                    expires_at: row.get(4)?,
                 })
             },
         ).ok()
@@ -145,7 +171,7 @@ impl TokenStore {
     pub fn list_tokens(&self) -> rusqlite::Result<Vec<TokenInfo>> {
         let conn = self.conn.lock().expect("token store mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT token_id, label, scopes, created_at, revoked_at
+            "SELECT token_id, label, scopes, created_at, revoked_at, expires_at
              FROM tokens
              ORDER BY created_at ASC",
         )?;
@@ -158,6 +184,7 @@ impl TokenStore {
                 scopes,
                 created_at: row.get(3)?,
                 revoked_at: row.get(4)?,
+                expires_at: row.get(5)?,
             })
         })?;
         rows.collect()

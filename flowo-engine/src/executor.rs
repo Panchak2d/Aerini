@@ -75,6 +75,8 @@ pub struct WorkflowExecutor {
     max_concurrent_nodes: usize,
     // When set, the executor checks this token between nodes and short-circuits retry backoff sleeps.
     cancel_token: Option<CancellationToken>,
+    // Server-level ceiling applied to every workflow regardless of per-workflow max_duration_secs.
+    server_max_duration_secs: Option<u64>,
 }
 
 impl WorkflowExecutor {
@@ -82,7 +84,7 @@ impl WorkflowExecutor {
         registry:            Arc<NodeRegistry>,
         credential_resolver: Arc<dyn CredentialResolver>,
     ) -> Self {
-        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None }
+        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None }
     }
 
     /// Restrict `{{$env.VAR}}` expressions to the listed variable names.
@@ -149,6 +151,15 @@ impl WorkflowExecutor {
     /// nodes and short-circuits retry backoff sleeps. No-op if never cancelled.
     pub fn with_cancel_token(mut self, t: CancellationToken) -> Self {
         self.cancel_token = Some(t);
+        self
+    }
+
+    /// Set a server-level ceiling on workflow execution time (seconds).
+    /// Takes effect as `min(workflow.max_duration_secs, ceiling)` when both are set.
+    /// When only this ceiling is set it applies to every workflow run by this executor.
+    /// Values below 10 are clamped to 10; values above 86400 are clamped to 86400.
+    pub fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
+        self.server_max_duration_secs = secs.map(|s| s.clamp(10, 86400));
         self
     }
 
@@ -239,7 +250,12 @@ impl WorkflowExecutor {
         workflow: &Workflow,
         initial_variables: HashMap<String, Value>,
     ) -> Result<WorkflowResult, EngineError> {
-        let limit_secs = workflow.max_duration_secs.map(|s| s.clamp(10, 86400));
+        let limit_secs = match (workflow.max_duration_secs, self.server_max_duration_secs) {
+            (Some(wf), Some(srv)) => Some(wf.min(srv).clamp(10, 86400)),
+            (Some(wf), None)      => Some(wf.clamp(10, 86400)),
+            (None,     Some(srv)) => Some(srv),  // already clamped in builder
+            (None,     None)      => None,
+        };
 
         if let Some(secs) = limit_secs {
             match tokio::time::timeout(
@@ -808,7 +824,11 @@ impl WorkflowExecutor {
         topo_order:    &[String],
         state:         &SharedExecutionState,
     ) -> Result<NodeOutput, String> {
-        const MAX_LOOP_ITERATIONS: u64 = 10_000;
+        // Safety net against executor re-entry bugs — should never be reached in
+        // normal operation because LoopNode hard-caps arrays at 10,000 items and
+        // routes to "done" once current_index >= total. Set to 10,001 so it sits
+        // above the node's own guard and only fires on a real executor bug.
+        const MAX_LOOP_ITERATIONS: u64 = 10_001;
 
         // Build a local O(1) lookup map. Built once per loop execution — not per iteration.
         // Replaces the O(n) Workflow::node() scan on every body node on every iteration.
@@ -1712,4 +1732,88 @@ mod tests {
             Err(EngineError::WorkflowTimeout { limit_secs: 10, .. })
         ));
     }
+    #[tokio::test]
+    async fn server_ceiling_applies_when_workflow_has_no_timeout() {
+        tokio::time::pause();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+        let executor = Arc::new(
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+                .with_server_max_duration_secs(Some(10)),
+        );
+
+        // Workflow has no max_duration_secs — server ceiling must fire.
+        let workflow = single_node_workflow("slow_test", None);
+
+        let exec = Arc::clone(&executor);
+        let wf   = workflow.clone();
+        let handle = tokio::spawn(async move { exec.run(&wf, HashMap::new()).await });
+
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let result = handle.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(EngineError::WorkflowTimeout { limit_secs: 10, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_ceiling_clamps_longer_workflow_timeout() {
+        tokio::time::pause();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+        let executor = Arc::new(
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+                .with_server_max_duration_secs(Some(10)),
+        );
+
+        // Workflow sets 3600s, server ceiling is 10s — ceiling wins.
+        let workflow = single_node_workflow("slow_test", Some(3600));
+
+        let exec = Arc::clone(&executor);
+        let wf   = workflow.clone();
+        let handle = tokio::spawn(async move { exec.run(&wf, HashMap::new()).await });
+
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let result = handle.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(EngineError::WorkflowTimeout { limit_secs: 10, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_timeout_wins_when_shorter_than_server_ceiling() {
+        tokio::time::pause();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+        let executor = Arc::new(
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+                .with_server_max_duration_secs(Some(3600)),
+        );
+
+        // Workflow sets 10s, server ceiling is 3600s — workflow limit wins.
+        let workflow = single_node_workflow("slow_test", Some(10));
+
+        let exec = Arc::clone(&executor);
+        let wf   = workflow.clone();
+        let handle = tokio::spawn(async move { exec.run(&wf, HashMap::new()).await });
+
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let result = handle.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(EngineError::WorkflowTimeout { limit_secs: 10, .. })
+        ));
+    }
+
 }

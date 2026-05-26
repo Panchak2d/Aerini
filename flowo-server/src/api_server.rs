@@ -21,8 +21,9 @@
 //!   POST   /api/tokens   (admin scope required)
 //!   DELETE /api/tokens/:id  (admin scope required)
 
+use base64::Engine;
 use axum::{
-    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Sse},
@@ -49,11 +50,10 @@ use std::{
     time::{Duration, Instant},
 };
 use dashmap::DashMap;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore, OwnedSemaphorePermit};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-use uuid::Uuid;
-
 use rand::RngCore;
+use base64;
 
 use crate::event_bridge::BroadcastEventSink;
 use crate::token_store::{TokenRecord, TokenStore};
@@ -73,6 +73,11 @@ pub struct ApiState {
     pub code_exec_disabled:   bool,
     pub parallel_execution:   bool,
     pub max_concurrent_nodes: usize,
+    pub server_max_duration_secs: Option<u64>,
+    /// Semaphore that caps concurrent SSE connections at SSE_MAX_CONNECTIONS.
+    /// Acquiring a permit before upgrading guarantees the cap is never exceeded —
+    /// unlike the previous AtomicUsize approach which had a TOCTOU race window.
+    pub sse_semaphore: Arc<Semaphore>,
 }
 
 /// Extracts the real client IP from X-Forwarded-For when behind trusted proxies.
@@ -139,6 +144,7 @@ pub async fn run(
     use_keychain: bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
 ) {
     crate::init_tracing();
     let data_dir = PathBuf::from(if data_dir.starts_with('~') {
@@ -166,15 +172,18 @@ pub async fn run(
         }
         None => {
             if token_store.is_empty() {
-                let generated = Uuid::new_v4().to_string().replace('-', "");
+                // 32 bytes from OsRng = 256-bit entropy, URL-safe base64 encoded.
+                let mut raw_bytes = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut raw_bytes);
+                let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
                 eprintln!();
-                eprintln!("┌─────────────────────────────────────────────────────┐");
-                eprintln!("│  Flowo Server — API Token (save this somewhere safe) │");
-                eprintln!("│                                                       │");
+                eprintln!("┌──────────────────────────────────────────────────────────┐");
+                eprintln!("│  Flowo Server — API Token (save this somewhere safe)      │");
+                eprintln!("│                                                            │");
                 eprintln!("│  {}  │", generated);
-                eprintln!("│                                                       │");
-                eprintln!("│  Set FLOWO_TOKEN env var to skip this on restart.    │");
-                eprintln!("└─────────────────────────────────────────────────────┘");
+                eprintln!("│                                                            │");
+                eprintln!("│  Set FLOWO_TOKEN env var to skip this on restart.         │");
+                eprintln!("└──────────────────────────────────────────────────────────┘");
                 eprintln!();
                 token_store
                     .import_token(&generated, "default", &["read", "write", "admin"])
@@ -233,9 +242,37 @@ pub async fn run(
                 .with_parallel_execution(true)
                 .with_max_concurrent_nodes(max_concurrent_nodes);
         }
+        if server_max_duration_secs.is_some() {
+            daemon = daemon.with_server_max_duration_secs(server_max_duration_secs);
+        }
+        if let Some(ref sandbox) = file_sandbox_dir {
+            daemon = daemon.with_file_sandbox_dir(sandbox.clone());
+        }
         Arc::new(daemon)
     };
     scheduler.start(&tokio::runtime::Handle::current());
+
+    // Default the file sandbox to {data_dir}/files when not explicitly set.
+    // Without a sandbox, File nodes can read/write any path the server process
+    // can reach — including flowo.key and credentials.db. This default closes
+    // that path without requiring a breaking CLI change.
+    let file_sandbox_dir: std::path::PathBuf = match file_sandbox_dir {
+        Some(d) => {
+            tracing::info!("File node sandbox directory: {:?}", d);
+            d
+        }
+        None => {
+            let default = data_dir.join("files");
+            std::fs::create_dir_all(&default)
+                .expect("Cannot create default file sandbox directory");
+            tracing::info!(
+                "File node sandbox not set — defaulting to {:?}. \
+                 Pass --file-sandbox-dir to use a different path.",
+                default
+            );
+            default
+        }
+    };
 
     let state = ApiState {
         db:               Arc::clone(&db),
@@ -246,11 +283,13 @@ pub async fn run(
         token_store:      Arc::clone(&token_store),
         exec_locks:       Arc::new(std::sync::Mutex::new(HashMap::new())),
         env_allowlist:    env_allowlist.clone(),
-        file_sandbox_dir: file_sandbox_dir.map(|d| Arc::new(d)),
+        file_sandbox_dir: Some(Arc::new(file_sandbox_dir)),
         shell_exec_disabled,
         code_exec_disabled,
         parallel_execution,
         max_concurrent_nodes,
+        server_max_duration_secs,
+        sse_semaphore: Arc::new(Semaphore::new(SSE_MAX_CONNECTIONS)),
     };
 
     let protected = Router::new()
@@ -279,7 +318,7 @@ pub async fn run(
                 || extra_c.iter().any(|o| o.as_slice() == b)
         }))
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers(tower_http::cors::Any);
+        .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]);
 
     // Per-IP rate limiter: 300 requests per 60-second window per client address.
     let rl_state: Arc<DashMap<IpAddr, (u32, Instant)>> = Arc::new(DashMap::new());
@@ -511,9 +550,7 @@ async fn run_workflow(
         let len = s.exec_locks.lock().expect("exec_locks mutex poisoned").len();
         if len > 1000 {
             let db = Arc::clone(&s.db);
-            if let Ok(Ok(summaries)) = tokio::task::spawn_blocking(move || db.list()).await {
-                let live_ids: std::collections::HashSet<String> =
-                    summaries.into_iter().map(|w| w.id).collect();
+            if let Ok(Ok(live_ids)) = tokio::task::spawn_blocking(move || db.list_ids()).await {
                 s.exec_locks
                     .lock()
                     .expect("exec_locks mutex poisoned")
@@ -546,7 +583,7 @@ async fn run_workflow(
         executor = executor.with_env_allowlist(allowlist.iter().cloned().collect());
     }
     if let Some(ref sandbox) = s.file_sandbox_dir {
-        executor = executor.with_file_sandbox_dir(sandbox.as_ref().clone());
+        executor = executor.with_file_sandbox_dir((**sandbox).clone());
     }
     if s.shell_exec_disabled {
         executor = executor.with_shell_disabled(true);
@@ -558,6 +595,9 @@ async fn run_workflow(
         executor = executor
             .with_parallel_execution(true)
             .with_max_concurrent_nodes(s.max_concurrent_nodes);
+    }
+    if s.server_max_duration_secs.is_some() {
+        executor = executor.with_server_max_duration_secs(s.server_max_duration_secs);
     }
 
     let run_result = executor.run(&wf, b.initial_variables).await;
@@ -672,6 +712,9 @@ async fn delete_cred(
     }
 }
 
+/// Maximum concurrent SSE connections across all tokens.
+const SSE_MAX_CONNECTIONS: usize = 64;
+
 async fn sse_events(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
@@ -679,11 +722,44 @@ async fn sse_events(
     if let Err(e) = require_read(&caller) {
         return e.into_response();
     }
+
+    // try_acquire_owned() is atomic — no TOCTOU race between the check and the
+    // reservation. The permit is held by GuardedStream and released on drop,
+    // which happens when axum drops the response body after the client disconnects.
+    let permit: OwnedSemaphorePermit = match Arc::clone(&s.sse_semaphore).try_acquire_owned() {
+        Ok(p)  => p,
+        Err(_) => return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "too many active SSE connections"})),
+        ).into_response(),
+    };
+
     let rx     = s.sse_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| {
-        msg.ok().map(|data| Ok::<axum::response::sse::Event, std::convert::Infallible>(axum::response::sse::Event::default().data(data)))
-    });
-    Sse::new(stream).keep_alive(
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|msg| {
+            msg.ok().map(|data| Ok::<axum::response::sse::Event, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(data)
+            ))
+        });
+
+    // GuardedStream holds the semaphore permit; releasing it on drop returns
+    // the slot to the pool when the client disconnects.
+    struct GuardedStream<S> {
+        inner:   S,
+        _permit: OwnedSemaphorePermit,
+    }
+    impl<S: futures_core::Stream + Unpin> futures_core::Stream for GuardedStream<S> {
+        type Item = S::Item;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::pin::Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+    let guarded = GuardedStream { inner: stream, _permit: permit };
+
+    Sse::new(guarded).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(30))
             .text("ping"),
@@ -735,6 +811,8 @@ struct CreateTokenBody {
     label:  String,
     #[serde(default = "default_token_scopes")]
     scopes: Vec<String>,
+    /// Optional TTL in seconds. Omit or set null for a non-expiring token.
+    expires_in_secs: Option<u64>,
 }
 
 fn default_token_scopes() -> Vec<String> {
@@ -748,6 +826,10 @@ async fn security_headers_middleware(req: axum::extract::Request, next: axum::mi
     h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
     h.insert("x-frame-options",        HeaderValue::from_static("DENY"));
     h.insert("referrer-policy",        HeaderValue::from_static("strict-origin-when-cross-origin"));
+    h.insert("permissions-policy",     HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
+    // HSTS omitted: server runs behind a TLS-terminating reverse proxy over plain HTTP.
+    // Browsers ignore HSTS on non-HTTPS connections; the proxy should inject it.
+    h.insert("content-security-policy", HeaderValue::from_static("default-src 'none'"));
     response
 }
 
@@ -769,12 +851,13 @@ async fn create_token_handler(
         }))).into_response();
     }
     let scopes_ref: Vec<&str> = b.scopes.iter().map(|s| s.as_str()).collect();
-    match s.token_store.create_token(&b.label, &scopes_ref) {
+    match s.token_store.create_token(&b.label, &scopes_ref, b.expires_in_secs) {
         Ok(raw) => (StatusCode::CREATED, Json(json!({
-            "token":  raw,
-            "label":  b.label,
-            "scopes": b.scopes,
-            "note":   "Save this token — it will not be shown again."
+            "token":      raw,
+            "label":      b.label,
+            "scopes":     b.scopes,
+            "expires_in_secs": b.expires_in_secs,
+            "note":       "Save this token — it will not be shown again."
         }))).into_response(),
         Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
     }

@@ -13,9 +13,13 @@ static AGENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn shared_agent_client() -> reqwest::Client {
     AGENT_CLIENT.get_or_init(|| {
+        // Redirects disabled: check_host_ssrf_from_url validates the initial URL only.
+        // A server at an allowed URL could redirect to an internal address and bypass
+        // the SSRF check. Matches the same policy used in http.rs and ai_prompt.rs.
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(20)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build shared agent HTTP client")
     }).clone()
@@ -157,6 +161,10 @@ impl Node for AiAgentNode {
             })
             .trim_end_matches('/')
             .to_string();
+
+        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url).await {
+            return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
+        }
 
         let max_iterations = input.input["max_iterations"].as_u64().unwrap_or(5).min(20) as usize;
         let max_tokens     = input.input["max_tokens"].as_u64().unwrap_or(2048).min(8192);

@@ -18,12 +18,6 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-ask",
-    "dialog:allow-message",
-    "fs:allow-read-text-file",
-    "fs:allow-write-text-file",
-    "fs:allow-read-dir",
-    "fs:allow-mkdir",
-    "fs:allow-exists",
-    "fs:allow-remove"
+    "dialog:allow-message"
   ]
 }

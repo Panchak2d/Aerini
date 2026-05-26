@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::NodePorts;
+use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
 pub struct StopNode;
 
 #[async_trait]
-impl crate::node::Node for StopNode {
+impl Node for StopNode {
     fn type_id(&self) -> &'static str { "stop" }
     fn display_name(&self) -> &'static str { "Stop" }
     fn node_type(&self) -> NodeType { NodeType::Logic }
@@ -27,7 +27,6 @@ impl crate::node::Node for StopNode {
     }
 
     fn ports(&self) -> NodePorts {
-        use crate::node::{PortDefinition, PortPosition};
         NodePorts {
             inputs: vec![PortDefinition {
                 id: "input".to_string(),

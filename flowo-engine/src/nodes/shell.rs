@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::error::NodeError;
@@ -48,7 +49,7 @@ impl Node for ShellExecNode {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "SHELL_DISABLED",
                 "Shell Command node is disabled in this deployment. \
-                 Pass --disable-shell=false to the server to enable it.",
+                 Pass --allow-shell to the server to enable it.",
             ));
         }
 
@@ -87,23 +88,64 @@ impl Node for ShellExecNode {
             }
         }
 
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c)  => c,
+            Err(e) => return NodeOutput::failure(
+                NodeError::unrecoverable("SPAWN_FAILED", e.to_string())
+            ),
+        };
+
+        // Move pipes into tasks so we can read stdout/stderr concurrently with wait().
+        // Required: if the child fills the OS pipe buffer (~64 KB) and nothing is reading,
+        // it blocks forever — wait() would never return.
+        // child.wait() takes &mut self (not self), so child remains owned here for kill().
+        let stdout_task = tokio::spawn({
+            use tokio::io::AsyncReadExt;
+            let mut pipe = child.stdout.take();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                buf
+            }
+        });
+        let stderr_task = tokio::spawn({
+            use tokio::io::AsyncReadExt;
+            let mut pipe = child.stderr.take();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                buf
+            }
+        });
+
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            cmd.output(),
+            child.wait(),
         ).await;
 
         match result {
-            Err(_) => NodeOutput::failure(
-                NodeError::recoverable("TIMEOUT", format!("Command timed out after {}s", timeout_secs))
-            ),
-            Ok(Err(e)) => NodeOutput::failure(
-                NodeError::unrecoverable("SPAWN_FAILED", e.to_string())
-            ),
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
-                let success = output.status.success();
+            Err(_) => {
+                let _ = child.kill().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                NodeOutput::failure(
+                    NodeError::recoverable("TIMEOUT", format!("Command timed out after {}s", timeout_secs))
+                )
+            }
+            Ok(Err(e)) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                NodeOutput::failure(NodeError::unrecoverable("EXEC_ERROR", e.to_string()))
+            }
+            Ok(Ok(status)) => {
+                let stdout_bytes = stdout_task.await.unwrap_or_default();
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stdout    = String::from_utf8_lossy(&stdout_bytes).to_string();
+                let stderr    = String::from_utf8_lossy(&stderr_bytes).to_string();
+                let exit_code = status.code().unwrap_or(-1);
+                let success   = status.success();
 
                 let logs = vec![
                     format!("Command: {}", redact_command_log(&command)),

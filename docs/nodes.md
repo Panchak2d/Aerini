@@ -342,7 +342,7 @@ Read or write files on the local filesystem.
 
 Output: `{ content: string, path: string, size: number }`
 
-The File node can read and write any file the current OS user can access. There's no path sandbox. In the desktop app you're prompted before any workflow with a File node runs. In server mode, no prompt — be careful with untrusted workflow JSON that contains file paths.
+The File node can read and write any file the current OS user can access. In the desktop app you're prompted before any workflow with a File node runs. In server/API mode there is no prompt. Use `--file-sandbox-dir` to restrict File nodes to a specific directory tree — without it, File nodes can reach any path the server process can, including the data directory.
 
 ### Desktop Notification
 
@@ -372,6 +372,22 @@ Query SQLite, PostgreSQL, MySQL, or Redis. Select the backend with `db_type`.
 | `operation` | string | `query` (SELECT, default) or `execute` (INSERT / UPDATE / DELETE). |
 | `query` | string | **required.** SQL query. Use `?` for placeholders. |
 | `params` | string | JSON array of positional parameters. Example: `[42, "Alice"]` |
+
+
+> **SQL injection warning:** Always use `?` placeholders and the `params` array for any value that comes from workflow data, trigger payloads, or external input. Never put workflow expressions directly inside the query string.
+>
+> **Safe:**
+> ```
+> query: "SELECT * FROM users WHERE id = ?"
+> params: ["{{trigger.output.id}}"]
+> ```
+>
+> **Unsafe (SQL injection risk):**
+> ```
+> query: "SELECT * FROM users WHERE id = '{{trigger.output.id}}'"
+> ```
+>
+> When the server detects single-quoted literals in a resolved query, it appends a warning to the node's log output. This is a heuristic — it does not guarantee safety. Use parameterized queries unconditionally for any external data.
 
 Output: `{ rows: [], rows_affected: 0, last_insert_id: 0, columns: [] }`
 

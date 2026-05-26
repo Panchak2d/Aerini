@@ -45,10 +45,6 @@ pub use node::NodeRegistry;
 pub const ENGINE_VERSION: &str = "0.2.0";
 
 // ── EventSink ─────────────────────────────────────────────────────────────────
-// Abstracts over how execution events are delivered to the consumer.
-// The Tauri app wraps tauri::AppHandle; the server uses an SSE broadcast channel.
-// Using a trait here is the key step that decouples executor.rs and scheduler/mod.rs
-// from any Tauri dependency, making the engine usable in a headless binary.
 
 pub trait EventSink: Send + Sync + 'static {
     /// Emit a named event with a JSON payload to the consumer.

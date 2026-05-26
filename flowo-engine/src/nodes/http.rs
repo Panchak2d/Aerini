@@ -220,9 +220,16 @@ impl Node for HttpRequestNode {
                             Err(_) => Value::String(String::from_utf8_lossy(&bytes).to_string()),
                         };
 
+                        let mut logs = vec![format!("HTTP {} {} -> {}", method, safe_log_url, status)];
+                        if (300..400).contains(&status) {
+                            logs.push(format!(
+                                "Redirect following is disabled. To follow, extract the 'location' header ({}) and make a second HTTP request.",
+                                headers.get("location").and_then(|v| v.as_str()).unwrap_or("not present")
+                            ));
+                        }
                         NodeOutput::success_with_logs(
                             json!({ "status": status, "body": body, "headers": headers }),
-                            vec![format!("HTTP {} {} -> {}", method, safe_log_url, status)],
+                            logs,
                         )
                     }
                     Err(e) => NodeOutput::failure(
@@ -230,14 +237,7 @@ impl Node for HttpRequestNode {
                     ),
                 }
             }
-            Err(e) => {
-                let recoverable = e.is_timeout() || e.is_connect();
-                if recoverable {
-                    NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", e.to_string()))
-                } else {
-                    NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
-                }
-            }
+            Err(e) => super::util::http_err_output(&e),
         }
     }
 }

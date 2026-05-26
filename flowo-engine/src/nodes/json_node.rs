@@ -40,7 +40,6 @@ impl crate::node::Node for JsonNode {
         let op = input.input["operation"].as_str().unwrap_or("extract");
 
         match op {
-            // Parse a JSON string into a value
             "parse" => {
                 let text = input.input["input_text"].as_str().unwrap_or("{}");
                 match serde_json::from_str::<Value>(text) {
@@ -51,14 +50,12 @@ impl crate::node::Node for JsonNode {
                 }
             }
 
-            // Stringify the entire context to JSON
             "stringify" => {
                 let combined: Value = json!(input.context.node_outputs);
                 let s = serde_json::to_string_pretty(&combined).unwrap_or_default();
                 NodeOutput::success(json!({ "result": s }))
             }
 
-            // Extract a value using a JSON pointer from combined node outputs
             "extract" => {
                 let pointer = input.input["pointer"].as_str().unwrap_or("/");
                 let combined = json!(input.context.node_outputs);
@@ -76,7 +73,6 @@ impl crate::node::Node for JsonNode {
                 )
             }
 
-            // Merge all node outputs into one flat object
             "merge" => {
                 let mut merged = serde_json::Map::new();
                 for output_val in input.context.node_outputs.values() {
@@ -89,11 +85,9 @@ impl crate::node::Node for JsonNode {
                 NodeOutput::success(json!({ "result": merged }))
             }
 
-            // Get item at index from first array found in context
             "array_get" => {
                 let idx = input.input["index"].as_u64().unwrap_or(0) as usize;
 
-                // Search node outputs for an array
                 for output_val in input.context.node_outputs.values() {
                     if let Some(arr) = output_val.as_array() {
                         let item = arr.get(idx).cloned().unwrap_or(Value::Null);

@@ -116,13 +116,20 @@ impl MigrationEngine {
 
             match self.migrations.iter().find(|m| m.from == current.as_str()) {
                 None => {
+                    let is_newer = {
+                        let parse = |s: &str| -> (u32, u32) {
+                            let mut it = s.splitn(2, '.').map(|p| p.parse::<u32>().unwrap_or(0));
+                            (it.next().unwrap_or(0), it.next().unwrap_or(0))
+                        };
+                        parse(file_version.as_str()) > parse(CURRENT_VERSION)
+                    };
                     return Err(format!(
                         "no migration path from schema_version '{}' to '{}'. \
                          This workflow was created by a {} version of Flowo. \
                          Upgrade Flowo to load it.",
                         file_version,
                         CURRENT_VERSION,
-                        if file_version.as_str() > CURRENT_VERSION { "newer" } else { "unknown" }
+                        if is_newer { "newer" } else { "unknown" }
                     ));
                 }
                 Some(m) => {

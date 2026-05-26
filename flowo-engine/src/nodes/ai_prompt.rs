@@ -13,9 +13,13 @@ static AI_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn shared_ai_client() -> reqwest::Client {
     AI_CLIENT.get_or_init(|| {
+        // Redirects disabled: check_host_ssrf_from_url validates the initial URL only.
+        // A server at an allowed URL could redirect to an internal address and bypass
+        // the SSRF check. Matches the same policy used in http.rs.
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(20)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build shared AI HTTP client")
     }).clone()
@@ -39,7 +43,7 @@ impl Node for AiPromptNode {
                 "system":         { "type": "string",  "description": "System / persona instructions" },
                 "model":          { "type": "string",  "description": "Model name — e.g. gpt-4o, claude-sonnet-4-6, gemini-2.5-flash, llama3" },
                 "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini"], "description": "API provider. 'auto' detects from base_url." },
-                "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Ollama: http://localhost:11434/v1" },
+                "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Note: localhost/loopback addresses are blocked in server mode." },
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },
                 "temperature":    { "type": "number",  "description": "Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7" },
                 "max_tokens":     { "type": "number",  "description": "Maximum response tokens. Default 2048" },
@@ -93,6 +97,10 @@ impl Node for AiPromptNode {
             .trim_end_matches('/')
             .to_string();
 
+        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url).await {
+            return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
+        }
+
         let provider = match input.input["provider"].as_str().unwrap_or("auto") {
             "anthropic" => Provider::Anthropic,
             "gemini"    => Provider::Gemini,
@@ -107,7 +115,6 @@ impl Node for AiPromptNode {
             }
         }
 
-        // Shared client — connection pool and TLS sessions reused across all AI calls.
         let client = shared_ai_client();
 
         match provider {
@@ -132,6 +139,10 @@ fn detect_provider(base_url: &str) -> Provider {
         // Mistral, OpenRouter, and any other OpenAI-compatible endpoint.
         Provider::OpenAI
     }
+}
+
+fn extract_err_msg(obj: &serde_json::Map<String, Value>, default: &str) -> String {
+    obj.get("message").and_then(|m| m.as_str()).unwrap_or(default).to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -169,9 +180,8 @@ async fn call_openai_compatible(
         Err(e) => return e,
     };
 
-    // API-level error object
     if let Some(err_obj) = resp_json["error"].as_object() {
-        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown API error").to_string();
+        let msg = extract_err_msg(err_obj, "Unknown API error");
         return if status == 429 {
             NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
         } else {
@@ -221,7 +231,6 @@ async fn call_anthropic(
         ));
     }
 
-    // Use provided base_url if it's the Anthropic endpoint, otherwise default.
     let endpoint = if base_url.contains("anthropic.com") {
         format!("{}/v1/messages", base_url.trim_end_matches("/v1"))
     } else {
@@ -250,7 +259,7 @@ async fn call_anthropic(
 
     // Anthropic error format: { "type": "error", "error": { "type": "...", "message": "..." } }
     if let Some(err_obj) = resp_json["error"].as_object() {
-        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown Anthropic error").to_string();
+        let msg = extract_err_msg(err_obj, "Unknown Anthropic error");
         return if status == 429 || status == 529 {
             NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
         } else {
@@ -307,8 +316,6 @@ async fn call_gemini(
         ));
     }
 
-    // Build endpoint. Use provided base_url if it already looks like a Gemini URL,
-    // otherwise use the canonical Google AI endpoint.
     let endpoint = if base_url.contains("googleapis.com") || base_url.contains("generativelanguage") {
         format!("{}/models/{}:generateContent", base_url.trim_end_matches('/'), model)
     } else {
@@ -348,7 +355,7 @@ async fn call_gemini(
 
     // Gemini error format: { "error": { "code": 400, "message": "...", "status": "..." } }
     if let Some(err_obj) = resp_json["error"].as_object() {
-        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown Gemini error").to_string();
+        let msg = extract_err_msg(err_obj, "Unknown Gemini error");
         return if status == 429 {
             NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
         } else {

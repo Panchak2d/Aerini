@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited, LengthLimitError};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -38,10 +38,20 @@ impl Node for WebhookNode {
         json!({
             "type": "object",
             "properties": {
-                "port":         { "type": "number", "description": "Port to listen on (default 3456)" },
+                "port":         { "type": "number", "description": "Port to listen on (default 3456). In server/API mode, external traffic cannot reach 127.0.0.1 directly — a reverse proxy forwarding to this port is required." },
                 "path":         { "type": "string", "description": "URL path (default /webhook)" },
                 "method":       { "type": "string", "enum": ["GET","POST","PUT","ANY"] },
-                "secret":       { "type": "string", "description": "Optional shared secret header" },
+                "secret":       {
+                    "type": "string",
+                    "description": concat!(
+                        "Optional shared secret validated via x-webhook-secret header. ",
+                        "This verifies the caller knows the secret but does NOT sign the request body — ",
+                        "captured requests can be replayed verbatim. ",
+                        "For integrations that send HMAC-SHA256 body signatures (Stripe, GitHub, etc.), ",
+                        "verify the platform's native signature header (e.g. x-hub-signature-256) ",
+                        "in a Code node immediately downstream rather than relying on this field alone."
+                    )
+                },
                 "timeout_secs": { "type": "number", "description": "Wait timeout (default 60)" }
             }
         })
@@ -216,25 +226,25 @@ async fn handle_request(
         }
     }
 
-    // Collect body. Hyper handles chunked transfer encoding and Content-Length
-    // framing; we just read the aggregated bytes.
-    let body_bytes = match req.into_body().collect().await {
+    // Cap body at 1 MB *before* collecting — Limited wraps the incoming stream
+    // and returns LengthLimitError as soon as the limit is exceeded, preventing
+    // full memory allocation before the size check fires.
+    const MAX_BODY_BYTES: usize = 1_000_000;
+    let body_bytes = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
+        Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => {
+            return Ok(Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(Full::new(Bytes::new()))
+                .expect("static response builder parameters are infallible"));
+        }
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::new()))
-                .unwrap());
+                .expect("static response builder parameters are infallible"));
         }
         Ok(b) => b.to_bytes(),
     };
-
-    // Hard cap at 1 MB, matching prior behaviour.
-    if body_bytes.len() > 1_000_000 {
-        return Ok(Response::builder()
-            .status(StatusCode::PAYLOAD_TOO_LARGE)
-            .body(Full::new(Bytes::new()))
-            .unwrap());
-    }
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
@@ -245,7 +255,7 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::new()))
-            .unwrap());
+            .expect("static response builder parameters are infallible"));
     }
 
     // Path mismatch: 401 (not 404). Returning 404 would confirm the port is
@@ -254,13 +264,20 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body(Full::new(Bytes::new()))
-            .unwrap());
+            .expect("static response builder parameters are infallible"));
     }
 
     // Secret validation via constant-time comparison to prevent timing attacks.
     // Both sides are hashed with BLAKE3 to normalise to a fixed 32-byte length
     // before the ct_eq call — prevents the length oracle present in direct
     // ct_eq comparison of differently-lengthed slices.
+    //
+    // SECURITY NOTE — replay attacks: this check validates only that the caller
+    // knows the secret. It does NOT cryptographically bind the secret to the
+    // request body. A captured valid request can be replayed in full. For
+    // integrations that send HMAC-SHA256 body signatures (Stripe: Stripe-Signature,
+    // GitHub: X-Hub-Signature-256), add a downstream Code node that verifies the
+    // platform's native signature header against the raw body bytes.
     if !st.secret.is_empty() {
         let provided = headers
             .get("x-webhook-secret")
@@ -272,7 +289,7 @@ async fn handle_request(
             return Ok(Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Full::new(Bytes::new()))
-                .unwrap());
+                .expect("static response builder parameters are infallible"));
         }
     }
 
@@ -295,5 +312,5 @@ async fn handle_request(
         .status(StatusCode::OK)
         .header("content-length", "2")
         .body(Full::new(Bytes::from_static(b"OK")))
-        .unwrap())
+        .expect("static response builder parameters are infallible"))
 }

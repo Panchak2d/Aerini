@@ -1,5 +1,47 @@
+// Static CSS for the status page. No template variables — content must stay
+// byte-for-byte stable so the CSP sha256 hash in security_headers_middleware
+// remains valid. To recompute: sha256(bytes of this string) → base64-encode.
+//
+// SHA-256 (base64): EzDjh6fNSkXy+4Mk3I+Q6Pr4QSMDO7qOBhX3NHRvUFw=
+const STATUS_PAGE_CSS: &str = concat!(
+    "*{box-sizing:border-box;margin:0;padding:0}\n",
+    "    body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;font-size:14px}\n",
+    "    h1{font-size:20px;font-weight:600;margin-bottom:4px}\n",
+    "    .sub{color:#64748b;font-size:13px;margin-bottom:24px}\n",
+    "    .cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}\n",
+    "    .card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;min-width:160px}\n",
+    "    .card-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:6px}\n",
+    "    .card-value{font-size:16px;font-weight:500}\n",
+    "    .card-value-sm{font-size:13px}\n",
+    "    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}\n",
+    "    .status-dot.running{background:#f59e0b}\n",
+    "    .status-dot.error{background:#ef4444}\n",
+    "    .status-dot.done{background:#6b7280}\n",
+    "    .status-dot.idle{background:#22c55e}\n",
+    "    .log-section{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px}\n",
+    "    .log-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:12px}\n",
+    "    table{width:100%;border-collapse:collapse;font-family:'SF Mono','Fira Code',monospace;font-size:12px}\n",
+    "    tr+tr td{border-top:1px solid #1e293b}\n",
+    "    td{padding:3px 0;color:#94a3b8;vertical-align:top}\n",
+    "    .error-banner{background:#450a0a;border:1px solid #7f1d1d;border-radius:6px;padding:10px 14px;margin-bottom:16px;color:#fca5a5;font-size:13px}\n",
+    "    form{margin-top:16px}\n",
+    "    button{background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px}\n",
+    "    button:hover{background:#2563eb}\n",
+    "    .refresh-note{color:#475569;font-size:11px;margin-top:16px}\n",
+    "    .run-ts{color:#6b7280;white-space:nowrap;padding-right:16px}\n",
+    "    .run-status{padding-right:16px}\n",
+    "    .run-success{color:#22c55e}\n",
+    "    .run-failed{color:#ef4444}\n",
+    "    .run-dur{color:#64748b}\n",
+    "    .history-link{color:#3b82f6;font-size:11px}\n",
+    "    .logs-empty{color:#475569;font-style:italic;padding:8px 0}\n",
+    "    .run-now-wrap{margin-top:16px;display:flex;gap:8px;align-items:center}\n",
+    "    .run-now-input{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 12px;color:#e2e8f0;font-size:13px;width:220px}\n",
+    "    .history-section{margin-bottom:16px}",
+);
+
 use axum::{
-    extract::{Form, Path, Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -27,8 +69,6 @@ pub struct StatusState {
     pub workflow_name: String,
     pub workflow_id:   String,
     pub trigger_desc:  String,
-    #[allow(dead_code)]
-    pub status_port:   u16,
     pub run_state:     SharedRunState,
     pub log_buffer:    LogBuffer,
     pub run_trigger:   Arc<tokio::sync::Notify>,
@@ -63,9 +103,23 @@ async fn security_headers_middleware(req: Request, next: Next) -> impl IntoRespo
     h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
     h.insert("x-frame-options",        HeaderValue::from_static("DENY"));
     h.insert("referrer-policy",        HeaderValue::from_static("strict-origin-when-cross-origin"));
+    h.insert("permissions-policy",     HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
+    // HSTS is omitted here: this server runs behind a TLS-terminating reverse proxy
+    // (Caddy/Nginx) over plain HTTP. Browsers ignore HSTS on non-HTTPS connections,
+    // so the header is vacuous at this layer. The reverse proxy should inject it.
+    //
+    // Both style-src and script-src use SHA-256 hashes instead of 'unsafe-inline'.
+    // style-src hash covers STATUS_PAGE_CSS (see const at top of file).
+    // script-src hash covers the static "Run Now" script block in status_page().
+    // Both hashes must be recomputed if their respective content changes.
     h.insert(
         "content-security-policy",
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"),
+        HeaderValue::from_static(
+            "default-src 'none'; \
+             style-src 'sha256-EzDjh6fNSkXy+4Mk3I+Q6Pr4QSMDO7qOBhX3NHRvUFw='; \
+             script-src 'sha256-wU0Ewa2fRPMqN+gEO+pMBNDvkMABDjHCJ+3YwjpGSGo='; \
+             frame-ancestors 'none'",
+        ),
     );
     response
 }
@@ -105,36 +159,27 @@ async fn rate_limit_middleware(
 /// GET / — HTML status page, auto-refreshes every 30 seconds.
 async fn status_page(State(s): State<StatusState>) -> Html<String> {
     let rs = s.run_state.read().expect("run_state RwLock poisoned").clone();
-    let status_color = match rs.status.as_str() {
-        "running"  => "#f59e0b",
-        "error"    => "#ef4444",
-        "done"     => "#6b7280",
-        _          => "#22c55e",
+    let status_class = match rs.status.as_str() {
+        "running" => "running",
+        "error"   => "error",
+        "done"    => "done",
+        _         => "idle",
     };
 
     let last_run   = rs.last_run_at.as_deref().unwrap_or("—");
     let next_run   = rs.next_run_at.as_deref().unwrap_or("—");
     let last_error = rs.last_error.as_deref().unwrap_or("");
 
-    let logs_html: String = s.log_buffer.last_n(50).iter().rev().map(|e| {
-        let color = match e.level.as_str() {
-            "ERROR" => "#ef4444",
-            "WARN"  => "#f59e0b",
-            "DEBUG" => "#6b7280",
-            _       => "#d1d5db",
-        };
-        let node = e.node_id.as_deref()
-            .map(|n| format!("<span style='color:#818cf8'>[{}]</span> ", n))
-            .unwrap_or_default();
-        format!(
-            "<tr><td style='color:#6b7280;white-space:nowrap;padding-right:16px'>{}</td>\
-             <td style='color:{};padding-right:8px'>{}</td>\
-             <td>{}{}</td></tr>",
-            &e.timestamp[..19].replace('T', " "),
-            color, e.level, node,
-            html_escape(&e.message)
-        )
-    }).collect();
+    // Logs are never rendered in the public HTML page regardless of whether a
+    // run_secret is set. Execution logs can contain API responses, database values,
+    // or internal error details that must not be publicly accessible.
+    // The authenticated GET /api/logs endpoint is the only way to read log entries.
+    let logs_html: &'static str =
+        "<tr><td colspan='3' class='logs-empty'>\
+         Logs are only available via the authenticated endpoint. Use \
+         <code>GET /api/logs</code> with \
+         <code>Authorization: Bearer &lt;run_secret&gt;</code>.\
+         </td></tr>";
 
     // Recent run history from persistent DB (last 10 runs).
     let history_html: String = if let Some(ref db) = s.run_history {
@@ -143,27 +188,27 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
                 let rows: String = runs.iter().map(|r| {
                     let ts    = &r.ran_at[..19.min(r.ran_at.len())];
                     let ts    = ts.replace('T', " ");
-                    let color = if r.success { "#22c55e" } else { "#ef4444" };
+                    let color_class = if r.success { "run-success" } else { "run-failed" };
                     let label = if r.success { "success" } else { "failed" };
                     let dur   = format!("{:.1}s", r.duration_ms as f64 / 1000.0);
                     format!(
                         "<tr>\
-                         <td style='color:#6b7280;white-space:nowrap;padding-right:16px'>{}</td>\
-                         <td style='color:{};padding-right:16px'>{}</td>\
-                         <td style='color:#64748b'>{}</td>\
+                         <td class='run-ts'>{}</td>\
+                         <td class='run-status {}'>{}</td>\
+                         <td class='run-dur'>{}</td>\
                          </tr>",
-                        html_escape(&ts), color, label, html_escape(&dur)
+                        html_escape(&ts), color_class, label, html_escape(&dur)
                     )
                 }).collect();
                 format!(
-                    "<div class='log-section' style='margin-bottom:16px'>\
+                    "<div class='log-section history-section'>\
                        <div class='log-title'>Run history (last 10) &nbsp;\
                          {}\
                        </div>\
                        <table><tbody>{}</tbody></table>\
                      </div>",
                     if s.run_secret.is_some() {
-                        "<a href='/api/runs' style='color:#3b82f6;font-size:11px'>JSON ↗</a>"
+                        "<a href='/api/runs' class='history-link'>JSON ↗</a>"
                     } else {
                         ""
                     },
@@ -183,27 +228,7 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
   <meta http-equiv="refresh" content="30">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Flowo — {wf}</title>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;font-size:14px}}
-    h1{{font-size:20px;font-weight:600;margin-bottom:4px}}
-    .sub{{color:#64748b;font-size:13px;margin-bottom:24px}}
-    .cards{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
-    .card{{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;min-width:160px}}
-    .card-label{{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:6px}}
-    .card-value{{font-size:16px;font-weight:500}}
-    .status-dot{{display:inline-block;width:8px;height:8px;border-radius:50%;background:{sc};margin-right:6px}}
-    .log-section{{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px}}
-    .log-title{{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:12px}}
-    table{{width:100%;border-collapse:collapse;font-family:'SF Mono','Fira Code',monospace;font-size:12px}}
-    tr+tr td{{border-top:1px solid #1e293b}}
-    td{{padding:3px 0;color:#94a3b8;vertical-align:top}}
-    .error-banner{{background:#450a0a;border:1px solid #7f1d1d;border-radius:6px;padding:10px 14px;margin-bottom:16px;color:#fca5a5;font-size:13px}}
-    form{{margin-top:16px}}
-    button{{background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px}}
-    button:hover{{background:#2563eb}}
-    .refresh-note{{color:#475569;font-size:11px;margin-top:16px}}
-  </style>
+  <style>{css}</style>
 </head>
 <body>
   <h1>{wf}</h1>
@@ -214,7 +239,7 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
   <div class="cards">
     <div class="card">
       <div class="card-label">Status</div>
-      <div class="card-value"><span class="status-dot"></span>{status}</div>
+      <div class="card-value"><span class="status-dot {status_class}"></span>{status}</div>
     </div>
     <div class="card">
       <div class="card-label">Total Runs</div>
@@ -222,18 +247,18 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
     </div>
     <div class="card">
       <div class="card-label">Last Run</div>
-      <div class="card-value" style="font-size:13px">{last_run}</div>
+      <div class="card-value card-value-sm">{last_run}</div>
     </div>
     <div class="card">
       <div class="card-label">Next Run</div>
-      <div class="card-value" style="font-size:13px">{next_run}</div>
+      <div class="card-value card-value-sm">{next_run}</div>
     </div>
   </div>
 
   {history}
 
   <div class="log-section">
-    <div class="log-title">Last 50 log entries</div>
+    <div class="log-title">{log_section_title}</div>
     <table><tbody>{logs}</tbody></table>
   </div>
 
@@ -241,35 +266,61 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
   <p class="refresh-note">Auto-refreshes every 30 seconds.</p>
 </body>
 </html>"#,
+        css      = STATUS_PAGE_CSS,
         wf       = html_escape(&s.workflow_name),
         trigger  = html_escape(&s.trigger_desc),
         exported = "—",
-        sc       = status_color,
+        status_class = status_class,
         status   = html_escape(&rs.status),
         runs     = rs.run_count,
         last_run = html_escape(last_run),
         next_run = html_escape(next_run),
-        error_banner = if !last_error.is_empty() {
+        error_banner = if !last_error.is_empty() && s.run_secret.is_some() {
+            // Only show the error banner when the deployment is secured with a run_secret.
+            // Without a secret the page is public — error messages can expose internal details.
+            // The authenticated GET /api/status JSON endpoint always includes last_error.
             format!("<div class='error-banner'>Last error: {}</div>",
                 html_escape(last_error))
+        } else if !last_error.is_empty() {
+            // Public page: indicate an error occurred without exposing the message.
+            "<div class='error-banner'>Last run ended with an error. \
+             Set a run_secret and use <code>/api/status</code> to see details.</div>".to_string()
         } else { String::new() },
         history  = history_html,
+        log_section_title = "Logs (authenticated only)",
         logs     = logs_html,
         run_now_form = match &s.run_secret {
-            Some(_) => "<form method=\"POST\" action=\"/api/run\" style=\"margin-top:16px;display:flex;gap:8px;align-items:center\">\
-                <input type=\"password\" name=\"secret\" placeholder=\"Run secret\" required \
-                    style=\"background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 12px;\
-                           color:#e2e8f0;font-size:13px;width:220px\">\
-                <button type=\"submit\">&#9654; Run Now</button>\
-                </form>".to_string(),
+            Some(_) => concat!(
+                "<div class='run-now-wrap'>",
+                "<input type='password' id='_flowo_rs' placeholder='Run secret' ",
+                "class='run-now-input'>",
+                "<button onclick='_flowoRun()'>&#9654; Run Now</button>",
+                "</div>",
+                "<script>",
+                "async function _flowoRun(){",
+                "var s=document.getElementById('_flowo_rs').value;",
+                "var r=await fetch('/api/run',{method:'POST',",
+                "headers:{'Authorization':'Bearer '+s,'Content-Type':'application/json'},",
+                "body:'{}'});",
+                "if(r.ok){document.getElementById('_flowo_rs').value='';alert('Run triggered.');}",
+                "else{alert('Invalid run secret.');}}",
+                "</script>"
+            ).to_string(),
             None => String::new(),
         },
     ))
 }
 
 /// GET /api/status — JSON status.
-async fn api_status(State(s): State<StatusState>) -> Json<Value> {
-    let rs = s.run_state.read().expect("run_state RwLock poisoned").clone();
+/// `last_error` is only included when the request carries a valid run_secret.
+/// Unauthenticated callers receive all non-sensitive fields (counts, timestamps, status)
+/// but not the error string, which may contain internal paths or scrubbed credential URLs.
+async fn api_status(
+    State(s): State<StatusState>,
+    headers:  HeaderMap,
+) -> Json<Value> {
+    let rs     = s.run_state.read().expect("run_state RwLock poisoned").clone();
+    let authed = check_run_secret(&s, &headers).is_ok();
     Json(json!({
         "workflow_name": s.workflow_name,
         "trigger":       s.trigger_desc,
@@ -277,14 +328,21 @@ async fn api_status(State(s): State<StatusState>) -> Json<Value> {
         "run_count":     rs.run_count,
         "last_run_at":   rs.last_run_at,
         "next_run_at":   rs.next_run_at,
-        "last_error":    rs.last_error,
         "last_duration_ms": rs.last_duration_ms,
+        "last_error": if authed { rs.last_error } else { None },
     }))
 }
 
 /// GET /api/logs?n=50 — JSON log array.
-async fn api_logs(State(s): State<StatusState>) -> Json<Value> {
-    Json(json!(s.log_buffer.last_n(50)))
+/// Requires: Authorization: Bearer <run_secret>
+async fn api_logs(
+    State(s): State<StatusState>,
+    headers:  HeaderMap,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+        return (status, msg).into_response();
+    }
+    Json(json!(s.log_buffer.last_n(50))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -373,36 +431,37 @@ async fn api_run_detail(
     }
 }
 
-#[derive(Deserialize)]
-struct RunForm {
-    secret: Option<String>,
-}
-
-/// POST /api/run — manual one-shot trigger from the status page button.
-/// Requires the correct secret token when one is configured.
+/// POST /api/run — manual one-shot trigger from the status page run button.
+/// Requires: Authorization: Bearer <run_secret>
+/// The secret is read from the Authorization header, not the request body,
+/// to block cross-origin form-based CSRF attacks (JSON Content-Type triggers
+/// a CORS preflight on cross-origin requests, which the status server rejects).
 async fn api_run(
     State(s): State<StatusState>,
-    Form(form): Form<RunForm>,
+    headers:  HeaderMap,
 ) -> impl IntoResponse {
     match &s.run_secret {
         Some(expected) => {
-            let provided = form.secret.as_deref().unwrap_or("");
+            let provided = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("");
             // Hash both sides with BLAKE3 before constant-time comparison.
-            // ct_eq on byte slices of different lengths returns 0 immediately,
-            // leaking the expected length via timing. Hashing normalises both
-            // to a fixed 32-byte output, eliminating the length oracle.
+            // Hashing normalises both sides to 32 bytes, preventing a length
+            // oracle via ct_eq short-circuiting on mismatched lengths.
             let ok: bool = blake3::hash(expected.as_bytes())
                 .as_bytes()
                 .ct_eq(blake3::hash(provided.as_bytes()).as_bytes())
                 .into();
             if !ok {
-                return (StatusCode::FORBIDDEN, "Invalid secret");
+                return (StatusCode::FORBIDDEN, "Invalid secret").into_response();
             }
         }
-        None => return (StatusCode::FORBIDDEN, "Manual trigger is disabled"),
+        None => return (StatusCode::FORBIDDEN, "Manual trigger is disabled").into_response(),
     }
     s.run_trigger.notify_one();
-    (StatusCode::ACCEPTED, "Run triggered")
+    (StatusCode::ACCEPTED, "Run triggered").into_response()
 }
 
 fn html_escape(s: &str) -> String {
@@ -410,6 +469,7 @@ fn html_escape(s: &str) -> String {
      .replace('<', "&lt;")
      .replace('>', "&gt;")
      .replace('"', "&quot;")
+     .replace('\'', "&#x27;")
 }
 
 #[cfg(test)]
@@ -425,7 +485,6 @@ mod tests {
             workflow_name:       "test-workflow".to_string(),
             workflow_id:         "wf-test".to_string(),
             trigger_desc:        "manual".to_string(),
-            status_port:         0,
             run_state:           std::sync::Arc::new(std::sync::RwLock::new(RunState::default())),
             log_buffer:          LogBuffer::new(10),
             run_trigger:         std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -434,6 +493,45 @@ mod tests {
             run_history:         None,
             trusted_proxy_count: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn api_status_last_error_requires_auth() {
+        let state = std::sync::Arc::new(std::sync::RwLock::new({
+            let mut rs = RunState::default();
+            rs.last_error = Some("postgres://admin:secret@internal-db:5432/prod — connection refused".into());
+            rs
+        }));
+        let mut s = make_state(Some("secret"));
+        s.run_state = state;
+        let app = router(s);
+
+        // No auth — last_error must be absent (null)
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["last_error"].is_null(), "unauthenticated caller must not receive last_error");
+
+        // With auth — last_error must be present
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(!v["last_error"].is_null(), "authenticated caller must receive last_error");
     }
 
     #[tokio::test]
@@ -469,5 +567,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_logs_requires_secret() {
+        let app = router(make_state(Some("logsecret")));
+
+        // No auth → 403
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/api/logs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Wrong secret → 403
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/logs")
+                    .header("authorization", "Bearer wrongsecret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Correct secret → 200
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/logs")
+                    .header("authorization", "Bearer logsecret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_run_requires_bearer_header() {
+        let app = router(make_state(Some("runsecret")));
+
+        // No auth → 403
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Wrong secret → 403
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/run")
+                    .header("authorization", "Bearer badsecret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Correct secret → 202
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/run")
+                    .header("authorization", "Bearer runsecret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 }

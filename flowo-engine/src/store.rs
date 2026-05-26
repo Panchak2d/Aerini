@@ -11,7 +11,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::error::EngineError;
@@ -52,8 +52,8 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    pub fn open(db_path: &PathBuf, key_source: KeySource) -> Result<Self, EngineError> {
-        let key_bytes = Self::load_key_bytes(key_source)?;
+    pub fn open(db_path: &Path, key_source: KeySource) -> Result<Self, EngineError> {
+        let key_bytes = Self::load_key(key_source)?;
         let key    = Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
 
@@ -153,11 +153,11 @@ impl CredentialStore {
 
     // ── Key loading ───────────────────────────────────────────────────────────
 
-    fn load_key_bytes(source: KeySource) -> Result<Vec<u8>, EngineError> {
+    fn load_key(source: KeySource) -> Result<Vec<u8>, EngineError> {
         match source {
-            KeySource::File(path) => Self::load_or_generate_key(&path),
+            KeySource::File(path) => Self::key_from_file(&path),
             KeySource::OsKeychain { fallback } => {
-                Self::load_or_generate_key_from_keychain(&fallback)
+                Self::key_from_keychain(&fallback)
             }
         }
     }
@@ -171,7 +171,7 @@ impl CredentialStore {
     /// 3. No entry, no file → generate, write to keychain, return.
     /// 4. Any keychain error except NoEntry, or keychain write fails in step 3
     ///    → warn + fall back to file.
-    fn load_or_generate_key_from_keychain(fallback: &PathBuf) -> Result<Vec<u8>, EngineError> {
+    fn key_from_keychain(fallback: &Path) -> Result<Vec<u8>, EngineError> {
         use keyring::{Entry, Error as KeyringError};
 
         const SERVICE: &str = "flowo";
@@ -185,7 +185,7 @@ impl CredentialStore {
                      Falling back to file at {}.",
                     fallback.display()
                 );
-                return Self::load_or_generate_key(fallback);
+                return Self::key_from_file(fallback);
             }
         };
 
@@ -208,7 +208,7 @@ impl CredentialStore {
             Err(KeyringError::NoEntry) => {
                 if fallback.exists() {
                     // Migrate key from legacy file into the keychain.
-                    let key_bytes = Self::load_or_generate_key(fallback)?;
+                    let key_bytes = Self::key_from_file(fallback)?;
                     let encoded = B64.encode(&key_bytes);
                     match entry.set_password(&encoded) {
                         Ok(()) => {
@@ -238,8 +238,8 @@ impl CredentialStore {
                                  Falling back to file at {}.",
                                 fallback.display()
                             );
-                            // load_or_generate_key will create the file.
-                            Self::load_or_generate_key(fallback)
+                            // key_from_file creates the key file if absent.
+                            Self::key_from_file(fallback)
                         }
                     }
                 }
@@ -251,12 +251,12 @@ impl CredentialStore {
                      Falling back to file at {}.",
                     fallback.display()
                 );
-                Self::load_or_generate_key(fallback)
+                Self::key_from_file(fallback)
             }
         }
     }
 
-    fn load_or_generate_key(key_path: &PathBuf) -> Result<Vec<u8>, EngineError> {
+    fn key_from_file(key_path: &Path) -> Result<Vec<u8>, EngineError> {
         if key_path.exists() {
             let encoded = std::fs::read_to_string(key_path)
                 .map_err(|e| EngineError::Encryption(e.to_string()))?;

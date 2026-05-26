@@ -75,6 +75,8 @@ pub struct SchedulerDaemon {
     code_exec_disabled:  bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
+    file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
 }
 
 impl SchedulerDaemon {
@@ -97,6 +99,8 @@ impl SchedulerDaemon {
             code_exec_disabled:  false,
             parallel_execution:   false,
             max_concurrent_nodes: 8,
+            server_max_duration_secs: None,
+            file_sandbox_dir: None,
         }
     }
 
@@ -128,6 +132,19 @@ impl SchedulerDaemon {
     /// Maximum simultaneous node tasks in parallel mode. Default: 8.
     pub fn with_max_concurrent_nodes(mut self, limit: usize) -> Self {
         self.max_concurrent_nodes = limit.max(1);
+        self
+    }
+
+    /// Set a server-level ceiling on workflow execution time for all jobs run by this scheduler.
+    /// Passed through to `WorkflowExecutor::with_server_max_duration_secs`.
+    pub fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
+        self.server_max_duration_secs = secs;
+        self
+    }
+
+    /// Restrict File nodes to paths within `dir` for all workflows run by this scheduler.
+    pub fn with_file_sandbox_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.file_sandbox_dir = Some(Arc::new(dir));
         self
     }
 
@@ -362,6 +379,8 @@ impl SchedulerDaemon {
         let code_exec_disabled  = self.code_exec_disabled;
         let parallel_execution   = self.parallel_execution;
         let max_concurrent_nodes = self.max_concurrent_nodes;
+        let server_max_duration_secs = self.server_max_duration_secs;
+        let file_sandbox_dir = self.file_sandbox_dir.clone();
 
         let trigger = if let Some(t) = trigger_override {
             t
@@ -390,6 +409,7 @@ impl SchedulerDaemon {
                 event_sink, exec_lock, fire_immediately, env_allowlist,
                 shell_exec_disabled, code_exec_disabled,
                 parallel_execution, max_concurrent_nodes,
+                server_max_duration_secs, file_sandbox_dir,
             ).await;
             jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
         }));
@@ -441,12 +461,14 @@ async fn run_job_loop(
     code_exec_disabled:   bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
+    file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
 ) {
     match trigger {
         TriggerKind::Interval { secs } => {
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -461,7 +483,7 @@ async fn run_job_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
                 if let Ok(_guard) = exec_lock.try_lock() {
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -471,7 +493,7 @@ async fn run_job_loop(
         TriggerKind::Cron { ref expr } => {
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -495,7 +517,7 @@ async fn run_job_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
                 if let Ok(_guard) = exec_lock.try_lock() {
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -520,7 +542,7 @@ async fn run_job_loop(
                     )
                 }));
             }
-            fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes).await;
+            fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
             db.scheduler_set_status(&workflow_id, "done").ok();
             emit_done(&event_sink, &db, &workflow_id);
         }
@@ -588,6 +610,7 @@ async fn run_job_loop(
                 fire_once_with_vars(
                     &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
                     shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes,
+                    server_max_duration_secs, &file_sandbox_dir,
                 ).await;
 
                 emit_waiting(&event_sink, &db, &workflow_id, None);
@@ -614,10 +637,13 @@ async fn fire_once(
     code_exec_disabled:   bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
+    file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
 ) {
     fire_once_with_vars(workflow_id, db, registry, cred_store, event_sink,
         std::collections::HashMap::new(), env_allowlist,
         shell_exec_disabled, code_exec_disabled, parallel_execution, max_concurrent_nodes,
+        server_max_duration_secs, file_sandbox_dir,
     ).await;
 }
 
@@ -633,6 +659,8 @@ async fn fire_once_with_vars(
     code_exec_disabled:   bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
+    file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
 ) {
     {
         let row   = db.scheduler_get(workflow_id).ok().flatten();
@@ -685,6 +713,12 @@ async fn fire_once_with_vars(
         executor = executor
             .with_parallel_execution(true)
             .with_max_concurrent_nodes(max_concurrent_nodes);
+    }
+    if server_max_duration_secs.is_some() {
+        executor = executor.with_server_max_duration_secs(server_max_duration_secs);
+    }
+    if let Some(ref sandbox) = file_sandbox_dir {
+        executor = executor.with_file_sandbox_dir(sandbox.as_ref().clone());
     }
 
     let now_str = Utc::now().to_rfc3339();

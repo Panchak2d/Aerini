@@ -31,7 +31,7 @@ rand    = "0.8"
 base64  = "0.22"
 
 # HTTP node
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "query", "form"], default-features = false }
 url     = "2"
 
 # Webhook node HTTP server (already transitive via reqwest; listed explicitly for clarity)
@@ -89,10 +89,6 @@ redis = { version = "1.0", features = ["tokio-comp"] }
 # S3 / object storage node (Phase 13)
 # default-features = false: avoid native-tls (pulls in OpenSSL) — use rustls instead,
 # matching reqwest's TLS choice throughout the project.
-# tokio-rustls-tls: tokio runtime + rustls TLS backend.
-# NOTE: If compilation fails with "unknown feature tokio-rustls-tls", change to
-#       default-features = true (tokio + native-tls) — native-tls works on all platforms
-#       but adds an OpenSSL dependency on Linux.
 rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"] }
 
 [dev-dependencies]

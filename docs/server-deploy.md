@@ -234,6 +234,8 @@ Press `Ctrl+C` to stop. The workflow stops when this process stops, so this is o
 
 > `flowo-server.json` contains a `run_secret` in plaintext. Restrict access: `chmod 600 flowo-server.json`.
 
+> **Security:** `flowo-server.json` (and `flowo-config.json` in the export zip) contains the `run_secret` in plaintext. Treat it like a password: do not commit it to version control, do not store it in a world-readable location, and do not share the zip file publicly. If you need to rotate the secret, re-export the workflow from the desktop app.
+
 ---
 
 ## API mode
@@ -274,6 +276,8 @@ On first run, the server generates a random API token and prints it:
 ```
 
 **Copy this token and save it somewhere safe** — a password manager, a notes app, anywhere offline. Every API request and CLI command requires it. If you lose it, you will need to reset the server's data directory.
+
+> **systemd journal note:** If you run `flowo-server api` interactively before setting up the systemd service, the token is printed to stderr. In systemd deployments with `StandardError=journal` (the default), stderr is captured by the journal and the raw token will be visible in `journalctl` output. After first run, either set `FLOWO_TOKEN` in the service unit (so the token is never re-printed) or check journal permissions and rotate the token if the journal is readable by untrusted users.
 
 Press `Ctrl+C` to stop the server. You will run it as a persistent service in the next step.
 
@@ -853,6 +857,37 @@ In the systemd unit:
 ExecStart=/usr/local/bin/flowo-server api \
   --disable-shell=false \
   --disable-code=false
+```
+
+### Rate limiting
+
+Both the API server and the status server include a per-IP in-process rate limiter (300 req/60s for the API server; 120 req/60s for the status server). This provides a basic floor against accidental hammering.
+
+**Limitations to be aware of:**
+
+- The counters live in process memory and reset on server restart. A restarting server provides no brute-force protection during the first rate-limit window.
+- There is no tighter limit specifically on failed authentication attempts. For a 128-bit random token this is tolerable, but for any deployment exposed to the internet, a network-level rate limiter at the reverse proxy provides a stronger first line of defense.
+
+**Recommended for internet-facing deployments:**
+
+Add rate limiting at the reverse proxy layer. For Caddy:
+
+```
+api.yourdomain.com {
+    rate_limit {remote.ip} 60r/m
+    reverse_proxy localhost:7700
+}
+```
+
+For Nginx (requires `ngx_http_limit_req_module`, usually included):
+
+```nginx
+limit_req_zone $binary_remote_addr zone=flowo:10m rate=60r/m;
+
+location / {
+    limit_req zone=flowo burst=20 nodelay;
+    proxy_pass http://127.0.0.1:7700;
+}
 ```
 
 ---

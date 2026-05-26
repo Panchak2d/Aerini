@@ -1,5 +1,81 @@
 use serde_json::Value;
 
+use crate::error::NodeError;
+use crate::model::NodeOutput;
+
+/// Scrubs embedded URL passwords from a driver error string before it is
+/// stored or returned to callers.
+///
+/// Replaces `scheme://user:password@host` with `scheme://user:[REDACTED]@host`
+/// anywhere in `s`. Safe to call on strings that contain no URL — returned
+/// unchanged. Used to prevent DB connection strings (which include credentials)
+/// from leaking through sqlx / redis error messages.
+pub fn scrub_url_in_error(s: &str) -> String {
+    let marker = "://";
+    let mut result = String::with_capacity(s.len());
+    let mut haystack = s;
+
+    while let Some(pos) = haystack.find(marker) {
+        result.push_str(&haystack[..pos + marker.len()]);
+        let after = &haystack[pos + marker.len()..];
+
+        let at_pos    = after.find('@');
+        let slash_pos = after.find('/');
+        let space_pos = after.find(|c: char| c.is_ascii_whitespace());
+
+        // '@' must appear before any '/' or whitespace to be part of credentials.
+        let at_before_delim = match at_pos {
+            None    => false,
+            Some(a) => slash_pos.map_or(true, |s| a < s) && space_pos.map_or(true, |s| a < s),
+        };
+
+        if at_before_delim {
+            let a = at_pos.unwrap();
+            let before_at = &after[..a];
+            if let Some(colon) = before_at.find(':') {
+                let user = &before_at[..colon];
+                if !user.is_empty() && !user.contains(|c: char| c.is_ascii_whitespace()) {
+                    result.push_str(user);
+                    result.push_str(":[REDACTED]@");
+                    haystack = &after[a + 1..];
+                    continue;
+                }
+            }
+        }
+        haystack = after;
+    }
+
+    result.push_str(haystack);
+    result
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::scrub_url_in_error;
+
+    #[test]
+    fn redacts_postgres_password_in_error() {
+        let e = "Postgres connection failed: error connecting to server: postgres://admin:s3cr3t@db.internal:5432/prod — connection refused";
+        let out = scrub_url_in_error(e);
+        assert!(!out.contains("s3cr3t"), "password must be removed");
+        assert!(out.contains("[REDACTED]"), "must have redaction marker");
+        assert!(out.contains("admin"), "username must stay");
+    }
+
+    #[test]
+    fn string_without_url_unchanged() {
+        let e = "connection timed out after 30s";
+        assert_eq!(scrub_url_in_error(e), e);
+    }
+
+    #[test]
+    fn url_without_credentials_unchanged() {
+        let e = "failed: redis://cache.internal:6379";
+        let out = scrub_url_in_error(e);
+        assert_eq!(out, e);
+    }
+}
+
 /// Traverse a dot-separated field path into a JSON Value.
 ///
 /// Returns `Value::Null` on any miss: key absent, non-object intermediate value,
@@ -115,6 +191,38 @@ pub async fn check_host_ssrf(host: url::Host<&str>, port: u16) -> Result<(), Str
     }
 }
 
+/// SSRF protection for AI node `base_url` fields and any other HTTP/HTTPS URL.
+///
+/// Parses `raw_url`, validates the scheme is `http` or `https`, extracts the
+/// host and port, then delegates to `check_host_ssrf`. Blocks loopback, private,
+/// link-local, Azure IMDS, and all other non-public IP ranges.
+///
+/// **Note:** this check intentionally blocks `localhost` and loopback addresses,
+/// which means self-hosted inference servers (e.g. Ollama at
+/// `http://localhost:11434/v1`) will be rejected in server/API mode. This is
+/// the correct security boundary for multi-user deployments — the local network
+/// is not trusted from the server's perspective. Desktop-only users running
+/// Ollama must use a non-loopback address reachable from outside (e.g. bind
+/// Ollama to `0.0.0.0` and use the machine's LAN IP) or disable SSRF checking
+/// via a dedicated flag if one is added in a future release.
+pub async fn check_host_ssrf_from_url(raw_url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw_url)
+        .map_err(|e| format!("Invalid base_url: {}", e))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => return Err(format!("URL scheme '{}' is not permitted. Use http or https.", s)),
+    }
+
+    let host = match parsed.host() {
+        Some(h) => h,
+        None => return Err("base_url has no host".to_string()),
+    };
+
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    check_host_ssrf(host, port).await
+}
+
 /// SSRF protection for database connection URLs (postgres, mysql, redis).
 ///
 /// Parses `raw_url`, extracts the host and port, and delegates to
@@ -140,3 +248,13 @@ pub async fn check_db_url_ssrf(raw_url: &str) -> Result<(), String> {
     check_host_ssrf(host, port).await
 }
 
+/// Maps a reqwest network error to a `NodeOutput`, classifying timeout and
+/// connection errors as recoverable (eligible for scheduler retry).
+/// All other errors are unrecoverable.
+pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
+    if e.is_timeout() || e.is_connect() {
+        NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", e.to_string()))
+    } else {
+        NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
+    }
+}

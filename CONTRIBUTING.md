@@ -35,6 +35,8 @@ npm run dev       # Vite dev server + Tauri window
 npm run build     # production bundle → src-tauri/target/release/bundle/
 ```
 
+> **`dist/` policy:** The `dist/` directory contains the compiled frontend assets that Tauri reads at runtime. It is committed to this repository intentionally (Tauri reads from `dist/` during the build). It is also listed in `.gitignore` to prevent accidental re-commits of stale builds. **Do not remove it from the repo.** When contributing, rebuild it with `npm run build` before running `cargo tauri build`, but do not commit the rebuilt `dist/` unless you are the maintainer cutting a release.
+
 ---
 
 ## Adding a new node

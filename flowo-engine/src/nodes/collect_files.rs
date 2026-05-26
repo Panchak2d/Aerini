@@ -20,6 +20,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
+use std::collections::HashSet;
+
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
 pub struct CollectFilesNode;
@@ -80,7 +82,6 @@ impl Node for CollectFilesNode {
         let sources = match cfg["sources"].as_array() {
             Some(s) => s.clone(),
             None => {
-                // No sources configured — return empty batch
                 return NodeOutput::success_with_logs(
                     json!({ "files": [], "count": 0, "source": "collect_files" }),
                     vec!["No sources configured".to_string()],
@@ -89,7 +90,7 @@ impl Node for CollectFilesNode {
         };
 
         let mut merged_files: Vec<Value> = Vec::new();
-        let mut seen_filenames: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_filenames: HashSet<String> = HashSet::new();
         let mut logs: Vec<String> = Vec::new();
 
         for (source_index, source) in sources.iter().enumerate() {
@@ -118,8 +119,7 @@ impl Node for CollectFilesNode {
                 let deduped = deduplicate_filename(&original_name, source_index, &seen_filenames);
                 seen_filenames.insert(deduped.clone());
 
-                // Rebuild with (possibly renamed) filename
-                let mut f = file.clone();
+                let mut f = file;
                 if let Some(obj) = f.as_object_mut() {
                     obj.insert("filename".to_string(), Value::String(deduped));
                 }
@@ -134,8 +134,6 @@ impl Node for CollectFilesNode {
         )
     }
 }
-
-// ── Port derivation ───────────────────────────────────────────────────────────
 
 pub fn derive_ports(config: &Value) -> NodePorts {
     let mut inputs: Vec<PortDefinition> = Vec::new();
@@ -168,8 +166,6 @@ pub fn derive_ports(config: &Value) -> NodePorts {
         }],
     }
 }
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Parse source_expr string:
 /// - If it looks like a JSON object/array: parse as JSON
@@ -205,12 +201,11 @@ fn extract_files_array(val: &Value) -> Vec<Value> {
 fn deduplicate_filename(
     filename: &str,
     source_index: usize,
-    seen: &std::collections::HashSet<String>,
+    seen: &HashSet<String>,
 ) -> String {
     if !seen.contains(filename) {
         return filename.to_string();
     }
-    // Insert suffix before extension
     let dot = filename.rfind('.');
     let renamed = match dot {
         Some(pos) => format!("{}_{}{}", &filename[..pos], source_index, &filename[pos..]),

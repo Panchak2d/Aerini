@@ -207,7 +207,15 @@ Use this as a deployment checklist. None of these are automatic.
 
 ### Strongly recommended
 
-- [ ] **Set `--file-sandbox-dir`.** Constrain File nodes to a specific directory. Without it, File nodes can read and write anywhere the server process user can reach.
+- [ ] **Protect `flowo-server.json` in serve mode.** The config file contains `run_secret` in plaintext. After the installer runs, restrict read access:
+
+  ```bash
+  chmod 600 ~/.flowo-server/MyWorkflow/flowo-server.json
+  ```
+
+  Do not commit it to version control or store it in a world-readable location.
+
+- [ ] **Set `--file-sandbox-dir`.** Constrain File nodes to a specific directory. Without it, File nodes can read and write anywhere the server process user can reach, including the data directory that holds the encryption key and credential database. The server emits a `WARN`-level log at startup when this flag is not set.
 
   ```bash
   flowo-server api --file-sandbox-dir /var/flowo/data
@@ -259,14 +267,16 @@ When running `flowo-server serve`, the status server binds on the configured por
 
 | Endpoint | Auth required | What it exposes |
 |---|---|---|
-| `GET /` | None | HTML status page — workflow name, status, last/next run times, last 50 log entries, last 10 run history rows |
+| `GET /` | None | HTML status page — workflow name, status, last/next run times, last 10 run history rows. **Log entries are shown only when `run_secret` is not set** (see note below). |
 | `GET /api/status` | None | JSON: workflow name, trigger, status, run counts, timestamps, last error |
-| `GET /api/logs` | None | JSON: last 50 log entries |
+| `GET /api/logs` | `run_secret` | JSON: last 50 log entries |
 | `POST /api/run` | `run_secret` | Triggers a manual run |
 | `GET /api/runs` | `run_secret` | JSON: full paginated run history including all node outputs |
 | `GET /api/runs/:id` | `run_secret` | JSON: single run record including complete `node_outputs` |
 
 **`/api/runs` exposes everything.** Each run record includes the full output of every node — API responses, database query results, file contents, and any other data that flowed through the workflow. This endpoint requires `run_secret`.
+
+> **Log visibility on `GET /`:** When `run_secret` is set, the HTML status page does **not** render log entries — it shows a notice directing to `GET /api/logs` instead. When no `run_secret` is configured (single-user or trusted-network deployments), the HTML page renders the last 50 log entries publicly. If your logs may contain sensitive data, always set a `run_secret`.
 
 ### Accessing /api/runs from scripts and tools
 
@@ -307,7 +317,7 @@ The HTML status page (`GET /`) always shows the last 10 run history rows without
 
 ### Public endpoints
 
-`GET /`, `GET /api/status`, and `GET /api/logs` are always public. They expose metadata only — no node output values. If this is too much for your deployment, bind the status server to localhost only (the default) and restrict access at the network level.
+`GET /` and `GET /api/status` are always public. `GET /api/logs` requires `run_secret`. If public exposure of even status metadata is too much for your deployment, bind the status server to localhost only (the default) and restrict access at the network level.
 
 ---
 
@@ -421,11 +431,17 @@ The dangerous node confirmation prompt gives you visibility. It cannot give you 
 
 **Mitigation:** only run workflows from sources you trust. Treat shared workflow files (.flowo) the same way you treat executable downloads.
 
-### No OS keychain integration
+### OS keychain integration (server mode only)
 
-Credentials are protected by a file-based key, not by your OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). OS keychain integration would require user authentication (Touch ID, Windows Hello, password prompt) before decrypting credentials on each app launch. Flowo does not currently use this.
+By default, the server binary stores the credential encryption key in a file (`flowo.key`). Use the `--use-keychain` flag to store the key in the OS-native credential store instead:
 
-This means Flowo can decrypt credentials in the background without any user interaction — useful for scheduled workflows, but a weaker security boundary than OS-keychain-backed storage.
+```bash
+flowo-server api --use-keychain
+```
+
+This activates `KeySource::OsKeychain` — macOS Keychain, Windows Credential Manager, or Linux SecretService via D-Bus. If the keychain is unavailable at runtime, the server falls back to the file-based key automatically.
+
+**Desktop app:** the Tauri desktop app uses a file-based key (not the keychain) and does not expose a `--use-keychain` flag. The encryption key file is created with `chmod 600` on Unix. Credentials decrypt automatically in the background for scheduled workflows.
 
 ### The DNS rebinding gap on the HTTP node
 

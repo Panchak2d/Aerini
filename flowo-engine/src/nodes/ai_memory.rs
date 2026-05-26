@@ -110,11 +110,11 @@ impl Node for AiMemoryNode {
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let operation = match input.input["operation"].as_str() {
-            Some(op) => op.to_string(),
+            Some(op) => op,
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_OP", "operation is required")),
         };
         let session_id = match input.input["session_id"].as_str() {
-            Some(s) if !s.is_empty() => s.to_string(),
+            Some(s) if !s.is_empty() => s,
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_SESSION", "session_id is required")),
         };
         let max_messages = input.input["max_messages"].as_u64().unwrap_or(20) as usize;
@@ -128,9 +128,9 @@ impl Node for AiMemoryNode {
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e.to_string())),
         };
 
-        match operation.as_str() {
+        match operation {
             "read" => {
-                match read_messages(&conn, &session_id, max_messages) {
+                match read_messages(&conn, session_id, max_messages) {
                     Ok(msgs) => {
                         let count = msgs.len();
                         NodeOutput::success_with_logs(
@@ -144,21 +144,21 @@ impl Node for AiMemoryNode {
 
             "append" => {
                 let role = match input.input["role"].as_str() {
-                    Some(r) => r.to_string(),
+                    Some(r) => r,
                     None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for append")),
                 };
                 let content = match input.input["content"].as_str() {
-                    Some(c) if !c.is_empty() => c.to_string(),
+                    Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for append")),
                 };
-                let seq = get_next_seq(&conn, &session_id).unwrap_or(0);
+                let seq = get_next_seq(&conn, session_id).unwrap_or(0);
                 let now = chrono::Utc::now().to_rfc3339();
                 match conn.execute(
                     "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![session_id, role, content, now, seq],
                 ) {
                     Ok(_) => {
-                        let msgs  = read_messages(&conn, &session_id, max_messages).unwrap_or_default();
+                        let msgs  = read_messages(&conn, session_id, max_messages).unwrap_or_default();
                         let count = msgs.len();
                         NodeOutput::success_with_logs(
                             json!({ "messages": msgs, "count": count, "session_id": session_id }),
@@ -171,10 +171,10 @@ impl Node for AiMemoryNode {
 
             "write" => {
                 let role = match input.input["role"].as_str() {
-                    Some(r) => r.to_string(),
+                    Some(r) => r,
                     None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for write")),
                 };
-                let content = input.input["content"].as_str().unwrap_or("").to_string();
+                let content = input.input["content"].as_str().unwrap_or("");
                 let _ = conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]);
                 let now = chrono::Utc::now().to_rfc3339();
                 match conn.execute(

@@ -78,9 +78,23 @@ enum Command {
 
         /// Number of reverse-proxy hops to trust when reading X-Forwarded-For.
         /// Set to the number of proxies between the internet and this server.
+        /// Must exactly match your proxy topology — setting this too high lets
+        /// clients spoof their IP and bypass per-IP rate limiting.
         /// Default 0 = use TCP source IP directly.
         #[arg(long, env = "FLOWO_TRUSTED_PROXY_COUNT", default_value_t = 0)]
         trusted_proxy_count: usize,
+
+        /// Allow Shell Command nodes (disabled by default).
+        /// Shell Command nodes execute arbitrary OS commands — only enable this
+        /// if you have audited every node in the exported workflow.
+        #[arg(long, default_value_t = false)]
+        allow_shell: bool,
+
+        /// Allow Code (JS) nodes (disabled by default).
+        /// Code nodes spawn a Node.js subprocess — only enable if you have
+        /// audited every node in the exported workflow.
+        #[arg(long, default_value_t = false)]
+        allow_code: bool,
     },
 
     /// Run the multi-workflow REST API server.
@@ -127,29 +141,17 @@ enum Command {
         #[arg(long, env = "FLOWO_TRUSTED_PROXY_COUNT", default_value_t = 0)]
         trusted_proxy_count: usize,
 
-        /// Disable Shell Command nodes. Disabled by default — Shell Command nodes
-        /// execute arbitrary OS commands and are off unless explicitly opted in.
-        /// To allow shell execution: --disable-shell=false
-        #[arg(
-            long,
-            num_args(0..=1),
-            action = clap::ArgAction::Set,
-            default_value_t = true,
-            default_missing_value = "true",
-        )]
-        disable_shell: bool,
+        /// Allow Shell Command nodes (disabled by default).
+        /// Shell Command nodes execute arbitrary OS commands — only enable this
+        /// if you control all workflows running on this server.
+        #[arg(long, default_value_t = false)]
+        allow_shell: bool,
 
-        /// Disable Code (JS) nodes. Disabled by default — Code nodes spawn a Node.js
-        /// process and are off unless explicitly opted in.
-        /// To allow code execution: --disable-code=false
-        #[arg(
-            long,
-            num_args(0..=1),
-            action = clap::ArgAction::Set,
-            default_value_t = true,
-            default_missing_value = "true",
-        )]
-        disable_code: bool,
+        /// Allow Code (JS) nodes (disabled by default).
+        /// Code nodes spawn a Node.js subprocess — only enable if you control
+        /// all workflows running on this server.
+        #[arg(long, default_value_t = false)]
+        allow_code: bool,
 
         /// Use the OS keychain (macOS Keychain, Windows Credential Manager,
         /// Linux SecretService) to store the encryption key instead of a
@@ -170,6 +172,12 @@ enum Command {
         /// Ignored when --parallel-execution is not set. Default: 8.
         #[arg(long, default_value_t = 8)]
         max_concurrent_nodes: usize,
+
+        /// Maximum wall-clock time (seconds) for any single workflow execution.
+        /// Acts as a server-level ceiling — applies even if the workflow does not
+        /// set its own timeout. Min: 10, Max: 86400 (24 h). Default: no limit.
+        #[arg(long)]
+        max_workflow_duration_secs: Option<u64>,
     },
 
     /// List all scheduled workflows (API mode only).
@@ -254,6 +262,11 @@ enum TokenAction {
         #[arg(long = "scopes", value_delimiter = ',', default_value = "read,write")]
         scopes: Vec<String>,
 
+        /// Optional token lifetime in seconds. Omit for a non-expiring token.
+        /// Example: --expires-in 7776000 (90 days)
+        #[arg(long)]
+        expires_in: Option<u64>,
+
         #[arg(long, default_value = "http://localhost:7700")]
         server: String,
 
@@ -279,8 +292,12 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { config, port, bind, trusted_proxy_count } => serve_mode(config, port, bind, trusted_proxy_count).await,
-        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, disable_shell, disable_code, keychain, parallel_execution, max_concurrent_nodes } => api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, disable_shell, disable_code, keychain, parallel_execution, max_concurrent_nodes).await,
+        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code).await,
+        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs } => {
+            let shell_exec_disabled = !allow_shell;
+            let code_exec_disabled  = !allow_code;
+            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs).await;
+        },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
         Command::Stop    { workflow, server, token } => ctl_stop(&workflow, &server, &token).await,
         Command::Start   { workflow, server, token } => ctl_start(&workflow, &server, &token).await,
@@ -290,7 +307,7 @@ async fn main() {
     }
 }
 
-async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: String, trusted_proxy_count: usize) {
+async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: String, trusted_proxy_count: usize, allow_shell: bool, allow_code: bool) {
     init_tracing();
     let config = match ServerConfig::from_file(&config_path) {
         Ok(c)  => c,
@@ -354,12 +371,36 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
 
     let db = Arc::clone(&workflow_db) as Arc<dyn SchedulerDb>;
 
-    let daemon = Arc::new(SchedulerDaemon::new(
+    // Warn if the workflow contains Shell or Code nodes and the operator has not
+    // explicitly opted in with --allow-shell / --allow-code.
+    let has_shell_node = workflow.nodes.iter().any(|n| n.node_type_id == "shell_exec");
+    let has_code_node  = workflow.nodes.iter().any(|n| n.node_type_id == "code");
+    if has_shell_node && !allow_shell {
+        tracing::warn!(
+            "Workflow contains a Shell Command node but --allow-shell was not set. \
+             Shell execution is DISABLED. Pass --allow-shell only after auditing the workflow."
+        );
+    }
+    if has_code_node && !allow_code {
+        tracing::warn!(
+            "Workflow contains a Code (JS) node but --allow-code was not set. \
+             Code execution is DISABLED. Pass --allow-code only after auditing the workflow."
+        );
+    }
+
+    let mut daemon = SchedulerDaemon::new(
         Arc::clone(&db) as Arc<dyn SchedulerDb>,
         Arc::clone(&registry),
         Arc::clone(&cred_resolver) as Arc<dyn flowo_engine::executor::CredentialResolver>,
         Arc::clone(&event_sink) as Arc<dyn flowo_engine::EventSink>,
-    ));
+    );
+    if !allow_shell {
+        daemon = daemon.with_shell_disabled(true);
+    }
+    if !allow_code {
+        daemon = daemon.with_code_disabled(true);
+    }
+    let daemon = Arc::new(daemon);
 
     log.push("INFO", None, format!("Starting '{}'", config.workflow_name));
     log.push("INFO", None, format!("Trigger: {}", trigger_desc));
@@ -407,11 +448,40 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
         "Flowo Server started in serve mode"
     );
 
+    fn is_public_bind(b: &str) -> bool {
+        !matches!(b, "127.0.0.1" | "::1" | "localhost")
+    }
+
+    if is_public_bind(&bind) && config.run_secret.is_none() {
+        // Logs are no longer exposed on the public page (fixed), but warn anyway
+        // so operators know to set a secret for authenticated access.
+        tracing::warn!(
+            "Status page is publicly accessible (bind={}) and run_secret is not set. \
+             Workflow metadata (run counts, timestamps) is visible to anyone who can reach port {}. \
+             Set run_secret in flowo-server.json to enable authenticated log/run access.",
+            bind, status_port
+        );
+    }
+
+    // Warn if the config file permissions are too open on Unix systems.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(&config_path) {
+            if meta.mode() & 0o077 != 0 {
+                tracing::warn!(
+                    "Config file {:?} is readable by group or other users (mode {:03o}). \
+                     It contains run_secret in plaintext — consider: chmod 600 {:?}",
+                    config_path, meta.mode() & 0o777, config_path
+                );
+            }
+        }
+    }
+
     let status_state = status_server::StatusState {
         workflow_name: config.workflow_name,
         workflow_id:   workflow.id.clone(),
         trigger_desc,
-        status_port,
         run_state:     Arc::clone(&state),
         log_buffer:    log,
         run_trigger,
@@ -429,8 +499,8 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("Status server error");
 }
 
-async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, disable_shell: bool, disable_code: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize) {
-    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, disable_shell, disable_code, use_keychain, parallel_execution, max_concurrent_nodes).await;
+async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>) {
+    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs).await;
 }
 
 async fn ctl_list(server: &str, token: &str) {
@@ -474,7 +544,9 @@ async fn ctl_start(workflow: &str, server: &str, token: &str) {
 
 async fn ctl_restart(workflow: &str, server: &str, token: &str) {
     let id = resolve_workflow_id(workflow, server, token).await;
-    let _ = api_post(server, token, &format!("/api/scheduler/{}/stop", id), "{}").await;
+    if let Err(e) = api_post(server, token, &format!("/api/scheduler/{}/stop", id), "{}").await {
+        eprintln!("WARNING: stop failed before restart (proceeding anyway): {}", e);
+    }
     match api_post(server, token, &format!("/api/scheduler/{}/start", id),
         r#"{"always_on":false}"#).await {
         Ok(_) => println!("Restarted '{}'.", workflow),
@@ -518,9 +590,12 @@ async fn ctl_tokens(action: TokenAction) {
                 Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
             }
         }
-        TokenAction::Create { label, scopes, server, token } => {
-            let body = serde_json::json!({"label": label, "scopes": scopes}).to_string();
-            match api_post_json::<serde_json::Value>(&server, &token, "/api/tokens", &body).await {
+        TokenAction::Create { label, scopes, expires_in, server, token } => {
+            let mut body = serde_json::json!({"label": label, "scopes": scopes});
+            if let Some(secs) = expires_in {
+                body["expires_in_secs"] = serde_json::json!(secs);
+            }
+            match api_post_json::<serde_json::Value>(&server, &token, "/api/tokens", &body.to_string()).await {
                 Ok(v) => {
                     println!("Token created. Save the raw token — it will not be shown again.");
                     println!();

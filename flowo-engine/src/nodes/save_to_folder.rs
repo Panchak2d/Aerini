@@ -93,31 +93,38 @@ impl Node for SaveToFolderNode {
         // Server mode: enforce __file_sandbox_dir if set, matching the same policy as FileNode.
         if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
             if let Some(sandbox_str) = sandbox_val.as_str() {
-                // Early rejection of path traversal sequences, matching FileNode policy.
-                if folder_path.contains("..") {
-                    return NodeOutput::failure(NodeError::unrecoverable(
+                // Canonicalize the sandbox root so symlinks in the operator-supplied path
+                // don't defeat the containment check.
+                let sandbox = match std::fs::canonicalize(sandbox_str) {
+                    Ok(p) => p,
+                    Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
                         "INVALID_PATH",
-                        "Path traversal sequences (..) are not permitted",
-                    ));
-                }
-                let sandbox = std::path::Path::new(sandbox_str);
-                // Resolve relative paths against sandbox root, matching FileNode behaviour.
-                let canonical = if folder_path.starts_with('/') {
+                        "Configured sandbox directory does not exist or cannot be resolved",
+                    )),
+                };
+                // Resolve relative paths against the canonical sandbox root.
+                let abs: std::path::PathBuf = if folder_path.starts_with('/') {
                     std::path::PathBuf::from(&folder_path)
                 } else {
                     sandbox.join(&folder_path)
                 };
-                let mut components: Vec<std::ffi::OsString> = Vec::new();
-                for c in canonical.components() {
-                    use std::path::Component;
-                    match c {
-                        Component::ParentDir => { components.pop(); }
-                        Component::CurDir    => {}
-                        other                => components.push(other.as_os_str().to_owned()),
+                // The target directory may not exist yet (create_dir_all runs later).
+                // Canonicalize the deepest existing ancestor and check containment.
+                // This also dereferences any symlinks inside the sandbox that point outside.
+                let mut check = abs.as_path();
+                let canonical_parent = loop {
+                    match std::fs::canonicalize(check) {
+                        Ok(p) => break p,
+                        Err(_) => match check.parent() {
+                            Some(p) => check = p,
+                            None => return NodeOutput::failure(NodeError::unrecoverable(
+                                "INVALID_PATH",
+                                "folder_path cannot be resolved to an existing ancestor",
+                            )),
+                        },
                     }
-                }
-                let resolved: std::path::PathBuf = components.iter().collect();
-                if !resolved.starts_with(sandbox) {
+                };
+                if !canonical_parent.starts_with(&sandbox) {
                     return NodeOutput::failure(NodeError::unrecoverable(
                         "PATH_OUTSIDE_SANDBOX",
                         format!("folder_path '{}' is outside the permitted sandbox directory '{}'",
@@ -211,13 +218,16 @@ async fn subfolder_mode(
         all_results.extend(results);
     }
 
-    let (saved, errors): (Vec<_>, Vec<_>) = all_results.into_iter().partition(|r| r.is_ok());
-    let saved: Vec<Value>  = saved.into_iter().map(|r| r.unwrap()).collect();
+    let (ok, errors): (Vec<_>, Vec<_>) = all_results.into_iter().partition(|r| r.is_ok());
+    let ok: Vec<Value>     = ok.into_iter().filter_map(|r| r.ok()).collect();
     let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
-    let count = saved.len();
+    let (skipped_files, saved): (Vec<Value>, Vec<Value>) =
+        ok.into_iter().partition(|v| v["skipped"].as_bool().unwrap_or(false));
+    let count         = saved.len();
+    let skipped_count = skipped_files.len();
 
     NodeOutput::success_with_logs(
-        json!({ "saved": saved, "count": count, "folder": folder_path, "skipped": 0, "errors": errors }),
+        json!({ "saved": saved, "count": count, "folder": folder_path, "skipped": skipped_count, "errors": errors }),
         logs,
     )
 }
@@ -334,15 +344,19 @@ async fn write_single_file(
 }
 
 fn build_output(results: Vec<Result<Value, Value>>, folder: &str) -> NodeOutput {
-    let (saved, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
-    let saved: Vec<Value>  = saved.into_iter().map(|r| r.unwrap()).collect();
+    let (ok, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
+    let ok: Vec<Value>     = ok.into_iter().filter_map(|r| r.ok()).collect();
     let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
-    let count = saved.len();
+    // Separate skipped files (overwrite=false, file existed) from actually written files.
+    let (skipped, saved): (Vec<Value>, Vec<Value>) =
+        ok.into_iter().partition(|v| v["skipped"].as_bool().unwrap_or(false));
+    let count         = saved.len();
+    let skipped_count = skipped.len();
     NodeOutput::success(json!({
         "saved":   saved,
         "count":   count,
         "folder":  folder,
-        "skipped": 0,
+        "skipped": skipped_count,
         "errors":  errors
     }))
 }

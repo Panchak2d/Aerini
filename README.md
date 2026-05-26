@@ -96,3 +96,19 @@ Node.js must be on PATH at runtime — the Code (JS) node spawns it as a subproc
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev environment setup, how to add a new node, code conventions, and the protected interfaces you must not change.
 
 These docs cover Flowo `0.2.0` (engine) and `flowo-server` `0.1.0`. The project is pre-1.0 — rough edges exist and are noted throughout the guides where relevant.
+
+---
+
+## License
+
+Flowo is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+**What this means:**
+
+- You can use, modify, and distribute Flowo freely.
+- If you modify Flowo and run it as a **network-accessible service** (including `flowo-server`), you must release your modifications under AGPL-3.0. This applies to SaaS, hosted services, and any deployment where users interact with the software over a network.
+- If you redistribute Flowo (binary or source), you must include the license and make source available.
+
+For projects where AGPL-3.0 is incompatible with your license, contact the maintainers to discuss alternatives.
+
+All bundled dependencies are MIT or Apache-2.0 licensed and are compatible with AGPL-3.0 distribution.

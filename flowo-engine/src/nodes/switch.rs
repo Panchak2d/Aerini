@@ -62,14 +62,14 @@ impl Node for SwitchNode {
                 id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left,
             }],
             outputs: vec![
-                PortDefinition { id: "case_1".to_string(),  label: "Case 1".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_2".to_string(),  label: "Case 2".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_3".to_string(),  label: "Case 3".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_4".to_string(),  label: "Case 4".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_5".to_string(),  label: "Case 5".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_6".to_string(),  label: "Case 6".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_7".to_string(),  label: "Case 7".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "case_8".to_string(),  label: "Case 8".to_string(),  position: PortPosition::Right },
+                PortDefinition { id: "case_1".to_string(), label: "Case 1".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_2".to_string(), label: "Case 2".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_3".to_string(), label: "Case 3".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_4".to_string(), label: "Case 4".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_5".to_string(), label: "Case 5".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_6".to_string(), label: "Case 6".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_7".to_string(), label: "Case 7".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_8".to_string(), label: "Case 8".to_string(), position: PortPosition::Right },
                 PortDefinition { id: "default".to_string(), label: "Default".to_string(), position: PortPosition::Right },
             ],
         }
@@ -91,14 +91,12 @@ impl Node for SwitchNode {
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("INVALID_CASES", e.to_string())),
         };
 
-        // Get source data
         let data: Value = if let Some(source_node) = input.input["source_node"].as_str() {
             input.context.node_outputs.get(source_node).cloned().unwrap_or(Value::Null)
         } else {
             Value::Object(input.context.node_outputs.iter().map(|(k,v)| (k.clone(), v.clone())).collect())
         };
 
-        // Navigate field path
         let value = traverse_dotpath(&data, &field);
         let value_str = match &value {
             Value::String(s) => s.clone(),
@@ -110,10 +108,9 @@ impl Node for SwitchNode {
 
         let default_port = input.input["default_port"].as_str().unwrap_or("default").to_string();
 
-        // Match against cases
         for case in &cases {
             let match_val = case["match"].as_str().unwrap_or("");
-            let port      = case["port"].as_str().unwrap_or("case_1");
+            let port = case["port"].as_str().unwrap_or("case_1");
             if value_str == match_val {
                 return NodeOutput::success_with_logs(
                     json!({ "matched_case": match_val, "port": port, "value": value, "data": data }),
@@ -122,11 +119,9 @@ impl Node for SwitchNode {
             }
         }
 
-        // No match → default
         NodeOutput::success_with_logs(
             json!({ "matched_case": null, "port": default_port, "value": value, "data": data }),
             vec![format!("Switch: field '{}' = '{}' → default", field, value_str)],
         )
     }
 }
-

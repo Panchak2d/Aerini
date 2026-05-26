@@ -62,7 +62,7 @@ impl Node for SetVariableNode {
             ),
         };
 
-        let value   = input.input["value"].clone();
+        let value = input.input["value"].clone();
         let persist = input.input["persist"].as_bool().unwrap_or(false);
 
         let mut logs = vec![format!("Set '{}' = {}", key, value)];
@@ -77,10 +77,10 @@ impl Node for SetVariableNode {
                     ));
                 }
                 Some(ref db) => {
-                    let db_arc     = Arc::clone(db);
-                    let wf_id      = input.workflow_id.clone();
-                    let key_clone  = key.clone();
-                    let val_clone  = value.clone();
+                    let db_arc = Arc::clone(db);
+                    let wf_id = input.workflow_id.clone();
+                    let key_clone = key.clone();
+                    let val_clone = value.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         db_arc.set_variable(&wf_id, &key_clone, &val_clone)
                     }).await;
@@ -174,15 +174,14 @@ impl Node for GetVariableNode {
             );
         }
 
-        // If persist=true, fall back to DB
         if persist {
             match self.db {
                 None => {
                     // serve mode: warn, fall through to default
                 }
                 Some(ref db) => {
-                    let db_arc    = Arc::clone(db);
-                    let wf_id     = input.workflow_id.clone();
+                    let db_arc = Arc::clone(db);
+                    let wf_id = input.workflow_id.clone();
                     let key_clone = key.clone();
                     let db_result = tokio::task::spawn_blocking(move || {
                         db_arc.get_variable(&wf_id, &key_clone)
@@ -213,7 +212,6 @@ impl Node for GetVariableNode {
             }
         }
 
-        // Use configured default, or return null
         match default {
             Some(ref d) if !d.is_null() => NodeOutput::success_with_logs(
                 json!({ "key": key, "value": d, "found": false }),
