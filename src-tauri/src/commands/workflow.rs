@@ -189,7 +189,8 @@ pub async fn run_workflow(
     .with_parallel_execution(parallel_execution)
     .with_cancel_token(token);
 
-    let result = executor.run(&workflow, initial_variables).await;
+    let workflow_id = workflow.id.clone();
+    let result = executor.run(Arc::new(workflow), initial_variables).await;
 
     // Clear stored token regardless of outcome.
     *active_run.0.lock().unwrap() = None;
@@ -198,7 +199,7 @@ pub async fn run_workflow(
         Ok(r) => Ok(r),
         Err(EngineError::ExecutionCancelled) => Ok(WorkflowResult {
             execution_id:      uuid::Uuid::new_v4().to_string(),
-            workflow_id:       workflow.id.clone(),
+            workflow_id:       workflow_id,
             success:           false,
             node_outputs:      HashMap::new(),
             logs:              vec![],

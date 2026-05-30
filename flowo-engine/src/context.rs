@@ -66,7 +66,7 @@ pub struct ExecutionState {
     pub execution_id: String,
     pub workflow_id: String,
     pub started_at: DateTime<Utc>,
-    node_outputs: HashMap<String, Value>,
+    node_outputs: Arc<HashMap<String, Value>>,
     node_statuses: HashMap<String, NodeExecution>,
     pub variables: HashMap<String, Value>,
     // Loop-internal state: __loop_*_index and __loop_*_result_* keys.
@@ -82,7 +82,7 @@ impl ExecutionState {
             execution_id: Uuid::new_v4().to_string(),
             workflow_id: workflow_id.into(),
             started_at: Utc::now(),
-            node_outputs: HashMap::new(),
+            node_outputs: Arc::new(HashMap::new()),
             node_statuses: HashMap::new(),
             variables,
             loop_state: HashMap::new(),
@@ -104,7 +104,9 @@ impl ExecutionState {
 
     pub fn mark_succeeded(&mut self, node_id: &str, output: NodeOutput) {
         let value = output.output.clone().unwrap_or(serde_json::Value::Null);
-        self.node_outputs.insert(node_id.to_string(), value);
+        // CoW: if no other Arc references exist (common case), mutates in place — O(1).
+        // If a snapshot is still alive, clones the map before inserting — O(n).
+        Arc::make_mut(&mut self.node_outputs).insert(node_id.to_string(), value);
         if let Some(r) = self.node_statuses.get_mut(node_id) {
             r.status = NodeStatus::Succeeded;
             r.output = Some(output);
@@ -185,7 +187,7 @@ impl ExecutionState {
         }
         ExecutionContext {
             variables: self.variables.clone(),
-            node_outputs: self.node_outputs.clone(),
+            node_outputs: Arc::clone(&self.node_outputs),
             metadata: meta,
         }
     }

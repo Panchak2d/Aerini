@@ -8,7 +8,7 @@ The codebase is split into three Cargo crates and a TypeScript frontend.
 ## Architecture
 
 ```
-flowo-engine/     — core library: Node trait, executor, scheduler, DB, 34 nodes
+flowo-engine/     — core library: Node trait, executor, scheduler, DB, 39 nodes
 src-tauri/        — Tauri shell: IPC commands, tray, app lifecycle
 flowo-server/     — headless binary for server-side workflow execution
 src/              — TypeScript/Vite frontend (vanilla TS, no framework)
@@ -41,7 +41,7 @@ npm run build     # production bundle → src-tauri/target/release/bundle/
 
 ## Adding a new node
 
-All 34 built-in nodes follow the same pattern. Copy any existing node file as a starting point
+All 39 built-in nodes follow the same pattern. Copy any existing node file as a starting point
 (e.g. `flowo-engine/src/nodes/delay.rs` for a simple action node).
 
 ### 1 — Create the file
@@ -145,7 +145,7 @@ Adding is fine. Renaming or removing breaks the TypeScript frontend.
 `NodeDescriptor`, `ScheduledJobRow`, `SchedulerStatusEvent`, `SchedulerError`, `PortConflict`,
 `CredentialEntry`, `RunRecord`, `VersionRow`, `TriggerKind`.
 
-**`async_trait` impls** — all 34 `impl Node for X`, both `CredentialResolver` impls,
+**`async_trait` impls** — all 39 `impl Node for X`, both `CredentialResolver` impls,
 both `SchedulerDb` impls, all `EventSink` impls. Zero direct call sites is intentional
 (dyn dispatch). Do not remove any impl even if nothing visibly calls it.
 

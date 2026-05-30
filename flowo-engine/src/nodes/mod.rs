@@ -43,6 +43,21 @@ use std::sync::Arc;
 use crate::db::WorkflowDb;
 use crate::node::NodeRegistry;
 
+static SHARED_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// Shared HTTP client for integration nodes with 30-second timeout.
+/// ai_prompt, ai_agent, image_gen, social_upload keep their own 120s clients.
+/// http.rs keeps its own client (SSRF-safe: redirect=none).
+pub(crate) fn shared_http_client() -> &'static reqwest::Client {
+    SHARED_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("flowo-engine/0.2.0")
+            .build()
+            .expect("shared HTTP client init failed")
+    })
+}
+
 /// Register all built-in node implementations.
 ///
 /// `db` is `None` in flowo-server's single-workflow serve mode, where no WorkflowDb

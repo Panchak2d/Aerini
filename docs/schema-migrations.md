@@ -139,8 +139,8 @@ Because migration happens in memory on load and is only written to disk when you
 - If you run an older Flowo build after migration has updated an in-memory workflow and saved it, the file will now contain the new `schema_version` and the older build won't be able to load it.
 
 **Recommendation:** before upgrading Flowo in a production deployment, back up:
-- `~/.local/share/flowo/workflows.db` (Linux desktop)
-- `~/Library/Application Support/flowo/workflows.db` (macOS desktop)
+- `~/.local/share/com.flowo.app/workflows.db` (Linux desktop)
+- `~/Library/Application Support/com.flowo.app/workflows.db` (macOS desktop)
 - The data directory specified by `--data-dir` (server deployments)
 - Any `.flowo` export files you care about
 

@@ -1,23 +1,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
 const NOTION_VERSION: &str = "2022-06-28";
-
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn client() -> reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to build Notion HTTP client")
-    }).clone()
-}
 
 pub struct NotionNode;
 
@@ -129,9 +117,9 @@ impl Node for NotionNode {
 impl NotionNode {
     async fn send_request(&self, method: &str, url: &str, api_key: &str, body: Value, action: &str) -> NodeOutput {
         let req = if method == "POST" {
-            client().post(url)
+            super::shared_http_client().post(url)
         } else {
-            client().patch(url)
+            super::shared_http_client().patch(url)
         };
 
         match req

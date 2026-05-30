@@ -48,13 +48,14 @@ Controls where the node appears in the palette and how the canvas colours it:
 
 ```rust
 pub enum NodeType {
-    Trigger,   // entry nodes — Schedule, Webhook, ManualTrigger
-    Action,    // most nodes — HTTP, Shell, Email, etc.
-    Logic,     // branching — IfCondition, Switch, Loop
-    Transform, // data manipulation — JSON, Transform, TextSplitter
-    Output,    // terminal nodes — Output, Stop
+    Action,    // most nodes — HTTP, Shell, Email, triggers, Output, Stop
+    Ai,        // AI nodes — AI Prompt, AI Agent, AI Memory, Image Generation
+    Logic,     // branching and control — IfCondition, Switch, Loop, Merge, Collect Files
+    Utility,   // data and utility — JSON, Transform, Set/Get Variable, Output, Text Splitter
 }
 ```
+
+There are no separate `Trigger` or `Output` variants. Trigger nodes (Schedule, Webhook, Manual Trigger) use `NodeType::Action`. The Output node uses `NodeType::Utility`. Stop uses `NodeType::Logic`.
 
 ### `version`
 
@@ -250,7 +251,7 @@ pub struct ReverseNode;
 impl Node for ReverseNode {
     fn type_id(&self)        -> &'static str { "reverse" }
     fn display_name(&self)   -> &'static str { "Reverse String" }
-    fn node_type(&self)      -> NodeType     { NodeType::Transform }
+    fn node_type(&self)      -> NodeType     { NodeType::Utility }
     fn version(&self)        -> &'static str { "1.0.0" }
 
     fn input_schema(&self) -> Value {

@@ -240,7 +240,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
 
             let db = Arc::new(
-                WorkflowDb::open(&data_dir.join("workflows.db"))
+                WorkflowDb::open(&data_dir.join("workflows.db"), 8)
                     .expect("Failed to open workflow database")
             );
             let cred_store = Arc::new(

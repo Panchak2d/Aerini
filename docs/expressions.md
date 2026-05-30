@@ -1,221 +1,236 @@
 # Expressions
 
-Flowo uses `{{...}}` template syntax to wire node outputs into other nodes' inputs. Any string field in any node's config can contain one or more expressions.
-
-## What is an expression?
-
-When you type `{{code.output.message}}` into a node's text field, Flowo replaces that placeholder with the actual value when the workflow runs. Think of it like mail merge — you write the template once, and the real value is filled in at runtime.
-
-You can mix static text and expressions freely:
-
-```
-Hello {{HTTP Request.output.body.user.name}}, your order is confirmed.
-```
+Expressions let you take data produced by one node and use it in another node's configuration. Without them, each node would be an island — expressions are what turn a collection of isolated steps into a connected workflow.
 
 ---
 
-## Syntax
+## The basics
 
-### Node output reference
-
-```
-{{node_name.output.field}}
-```
-
-`node_name` is the **exact display name** of the node as it appears on the canvas — including spaces, capitalisation, and special characters. If you have a node named "HTTP Request", reference it as `HTTP Request`:
+Anywhere a node config field accepts a text value, you can embed an expression using double curly braces:
 
 ```
-{{HTTP Request.output.body}}
-{{Slack.output.ts}}
-{{code.output.result}}
+{{node_name.output.field_name}}
 ```
 
-The easiest way to get the correct expression is to press `{{` in any text field to open the autocomplete dropdown, which inserts the exact name for you. If you type the expression manually, the name must match exactly — the comparison is case-sensitive.
+When the workflow runs, Flowo replaces every `{{...}}` block with the actual value from the running context. If the expression can't be resolved — because the node hasn't run yet, or the field name is wrong — it resolves to an empty string and a warning is added to the run logs.
 
-> **Tip:** Long or complex node names like "Code (JS)" are a pain to type. Rename any node by double-clicking its title on the canvas. The renamed name is what you use in expressions.
-
-### Nested fields
-
-Dot-path traversal works to any depth:
+**Example:** An HTTP Request node named `weather` fetches a weather API. The response body contains `{ "temperature": 21 }`. In a downstream Slack node's text field, you write:
 
 ```
-{{HTTP Request.output.body.user.email}}
-{{HTTP Request.output.body.results[0].name}}
+Current temperature: {{weather.output.body.temperature}}°C
 ```
 
-Array indexing uses `[N]` notation. `[0]` is the first element.
+When the workflow runs, Flowo replaces that with `Current temperature: 21°C`.
 
-### Run context
+---
 
-These are available in every run, with no node name prefix:
+## Referencing node outputs
+
+The standard path for referencing another node's output is:
+
+```
+{{NodeName.output.field}}
+```
+
+- `NodeName` is the node's name as shown on the canvas. Rename a node by double-clicking its title.
+- `.output` accesses the node's output object.
+- `.field` is the specific field you want.
+
+Node names are matched case-insensitively.
+
+### Dot paths and array indexing
+
+You can navigate nested objects with dots and access array elements with brackets:
+
+```
+{{http.output.body.user.email}}
+{{http.output.body.items[0].name}}
+{{http.output.body.items[2].price}}
+```
+
+### If you rename a node
+
+Renaming a node on the canvas after building expressions that reference it will break those expressions. They'll produce empty strings at runtime with a warning in the logs. Use the expression picker to rebuild them after renaming.
+
+---
+
+## The expression picker
+
+Press `{{` inside any text input field to open the expression picker. It shows all values currently available in the workflow — the output fields from every upstream node. Click any value to insert it as an expression. This is the recommended way to build expressions; you don't need to remember field names or path syntax.
+
+---
+
+## Special variables
+
+These are available in every workflow without referencing a specific node.
+
+### `$run.*`
 
 | Expression | Value |
 |---|---|
-| `{{$run.id}}` | Unique execution ID (UUID) for this run |
-| `{{$run.timestamp}}` | ISO 8601 timestamp of when the run started |
-| `{{$run.workflow_name}}` | The workflow's display name |
+| `{{$run.id}}` | The execution ID for this run (a UUID). |
+| `{{$run.timestamp}}` | ISO 8601 timestamp of when this expression was evaluated. |
+| `{{$run.workflow_name}}` | The name of the current workflow. |
 
-### Environment variables
+### `$env.*`
+
+Reads an environment variable from the system. Disabled by default.
 
 ```
-{{$env.VAR_NAME}}
+{{$env.HOME}}
+{{$env.APP_ENV}}
 ```
 
-Disabled in the desktop app. In server mode, opt-in per variable with `--allow-env-vars`. See [Server Deployment — Environment Variables](server-deploy.md#environment-variable-expressions).
+In the desktop app, `$env` is always disabled for security — expressions referencing `$env` resolve to empty strings.
+
+In server mode, each variable must be explicitly whitelisted when starting the server:
+
+```bash
+flowo-server api --allow-env-vars HOME,APP_ENV --token mytoken
+```
+
+Variables not on the allowlist resolve to empty strings. Never add `FLOWO_TOKEN` or `FLOWO_CRED_*` variables to the allowlist — doing so lets any workflow read and exfiltrate credentials.
 
 ---
 
-## Inline functions
+## Functions
 
-Wrap any expression in a function call to transform its value:
+Call functions inside `{{...}}` to transform values before using them.
 
-```
-{{upper(HTTP Request.output.body.status)}}
-{{format_date($run.timestamp, "YYYY-MM-DD")}}
-{{round(price_node.output.total, 2)}}
-```
+Syntax: `{{function(argument)}}` or `{{function(node.output.field, "literal")}}`
 
-Functions accept one expression argument, plus optional extra literal string or number arguments (quoted with `""`).
+Arguments can be other expressions or quoted string literals.
+
+### String functions
+
+| Function | Example | Result |
+|---|---|---|
+| `upper(s)` | `{{upper(name.output.text)}}` | Converts to uppercase |
+| `lower(s)` | `{{lower(name.output.text)}}` | Converts to lowercase |
+| `trim(s)` | `{{trim(name.output.text)}}` | Removes leading and trailing whitespace |
+| `trim_start(s)` | `{{trim_start(s)}}` | Removes leading whitespace only |
+| `trim_end(s)` | `{{trim_end(s)}}` | Removes trailing whitespace only |
+| `len(s)` | `{{len(name.output.items)}}` | Character count for strings, element count for arrays |
+| `contains(s, sub)` | `{{contains(name.output.body, "error")}}` | `true` or `false` |
+| `starts_with(s, prefix)` | `{{starts_with(name.output.url, "https")}}` | `true` or `false` |
+| `ends_with(s, suffix)` | `{{ends_with(name.output.file, ".pdf")}}` | `true` or `false` |
+| `slice(s, start, end)` | `{{slice(name.output.text, 0, 10)}}` | Substring by character position |
+| `replace(s, from, to)` | `{{replace(name.output.text, "foo", "bar")}}` | Replaces first occurrence |
+| `replace_all(s, from, to)` | `{{replace_all(name.output.text, " ", "_")}}` | Replaces all occurrences |
+| `split(s, sep)` | `{{split(name.output.csv, ",")}}` | Returns a JSON array string |
+| `join(arr, sep)` | `{{join(name.output.items, ", ")}}` | Joins array elements |
+| `pad_start(s, len, char)` | `{{pad_start(name.output.id, 5, "0")}}` | Pads left to length |
+| `pad_end(s, len, char)` | `{{pad_end(name.output.code, 8, " ")}}` | Pads right to length |
+
+### Number functions
+
+| Function | Example | Result |
+|---|---|---|
+| `round(n, decimals)` | `{{round(name.output.price, 2)}}` | Rounds to given decimal places |
+| `floor(n)` | `{{floor(name.output.value)}}` | Rounds down |
+| `ceil(n)` | `{{ceil(name.output.value)}}` | Rounds up |
+| `abs(n)` | `{{abs(name.output.diff)}}` | Absolute value |
+| `min(a, b)` | `{{min(name.output.a, name.output.b)}}` | Smaller of two numbers |
+| `max(a, b)` | `{{max(name.output.a, name.output.b)}}` | Larger of two numbers |
+| `to_int(s)` | `{{to_int(name.output.count)}}` | Converts string to integer |
+| `to_float(s)` | `{{to_float(name.output.price)}}` | Converts string to float |
+
+### Date functions
+
+All date functions use ISO 8601 timestamps (`2024-01-15T09:00:00Z`).
+
+| Function | Example | Result |
+|---|---|---|
+| `now()` | `{{now()}}` | Current UTC time as ISO 8601 |
+| `format_date(ts, fmt)` | `{{format_date(name.output.ts, "YYYY-MM-DD")}}` | Formats a timestamp |
+| `parse_date(s)` | `{{parse_date(name.output.date_str)}}` | Parses a date string to ISO 8601 |
+| `add_days(ts, n)` | `{{add_days(now(), 7)}}` | Adds days to a timestamp |
+| `add_hours(ts, n)` | `{{add_hours(now(), 2)}}` | Adds hours |
+| `add_minutes(ts, n)` | `{{add_minutes(now(), 30)}}` | Adds minutes |
+| `date_diff(ts1, ts2, unit)` | `{{date_diff(now(), name.output.created_at, "days")}}` | Difference between two timestamps |
+
+Format tokens for `format_date`: `YYYY` (4-digit year), `MM` (month), `DD` (day), `HH` (hour), `mm` (minute), `ss` (second).
+
+Units for `date_diff`: `days`, `hours`, `minutes`, `seconds`.
+
+### Array / Object functions
+
+| Function | Example | Result |
+|---|---|---|
+| `first(arr)` | `{{first(name.output.items)}}` | First element of a JSON array |
+| `last(arr)` | `{{last(name.output.items)}}` | Last element of a JSON array |
+| `nth(arr, n)` | `{{nth(name.output.items, 2)}}` | Element at index n (0-based) |
+| `keys(obj)` | `{{keys(name.output.data)}}` | Array of object keys |
+| `values(obj)` | `{{values(name.output.data)}}` | Array of object values |
+
+### Conditional function
+
+| Function | Example | Result |
+|---|---|---|
+| `if(condition, then, else)` | `{{if(name.output.status, "OK", "FAIL")}}` | Returns `then` if condition is truthy, else `else` |
+
+Truthy values: any non-empty string except `"false"`, `"0"`, and `"null"`.
 
 ---
 
-## Function reference
+## Mixing expressions and literal text
 
-### String
+Expressions can be embedded anywhere inside a string. The rest of the text is kept as-is:
 
-| Function | What it does | Example |
-|---|---|---|
-| `upper(str)` | Convert to uppercase | `{{upper(node.output.name)}}` → `ALICE` |
-| `lower(str)` | Convert to lowercase | `{{lower(node.output.name)}}` → `alice` |
-| `trim(str)` | Strip leading and trailing whitespace | `{{trim(node.output.text)}}` |
-| `trim_start(str)` | Strip leading whitespace only | `{{trim_start(node.output.text)}}` |
-| `trim_end(str)` | Strip trailing whitespace only | `{{trim_end(node.output.text)}}` |
-| `len(str\|array)` | Character count of a string, or element count of an array | `{{len(node.output.items)}}` |
-| `contains(str, search)` | Returns `true` or `false` | `{{contains(node.output.body, "error")}}` |
-| `starts_with(str, prefix)` | Returns `true` or `false` | `{{starts_with(node.output.path, "/api")}}` |
-| `ends_with(str, suffix)` | Returns `true` or `false` | `{{ends_with(node.output.file, ".pdf")}}` |
-| `slice(str, start, end)` | Extract a substring by character positions (0-based) | `{{slice(node.output.id, 0, 8)}}` |
-| `replace(str, from, to)` | Replace the first occurrence of `from` with `to` | `{{replace(node.output.text, "foo", "bar")}}` |
-| `replace_all(str, from, to)` | Replace every occurrence of `from` with `to` | `{{replace_all(node.output.text, " ", "_")}}` |
-| `split(str, delimiter)` | Split a string into a JSON array | `{{split(node.output.csv_row, ",")}}` |
-| `join(array, delimiter)` | Join an array into a string | `{{join(node.output.tags, ", ")}}` |
-| `pad_start(str, length, char)` | Left-pad a string to a minimum length | `{{pad_start(node.output.id, 8, "0")}}` → `00000042` |
-| `pad_end(str, length, char)` | Right-pad a string to a minimum length | `{{pad_end(node.output.code, 6, " ")}}` |
+```
+Hello {{user.output.name}}, your order #{{order.output.id}} shipped on {{format_date(order.output.shipped_at, "YYYY-MM-DD")}}.
+```
 
-### Number
-
-| Function | What it does | Example |
-|---|---|---|
-| `round(n, decimals?)` | Round to N decimal places (default `0`) | `{{round(node.output.price, 2)}}` → `9.99` |
-| `floor(n)` | Round down to nearest integer | `{{floor(node.output.score)}}` |
-| `ceil(n)` | Round up to nearest integer | `{{ceil(node.output.score)}}` |
-| `abs(n)` | Absolute value (remove the minus sign) | `{{abs(node.output.delta)}}` |
-| `min(a, b)` | Smaller of two values | `{{min(node.output.count, "100")}}` |
-| `max(a, b)` | Larger of two values | `{{max(node.output.count, "1")}}` |
-| `to_int(str)` | Parse a string as an integer | `{{to_int(node.output.quantity)}}` |
-| `to_float(str)` | Parse a string as a decimal number | `{{to_float(node.output.rate)}}` |
-
-### Date and time
-
-All date functions work with ISO 8601 timestamps (e.g. `2025-03-01T09:00:00Z`). `$run.timestamp` is always in this format.
-
-| Function | What it does | Example |
-|---|---|---|
-| `now()` | Current UTC time as an ISO 8601 string | `{{now()}}` |
-| `format_date(ts, format)` | Format a timestamp using the tokens below | `{{format_date($run.timestamp, "YYYY-MM-DD")}}` → `2025-03-01` |
-| `parse_date(str)` | Convert various date formats to ISO 8601 | `{{parse_date(node.output.date)}}` |
-| `add_days(ts, n)` | Add N days to a timestamp (negative to subtract) | `{{add_days($run.timestamp, 7)}}` |
-| `add_hours(ts, n)` | Add N hours | `{{add_hours($run.timestamp, -2)}}` |
-| `add_minutes(ts, n)` | Add N minutes | `{{add_minutes($run.timestamp, 30)}}` |
-| `date_diff(ts1, ts2, unit)` | Difference between two timestamps. Unit: `days`, `hours`, `minutes`, or `seconds`. Returns a signed integer (positive if ts1 is later than ts2). | `{{date_diff($run.timestamp, node.output.created_at, "hours")}}` |
-
-**`format_date` format tokens:**
-
-| Token | Output | Example |
-|---|---|---|
-| `YYYY` | 4-digit year | `2025` |
-| `MM` | 2-digit month | `03` |
-| `DD` | 2-digit day | `01` |
-| `HH` | 2-digit hour (24h, UTC) | `09` |
-| `mm` | 2-digit minute | `05` |
-| `ss` | 2-digit second | `00` |
-
-Tokens are case-sensitive. Combine them freely: `"DD/MM/YYYY"`, `"YYYY-MM-DD HH:mm"`, `"HH:mm:ss"`.
-
-### Array and object
-
-| Function | What it does | Example |
-|---|---|---|
-| `first(array)` | First element of an array | `{{first(node.output.items)}}` |
-| `last(array)` | Last element of an array | `{{last(node.output.items)}}` |
-| `nth(array, index)` | Element at position N (0-based) | `{{nth(node.output.items, 2)}}` — third item |
-| `keys(object)` | Array of all key names in an object | `{{keys(node.output.body)}}` |
-| `values(object)` | Array of all values in an object | `{{values(node.output.body)}}` |
-
-### Conditional
-
-| Function | What it does | Example |
-|---|---|---|
-| `if(condition, true_value, false_value)` | Return one of two values based on a condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`. Everything else is truthy. | `{{if(node.output.success, "Done", "Failed")}}` |
+Multiple expressions in one field all resolve independently.
 
 ---
 
-## Fallback behavior
+## How values are converted
 
-Any expression that can't be resolved produces an empty string and logs an `INFO`-level warning. It never errors the workflow — if you're getting unexpected empty values, check the **Logs** tab after a run to see which expressions didn't resolve.
+All expression results are converted to strings before being inserted into text fields. Objects and arrays become their JSON representation. `null` and missing values become an empty string.
 
----
-
-## Examples
-
-Combine static text and expressions in one field:
-
-```
-Hello {{HTTP Request.output.body.user.name}}, your order {{$run.id}} is confirmed.
-```
-
-Use array indexing to get the first forecast day:
-
-```
-{{Weather API.output.body.forecast.forecastday[0].day.maxtemp_c}}
-```
-
-Format a timestamp for a report header:
-
-```
-Report generated at {{format_date($run.timestamp, "YYYY-MM-DD HH:mm")}} for {{$run.workflow_name}}
-```
-
-Conditional message based on a result:
-
-```
-Status: {{if(payment_node.output.status, "Payment successful", "Payment failed")}}
-```
-
-Format a number as currency:
-
-```
-Total: ${{round(cart_node.output.total, 2)}}
-```
-
-Pad a numeric ID to 6 digits with leading zeros:
-
-```
-ORDER-{{pad_start(order_node.output.id, 6, "0")}}
-```
+If a field accepts a non-string type (a number field, a boolean field), the resolved string is converted back to the expected type. For example, a number field containing `{{loop.output.index}}` receives the integer value, not a string.
 
 ---
 
-## Expression autocomplete
+## Warnings vs errors
 
-In any text field that supports expressions, press `{{` to open the autocomplete dropdown. It shows all available node outputs from the current canvas, letting you navigate the output structure without memorizing field names. The dropdown also lists all available functions.
+Expression errors are warnings, not fatal errors. If an expression can't be resolved, the run continues with an empty string for that value, and a warning is written to the run logs. Check the Logs tab after a run to see any unresolved expressions.
+
+If you see unexpected empty values in a downstream node's output, check the Logs tab — a warning about an unresolved expression is usually the cause.
 
 ---
 
-## Notes
+## Using variables across runs
 
-- Node names are matched **case-sensitively** and must match the name shown on the canvas exactly. `{{HTTP Request.output.body}}` and `{{http request.output.body}}` are not the same.
-- Avoid giving nodes names that contain a dot (`.`) — the resolver splits expressions on dots, so a node named `v2.0 API` would not resolve correctly. Use underscores or spaces instead.
-- If two nodes have the same name, the expression resolves to the first one in execution order. Rename your nodes to avoid this.
-- Expressions inside JSON values work — you can put `{{Node Name.output.field}}` inside a JSON object field in any config panel.
-- The resolver returns the string unchanged when there's no `{{` in the template, so static strings have no overhead.
+Expressions only reference data from the current run. To pass a value between runs (for example, a counter that increments each time the workflow runs), use Set Variable with `persist: true` and Get Variable.
+
+---
+
+## Practical examples
+
+**Build a filename with a timestamp:**
+```
+report-{{format_date(now(), "YYYY-MM-DD")}}.csv
+```
+
+**Check the temperature from a weather API:**
+In an If / Condition node's `condition` field:
+```
+{{weather.output.body.current.temperature_2m}} > 25
+```
+
+**Extract the first item from a results array:**
+```
+{{first(search.output.body.results)}}
+```
+
+**Format a price with 2 decimal places:**
+```
+${{round(cart.output.total, 2)}}
+```
+
+**Use the loop index in a filename:**
+```
+image-{{pad_start(loop.output.index, 3, "0")}}.png
+```

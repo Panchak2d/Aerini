@@ -1,21 +1,9 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
-
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn client() -> reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to build Telegram HTTP client")
-    }).clone()
-}
 
 pub struct TelegramNode;
 
@@ -78,7 +66,7 @@ impl Node for TelegramNode {
             body["parse_mode"] = Value::String(mode.to_string());
         }
 
-        match client().post(&url).json(&body).send().await {
+        match super::shared_http_client().post(&url).json(&body).send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 match resp.json::<Value>().await {

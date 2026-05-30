@@ -42,20 +42,18 @@ const STATUS_PAGE_CSS: &str = concat!(
 
 use axum::{
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use dashmap::DashMap;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use blake3;
 use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
 
 use flowo_engine::db::WorkflowDb;
 
@@ -75,7 +73,7 @@ pub struct StatusState {
     /// Token required in the "Run Now" form. None = button hidden on status page.
     pub run_secret:    Option<String>,
     /// Per-IP rate limiter: maps client address → (request_count, window_start).
-    pub rate_limiter:  Arc<DashMap<IpAddr, (u32, Instant)>>,
+    pub rate_limiter:  Arc<crate::middleware::RateLimiter>,
     /// Persistent run history database. None in API mode (status server not used).
     pub run_history:   Option<Arc<WorkflowDb>>,
     /// Number of reverse-proxy hops to trust when reading X-Forwarded-For.
@@ -92,37 +90,10 @@ pub fn router(state: StatusState) -> Router {
         .route("/api/runs",      get(api_runs))
         .route("/api/runs/:id",  get(api_run_detail))
         .layer(axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
-        .layer(middleware::from_fn(security_headers_middleware))
+        .layer(middleware::from_fn(crate::middleware::status_security_headers))
         .with_state(state)
 }
 
-/// Adds defensive HTTP response headers to every status server response.
-async fn security_headers_middleware(req: Request, next: Next) -> impl IntoResponse {
-    let mut response = next.run(req).await;
-    let h = response.headers_mut();
-    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
-    h.insert("x-frame-options",        HeaderValue::from_static("DENY"));
-    h.insert("referrer-policy",        HeaderValue::from_static("strict-origin-when-cross-origin"));
-    h.insert("permissions-policy",     HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
-    // HSTS is omitted here: this server runs behind a TLS-terminating reverse proxy
-    // (Caddy/Nginx) over plain HTTP. Browsers ignore HSTS on non-HTTPS connections,
-    // so the header is vacuous at this layer. The reverse proxy should inject it.
-    //
-    // Both style-src and script-src use SHA-256 hashes instead of 'unsafe-inline'.
-    // style-src hash covers STATUS_PAGE_CSS (see const at top of file).
-    // script-src hash covers the static "Run Now" script block in status_page().
-    // Both hashes must be recomputed if their respective content changes.
-    h.insert(
-        "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'none'; \
-             style-src 'sha256-EzDjh6fNSkXy+4Mk3I+Q6Pr4QSMDO7qOBhX3NHRvUFw='; \
-             script-src 'sha256-wU0Ewa2fRPMqN+gEO+pMBNDvkMABDjHCJ+3YwjpGSGo='; \
-             frame-ancestors 'none'",
-        ),
-    );
-    response
-}
 
 /// Per-IP rate limiter: 120 requests per 60-second window per client address.
 async fn rate_limit_middleware(
@@ -131,25 +102,7 @@ async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let ip: IpAddr = extract_client_ip(&req, s.trusted_proxy_count);
-    let allowed = {
-        let now = Instant::now();
-        let mut entry = s.rate_limiter.entry(ip).or_insert((0u32, now));
-        if now.duration_since(entry.1).as_secs() >= 60 {
-            *entry = (1, now);
-            true
-        } else if entry.0 < 120 {
-            entry.0 += 1;
-            true
-        } else {
-            false
-        }
-    };
-    // Evict stale entries to prevent unbounded map growth under IP rotation or DDoS.
-    if s.rate_limiter.len() > 10_000 {
-        let cutoff = Instant::now() - std::time::Duration::from_secs(120);
-        s.rate_limiter.retain(|_, v| v.1 > cutoff);
-    }
-    if allowed {
+    if s.rate_limiter.is_allowed(ip) {
         next.run(req).await
     } else {
         (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response()
@@ -489,7 +442,7 @@ mod tests {
             log_buffer:          LogBuffer::new(10),
             run_trigger:         std::sync::Arc::new(tokio::sync::Notify::new()),
             run_secret:          run_secret.map(|s| s.to_string()),
-            rate_limiter:        std::sync::Arc::new(DashMap::new()),
+            rate_limiter:        std::sync::Arc::new(crate::middleware::RateLimiter::new(120, 60)),
             run_history:         None,
             trusted_proxy_count: 0,
         }

@@ -133,45 +133,43 @@ The Send Email node uses SMTP directly — no API key, just a username and passw
 
 ## How encryption works
 
-Credentials are encrypted with AES-256-GCM. The encryption key is stored in the OS-native credential store on the desktop app, and in a local file in server mode.
+Credentials are encrypted with AES-256-GCM. The desktop app stores the encryption key in the OS-native keychain. The server binary stores it in a plain file by default, with an option to use the keychain.
 
 ### Desktop app (macOS, Windows, Linux)
 
-The desktop app stores the encryption key in the OS keychain:
+The desktop app uses the OS-native keychain:
 
 | Platform | Store |
 |---|---|
 | macOS | macOS Keychain (login keychain, service `flowo`, account `encryption_key`) |
-| Windows | Windows Credential Manager (service `flowo`, account `encryption_key`) |
-| Linux | SecretService via D-Bus (e.g. GNOME Keyring, KWallet) |
+| Windows | Windows Credential Manager |
+| Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
 
-If the keychain is unavailable (e.g. Linux without a running SecretService daemon), the app logs a warning and falls back to a plain file — see the table in the next section for the fallback path.
-
-**Migration from older versions:** If you upgrade from a version that used a key file (`.cred.key`), the desktop app automatically migrates the key into the OS keychain on first launch and deletes the file. No manual action is required.
+If the keychain is unavailable (common on Linux without a running SecretService daemon), the app falls back to a plain file at `.cred.key` in the app data directory and logs a warning. The file is created with `chmod 600` on Unix. If a working keychain becomes available later, Flowo migrates the key from the file into the keychain automatically on next launch and deletes the file.
 
 ### Server mode (flowo-server)
 
-The server uses a plain file by default (servers rarely have an OS keychain):
+The server stores the key in a plain file by default:
 
 | Platform | Key file location |
 |---|---|
 | macOS | `<data_dir>/flowo.key` |
-| Windows | `<data_dir>\flowo.key` |
+| Windows | `<data_dir>lowo.key` |
 | Linux | `<data_dir>/flowo.key` |
 
-`<data_dir>` defaults to `~/.flowo-server` and can be changed with `--data-dir`.
+`<data_dir>` defaults to `~/.flowo-server` and can be changed with `--data-dir`. On Unix, the file is created with `chmod 600`.
 
-On Unix (macOS and Linux), the key file is created with `chmod 600` — owner-readable only.
+**Limitation:** `chmod 600` protects against other OS users reading the file. It does not protect against root, against a process running as the same user, or against a backup that contains both `flowo.key` and `credentials.db` — an attacker with both files can decrypt all credentials offline without touching the running server. See [Security — key storage](security.md#3-where-the-encryption-key-is-stored) for a full explanation and mitigations.
 
-To opt in to OS keychain storage on the server (useful when running on a desktop-adjacent machine with a running keychain daemon), pass the `--keychain` flag:
+To use the OS keychain instead, pass `--keychain`:
 
-```
+```bash
 flowo-server api --keychain --token mytoken
 ```
 
-If the keychain is unavailable, the server falls back to the file automatically with a warning in the log.
+If the keychain is unavailable at startup, the server falls back to the file automatically with a warning.
 
-**Back up your key.** Regardless of where the key is stored — keychain or file — losing it means stored credentials cannot be recovered. The `credentials.db` file is useless without its key.
+**Back up your key.** Losing the key makes `credentials.db` permanently unreadable. There is no recovery mechanism. Never store `flowo.key` and `credentials.db` in the same unencrypted backup.
 
 ---
 

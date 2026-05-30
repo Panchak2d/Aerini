@@ -1,66 +1,21 @@
-# Flowo Documentation
+# Flowo
 
-Flowo is a visual workflow automation desktop app for macOS, Windows, and Linux. You drag nodes onto a canvas, wire them together, and run the resulting workflow — either manually, on a cron schedule, or triggered by an incoming webhook.
+Flowo is a visual workflow automation desktop app for macOS, Windows, and Linux. Drag nodes onto a canvas, connect them together, and automate tasks — run them manually, on a schedule, or when an HTTP request arrives.
 
-No account, no cloud, no subscription. Everything runs locally. Workflows and credentials are stored on your machine in SQLite, credentials encrypted with AES-256-GCM.
+No account. No cloud. No subscription. Everything runs on your machine.
 
 ---
 
 ## What you can build
 
-Some examples of what people use Flowo for:
+- **Scheduled reports** — fetch data from an API every morning, transform it, email or Slack the result
+- **Alerts** — poll an endpoint on a timer, post to a channel when something looks wrong
+- **AI pipelines** — chain an AI Prompt into a Transform into a Notion page create
+- **Webhook receivers** — accept a GitHub or Stripe webhook, run logic, send a notification
+- **File processing** — read files, transform their content, write results elsewhere
+- **Social media uploads** — generate images with AI and post them to YouTube, Instagram, or TikTok
 
-- **Daily reports** — fetch data from an API at 9 AM on weekdays, transform it with a Code node, email the result via SendGrid or SMTP.
-- **Slack/Discord alerts** — poll an endpoint every 5 minutes, run a condition check, post to a channel if something's wrong.
-- **AI pipelines** — chain an AI Prompt node into a Transform node into a Notion page create. Or use the AI Agent node to reason over structured data and take action on the result.
-- **Webhook receivers** — listen for a GitHub webhook, run a shell script, post back a Slack notification.
-- **File processing** — watch for new files, read them, transform the content, write output somewhere else.
-
-Flowo isn't trying to replace n8n or Zapier for large teams — it's a local-first tool for individuals and small setups. If you need to deploy a workflow that runs 24/7 on a server, `flowo-server` covers that without needing the desktop app on the server.
-
----
-
-## Node categories
-
-Flowo ships 34 built-in nodes across six categories:
-
-**Triggers** — Manual Trigger, Schedule (interval / cron / once), Webhook
-
-**Logic** — If / Condition, Switch, Loop, Merge, Stop
-
-**Flow control** — Delay, Wait
-
-**AI** — AI Prompt, AI Agent (ReAct loop), AI Memory, Text Splitter
-
-**Actions** — HTTP Request, Shell Command, Code (JS), Send Email, SendGrid, File, Desktop Notification, Database (SQLite)
-
-**Integrations** — Slack, Discord, GitHub, Google Sheets, Notion, Telegram, Stripe
-
-**Data & Utility** — Transform Data, JSON, Set Variable, Get Variable, Output
-
-Full parameter docs, output schemas, and constraints for every node: [Nodes Reference](docs/nodes.md).
-
----
-
-## Quick orientation
-
-The left sidebar has three sections:
-
-- **Node Panel** — the search bar at the very top of the sidebar. Type any node name and click to place it on the canvas. You can also press `Space` or `Ctrl+K` to open node search from anywhere.
-- **Workflows** — your saved workflows, sorted by last modified. Click one to load it onto the canvas.
-- **Background Runs** — workflows currently executing on a schedule or waiting for an incoming webhook.
-
-Connect nodes by dragging from an output port to an input port. Press `Ctrl+Enter` to run the current workflow.
-
-After a run, the output drawer opens at the bottom with tabs for Summary, Results, Errors, Logs, Debug, and History.
-
----
-
-## Deploying to a server
-
-The desktop app includes an **Export for Server** feature. Open any workflow with a Schedule or Webhook trigger, click **File → Export for Server**, and Flowo generates a zip containing the `flowo-server` binary, a config file, a `.env.example` listing the credentials you need to set, a systemd service file, and an `install.sh` that handles everything. Upload the zip to a Linux server and run `./install.sh`.
-
-For managing many workflows on one server, `flowo-server api` mode exposes a REST API and a CLI. See [Server Deployment](docs/server-deploy.md).
+Flowo is a local-first tool for individuals and small setups. For workflows that need to run 24/7 on a server, `flowo-server` handles that without requiring the desktop app on the server.
 
 ---
 
@@ -68,47 +23,74 @@ For managing many workflows on one server, `flowo-server api` mode exposes a RES
 
 | Guide | What it covers |
 |---|---|
-| [Getting Started](docs/getting-started.md) | Install, build your first workflow, read run results, schedule it |
-| [Nodes Reference](docs/nodes.md) | All 34 nodes — parameters, outputs, credentials, constraints |
-| [Expressions](docs/expressions.md) | `{{...}}` template syntax, `$run.*`, `$env.*`, inline functions |
-| [Credentials](docs/credentials.md) | Add API keys, how encryption works, how to get keys for every supported service |
-| [Security](docs/security.md) | Full security model — encryption, dangerous nodes, SSRF, prompt injection, server hardening |
-| [Background Runs](docs/background-runs.md) | Scheduled and webhook-triggered workflows, system tray, n8n import |
-| [Server Deployment](docs/server-deploy.md) | Run workflows 24/7 on Linux — serve mode, API mode, Docker, HTTPS |
+| [Getting Started](docs/getting-started.md) | Install, build your first workflow, run it, schedule it |
+| [Concepts](docs/concepts.md) | What a workflow is, what nodes are, how everything fits together — start here if you're new |
+| [Nodes Reference](docs/nodes.md) | All 39 nodes — parameters, outputs, and what each one does |
+| [Expressions](docs/expressions.md) | `{{...}}` syntax for wiring node outputs into other nodes |
+| [Credentials](docs/credentials.md) | Storing API keys securely and getting them from every supported service |
+| [Background Runs](docs/background-runs.md) | Schedules, webhook triggers, run history |
+| [Server Deployment](docs/server-deploy.md) | Running workflows 24/7 on a Linux server |
+| [Security](docs/security.md) | Encryption, dangerous nodes, SSRF protection, server hardening |
+
+Developer guides:
+
+| Guide | What it covers |
+|---|---|
 | [Architecture](docs/architecture.md) | How the engine, Tauri shell, and server binary fit together |
+| [Custom Node Authoring](docs/node-authoring.md) | Adding new node types to Flowo |
+| [Schema Migrations](docs/schema-migrations.md) | How workflow format changes are handled across versions |
+
+---
+
+## Node categories
+
+Flowo ships 39 built-in nodes:
+
+**Triggers** — Manual Trigger, Schedule, Webhook
+
+**Logic** — If / Condition, Switch, Loop (For Each), Merge, Stop, Collect Files
+
+**Flow Control** — Delay, Wait
+
+**AI** — AI Prompt, AI Agent, AI Memory, Text Splitter, Image Generation
+
+**Actions** — HTTP Request, Shell Command, Code (JS), Send Email, SendGrid, File, Desktop Notification, Save to Folder, Social Upload, Database, S3 Storage
+
+**Integrations** — Slack, Discord, GitHub, Google Sheets, Notion, Telegram, Stripe
+
+**Data & Utility** — Transform Data, JSON, Set Variable, Get Variable, Output
 
 ---
 
 ## Requirements
 
-| Tool | Version |
-|---|---|
-| Rust (stable) | 1.77+ |
-| Node.js | 18+ |
-| Tauri CLI | 2.x |
+| Tool | Version | Why |
+|---|---|---|
+| Rust (stable) | 1.77+ | Builds the engine and desktop shell |
+| Node.js | 18+ | Required at runtime for the Code (JS) node |
+| Tauri CLI | 2.x | Packages the desktop app |
 
-Node.js must be on PATH at runtime — the Code (JS) node spawns it as a subprocess.
+Node.js must be on your PATH — not just installed, but reachable as the `node` command in a terminal. The Code (JS) node spawns it as a subprocess at runtime.
 
 ---
 
-## Contributing
+## Installing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev environment setup, how to add a new node, code conventions, and the protected interfaces you must not change.
+```bash
+git clone https://github.com/Panchak2d/flowo
+cd flowo
+npm install
+npm run dev
+```
 
-These docs cover Flowo `0.2.0` (engine) and `flowo-server` `0.1.0`. The project is pre-1.0 — rough edges exist and are noted throughout the guides where relevant.
+The first build takes 2–5 minutes while Rust compiles. After that, changes rebuild in seconds.
+
+To produce a standalone installer: `npm run build`. The output goes to `src-tauri/target/release/bundle/`.
 
 ---
 
 ## License
 
-Flowo is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
-**What this means:**
-
-- You can use, modify, and distribute Flowo freely.
-- If you modify Flowo and run it as a **network-accessible service** (including `flowo-server`), you must release your modifications under AGPL-3.0. This applies to SaaS, hosted services, and any deployment where users interact with the software over a network.
-- If you redistribute Flowo (binary or source), you must include the license and make source available.
-
-For projects where AGPL-3.0 is incompatible with your license, contact the maintainers to discuss alternatives.
-
-All bundled dependencies are MIT or Apache-2.0 licensed and are compatible with AGPL-3.0 distribution.
+You can use, modify, and distribute Flowo freely. If you modify Flowo and run it as a network-accessible service, you must release your modifications under AGPL-3.0.

@@ -259,7 +259,7 @@ mod tests {
             input: json!({ "operation": "read", "path": "escape" }),
             context: ExecutionContext {
                 variables:    HashMap::new(),
-                node_outputs: HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata,
             },
         };

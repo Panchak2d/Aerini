@@ -59,38 +59,74 @@ How it works in detail:
 
 ---
 
-## 3. The key file — your most important file
+## 3. Where the encryption key is stored
 
-Flowo generates a random 256-bit encryption key on first launch and writes it to:
+### Desktop app
 
-| Platform | Location |
+The desktop app stores the encryption key in the OS-native keychain, not in a plain file:
+
+| Platform | Key store |
 |---|---|
-| macOS | `~/Library/Application Support/com.flowo.app/.cred.key` |
-| Windows | `%APPDATA%\com.flowo.app\.cred.key` |
-| Linux | `~/.local/share/com.flowo.app/.cred.key` |
+| macOS | macOS Keychain (login keychain, service `flowo`, account `encryption_key`) |
+| Windows | Windows Credential Manager |
+| Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
 
-The file contains the key as a base64-encoded string.
+On first launch, Flowo generates a random 32-byte key using the OS cryptographically secure random source and writes it to the keychain. Subsequent launches read it back from there.
 
-**On Unix** (macOS and Linux), the file is created with `chmod 600` — readable only by your user account. No other user on the same machine can read it.
+**Keychain fallback:** if the keychain is unavailable (most common on Linux without a running SecretService daemon), Flowo falls back to a plain file at `.cred.key` in the app data directory and logs a warning. On Unix, this file is created with `chmod 600`. If a working keychain becomes available later, Flowo migrates the key from the file into the keychain automatically on next launch and deletes the file.
 
-**On Windows**, no equivalent permission restriction is applied. The file inherits the default ACL of `%APPDATA%`, which limits access to your user account and SYSTEM processes but does not enforce the same hard boundary as Unix file permissions.
+If you see a startup warning about the keychain being unavailable on Linux, install and start a SecretService provider:
 
-### This file is not backed up by default
+```bash
+# GNOME
+sudo apt install gnome-keyring
+# KDE
+sudo apt install kwallet-pam
+```
 
-Time Machine, most Linux backup tools, and Windows Backup do back up `~/.local/share` and `%APPDATA%` — but many cloud sync tools (iCloud Drive, Dropbox, OneDrive) do not sync hidden files or dotfiles by default. Verify your backup covers this location.
+### Server mode — key file and its limitations
 
-**If you lose the key file, you lose all stored credentials.** The `credentials.db` file is permanently unreadable without it. There is no recovery mechanism and no password reset.
+The server binary stores the key in a plain file by default (`<data_dir>/flowo.key`, default `~/.flowo-server/flowo.key`). On Unix, the file is created with `chmod 600`.
 
-### Treat this file like a master password
+**What `chmod 600` protects against:** other OS users on the same machine reading the file directly.
 
-- Back it up to an encrypted location (password manager, encrypted external drive, encrypted cloud backup).
-- Do not commit it to version control.
-- Do not share it.
-- If you migrate to a new machine, copy this file alongside `credentials.db` — not just the database.
+**What it does not protect against:**
+- Root access — root bypasses file permissions entirely
+- Any process running as the same OS user (including workflows with `--allow-shell` enabled)
+- A backup or snapshot that captures both `flowo.key` and `credentials.db` together — an attacker with both files can decrypt all credentials offline with no interaction with the running server
 
-### Key file integrity
+This is a documented limitation of file-based key storage. It is not a silent vulnerability, but it is a real constraint to understand before deploying.
 
-Flowo validates the key file on startup. If the file exists but is corrupt (wrong length after base64 decode), Flowo refuses to start rather than silently decrypting garbage data. The error message will say "Key file is corrupt: expected 32 bytes after base64 decode, got N".
+**Mitigations available today:**
+
+Use `--keychain` to store the key in the OS keychain instead of a file:
+
+```bash
+flowo-server api --keychain --token mytoken
+```
+
+If the keychain is unavailable at startup, the server falls back to the file automatically with a warning.
+
+For the strongest protection on systemd-based servers (systemd 249+), use `LoadCredentialEncrypted=` to bind the key to the machine's TPM chip or machine identity. A stolen disk image cannot be decrypted without the hardware:
+
+```ini
+# /etc/systemd/system/flowo-server.service
+[Service]
+LoadCredentialEncrypted=flowo-key:/etc/credstore.encrypted/flowo-key
+```
+
+Read the injected credential path from `$CREDENTIALS_DIRECTORY/flowo-key` at startup.
+
+### Protecting the key in both modes
+
+- **Back up the key alongside the database.** For the desktop, your keychain backup covers it. For the server, back up `flowo.key` to an encrypted location separate from the database.
+- **Never commit `flowo.key` to version control.**
+- **Never store `flowo.key` and `credentials.db` in the same unencrypted backup.** The pair together is sufficient to decrypt all credentials offline.
+- **Losing the key means losing all credentials permanently.** There is no recovery mechanism.
+
+### Key integrity check
+
+Flowo validates the key on startup. If it exists but is corrupt (wrong length after base64 decode), Flowo refuses to start rather than silently producing garbage output. The error message will say `"Key file is corrupt: expected 32 bytes after base64 decode, got N"`.
 
 ---
 
@@ -433,15 +469,15 @@ The dangerous node confirmation prompt gives you visibility. It cannot give you 
 
 ### OS keychain integration (server mode only)
 
-By default, the server binary stores the credential encryption key in a file (`flowo.key`). Use the `--use-keychain` flag to store the key in the OS-native credential store instead:
+By default, the server binary stores the credential encryption key in a plain file (`flowo.key`). Use `--keychain` to store the key in the OS-native credential store instead:
 
 ```bash
-flowo-server api --use-keychain
+flowo-server api --keychain --token mytoken
 ```
 
-This activates `KeySource::OsKeychain` — macOS Keychain, Windows Credential Manager, or Linux SecretService via D-Bus. If the keychain is unavailable at runtime, the server falls back to the file-based key automatically.
+If the keychain is unavailable at runtime, the server falls back to the file automatically with a warning.
 
-**Desktop app:** the Tauri desktop app uses a file-based key (not the keychain) and does not expose a `--use-keychain` flag. The encryption key file is created with `chmod 600` on Unix. Credentials decrypt automatically in the background for scheduled workflows.
+**Desktop app:** the desktop app uses `KeySource::OsKeychain` — macOS Keychain, Windows Credential Manager, or Linux SecretService. It does not use a plain key file unless the keychain is unavailable (see Section 3).
 
 ### The DNS rebinding gap on the HTTP node
 

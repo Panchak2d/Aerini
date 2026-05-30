@@ -62,7 +62,7 @@ impl Node for OutputNode {
             // Use all context outputs merged, preferring the most recent node's output
             // by taking the last entry in node_outputs that isn't this node itself
             let mut last: Option<Value> = None;
-            for (id, val) in &input.context.node_outputs {
+            for (id, val) in input.context.node_outputs.iter() {
                 if id != &input.node_id {
                     last = Some(val.clone());
                 }

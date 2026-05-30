@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+
+static NODE_BIN: OnceLock<&'static str> = OnceLock::new();
 
 /// Code node — runs a JavaScript snippet using the system Node.js installation.
 /// The snippet has access to `input` (the incoming data) and `context` (all node outputs).
@@ -109,8 +112,17 @@ function output(v) {{ __result = v; }}
 
         let start = std::time::Instant::now();
 
-        // Try node, then nodejs as fallback (some Linux distros name it differently)
-        let node_bin = if which_node("node").await { "node" } else { "nodejs" };
+        // Detect node binary once per process lifetime; cached via OnceLock.
+        let node_bin = *NODE_BIN.get_or_init(|| {
+            if std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+                .arg("node")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            { "node" } else { "nodejs" }
+        });
 
         let child = Command::new(node_bin)
             .arg("--input-type=module")
@@ -237,13 +249,3 @@ function output(v) {{ __result = v; }}
     }
 }
 
-async fn which_node(bin: &str) -> bool {
-    Command::new(if cfg!(windows) { "where" } else { "which" })
-        .arg(bin)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}

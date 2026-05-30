@@ -1,24 +1,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
 const GITHUB_API_VERSION: &str = "2022-11-28";
-
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn client() -> reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("flowo-engine/0.2.0")
-            .build()
-            .expect("Failed to build GitHub HTTP client")
-    }).clone()
-}
 
 pub struct GitHubNode;
 
@@ -111,7 +98,7 @@ impl Node for GitHubNode {
             )),
         };
 
-        match client()
+        match super::shared_http_client()
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Accept", "application/vnd.github+json")

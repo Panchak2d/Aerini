@@ -177,7 +177,14 @@ pub struct BroadcastEventSink {
 
 impl flowo_engine::EventSink for BroadcastEventSink {
     fn emit(&self, event: &str, payload: serde_json::Value) {
-        let msg = serde_json::json!({ "event": event, "payload": payload }).to_string();
-        let _ = self.tx.send(msg);
+        let mut msg = String::with_capacity(32 + event.len());
+        msg.push_str("{\"event\":\"");
+        msg.push_str(event);
+        msg.push_str("\",\"payload\":");
+        if let Ok(p) = serde_json::to_string(&payload) {
+            msg.push_str(&p);
+            msg.push('}');
+            let _ = self.tx.send(msg);
+        }
     }
 }

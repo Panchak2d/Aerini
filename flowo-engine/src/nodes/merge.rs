@@ -57,7 +57,7 @@ impl Node for MergeNode {
             _ => {
                 // "object" — key each output by its source node ID
                 let mut map = serde_json::Map::new();
-                for (node_id, output) in outputs {
+                for (node_id, output) in outputs.iter() {
                     map.insert(node_id.clone(), output.clone());
                 }
                 Value::Object(map)

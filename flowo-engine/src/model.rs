@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── Node type category ────────────────────────────────────────────────────────
 
@@ -229,11 +230,23 @@ pub struct NodeInput {
     pub context: ExecutionContext,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionContext {
     pub variables: HashMap<String, Value>,
-    pub node_outputs: HashMap<String, Value>,
+    /// Arc-wrapped so snapshot() in the executor is O(1) (refcount bump only).
+    /// Serializes identically to HashMap<String, Value> — no wire-format change.
+    pub node_outputs: Arc<HashMap<String, Value>>,
     pub metadata: HashMap<String, Value>,
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self {
+            variables:    HashMap::new(),
+            node_outputs: Arc::new(HashMap::new()),
+            metadata:     HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -138,8 +138,7 @@ impl TokenStore {
             "SELECT token_id, label, scopes, created_at, expires_at
              FROM tokens
              WHERE token_hash = ?1
-               AND revoked_at IS NULL
-               AND (expires_at IS NULL OR expires_at > datetime('now'))",
+               AND revoked_at IS NULL",
             params![hash],
             |row| {
                 let scopes_j: String = row.get(2)?;
@@ -153,7 +152,16 @@ impl TokenStore {
                     expires_at: row.get(4)?,
                 })
             },
-        ).ok()
+        ).ok().and_then(|record| {
+            if let Some(ref exp_str) = record.expires_at {
+                if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(exp_str) {
+                    if Utc::now() >= exp.with_timezone(&Utc) {
+                        return None;
+                    }
+                }
+            }
+            Some(record)
+        })
     }
 
     /// Revoke a token by its `token_id`. No-op if already revoked or not found.

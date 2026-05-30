@@ -1,21 +1,9 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
-
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn client() -> reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to build Stripe HTTP client")
-    }).clone()
-}
 
 pub struct StripeNode;
 
@@ -89,7 +77,7 @@ impl Node for StripeNode {
                     params.push(("description", desc.to_string()));
                 }
 
-                match client()
+                match super::shared_http_client()
                     .post("https://api.stripe.com/v1/payment_intents")
                     .header("Authorization", format!("Bearer {}", api_key))
                     .form(&params)

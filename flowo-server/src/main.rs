@@ -26,6 +26,7 @@ mod config;
 mod env_credentials;
 mod event_bridge;
 mod log_buffer;
+mod middleware;
 mod status_server;
 mod token_store;
 mod util;
@@ -178,6 +179,12 @@ enum Command {
         /// set its own timeout. Min: 10, Max: 86400 (24 h). Default: no limit.
         #[arg(long)]
         max_workflow_duration_secs: Option<u64>,
+
+        /// SQLite connection pool size.
+        /// Defaults to max(available_parallelism, 8).
+        /// Should be >= max_concurrent_nodes to avoid connection starvation.
+        #[arg(long, env = "FLOWO_DB_POOL_SIZE")]
+        db_pool_size: Option<usize>,
     },
 
     /// List all scheduled workflows (API mode only).
@@ -293,10 +300,16 @@ async fn main() {
 
     match cli.command {
         Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code).await,
-        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs } => {
+        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size } => {
             let shell_exec_disabled = !allow_shell;
             let code_exec_disabled  = !allow_code;
-            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs).await;
+            let pool_size = db_pool_size.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(8)
+                    .max(8)
+            });
+            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, pool_size).await;
         },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
         Command::Stop    { workflow, server, token } => ctl_stop(&workflow, &server, &token).await,
@@ -351,7 +364,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
 
     // Open (or create) the persistent run history database alongside the config file.
     let db_path = data_dir.join("flowo-serve.db");
-    let workflow_db = match WorkflowDb::open(&db_path) {
+    let workflow_db = match WorkflowDb::open(&db_path, 8) {
         Ok(db) => Arc::new(db),
         Err(e) => {
             tracing::error!("Failed to open run history database at {}: {}", db_path.display(), e);
@@ -486,7 +499,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
         log_buffer:    log,
         run_trigger,
         run_secret:    config.run_secret,
-        rate_limiter:  Arc::new(dashmap::DashMap::new()),
+        rate_limiter:  Arc::new(middleware::RateLimiter::new(120, 60)),
         run_history:   Some(workflow_db),
         trusted_proxy_count,
     };
@@ -499,8 +512,8 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("Status server error");
 }
 
-async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>) {
-    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs).await;
+async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>, db_pool_size: usize) {
+    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size).await;
 }
 
 async fn ctl_list(server: &str, token: &str) {

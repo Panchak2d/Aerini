@@ -47,6 +47,14 @@ use job::PortConflict;
 pub trait SchedulerDb: Send + Sync + 'static {
     fn scheduler_list_active(&self) -> Result<Vec<ScheduledJobRow>, String>;
     fn scheduler_list_all(&self) -> Result<Vec<ScheduledJobRow>, String>;
+    /// Paginated list. Returns (items, total_count).
+    /// Override for SQL-backed implementations; default falls back to list_all + Rust-side slice.
+    fn scheduler_list_paginated(&self, offset: usize, limit: usize) -> Result<(Vec<ScheduledJobRow>, usize), String> {
+        let all = self.scheduler_list_all()?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
     fn scheduler_upsert(&self, row: &ScheduledJobRow) -> Result<(), String>;
     fn scheduler_update_run(
         &self,
@@ -294,6 +302,10 @@ impl SchedulerDaemon {
 
     pub fn list_jobs(&self) -> Result<Vec<ScheduledJobRow>, String> {
         self.db.scheduler_list_all()
+    }
+
+    pub fn list_jobs_paginated(&self, offset: usize, limit: usize) -> Result<(Vec<ScheduledJobRow>, usize), String> {
+        self.db.scheduler_list_paginated(offset, limit)
     }
 
     pub fn stop_all(&self) {
@@ -722,7 +734,7 @@ async fn fire_once_with_vars(
     }
 
     let now_str = Utc::now().to_rfc3339();
-    let result  = executor.run(&workflow, vars).await;
+    let result  = executor.run(Arc::new(workflow), vars).await;
 
     match result {
         Ok(r) => {

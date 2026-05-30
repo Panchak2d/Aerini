@@ -24,10 +24,9 @@
 //     scope   video.publish
 
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -52,25 +51,20 @@ const TIKTOK_ACCESS_EXPIRY_SECS: u64 = 86400;
 /// YouTube access token lifetime (1 h).
 const YOUTUBE_ACCESS_EXPIRY_SECS: u64 = 3600;
 
-// ── Shared HTTP client ────────────────────────────────────────────────────────
-
-static OAUTH_HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("OAuth HTTP client build failed")
-});
-
 // ── Refresh mutex map (G3) ────────────────────────────────────────────────────
 
 // Key = "{platform}:{client_id}". Ensures only one goroutine refreshes a token
 // at a time; waiters re-read the keychain after acquiring, avoiding redundant
 // refresh calls if the leader already completed.
-static REFRESH_LOCKS: Lazy<DashMap<String, Arc<Mutex<()>>>> = Lazy::new(DashMap::new);
+static REFRESH_LOCKS: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
+
+fn refresh_locks() -> &'static DashMap<String, Arc<Mutex<()>>> {
+    REFRESH_LOCKS.get_or_init(DashMap::new)
+}
 
 fn refresh_lock(platform: &str, client_id: &str) -> Arc<Mutex<()>> {
     let key = format!("{}:{}", platform, client_id);
-    REFRESH_LOCKS
+    refresh_locks()
         .entry(key)
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -192,7 +186,7 @@ async fn exchange_code_youtube(
         ("redirect_uri", REDIRECT_URI),
         ("grant_type", "authorization_code"),
     ];
-    let resp = OAUTH_HTTP
+    let resp = super::shared_http_client()
         .post("https://oauth2.googleapis.com/token")
         .form(&params)
         .send()
@@ -216,7 +210,7 @@ async fn refresh_tokens_youtube(
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ];
-    let resp = OAUTH_HTTP
+    let resp = super::shared_http_client()
         .post("https://oauth2.googleapis.com/token")
         .form(&params)
         .send()
@@ -286,7 +280,7 @@ async fn exchange_code_instagram(
         ("redirect_uri", REDIRECT_URI),
         ("code", code),
     ];
-    let short_resp = OAUTH_HTTP
+    let short_resp = super::shared_http_client()
         .post("https://api.instagram.com/oauth/access_token")
         .form(&params)
         .send()
@@ -307,7 +301,7 @@ async fn exchange_code_instagram(
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram response"))?;
 
     // Step 2: exchange for long-lived token (60-day lifetime)
-    let ll_resp = OAUTH_HTTP
+    let ll_resp = super::shared_http_client()
         .get("https://graph.instagram.com/access_token")
         .query(&[
             ("grant_type", "ig_exchange_token"),
@@ -340,7 +334,7 @@ async fn exchange_code_instagram(
 }
 
 async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens, NodeError> {
-    let resp = OAUTH_HTTP
+    let resp = super::shared_http_client()
         .get("https://graph.instagram.com/refresh_access_token")
         .query(&[
             ("grant_type", "ig_refresh_token"),
@@ -387,7 +381,7 @@ async fn exchange_code_tiktok(
         ("grant_type", "authorization_code"),
         ("redirect_uri", REDIRECT_URI),
     ];
-    let resp = OAUTH_HTTP
+    let resp = super::shared_http_client()
         .post("https://open.tiktokapis.com/v2/oauth/token/")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&params)
@@ -412,7 +406,7 @@ async fn refresh_tokens_tiktok(
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
-    let resp = OAUTH_HTTP
+    let resp = super::shared_http_client()
         .post("https://open.tiktokapis.com/v2/oauth/token/")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&params)

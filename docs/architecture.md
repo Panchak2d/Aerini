@@ -5,7 +5,7 @@ How Flowo is structured, why it's split the way it is, and how execution actuall
 ## The three-crate split
 
 ```
-flowo-engine/     — core library: workflow model, executor, scheduler, node registry, 34 nodes
+flowo-engine/     — core library: workflow model, executor, scheduler, node registry, 39 nodes
 src-tauri/        — Tauri shell: IPC commands, system tray, app lifecycle
 flowo-server/     — headless binary: HTTP API, serve mode CLI, control commands
 ```
@@ -68,7 +68,9 @@ The executor itself is linear. Parallelism within a single workflow run isn't cu
 
 ## Credential store
 
-The `CredentialStore` wraps `credentials.db` and handles the encryption lifecycle. On first open it generates a random 32-byte key, writes it to the key file with `chmod 600`, and derives an AES-256-GCM cipher. Subsequent opens read the key file and reconstruct the cipher.
+The `CredentialStore` wraps `credentials.db` and handles the encryption lifecycle. On first open it generates a random 32-byte key via `OsRng`, stores it (keychain or file depending on `KeySource`), and derives an AES-256-GCM cipher. Subsequent opens load the key and reconstruct the cipher.
+
+The Tauri desktop app passes `KeySource::OsKeychain` — macOS Keychain, Windows Credential Manager, or Linux SecretService, with `.cred.key` as a fallback if the keychain is unavailable. The server binary passes `KeySource::File` by default; `--keychain` switches it to `KeySource::OsKeychain`.
 
 Each credential entry in the database stores: ID, name, a random nonce, and the GCM ciphertext. The raw value is never stored. Decryption happens in `CredentialResolver::resolve()`, called per-node at execution time. The decrypted value lives only in memory for the duration of the node's `execute()` call.
 
@@ -116,7 +118,7 @@ For version `"1.0"` workflows — which is all existing workflows — step 2 is 
 
 **If a workflow was created by a newer Flowo build** and this build has no migration path to that version, `from_json()` returns an error rather than silently loading malformed data. The error message tells the user to upgrade Flowo.
 
-See [`docs/schema-migrations.md`](schema-migrations.md) for the full migration contract, how to write a migration function, and backup guidance for production deployments.
+See [`schema-migrations.md`](schema-migrations.md) for the full migration contract, how to write a migration function, and backup guidance for production deployments.
 
 ## What's not in the engine
 
