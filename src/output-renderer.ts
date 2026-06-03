@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { NODE_IDS } from "./node-ids";
 import type { WorkflowResult } from "./ipc/workflow";
 import type { CanvasNode } from "./canvas/Node";
 import { escapeHtml } from "./utils";
@@ -307,12 +308,12 @@ async function renderMediaBatch(
 
 function renderTypedOutput(typeId: string, out: unknown, nodeName: string): string {
   switch (typeId) {
-    case "http_request": return renderHttpOutput(out, nodeName);
-    case "ai_prompt":
-    case "ai_agent":    return renderAiOutput(out, nodeName);
+    case NODE_IDS.HTTP_REQUEST: return renderHttpOutput(out, nodeName);
+    case NODE_IDS.AI_PROMPT:
+    case NODE_IDS.AI_AGENT:    return renderAiOutput(out, nodeName);
     case "output":      return renderOutputNodeResult(out, nodeName);
     case "social_upload": return renderSocialUploadOutput(out, nodeName);
-    case "code":
+    case NODE_IDS.CODE:
     case "transform_data": return renderCodeOutput(out, nodeName);
     default:            return renderGenericOutput(out, nodeName);
   }
@@ -508,7 +509,7 @@ function renderGenericOutput(out: unknown, name: string): string {
 function previewForNode(typeId: string, out: unknown): string {
   const obj = out as Record<string, unknown>;
   switch (typeId) {
-    case "http_request": {
+    case NODE_IDS.HTTP_REQUEST: {
       // Rust outputs: { status, body, headers }
       const status = obj?.status ?? obj?.status_code;
       const body   = obj?.body ?? obj?.content;
@@ -517,8 +518,8 @@ function previewForNode(typeId: string, out: unknown): string {
         : "";
       return status ? `HTTP ${status}${preview ? ` · ${preview}` : ""}` : extractPreview(out);
     }
-    case "ai_prompt":
-    case "ai_agent": {
+    case NODE_IDS.AI_PROMPT:
+    case NODE_IDS.AI_AGENT: {
       const content = obj?.content ?? obj?.text ?? obj?.result;
       return typeof content === "string" ? content.slice(0, 60) : extractPreview(out);
     }
@@ -538,9 +539,9 @@ function previewForNode(typeId: string, out: unknown): string {
       const str = typeof value === "string" ? value : JSON.stringify(value);
       return label ? `${label}: ${str.slice(0, 40)}` : str.slice(0, 60);
     }
-    case "schedule":
-    case "manual_trigger":
-    case "webhook": {
+    case NODE_IDS.SCHEDULE:
+    case NODE_IDS.MANUAL_TRIGGER:
+    case NODE_IDS.WEBHOOK: {
       const triggeredAt = obj?.triggered_at as string | undefined;
       const mode = obj?.mode as string | undefined;
       if (triggeredAt) {
@@ -558,7 +559,7 @@ function errorSuggestion(message: string, typeId: string): string {
   const m = message.toLowerCase();
 
   if (m.includes("connection refused") || m.includes("failed to connect")) {
-    return typeId === "http_request"
+    return typeId === NODE_IDS.HTTP_REQUEST
       ? "Check the URL is correct and the server is reachable."
       : "Check the server address and port.";
   }

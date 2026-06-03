@@ -1,5 +1,6 @@
 import type { NodeDescriptor } from "./ipc/workflow";
 import type { Canvas } from "./canvas/Canvas";
+import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 
 type ImportCallback = (obj: Record<string, unknown>) => void;
 type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
@@ -90,15 +91,15 @@ function isN8nWorkflow(obj: Record<string, unknown>): boolean {
 
 const N8N_TYPE_MAP: Record<string, string> = {
   // Already mapped — do not remove
-  "n8n-nodes-base.manualTrigger":      "manual_trigger",
-  "n8n-nodes-base.webhook":            "webhook",
-  "n8n-nodes-base.scheduleTrigger":    "schedule",
-  "n8n-nodes-base.httpRequest":        "http_request",
-  "n8n-nodes-base.code":               "code",
+  "n8n-nodes-base.manualTrigger":      NODE_IDS.MANUAL_TRIGGER,
+  "n8n-nodes-base.webhook":            NODE_IDS.WEBHOOK,
+  "n8n-nodes-base.scheduleTrigger":    NODE_IDS.SCHEDULE,
+  "n8n-nodes-base.httpRequest":        NODE_IDS.HTTP_REQUEST,
+  "n8n-nodes-base.code":               NODE_IDS.CODE,
   "n8n-nodes-base.if":                 "if_condition",
   "n8n-nodes-base.switch":             "switch",
   "n8n-nodes-base.emailSend":          "email_send",
-  "n8n-nodes-base.readWriteFile":      "file",
+  "n8n-nodes-base.readWriteFile":      NODE_IDS.FILE,
   "n8n-nodes-base.set":                "set_variable",
   "n8n-nodes-base.wait":               "wait",
   "n8n-nodes-base.noOp":               "output",
@@ -115,11 +116,24 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.airtable":           "unsupported",
   "n8n-nodes-base.discord":            "discord",
   "n8n-nodes-base.telegram":           "telegram",
-  "n8n-nodes-base.function":           "code",
+  "n8n-nodes-base.function":           NODE_IDS.CODE,
 };
 
 function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknown> {
+  const MAX_IMPORT_NODES     = 200;
+  const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+  const approxBytes = JSON.stringify(n8n).length;
+  if (approxBytes > MAX_IMPORT_FILE_BYTES) {
+    throw new Error(
+      `n8n workflow JSON is too large (${(approxBytes / 1024 / 1024).toFixed(1)} MB) — import limit is 5 MB.`
+    );
+  }
   const n8nNodes = (n8n.nodes as Array<Record<string, unknown>>) ?? [];
+  if (n8nNodes.length > MAX_IMPORT_NODES) {
+    throw new Error(
+      `n8n workflow has ${n8nNodes.length} nodes — import limit is ${MAX_IMPORT_NODES}. Split the workflow and import each part separately.`
+    );
+  }
   const n8nConns = (n8n.connections as Record<string, unknown>) ?? {};
 
   const nodeIdMap = new Map<string, string>(); // n8n name → flowo id
@@ -187,7 +201,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
 function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" {
   const logic   = ["if_condition","switch","loop","stop"];
   const utility = ["delay","wait","transform","json","set_variable","get_variable","output","note"];
-  const ai      = ["ai_prompt","ai_agent","ai_memory","text_splitter"];
+  const ai      = [NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, "ai_memory", "text_splitter"];
   if (logic.includes(typeId))   return "logic";
   if (utility.includes(typeId)) return "utility";
   if (ai.includes(typeId))      return "ai";
@@ -195,8 +209,7 @@ function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" 
 }
 
 function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
-  const noInput = ["manual_trigger","webhook","schedule"];
-  const inputs = noInput.includes(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
+  const inputs = TRIGGER_NODE_IDS.has(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
   const outputs = typeId === "stop" ? [] : [{ id: "output", label: "Out", position: "right" }];
   return { inputs, outputs };
 }

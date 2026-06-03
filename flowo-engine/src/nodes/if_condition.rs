@@ -121,3 +121,88 @@ fn evaluate(expr: &str) -> bool {
         other => other != "undefined",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ExecutionContext, NodeInput};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn make_input(condition: &str) -> NodeInput {
+        NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "condition": condition }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+            },
+        }
+    }
+
+    // ── evaluate() unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn numeric_greater_than_true()  { assert!(evaluate("42 > 20")); }
+    #[test]
+    fn numeric_greater_than_false() { assert!(!evaluate("5 > 20")); }
+    #[test]
+    fn numeric_equal()              { assert!(evaluate("10 == 10")); }
+    #[test]
+    fn numeric_not_equal()         { assert!(evaluate("10 != 5")); }
+    #[test]
+    fn numeric_lte()               { assert!(evaluate("5 <= 5")); }
+    #[test]
+    fn string_eq_case_insensitive(){ assert!(evaluate("ok == OK")); }
+    #[test]
+    fn string_neq()                { assert!(evaluate("yes != no")); }
+    #[test]
+    fn contains_operator()         { assert!(evaluate("hello world contains world")); }
+    #[test]
+    fn contains_miss()             { assert!(!evaluate("hello world contains xyz")); }
+    #[test]
+    fn bare_true_string()          { assert!(evaluate("true")); }
+    #[test]
+    fn bare_false_string()         { assert!(!evaluate("false")); }
+    #[test]
+    fn empty_string_false()        { assert!(!evaluate("")); }
+
+    // ── execute() output shape ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn true_branch_output() {
+        let out = IfConditionNode.execute(make_input("5 > 3")).await;
+        assert!(out.success);
+        assert_eq!(out.output["branch"], "on_true");
+        assert_eq!(out.output["result"], true);
+    }
+
+    #[tokio::test]
+    async fn false_branch_output() {
+        let out = IfConditionNode.execute(make_input("1 > 3")).await;
+        assert!(out.success);
+        assert_eq!(out.output["branch"], "on_false");
+        assert_eq!(out.output["result"], false);
+    }
+
+    #[tokio::test]
+    async fn no_condition_defaults_false() {
+        let input = NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({}),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+            },
+        };
+        let out = IfConditionNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output["branch"], "on_false");
+    }
+}

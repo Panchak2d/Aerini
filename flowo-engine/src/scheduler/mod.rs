@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
 
 use crate::executor::{CredentialResolver, WorkflowExecutor};
 use crate::model::Workflow;
@@ -84,6 +85,8 @@ pub struct SchedulerDaemon {
     code_sandbox_enabled: bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
+    max_concurrent_runs:  usize,
+    run_semaphore:        Arc<Semaphore>,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
 }
@@ -95,6 +98,7 @@ impl SchedulerDaemon {
         cred_store: Arc<dyn CredentialResolver>,
         event_sink: Arc<dyn EventSink>,
     ) -> Self {
+        const DEFAULT_MAX_CONCURRENT_RUNS: usize = 16;
         Self {
             db,
             registry,
@@ -109,6 +113,8 @@ impl SchedulerDaemon {
             code_sandbox_enabled: false,
             parallel_execution:   false,
             max_concurrent_nodes: 8,
+            max_concurrent_runs:  DEFAULT_MAX_CONCURRENT_RUNS,
+            run_semaphore:        Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
             server_max_duration_secs: None,
             file_sandbox_dir: None,
         }
@@ -148,6 +154,15 @@ impl SchedulerDaemon {
     /// Maximum simultaneous node tasks in parallel mode. Default: 8.
     pub fn with_max_concurrent_nodes(mut self, limit: usize) -> Self {
         self.max_concurrent_nodes = limit.max(1);
+        self
+    }
+
+    /// Maximum simultaneous workflow runs across all jobs. Default: 16.
+    /// When the ceiling is reached, new run attempts queue (await) rather than fail.
+    pub fn with_max_concurrent_runs(mut self, limit: usize) -> Self {
+        let limit = limit.max(1);
+        self.max_concurrent_runs = limit;
+        self.run_semaphore = Arc::new(Semaphore::new(limit));
         self
     }
 
@@ -402,6 +417,7 @@ impl SchedulerDaemon {
         let max_concurrent_nodes = self.max_concurrent_nodes;
         let server_max_duration_secs = self.server_max_duration_secs;
         let file_sandbox_dir = self.file_sandbox_dir.clone();
+        let run_semaphore = Arc::clone(&self.run_semaphore);
 
         let trigger = if let Some(t) = trigger_override {
             t
@@ -430,7 +446,7 @@ impl SchedulerDaemon {
                 event_sink, exec_lock, fire_immediately, env_allowlist,
                 shell_exec_disabled, code_exec_disabled, code_sandbox_enabled,
                 parallel_execution, max_concurrent_nodes,
-                server_max_duration_secs, file_sandbox_dir,
+                server_max_duration_secs, file_sandbox_dir, run_semaphore,
             ).await;
             jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
         }));
@@ -485,11 +501,13 @@ async fn run_job_loop(
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
+    run_semaphore:    Arc<Semaphore>,
 ) {
     match trigger {
         TriggerKind::Interval { secs } => {
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
+                    let _permit = run_semaphore.acquire().await;
                     fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
@@ -505,6 +523,7 @@ async fn run_job_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
                 if let Ok(_guard) = exec_lock.try_lock() {
+                    let _permit = run_semaphore.acquire().await;
                     fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
@@ -515,6 +534,7 @@ async fn run_job_loop(
         TriggerKind::Cron { ref expr } => {
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
+                    let _permit = run_semaphore.acquire().await;
                     fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
@@ -539,6 +559,7 @@ async fn run_job_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
                 if let Ok(_guard) = exec_lock.try_lock() {
+                    let _permit = run_semaphore.acquire().await;
                     fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
@@ -564,7 +585,10 @@ async fn run_job_loop(
                     )
                 }));
             }
-            fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+            {
+                let _permit = run_semaphore.acquire().await;
+                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+            }
             db.scheduler_set_status(&workflow_id, "done").ok();
             emit_done(&event_sink, &db, &workflow_id);
         }
@@ -629,6 +653,7 @@ async fn run_job_loop(
                     }
                     Ok(g) => g,
                 };
+                let _permit = run_semaphore.acquire().await;
                 fire_once_with_vars(
                     &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
                     shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes,

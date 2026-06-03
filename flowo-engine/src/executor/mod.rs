@@ -408,7 +408,7 @@ impl WorkflowExecutor {
         if !expr_warnings.is_empty() {
             let mut s = state.write().await;
             for msg in expr_warnings {
-                s.log(Some(&node_def.id), LogLevel::Info, msg);
+                s.log(Some(&node_def.id), LogLevel::Warn, msg);
             }
         }
 
@@ -517,6 +517,7 @@ impl WorkflowExecutor {
 mod tests {
     use super::*;
     use crate::error::EngineError;
+    use crate::migration::CURRENT_VERSION;
     use crate::model::{NodeType, Workflow, WorkflowNode};
     use crate::node::{Node, NodeRegistry};
     use std::collections::HashMap;
@@ -577,7 +578,7 @@ mod tests {
             position: Default::default(),
         };
         Workflow {
-            schema_version: "1.0".to_string(),
+            schema_version: CURRENT_VERSION.to_string(),
             id: "wf1".to_string(),
             name: "Test Workflow".to_string(),
             description: String::new(),

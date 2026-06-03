@@ -155,7 +155,9 @@ impl Default for WorkflowMetadata {
 
 // ── Root workflow document ────────────────────────────────────────────────────
 
-fn default_schema_version() -> String { "1.0".to_string() }
+use crate::migration::CURRENT_VERSION;
+
+fn default_schema_version() -> String { CURRENT_VERSION.to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
@@ -191,7 +193,7 @@ impl Workflow {
     #[allow(dead_code)]
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
-            schema_version: "1.0".to_string(),
+            schema_version: CURRENT_VERSION.to_string(),
             id: id.into(),
             name: name.into(),
             description: String::new(),

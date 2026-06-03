@@ -266,3 +266,40 @@ pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
         NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
     }
 }
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::check_ssrf_ip;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
+    fn v6(s: &str) -> IpAddr { IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()) }
+
+    #[test]
+    fn loopback_blocked()          { assert!(check_ssrf_ip(v4(127, 0, 0, 1)).is_err()); }
+    #[test]
+    fn rfc1918_10_blocked()        { assert!(check_ssrf_ip(v4(10, 0, 0, 1)).is_err()); }
+    #[test]
+    fn rfc1918_172_blocked()       { assert!(check_ssrf_ip(v4(172, 16, 0, 1)).is_err()); }
+    #[test]
+    fn rfc1918_192_blocked()       { assert!(check_ssrf_ip(v4(192, 168, 1, 1)).is_err()); }
+    #[test]
+    fn link_local_169_blocked()    { assert!(check_ssrf_ip(v4(169, 254, 0, 1)).is_err()); }
+    #[test]
+    fn azure_imds_blocked()        { assert!(check_ssrf_ip(v4(168, 63, 129, 16)).is_err()); }
+    #[test]
+    fn public_ip_allowed()         { assert!(check_ssrf_ip(v4(8, 8, 8, 8)).is_ok()); }
+    #[test]
+    fn another_public_allowed()    { assert!(check_ssrf_ip(v4(93, 184, 216, 34)).is_ok()); }
+    #[test]
+    fn ipv6_loopback_blocked()     { assert!(check_ssrf_ip(v6("::1")).is_err()); }
+    #[test]
+    fn ipv6_unique_local_blocked() { assert!(check_ssrf_ip(v6("fc00::1")).is_err()); }
+    #[test]
+    fn ipv6_link_local_blocked()   { assert!(check_ssrf_ip(v6("fe80::1")).is_err()); }
+    #[test]
+    fn ipv4_mapped_private_blocked() {
+        // ::ffff:10.0.0.1 — IPv4-mapped IPv6, must be caught as private
+        assert!(check_ssrf_ip(v6("::ffff:10.0.0.1")).is_err());
+    }
+}

@@ -1,4 +1,5 @@
 import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, type WorkflowResult } from "./ipc/workflow";
+import { TRIGGER_NODE_IDS } from "./node-ids";
 import { serialize } from "./canvas/CanvasSerializer";
 import type { Canvas } from "./canvas/Canvas";
 import {
@@ -681,7 +682,7 @@ export class RunManager {
       const nodes = doc.nodes ?? [];
       // entry node = no incoming edges; simplest check: node_type_id is a known trigger
       const triggerNode = nodes.find(n =>
-        n.node_type_id === "schedule" || n.node_type_id === "webhook"
+        TRIGGER_NODE_IDS.has(n.node_type_id)
       );
       triggerType = triggerNode?.node_type_id ?? null;
     } catch {

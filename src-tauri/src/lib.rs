@@ -8,6 +8,7 @@ use flowo_engine::{
     db::WorkflowDb,
     node::NodeRegistry,
     nodes::register_builtins,
+    nodes::database::start_pool_eviction_task,
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
     EventSink,
@@ -264,6 +265,7 @@ pub fn run() {
             );
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
+            start_pool_eviction_task();
             let registry = Arc::new(registry);
 
             let resolver = Arc::new(StoreCredentialResolver { store: Arc::clone(&cred_store) });

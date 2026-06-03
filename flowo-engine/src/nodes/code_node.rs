@@ -451,3 +451,56 @@ fn write_sandbox_loader() -> std::io::Result<tempfile::NamedTempFile> {
 }
 
 // tokio::process::Command exposes pre_exec() directly on Unix — no CommandExt import needed.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use std::collections::HashMap;
+
+    fn make_input(code: &str, disabled: bool) -> NodeInput {
+        let mut metadata = HashMap::new();
+        if disabled {
+            metadata.insert("__code_disabled".to_string(), serde_json::Value::Bool(true));
+        }
+        NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "code": code }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn code_disabled_flag_returns_error() {
+        let out = CodeNode.execute(make_input("console.log('hi')", true)).await;
+        assert!(!out.success);
+        let err = out.error.expect("expected NodeError");
+        assert_eq!(err.code, "CODE_DISABLED");
+        assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn missing_code_returns_error() {
+        let input = NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({}),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+            },
+        };
+        let out = CodeNode.execute(input).await;
+        assert!(!out.success);
+        let err = out.error.expect("expected NodeError");
+        assert_eq!(err.code, "MISSING_CODE");
+    }
+}

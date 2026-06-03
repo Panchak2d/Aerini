@@ -125,3 +125,86 @@ impl Node for SwitchNode {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_input(field: &str, cases_json: &str, outputs: HashMap<String, Value>) -> NodeInput {
+        NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "field": field, "cases": cases_json }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata:     HashMap::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_to_matching_case() {
+        let mut outputs = HashMap::new();
+        outputs.insert("prev".to_string(), json!({ "status": "ok" }));
+        let input = NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({
+                "field": "prev.status",
+                "cases": r#"[{"match":"ok","port":"case_1"},{"match":"error","port":"case_2"}]"#
+            }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata:     HashMap::new(),
+            },
+        };
+        let out = SwitchNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output["matched_case"], "ok");
+        assert_eq!(out.output["port"], "case_1");
+    }
+
+    #[tokio::test]
+    async fn routes_to_default_on_no_match() {
+        let out = SwitchNode.execute(make_input(
+            "status",
+            r#"[{"match":"ok","port":"case_1"}]"#,
+            HashMap::new(),
+        )).await;
+        assert!(out.success);
+        assert_eq!(out.output["matched_case"], serde_json::Value::Null);
+        assert_eq!(out.output["port"], "default");
+    }
+
+    #[tokio::test]
+    async fn missing_field_returns_error() {
+        let input = NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "cases": r#"[{"match":"ok","port":"case_1"}]"# }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+            },
+        };
+        let out = SwitchNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_FIELD");
+    }
+
+    #[tokio::test]
+    async fn invalid_cases_json_returns_error() {
+        let out = SwitchNode.execute(make_input("status", "not-json", HashMap::new())).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_CASES");
+    }
+}

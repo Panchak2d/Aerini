@@ -85,9 +85,27 @@ fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager>, String> 
 
 // ── sqlx pool (Postgres / MySQL) ──────────────────────────────────────────────
 
+/// Spawns a background task that evicts idle sqlx and Redis pools every 5 minutes.
+/// Call once at application startup (e.g. in main() or plugin setup).
+/// Safe to call multiple times — extra calls are no-ops after the first spawn.
+pub fn start_pool_eviction_task() {
+    use std::sync::Once;
+    static STARTED: Once = Once::new();
+    STARTED.call_once(|| {
+        tokio::spawn(async {
+            let evict_after = Duration::from_secs(1800);
+            loop {
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                PG_POOLS.retain(|_, v| v.last_used.elapsed() < evict_after);
+                MYSQL_POOLS.retain(|_, v| v.last_used.elapsed() < evict_after);
+                REDIS_CONNS.retain(|_, v| v.last_used.elapsed() < evict_after);
+            }
+        });
+    });
+}
+
 async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
     let key = pool_key(url);
-    PG_POOLS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
     if let Some(mut entry) = PG_POOLS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
@@ -101,7 +119,6 @@ async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
 
 async fn get_mysql_pool(url: &str) -> Result<sqlx::MySqlPool, String> {
     let key = pool_key(url);
-    MYSQL_POOLS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
     if let Some(mut entry) = MYSQL_POOLS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
@@ -129,7 +146,6 @@ fn get_redis_client(url: &str) -> Result<redis::Client, String> {
 /// Returns a cached MultiplexedConnection for `url`, creating one if absent.
 async fn get_redis_conn(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
     let key = pool_key(url);
-    REDIS_CONNS.retain(|_, v| v.last_used.elapsed() < Duration::from_secs(1800));
     if let Some(mut entry) = REDIS_CONNS.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());

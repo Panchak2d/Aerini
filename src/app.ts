@@ -1,4 +1,5 @@
 import { Canvas } from "./canvas/Canvas";
+import { NODE_IDS, TRIGGER_NODE_IDS, DANGEROUS_NODE_IDS } from "./node-ids";
 import { switchTab, openPanel, closePanel } from "./panels/NodeConfigPanel";
 import { CredentialPanel } from "./panels/CredentialPanel";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
@@ -130,7 +131,7 @@ async function init() {
     if (!btn) return;
 
     const hasSchedulableTrigger = [...canvas.nodes.values()].some(n =>
-      n.data.node_type_id === "schedule" || n.data.node_type_id === "webhook"
+      TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
     );
 
     const wrap = document.getElementById("always-on-wrap");
@@ -169,7 +170,7 @@ async function init() {
     const btn = document.getElementById("btn-always-on");
     if (btn) {
       const hasSchedulableTrigger = [...canvas.nodes.values()].some(n =>
-        n.data.node_type_id === "schedule" || n.data.node_type_id === "webhook"
+        TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
       );
       btn.classList.toggle("hidden", !hasSchedulableTrigger);
     }
@@ -316,11 +317,9 @@ async function init() {
   });
 
   const approvedForExecution = new Set<string>();
-  const DANGEROUS_NODE_TYPES = new Set(["shell_exec", "code", "file"]);
-
   const checkDangerousNodes = async (workflowId: string): Promise<boolean> => {
     const dangerousNodes = [...canvas.nodes.values()]
-      .filter(n => DANGEROUS_NODE_TYPES.has(n.data.node_type_id));
+      .filter(n => DANGEROUS_NODE_IDS.has(n.data.node_type_id as string));
     if (!dangerousNodes.length) return true;
     const dangerousIds = dangerousNodes.map(n => n.data.id).sort().join(",");
     const approvalKey = `${workflowId}::${dangerousIds}`;
@@ -745,7 +744,7 @@ function injectNodejsBanner(canvas: import("./canvas/Canvas").Canvas): void {
   // If the current workflow already has a Code node, show a one-time toast
   // so the warning is visible without opening the palette.
   const hasCodeNode = Array.from(canvas.nodes.values()).some(
-    n => n.data.node_type_id === "code"
+    n => n.data.node_type_id === NODE_IDS.CODE
   );
   if (hasCodeNode) {
     // Defer to ensure toast infrastructure is ready.
@@ -772,7 +771,7 @@ function validateWorkflow(canvas: Canvas): string[] {
 
   // Must have at least one trigger node
   const hasTrigger = [...nodes.values()].some(n =>
-    ["manual_trigger", "webhook", "schedule"].includes(n.data.node_type_id)
+    TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
   );
   if (!hasTrigger) {
     errors.push("No trigger node found. Add a Manual Trigger, Webhook, or Schedule.");
@@ -780,14 +779,14 @@ function validateWorkflow(canvas: Canvas): string[] {
 
   // Required field checks per node type
   const REQUIRED: Record<string, string[]> = {
-    http_request: ["url", "method"],
-    email_send:   ["to", "subject"],
-    shell_exec:   ["command"],
-    code:         ["code"],
-    ai_prompt:    ["prompt"],
-    ai_agent:     ["goal"],
-    schedule:     ["mode"],
-    database:     ["db_path", "query"],
+    [NODE_IDS.HTTP_REQUEST]: ["url", "method"],
+    email_send:              ["to", "subject"],
+    [NODE_IDS.SHELL_EXEC]:   ["command"],
+    [NODE_IDS.CODE]:         ["code"],
+    [NODE_IDS.AI_PROMPT]:    ["prompt"],
+    [NODE_IDS.AI_AGENT]:     ["goal"],
+    [NODE_IDS.SCHEDULE]:     ["mode"],
+    database:                ["db_path", "query"],
   };
 
   for (const node of nodes.values()) {
@@ -1417,7 +1416,7 @@ function initOnboarding(canvas: Canvas, wfManager: WorkflowManager): void {
       description: "",
       nodes: [
         {
-          id: "n1", node_type_id: "manual_trigger", node_type: "action",
+          id: "n1", node_type_id: NODE_IDS.MANUAL_TRIGGER, node_type: "action",
           name: "Start", position: { x: 120, y: 200 }, config: {},
           credentials: {}, retry: { max_attempts: 1, backoff_ms: 500 },
           fallback_node: null,
@@ -1426,7 +1425,7 @@ function initOnboarding(canvas: Canvas, wfManager: WorkflowManager): void {
           ports: { inputs: [], outputs: [{ id: "output", label: "Start", position: "right" }] },
         },
         {
-          id: "n2", node_type_id: "http_request", node_type: "action",
+          id: "n2", node_type_id: NODE_IDS.HTTP_REQUEST, node_type: "action",
           name: "Fetch Data", position: { x: 380, y: 200 },
           config: { url: "https://httpbin.org/get", method: "GET" },
           credentials: {}, retry: { max_attempts: 3, backoff_ms: 500 },

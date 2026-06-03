@@ -84,7 +84,11 @@ async function migrateFromLocalStorage(workflowId: string, workflowName: string)
         ran_at: o.ranAt, success: o.success, duration_ms: o.durationMs,
         result_json: JSON.stringify(o.result),
       };
-      await invoke("save_run_record", { record }).catch(() => {});
+      try {
+        await invoke("save_run_record", { record });
+      } catch (e) {
+        console.warn("Failed to save run record:", e);
+      }
     }
   } catch { /* ignore */ }
   localStorage.removeItem(LS_KEY);

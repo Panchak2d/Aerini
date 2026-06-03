@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { NODE_IDS } from "./node-ids";
 import type { CanvasNode } from "./canvas/Node";
 import { listCredentials } from "./ipc/credentials";
 import { runWorkflow } from "./ipc/workflow";
@@ -157,8 +158,8 @@ export async function showPopover(
     body.appendChild(mkSection("Configuration"));
 
     // AI cost warning for scheduled AI nodes
-    const isScheduled = node.data.node_type_id === "schedule";
-    const isAiNode    = node.data.node_type_id === "ai_prompt" || node.data.node_type_id === "ai_agent";
+    const isScheduled = node.data.node_type_id === NODE_IDS.SCHEDULE;
+    const isAiNode    = node.data.node_type_id === NODE_IDS.AI_PROMPT || node.data.node_type_id === NODE_IDS.AI_AGENT;
     if (isAiNode) {
       const warn = document.createElement("div");
       warn.className = "config-hint config-hint-warn";
@@ -664,7 +665,7 @@ export async function showPopover(
   // Credentials
   const hasCredField = Object.keys(props).some(k => CREDENTIAL_KEYS.has(k))
     || Object.keys(node.data.credentials).length > 0
-    || node.data.node_type_id === "http_request";
+    || node.data.node_type_id === NODE_IDS.HTTP_REQUEST;
   if (hasCredField) {
     const credKey = props["api_key"] !== undefined ? "api_key"
       : props["password"] !== undefined ? "password"
@@ -672,7 +673,7 @@ export async function showPopover(
     body.appendChild(mkSection("Connection"));
 
     // Auth mode selector for HTTP nodes
-    if (node.data.node_type_id === "http_request") {
+    if (node.data.node_type_id === NODE_IDS.HTTP_REQUEST) {
       body.appendChild(mkField("Auth Mode", () => {
         const modes = [
           { value: "none",           label: "None" },
@@ -728,7 +729,7 @@ export async function showPopover(
   }, "1 = no retry"));
 
   // Webhook — inform user of one-shot semantics and replay-attack limitation
-  if (node.data.node_type_id === "webhook") {
+  if (node.data.node_type_id === NODE_IDS.WEBHOOK) {
     const webhookNote = document.createElement("div");
     webhookNote.className = "popover-info-banner";
     webhookNote.innerHTML = `<strong>Run Now</strong> waits for one incoming request, then stops. For a persistent listener, use <strong>Schedule Run</strong>.`;
@@ -953,7 +954,7 @@ async function testSingleNode(node: CanvasNode, onChange: () => void): Promise<v
     nodes: [
       {
         id: triggerId,
-        node_type_id: "manual_trigger",
+        node_type_id: NODE_IDS.MANUAL_TRIGGER,
         node_type: "action",
         name: "Test Trigger",
         config: {},

@@ -104,3 +104,9 @@ You can use, modify, and distribute Flowo freely. If you modify Flowo and run it
 Flowo is open source under AGPL-3.0. A commercial license is available for proprietary use — no AGPL obligations, priority support included.
 
 [View pricing →](https://panchak2d.github.io/flowo/pricing)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+**CLA:** Required before your first PR is merged. [CLA Assistant](https://cla-assistant.io) posts a one-click sign link on your first PR — GitHub OAuth, done in seconds.

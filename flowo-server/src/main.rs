@@ -40,6 +40,7 @@ use flowo_engine::{
     model::Workflow,
     node::NodeRegistry,
     nodes::register_builtins,
+    nodes::database::start_pool_eviction_task,
     scheduler::{extract_trigger, SchedulerDaemon, SchedulerDb},
 };
 
@@ -372,6 +373,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
 
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry, &data_dir, None);
+    start_pool_eviction_task();
     let registry = Arc::new(registry);
 
     let log   = LogBuffer::new(1000);

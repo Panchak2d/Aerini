@@ -361,12 +361,13 @@ fn try_resolve_function(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::CURRENT_VERSION;
     use crate::model::{ExecutionContext, WorkflowNode};
     use serde_json::json;
 
     fn make_workflow(nodes: Vec<(&str, &str)>) -> Workflow {
         Workflow {
-            schema_version: "1.0".to_string(),
+            schema_version: CURRENT_VERSION.to_string(),
             id: "test_wf".to_string(),
             name: "Test Workflow".to_string(),
             description: String::new(),
