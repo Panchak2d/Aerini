@@ -10,6 +10,7 @@ use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
 static NODE_BIN: OnceLock<&'static str> = OnceLock::new();
 /// Guards the macOS partial-sandbox warning so it fires once per process, not once per execution.
+#[cfg(target_os = "macos")]
 static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 
 /// ESM loader script injected when sandbox mode is active.

@@ -265,7 +265,7 @@ pub fn run() {
             );
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
-            start_pool_eviction_task();
+            start_pool_eviction_task(tauri::async_runtime::handle().inner());
             let registry = Arc::new(registry);
 
             let resolver = Arc::new(StoreCredentialResolver { store: Arc::clone(&cred_store) });

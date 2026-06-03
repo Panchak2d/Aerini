@@ -88,11 +88,15 @@ fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager>, String> 
 /// Spawns a background task that evicts idle sqlx and Redis pools every 5 minutes.
 /// Call once at application startup (e.g. in main() or plugin setup).
 /// Safe to call multiple times — extra calls are no-ops after the first spawn.
-pub fn start_pool_eviction_task() {
+///
+/// `rt` must be a handle to a running Tokio runtime. Pass
+/// `tokio::runtime::Handle::current()` when inside `#[tokio::main]`, or
+/// `tauri::async_runtime::handle().inner()` inside Tauri's `setup()` callback.
+pub fn start_pool_eviction_task(rt: &tokio::runtime::Handle) {
     use std::sync::Once;
     static STARTED: Once = Once::new();
     STARTED.call_once(|| {
-        tokio::spawn(async {
+        rt.spawn(async {
             let evict_after = Duration::from_secs(1800);
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;

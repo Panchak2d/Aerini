@@ -8,7 +8,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use rand::RngCore;
+use rand_core::RngCore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
