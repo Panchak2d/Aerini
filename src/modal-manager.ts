@@ -1,9 +1,7 @@
 import type { NodeDescriptor } from "./ipc/workflow";
-import type { Canvas } from "./canvas/Canvas";
 import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 
 type ImportCallback = (obj: Record<string, unknown>) => void;
-type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
 
 let _allNodes: NodeDescriptor[] = [];
 let _pendingImport: Record<string, unknown> | null = null;
