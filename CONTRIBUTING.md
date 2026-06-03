@@ -5,6 +5,20 @@ The codebase is split into three Cargo crates and a TypeScript frontend.
 
 ---
 
+## Contributor License Agreement
+
+Before your first pull request can be merged, you must sign the
+[Contributor License Agreement](CLA.md).
+
+**Individual contributors:** This project uses [CLA Assistant](https://cla-assistant.io). On your first PR it posts a comment with a one-click sign link — GitHub OAuth, done in seconds.
+
+**Corporate contributors (contributing on behalf of your employer):**
+Your company must sign the Corporate CLA before any code from your employees
+can be merged. See [CLA.md](CLA.md) Section C8 for instructions. See
+[CONTACT.md](CONTACT.md) for the contact address before opening a PR.
+
+---
+
 ## Architecture
 
 ```
@@ -35,7 +49,13 @@ npm run dev       # Vite dev server + Tauri window
 npm run build     # production bundle → src-tauri/target/release/bundle/
 ```
 
-> **`dist/` policy:** The `dist/` directory contains the compiled frontend assets that Tauri reads at runtime. It is committed to this repository intentionally (Tauri reads from `dist/` during the build). It is also listed in `.gitignore` to prevent accidental re-commits of stale builds. **Do not remove it from the repo.** When contributing, rebuild it with `npm run build` before running `cargo tauri build`, but do not commit the rebuilt `dist/` unless you are the maintainer cutting a release.
+> ⚠️ **`dist/` is intentionally committed — do not delete it or add it to `.gitignore`.**
+>
+> Tauri reads compiled frontend assets from `dist/` at build time. Without it, `cargo tauri build` fails.
+> Only sourcemaps (`dist/**/*.map`) are gitignored — `dist/` itself is not.
+>
+> When contributing: rebuild with `npm run build` before `cargo tauri build` if you changed the frontend,
+> but **do not commit the rebuilt `dist/`** unless you are a maintainer cutting a release.
 
 ---
 
@@ -200,7 +220,7 @@ There is no end-to-end test harness yet. Manual verification steps go in your PR
 ## Opening a pull request
 
 1. Fork, branch from `main`, keep the branch focused on one change.
-2. Run `cargo clippy -p flowo-engine -- -D warnings` and fix all warnings before opening.
+2. Run `cargo clippy -p flowo-engine -p flowo-server -- -D warnings` and fix all warnings before opening.
 3. Run `cargo test -p flowo-engine` — all tests must pass.
 4. If you touch any IPC command or serde type — call it out explicitly in the PR description.
 5. If you add a node — include a short description of what it does and what credentials it needs.
@@ -219,3 +239,55 @@ All user data is written to the OS application data directory:
 | Linux | `~/.local/share/com.flowo.app/` |
 
 Delete this directory to reset all workflows, credentials, and run history during development.
+
+---
+
+## Building from Source
+
+### Requirements
+
+| Tool | Version | Install |
+|------|---------|---------|
+| Rust | 1.77+ | [rustup.rs](https://rustup.rs/) |
+| Node.js | 18+ | [nodejs.org](https://nodejs.org/) — required to build the frontend and for the Code (JS) node |
+| Tauri CLI | 2.x | `cargo install tauri-cli --version "^2" --locked` |
+
+### Steps
+
+```bash
+git clone https://github.com/Panchak2d/flowo
+cd flowo
+npm install
+npm run dev
+```
+
+`npm run dev` compiles the Rust code on the first run, which takes 2–5 minutes. After that, the Flowo window opens.
+
+### Building an installer
+
+```bash
+npm run build
+```
+
+The installer appears in `src-tauri/target/release/bundle/`:
+
+| Platform | File | How to install |
+|---|---|---|
+| macOS | `.dmg` in `macos/` | Open it, drag Flowo to Applications |
+| Windows | `.exe` or `.msi` in `msi/` | Run the installer |
+| Linux | `.AppImage` in `appimage/` | `chmod +x Flowo*.AppImage` then run it |
+
+### Server binary only (no desktop)
+
+To build `flowo-server` without the Tauri/desktop toolchain:
+
+```bash
+cargo build --release -p flowo-server
+```
+
+For a static Linux binary (recommended for server deployments):
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl -p flowo-server
+```

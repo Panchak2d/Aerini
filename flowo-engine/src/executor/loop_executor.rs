@@ -129,7 +129,13 @@ impl WorkflowExecutor {
 
             // Build input with current state (includes __loop_{id}_index variable
             // written at end of previous iteration, or absent on iteration 0).
-            let loop_input = self.build_input(&workflow, loop_node_def, state).await;
+            let loop_input = match self.build_input(&workflow, loop_node_def, state).await {
+                Ok(input) => input,
+                Err(failure) => {
+                    let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
+                    return Err(format!("Loop node '{}' build_input failed: {}", loop_node_id, msg));
+                }
+            };
             let loop_output = loop_node_impl.execute(loop_input).await;
 
             if !loop_output.success {
@@ -193,7 +199,15 @@ impl WorkflowExecutor {
                     format!("Body node type '{}' not registered", body_def.node_type_id)
                 })?;
 
-                let body_input = self.build_input(&workflow, body_def, state).await;
+                let body_input = match self.build_input(&workflow, body_def, state).await {
+                    Ok(input) => input,
+                    Err(failure) => {
+                        let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
+                        state.write().await.mark_failed(body_id, failure, 1);
+                        self.emit_node_status(&workflow.id, body_id, "error");
+                        return Err(format!("Loop body node '{}' build_input failed: {}", body_id, msg));
+                    }
+                };
 
                 // Validate body node input. In strict mode, fail the loop iteration.
                 // In non-strict mode, log a warning to the execution log and continue.

@@ -82,6 +82,11 @@ pub struct WorkflowExecutor {
     pub(super) cancel_token: Option<CancellationToken>,
     // Server-level ceiling applied to every workflow regardless of per-workflow max_duration_secs.
     pub(super) server_max_duration_secs: Option<u64>,
+    // When true, nodes gated on admin scope (e.g. allow_raw_sql) are unlocked.
+    pub(super) caller_is_admin: bool,
+    // When true, Code (JS) nodes run with module import restrictions and OS resource limits.
+    // Only meaningful when code_exec_disabled is false.
+    pub(super) code_sandbox_enabled: bool,
 }
 
 impl WorkflowExecutor {
@@ -89,7 +94,7 @@ impl WorkflowExecutor {
         registry:            Arc<NodeRegistry>,
         credential_resolver: Arc<dyn CredentialResolver>,
     ) -> Self {
-        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None }
+        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None, caller_is_admin: false, code_sandbox_enabled: false }
     }
 
     /// Restrict `{{$env.VAR}}` expressions to the listed variable names.
@@ -165,6 +170,26 @@ impl WorkflowExecutor {
     /// Values below 10 are clamped to 10; values above 86400 are clamped to 86400.
     pub fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
         self.server_max_duration_secs = secs.map(|s| s.clamp(10, 86400));
+        self
+    }
+
+    /// Grant admin-level node permissions (e.g. `allow_raw_sql`) to this executor.
+    /// Should be set to `true` only when the caller holds the `admin` API scope.
+    pub fn with_caller_is_admin(mut self, is_admin: bool) -> Self {
+        self.caller_is_admin = is_admin;
+        self
+    }
+
+    /// Enable Code (JS) node sandboxing.
+    /// When true, the Code node subprocess is launched with:
+    ///   - `--disallow-code-generation-from-strings`
+    ///   - A loader that blocks dangerous built-in module imports
+    ///     (child_process, fs, fs/promises, net, http, https, dgram, dns, os)
+    ///   - CPU and memory resource limits (Linux only, via setrlimit)
+    /// Desktop mode (sandbox = false): full Node.js stdlib available as documented.
+    /// Server mode with --allow-code: sandbox defaults to true; admin may disable.
+    pub fn with_code_sandbox(mut self, enabled: bool) -> Self {
+        self.code_sandbox_enabled = enabled;
         self
     }
 
@@ -331,15 +356,47 @@ impl WorkflowExecutor {
         workflow: &Workflow,
         node_def: &crate::model::WorkflowNode,
         state:    &SharedExecutionState,
-    ) -> NodeInput {
+    ) -> Result<NodeInput, NodeOutput> {
         let (raw_input, ctx, exec_id) = {
             let s = state.read().await;
             (node_def.config.clone(), s.snapshot(), s.execution_id.clone())
         };
 
-        let mut input = raw_input;
+        // Resolve expressions first so credential values are never passed through
+        // the expression engine. A credential containing `{{...}}` must not expand
+        // against the current execution context (prevents credential-value injection
+        // in shared-server deployments).
+
+        // SECURITY: Expression interpolation in SQL query strings is blocked unconditionally.
+        // Post-resolution heuristics (single-quote check) cannot catch numeric injection —
+        // e.g. {{val}} resolving to `1 OR 1=1` produces no quotes. The only safe fix is
+        // to reject {{...}} in SQL queries before resolution. All dynamic values must use
+        // `?` placeholders and the `params` array.
+        if node_def.node_type_id == "database" {
+            if let Some(query_raw) = raw_input["query"].as_str() {
+                if query_raw.contains("{{") {
+                    return Err(NodeOutput::failure(NodeError::unrecoverable(
+                        "SQL_EXPRESSION_BLOCKED",
+                        format!(
+                            "Node '{}': the `query` field contains `{{{{...}}}}` expression \
+                             interpolation. Values are inserted directly into the SQL string \
+                             and cannot be safely sanitized — numeric injection (e.g. `1 OR 1=1`) \
+                             produces no quotes and bypasses all heuristics. Use `?` placeholders \
+                             and the `params` array for all dynamic values. Example: \
+                             query: \"SELECT * FROM t WHERE id = ?\" with \
+                             params: [\"{{{{node.output.id}}}}\"].",
+                            node_def.name
+                        ),
+                    )));
+                }
+            }
+        }
+
+        let (mut resolved_input, expr_warnings) =
+            crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.env_allowlist.as_deref());
+
         if !node_def.credentials.is_empty() {
-            if let Some(obj) = input.as_object_mut() {
+            if let Some(obj) = resolved_input.as_object_mut() {
                 for (key, credential_id) in &node_def.credentials {
                     if let Some(secret) = self.credential_resolver.resolve(credential_id).await {
                         obj.insert(key.clone(), Value::String(secret));
@@ -348,9 +405,6 @@ impl WorkflowExecutor {
             }
         }
 
-        let (resolved_input, expr_warnings) =
-            crate::expression::resolve_all_strings(&input, workflow, &ctx, self.env_allowlist.as_deref());
-
         if !expr_warnings.is_empty() {
             let mut s = state.write().await;
             for msg in expr_warnings {
@@ -358,7 +412,7 @@ impl WorkflowExecutor {
             }
         }
 
-        NodeInput {
+        Ok(NodeInput {
             node_id:      node_def.id.clone(),
             workflow_id:  workflow.id.clone(),
             execution_id: exec_id,
@@ -377,9 +431,13 @@ impl WorkflowExecutor {
                 if self.code_exec_disabled {
                     ctx.metadata.insert("__code_disabled".to_string(), Value::Bool(true));
                 }
+                if self.code_sandbox_enabled {
+                    ctx.metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
+                }
+                ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.caller_is_admin));
                 ctx
             },
-        }
+        })
     }
 
     pub(super) async fn execute_with_retry(
@@ -527,6 +585,8 @@ mod tests {
             edges: vec![],
             metadata: Default::default(),
             max_duration_secs,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
         }
     }
 

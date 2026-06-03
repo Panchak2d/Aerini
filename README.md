@@ -87,6 +87,8 @@ The first build takes 2–5 minutes while Rust compiles. After that, changes reb
 
 To produce a standalone installer: `npm run build`. The output goes to `src-tauri/target/release/bundle/`.
 
+> `dist/` is intentionally committed — Tauri reads frontend assets from it at build time. Do not add it to `.gitignore`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ---
 
 ## License
@@ -94,3 +96,11 @@ To produce a standalone installer: `npm run build`. The output goes to `src-taur
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
 You can use, modify, and distribute Flowo freely. If you modify Flowo and run it as a network-accessible service, you must release your modifications under AGPL-3.0.
+
+---
+
+## Commercial licensing
+
+Flowo is open source under AGPL-3.0. A commercial license is available for proprietary use — no AGPL obligations, priority support included.
+
+[View pricing →](https://panchak2d.github.io/flowo/pricing)

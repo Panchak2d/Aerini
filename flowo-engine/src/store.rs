@@ -289,9 +289,120 @@ impl CredentialStore {
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
             }
 
+            // On Windows, set a DACL that grants access only to the current user,
+            // mirroring the Unix 0o600 intent.
+            #[cfg(windows)]
+            set_owner_only_acl(key_path)
+                .map_err(|e| EngineError::Encryption(e.to_string()))?;
+
             Ok(key.to_vec())
         }
     }
+}
+
+
+/// Sets a DACL on `path` that grants full control to the file owner only,
+/// mirroring Unix `chmod 0600`. Only compiled on Windows targets.
+#[cfg(windows)]
+fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{
+        SetNamedSecurityInfoW, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, InitializeAcl, AddAccessAllowedAce, GetTokenInformation,
+        TOKEN_USER, TokenUser, ACL_REVISION,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, CloseHandle};
+
+    // Encode path as a null-terminated wide string.
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    unsafe {
+        // Open the current process token to get the owner SID.
+        let mut token: HANDLE = INVALID_HANDLE_VALUE;
+        if windows_sys::Win32::Security::OpenProcessToken(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            windows_sys::Win32::Security::TOKEN_QUERY,
+            &mut token,
+        ) == 0 {
+            return Err(format!(
+                "OpenProcessToken failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+
+        // Query token for the user SID.
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            CloseHandle(token);
+            return Err("GetTokenInformation returned zero size — unexpected security configuration".to_string());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed,
+        ) == 0 {
+            CloseHandle(token);
+            return Err(format!(
+                "GetTokenInformation failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        CloseHandle(token);
+
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let sid = user.User.Sid;
+
+        // Build a minimal ACL containing one allow-all ACE for the owner SID.
+        // Typical SID + ACE overhead is well under 256 bytes.
+        // Use Vec<u32> (not Vec<u8>) to guarantee 4-byte alignment for the ACL header.
+        const ACL_BUF_BYTES: usize = 256;
+        let mut acl_buf = vec![0u32; ACL_BUF_BYTES / 4];
+        if InitializeAcl(acl_buf.as_mut_ptr() as *mut ACL, ACL_BUF_BYTES as u32, ACL_REVISION as u32) == 0 {
+            return Err(format!(
+                "InitializeAcl failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        if AddAccessAllowedAce(
+            acl_buf.as_mut_ptr() as *mut ACL,
+            ACL_REVISION as u32,
+            FILE_ALL_ACCESS,
+            sid,
+        ) == 0 {
+            return Err(format!(
+                "AddAccessAllowedAce failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+
+        // Apply the ACL to the file. PROTECTED_DACL_SECURITY_INFORMATION clears
+        // inherited ACEs so only the explicit owner ACE remains.
+        let rc = SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl_buf.as_mut_ptr() as *mut ACL,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: {}", rc));
+        }
+    }
+    Ok(())
 }
 
 pub struct StoreCredentialResolver {

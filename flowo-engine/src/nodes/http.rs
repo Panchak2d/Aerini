@@ -34,9 +34,16 @@ fn shared_http_client() -> reqwest::Client {
 ///
 /// Static checks (scheme, IP literal, known-bad hostnames) run first.
 /// For domain URLs, the hostname is resolved via Tokio DNS and every returned
-/// IP is validated before the request is sent. This narrows the DNS-rebinding
-/// attack window to the gap between this lookup and the actual TCP connect.
-/// A network-level egress firewall remains the strongest mitigation.
+/// IP is validated before the request is sent.
+///
+/// **TOCTOU gap:** a TOCTOU window exists between this DNS pre-check and the
+/// actual TCP connect. A malicious DNS server can return a public IP during
+/// validation and a private IP on the actual connection (DNS rebinding).
+/// This is unavoidable at the application layer — this check is defence-in-depth.
+///
+/// **Required mitigation:** configure a network-level egress firewall to block
+/// outbound TCP connections to private IP ranges. The application-layer check
+/// alone does not provide a complete security boundary.
 async fn check_ssrf(raw_url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(raw_url)
         .map_err(|e| format!("Invalid URL: {}", e))?;

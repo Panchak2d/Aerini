@@ -174,6 +174,17 @@ pub struct Workflow {
     /// The executor clamps values to [10, 86400] seconds.
     #[serde(default)]
     pub max_duration_secs: Option<u64>,
+    /// When true, independent branches run concurrently via the parallel executor.
+    /// Default: false — existing workflows are unaffected (sequential-safe default).
+    /// Enabling this for workflows with ordered side-effects (Stripe → Slack → Email)
+    /// may cause non-deterministic execution order; opt in only where branches are
+    /// truly independent.
+    #[serde(default)]
+    pub parallel_execution: bool,
+    /// Maximum concurrent node tasks when `parallel_execution` is true.
+    /// `None` = use executor default (8). Reduce if hitting external rate limits.
+    #[serde(default)]
+    pub max_concurrent_nodes: Option<usize>,
 }
 
 impl Workflow {
@@ -188,6 +199,8 @@ impl Workflow {
             edges: vec![],
             metadata: WorkflowMetadata::default(),
             max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
         }
     }
 

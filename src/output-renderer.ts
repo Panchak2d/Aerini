@@ -22,15 +22,15 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
   const nodeCount  = Object.keys(result.node_outputs).length;
   const errorCount = result.logs.filter(l => l.level === "error").length;
 
-  const statusColor = result.success ? "var(--green)" : "var(--red)";
   const statusText  = result.success ? "Workflow completed successfully" : "Workflow stopped with an error";
   const badge       = result.success ? "OK" : "FAIL";
+  const statusClass = result.success ? "success" : "error";
 
   let html = `
-    <div class="sum-header" style="border-left:3px solid ${statusColor}">
-      <span class="sum-badge" style="background:${statusColor}">${badge}</span>
+    <div class="sum-header sum-header--${statusClass}">
+      <span class="sum-badge sum-badge--${statusClass}">${badge}</span>
       <div>
-        <div class="sum-title" style="color:${statusColor}">${statusText}</div>
+        <div class="sum-title sum-title--${statusClass}">${statusText}</div>
         ${duration ? `<div class="sum-meta">${nodeCount} node${nodeCount !== 1 ? "s" : ""} · ${duration}${errorCount ? ` · ${errorCount} error${errorCount !== 1 ? "s" : ""}` : ""}</div>` : ""}
       </div>
     </div>`;
@@ -44,13 +44,13 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
       const name    = node?.data.name ?? cleanNodeId(id);
       const typeId  = node?.data.node_type_id ?? "";
       const failed  = result.logs.some(l => l.node_id === id && l.level === "error");
-      const color   = failed ? "var(--red)" : "var(--green)";
       const mark    = failed ? "✕" : "✓";
+      const markClass = failed ? "err" : "ok";
       const preview = previewForNode(typeId, out);
 
       html += `
         <div class="sum-node-row">
-          <span class="sum-node-mark" style="color:${color}">${mark}</span>
+          <span class="sum-node-mark sum-node-mark--${markClass}">${mark}</span>
           <span class="sum-node-name">${escapeHtml(name)}</span>
           <span class="sum-node-type">${typeLabel(typeId)}</span>
           <span class="sum-node-preview">${escapeHtml(preview)}</span>
@@ -173,11 +173,11 @@ export function renderLogsView(result: WorkflowResult): string {
     return `<div class="res-empty">No messages to show</div>`;
   }
   return `<div class="log-list">${result.logs.map(l => {
-    const mark  = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "INF";
-    const color = l.level === "error" ? "var(--red)" : l.level === "warn" ? "var(--amber)" : "var(--t3)";
-    const t     = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const mark      = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "INF";
+    const markClass = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "info";
+    const t         = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     return `<div class="log-line">
-      <span class="log-mark" style="color:${color}">${mark}</span>
+      <span class="log-mark log-mark--${markClass}">${mark}</span>
       <span class="log-time">${t}</span>
       <span class="log-msg">${escapeHtml(l.message)}</span>
     </div>`;
@@ -186,11 +186,11 @@ export function renderLogsView(result: WorkflowResult): string {
 
 export function renderDebugView(result: WorkflowResult): string {
   return result.logs.map(l => {
-    const mark  = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "   ";
-    const color = l.level === "error" ? "var(--red)" : l.level === "warn" ? "var(--amber)" : "var(--t3)";
-    const t     = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const node  = l.node_id ? ` [${l.node_id.slice(0, 12)}]` : "";
-    return `<span style="color:${color}">${mark}</span> <span style="color:var(--t3)">${t}${node}</span> ${escapeHtml(l.message)}`;
+    const mark      = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "   ";
+    const markClass = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "info";
+    const t         = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const node      = l.node_id ? ` [${l.node_id.slice(0, 12)}]` : "";
+    return `<span class="dbg-mark dbg-mark--${markClass}">${mark}</span> <span class="dbg-time">${t}${node}</span> ${escapeHtml(l.message)}`;
   }).join("\n");
 }
 
@@ -218,7 +218,7 @@ async function renderMediaBatch(
   header.className = "res-node-header";
   header.innerHTML = `
     <span class="res-node-name">${escapeHtml(name)}</span>
-    <span class="res-status-badge" style="color:var(--t3)">${count} file${count !== 1 ? "s" : ""}</span>`;
+    <span class="res-status-badge res-status-badge--muted">${count} file${count !== 1 ? "s" : ""}</span>`;
   container.appendChild(header);
 
   if (!count) {
@@ -326,7 +326,7 @@ function renderHttpOutput(out: unknown, name: string): string {
   const headers = obj?.headers as Record<string, string> | undefined;
 
   const statusNum   = typeof status === "string" ? parseInt(status, 10) : (status ?? 0);
-  const statusColor = statusNum && statusNum < 400 ? "var(--green)" : statusNum >= 400 ? "var(--red)" : "var(--t3)";
+  const statusClass = statusNum && statusNum < 400 ? "success" : statusNum >= 400 ? "error" : "muted";
   const statusText  = status ? `HTTP ${status}` : "Response";
 
   let bodyHtml = "";
@@ -356,7 +356,7 @@ function renderHttpOutput(out: unknown, name: string): string {
   return `
     <div class="res-node-header">
       <span class="res-node-name">${escapeHtml(name)}</span>
-      <span class="res-status-badge" style="color:${statusColor}">${statusText}</span>
+      <span class="res-status-badge res-status-badge--${statusClass}">${statusText}</span>
     </div>
     ${bodyHtml}
     ${headersHtml}`;
@@ -397,7 +397,7 @@ function renderOutputNodeResult(out: unknown, name: string): string {
   return `
     <div class="res-node-header">
       <span class="res-node-name">${escapeHtml(label)}</span>
-      ${typeStr ? `<span class="res-status-badge" style="color:var(--t3)">${escapeHtml(typeStr)}</span>` : ""}
+      ${typeStr ? `<span class="res-status-badge res-status-badge--muted">${escapeHtml(typeStr)}</span>` : ""}
     </div>
     ${isNull
       ? `<div class="res-empty">No output value</div>`
@@ -414,7 +414,7 @@ function renderCodeOutput(out: unknown, name: string): string {
   let html = `<div class="res-node-header"><span class="res-node-name">${escapeHtml(name)}</span></div>`;
 
   if (err) {
-    html += `<div class="res-section-label" style="color:var(--red)">Error output</div>
+    html += `<div class="res-section-label res-section-label--error">Error output</div>
              <pre class="res-code res-code--error">${escapeHtml(String(err))}</pre>`;
   }
 
@@ -435,7 +435,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
   const count    = typeof obj.count === "number" ? obj.count : uploaded.length;
 
   const platformLabel = { youtube: "YouTube", instagram: "Instagram", tiktok: "TikTok" }[platform] ?? platform;
-  const statusColor   = errors.length && !uploaded.length ? "var(--red)" : errors.length ? "var(--amber)" : "var(--green)";
+  const statusClass   = errors.length && !uploaded.length ? "error" : errors.length ? "warn" : "success";
   const statusText    = `${count} uploaded${errors.length ? ` · ${errors.length} failed` : ""}`;
 
   const uploadedHtml = uploaded.length
@@ -450,7 +450,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
     : "";
 
   const errorsHtml = errors.length
-    ? `<div class="res-section-label" style="color:var(--red)">Errors</div>
+    ? `<div class="res-section-label res-section-label--error">Errors</div>
        ${errors.map(e => `
          <div class="soc-error-card">
            <div class="soc-error-code">${escapeHtml(String(e.code ?? "ERROR"))}</div>
@@ -463,7 +463,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
   return `
     <div class="res-node-header">
       <span class="res-node-name">${escapeHtml(name)}</span>
-      <span class="res-status-badge" style="color:${statusColor}">${escapeHtml(platformLabel)} · ${statusText}</span>
+      <span class="res-status-badge res-status-badge--${statusClass}">${escapeHtml(platformLabel)} · ${statusText}</span>
     </div>
     ${uploadedHtml}
     ${errorsHtml}`;
@@ -619,6 +619,19 @@ export function extractPreview(out: unknown): string {
   return JSON.stringify(out).slice(0, 120);
 }
 
+/**
+ * Syntax-highlight a JSON string for HTML display.
+ *
+ * CALL-ORDER CONTRACT: `json` must be the raw output of `JSON.stringify` —
+ * never pre-escaped HTML.  This function calls `escapeHtml` internally as
+ * its first step, then applies span-wrapping regexes.  Passing pre-escaped
+ * HTML (e.g. a string containing `&amp;` or `&lt;`) will cause double-escaping
+ * and corrupt the displayed output.
+ *
+ * All call sites in this file satisfy this contract because they pass
+ * `JSON.stringify(value)` directly.  Do not refactor those call sites to
+ * pre-escape without updating this function accordingly.
+ */
 export function syntaxHighlight(json: string): string {
   return escapeHtml(json).replace(
     /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,

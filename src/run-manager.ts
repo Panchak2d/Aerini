@@ -22,8 +22,10 @@ export class RunManager {
   private lastResult: WorkflowResult | null = null;
   private _isRunning = false;
   private _cancelRequested = false;
-  private currentWorkflowName = "Untitled";
-  private currentWorkflowId   = "";
+  private currentWorkflowName        = "Untitled";
+  private currentWorkflowId          = "";
+  private currentParallelExecution   = false;
+  private currentMaxConcurrentNodes  = 8;
   private _activeHistoryPanel: HistoryPanel | null = null;
 
   onRunStateChange: ((running: boolean) => void) | null = null;
@@ -35,9 +37,11 @@ export class RunManager {
   // Keeps RunManager's currentWorkflowId in sync so onNodeStatusEvent
   // routes correctly and showResultFromScheduler saves history under
   // the right workflow ID.
-  setCurrentWorkflow(id: string, name: string): void {
-    this.currentWorkflowId   = id;
-    this.currentWorkflowName = name;
+  setCurrentWorkflow(id: string, name: string, parallelExecution = false, maxConcurrentNodes = 8): void {
+    this.currentWorkflowId         = id;
+    this.currentWorkflowName       = name;
+    this.currentParallelExecution  = parallelExecution;
+    this.currentMaxConcurrentNodes = maxConcurrentNodes;
   }
 
   // Called from app.ts's global listenNodeStatus subscription.
@@ -111,8 +115,8 @@ export class RunManager {
         </div>` : ""}
         <div class="error-detail-section">
           <details>
-            <summary class="error-detail-label" style="cursor:pointer;user-select:none">Execution context (what other nodes produced)</summary>
-            <pre class="node-card-json" style="max-height:180px;overflow-y:auto">${syntaxHighlight(JSON.stringify(inputContext, null, 2))}</pre>
+            <summary class="error-detail-label error-detail-label--interactive">Execution context (what other nodes produced)</summary>
+            <pre class="node-card-json node-card-json--scrollable">${syntaxHighlight(JSON.stringify(inputContext, null, 2))}</pre>
           </details>
         </div>
         <button class="run-error-copy" id="run-error-copy-btn">Copy error</button>
@@ -265,7 +269,8 @@ export class RunManager {
       this.onToast("Test Input JSON is invalid — ignored", "info");
     }
 
-    const json = serialize(currentId, currentName, this.canvas.nodes, this.canvas.connectors);
+    const json = serialize(currentId, currentName, this.canvas.nodes, this.canvas.connectors,
+      this.currentParallelExecution, this.currentMaxConcurrentNodes);
 
     if (!isTauri()) {
       content.innerHTML = `<div class="run-notice">
@@ -384,7 +389,8 @@ export class RunManager {
       this.onStatus("Node not found"); return;
     }
 
-    const json = serialize(`${currentId}_sub`, `${currentName} (node test)`, subNodes, subConns);
+    const json = serialize(`${currentId}_sub`, `${currentName} (node test)`, subNodes, subConns,
+      this.currentParallelExecution, this.currentMaxConcurrentNodes);
     this.onStatus(`Running "${allNodes.get(targetNodeId)?.data.name ?? targetNodeId}"…`);
 
     // Open drawer

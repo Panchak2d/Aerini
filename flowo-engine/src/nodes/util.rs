@@ -114,6 +114,7 @@ pub fn check_ssrf_ip(ip: std::net::IpAddr) -> Result<(), String> {
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
+                || v4.is_multicast()
             {
                 return Err(format!(
                     "Requests to private/internal IP addresses are not permitted ({})", v4
@@ -130,6 +131,7 @@ pub fn check_ssrf_ip(ip: std::net::IpAddr) -> Result<(), String> {
                     || v4.is_broadcast()
                     || v4.is_documentation()
                     || v4.is_unspecified()
+                    || v4.is_multicast()
                 {
                     return Err(format!(
                         "Requests to private/internal IP addresses are not permitted ({})", v6
@@ -155,11 +157,17 @@ pub fn check_ssrf_ip(ip: std::net::IpAddr) -> Result<(), String> {
 ///
 /// For IP literals: validates directly via `check_ssrf_ip`.
 /// For domain names: checks the static block list then resolves via DNS and
-/// validates every returned address. Narrows the DNS-rebinding attack window
-/// to the gap between this lookup and the actual TCP connect.
+/// validates every returned address.
 ///
-/// `port` is used only as the port argument to `lookup_host` and does not
-/// affect the IP validation logic.
+/// **TOCTOU gap:** a TOCTOU (time-of-check / time-of-use) window exists between
+/// this DNS pre-check and the actual TCP connect. A malicious DNS server can
+/// return a public IP during validation and a private IP on the actual connection
+/// (DNS rebinding). This is unavoidable at the application layer — this check is
+/// defence-in-depth only.
+///
+/// **Required mitigation:** configure a network-level egress firewall to block
+/// outbound TCP connections to private IP ranges (RFC 1918, link-local, loopback).
+/// The application-layer SSRF check alone does not provide a complete boundary.
 pub async fn check_host_ssrf(host: url::Host<&str>, port: u16) -> Result<(), String> {
     match host {
         url::Host::Ipv4(ip) => check_ssrf_ip(std::net::IpAddr::V4(ip)),

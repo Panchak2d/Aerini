@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flowo</title>
+  <script type="module" crossorigin src="./assets/index-CXsWxgkX.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-zC3cp9V9.css">
+</head>
+<body>
+
+  <!-- ── Sidebar ── -->
+  <aside id="sidebar">
+
+    <!-- Activity bar: narrow icon strip on left edge -->
+    <div id="activity-bar">
+      <div class="activity-top">
+        <div class="activity-logo">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <rect x="1" y="1" width="6" height="6" rx="1.5" fill="#34d399"/>
+            <rect x="11" y="1" width="6" height="6" rx="1.5" fill="#34d399" opacity="0.5"/>
+            <rect x="1" y="11" width="6" height="6" rx="1.5" fill="#34d399" opacity="0.5"/>
+            <rect x="11" y="11" width="6" height="6" rx="1.5" fill="#34d399" opacity="0.25"/>
+            <line x1="7" y1="4" x2="11" y2="4" stroke="#34d399" stroke-width="1.5"/>
+            <line x1="4" y1="7" x2="4" y2="11" stroke="#34d399" stroke-width="1.5"/>
+            <line x1="14" y1="7" x2="14" y2="11" stroke="#34d399" stroke-width="1.5" opacity="0.5"/>
+          </svg>
+        </div>
+        <button class="activity-btn active" data-zone="nodes" title="Nodes">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.2"/><rect x="14" y="3" width="7" height="7" rx="1.2"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.2"/><rect x="14" y="14" width="7" height="7" rx="1.2"/>
+          </svg>
+        </button>
+        <button class="activity-btn" data-zone="workflows" title="Workflows">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+          <span class="activity-badge" id="wf-count"></span>
+        </button>
+        <button class="activity-btn" data-zone="bgruns" title="Background Runs">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/>
+          </svg>
+          <span class="activity-badge activity-badge--hidden" id="bg-count"></span>
+        </button>
+      </div>
+      <div class="activity-bottom">
+        <button id="btn-new-workflow" class="activity-btn activity-btn--new" title="New Workflow (Ctrl+N)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button id="btn-shortcuts" class="activity-btn" title="Keyboard shortcuts (?)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-settings" class="activity-btn" title="Settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Sidebar panel: one zone visible at a time -->
+    <div id="sidebar-panel">
+
+      <!-- NODES zone -->
+      <div class="sidebar-zone active" id="zone-nodes">
+        <div class="zone-header">
+          <span class="zone-title">Nodes</span>
+        </div>
+        <div class="zone-search">
+          <input id="node-search" type="text" placeholder="Search nodes…" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="node-palette" class="palette-scroll"></div>
+      </div>
+
+      <!-- WORKFLOWS zone -->
+      <div class="sidebar-zone" id="zone-workflows">
+        <div class="zone-header">
+          <span class="zone-title">Workflows</span>
+          <div class="zone-header-actions">
+            <button class="zone-action-btn" id="btn-wf-search-toggle" title="Search">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            </button>
+            <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" data-sort="updated_desc">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="zone-search hidden" id="wf-search-bar">
+          <input id="wf-search" type="text" placeholder="Filter workflows…" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="workflow-list" class="workflow-scroll"></div>
+
+      </div>
+
+      <!-- BACKGROUND RUNS zone -->
+      <div class="sidebar-zone" id="zone-bgruns">
+        <div class="zone-header">
+          <span class="zone-title">Background Runs</span>
+          <div class="zone-header-actions">
+            <button class="zone-action-btn" id="btn-bg-search-toggle" title="Search">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            </button>
+            <button class="zone-action-btn" id="btn-bg-filter" title="Filter: All" data-filter="all">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="zone-search hidden" id="bg-search-bar">
+          <input id="bg-search" type="text" placeholder="Filter runs…" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="bg-jobs-list" class="bg-jobs-list"></div>
+      </div>
+
+    </div>
+
+    <!-- Right edge resize handle -->
+    <div id="sidebar-resize-handle"></div>
+
+  </aside>
+
+  <!-- ── Canvas ── -->
+  <main id="canvas-area">
+    <div id="toolbar">
+      <span id="workflow-name-label" class="workflow-title" title="Double-click to rename">Untitled</span>
+      <span class="unsaved-dot" id="unsaved-dot"></span>
+      <span class="workflow-rename-hint" id="workflow-rename-hint" title="Double-click the name to rename">✎</span>
+      <div class="toolbar-spacer"></div>
+      <div class="toolbar-actions">
+        <button id="btn-export" class="btn-toolbar" title="Export as .flowo">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export
+        </button>
+        <button id="btn-credentials" class="btn-toolbar btn-connections" title="Manage credentials (API keys)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          Connections
+        </button>
+        <div class="toolbar-divider"></div>
+        <button id="btn-focus-mode" class="btn-toolbar btn-icon-only" title="Focus mode (F)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+        </button>
+        <button id="btn-save" class="btn-toolbar btn-toolbar-secondary">Save</button>
+        <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Auto-start this workflow on every app launch">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+          Auto-start
+        </button>
+        <button id="btn-versions" class="btn-toolbar btn-icon-only" title="Version history">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </button>
+        <button id="btn-bg-run" class="btn-toolbar btn-bg-run btn-toolbar-secondary" title="Run silently — no output drawer, workflow runs and result is stored in history">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/><line x1="19" y1="3" x2="19" y2="21"/></svg>
+          Schedule Run
+        </button>
+        <button id="btn-run" class="btn-toolbar btn-run">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+      </div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <div id="canvas-empty-state">
+      <div class="empty-state-box">
+        <svg class="empty-state-icon" width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <rect x="20" y="2" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <rect x="11" y="20" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <line x1="12" y1="7" x2="20" y2="7" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <line x1="7" y1="12" x2="16" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+          <line x1="25" y1="12" x2="16" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+        </svg>
+        <div class="empty-state-title">Start building your workflow</div>
+        <div class="empty-state-sub">Click any node in the sidebar to place it, or drag from the sidebar to the canvas. Drop a .flowo file to import.</div>
+        <div class="empty-state-shortcuts">
+          <div class="empty-shortcut"><kbd>Space</kbd> Search nodes</div>
+          <div class="empty-shortcut"><kbd>Ctrl+K</kbd> Palette</div>
+          <div class="empty-shortcut"><kbd>Ctrl+Shift+F</kbd> Fit to screen</div>
+          <div class="empty-shortcut"><kbd>?</kbd> Shortcuts</div>
+          <div class="empty-shortcut" id="empty-state-import-btn">Import .flowo</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="drop-overlay" class="drop-overlay">
+      <div class="drop-overlay-inner">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <div class="drop-overlay-title">Drop to import workflow</div>
+        <div class="drop-overlay-sub">Release to preview before importing</div>
+      </div>
+    </div>
+
+    <div id="minimap-wrap">
+      <button id="btn-minimap-toggle" title="Toggle minimap (M)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/></svg>
+      </button>
+      <canvas id="minimap-canvas" width="160" height="100"></canvas>
+    </div>
+
+    <div id="status-bar">
+      <span id="status-text">Ready</span>
+      <span class="status-hint" id="status-hint">Click a node to place it · Space to search · Ctrl+S to save</span>
+    </div>
+  </main>
+
+  <!-- Hidden elements kept for NodeConfigPanel constructor compatibility -->
+  <div id="panel-body" style="display:none"></div>
+  <div id="panel-empty" style="display:none"></div>
+
+  <!-- ── Right panel ── -->
+  <aside id="right-panel">
+    <div id="panel-resize-handle"></div>
+    <div class="panel-tabs">
+      <button class="panel-tab active" data-tab="run">Run</button>
+      <button class="panel-tab" data-tab="logs">Logs</button>
+      <button id="btn-close-panel" class="panel-close" title="Close panel">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div id="tab-run" class="tab-body active">
+      <div class="run-section">
+        <div id="browser-run-notice" class="browser-notice hidden">
+          <strong>Browser mode</strong>
+          Execution requires the Tauri desktop app. Workflow builder works fully here.
+        </div>
+        <div class="field-group">
+          <label class="field-label">Input Variables <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+          <textarea id="run-input" placeholder='Leave empty to run without variables — or enter { "key": "value" }' rows="4"></textarea>
+        </div>
+        <button id="btn-run-panel" class="btn-primary">Run Workflow</button>
+        <div id="run-status" class="run-status-msg"></div>
+      </div>
+    </div>
+    <div id="tab-logs" class="tab-body">
+      <div id="logs-list" class="logs-list"></div>
+    </div>
+  </aside>
+
+  <!-- ── Output drawer ── -->
+  <div id="output-drawer" class="hidden">
+    <div id="drawer-resize-handle"></div>
+    <div class="drawer-header">
+      <span>Output</span>
+      <div class="drawer-tabs" id="drawer-tabs"></div>
+      <div class="drawer-header-spacer"></div>
+      <div class="drawer-actions">
+        <button class="drawer-btn" id="btn-copy-output" title="Copy output">Copy</button>
+        <button class="drawer-btn" id="btn-expand-output" title="Expand / collapse">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        </button>
+        <button id="btn-close-drawer" class="drawer-btn" title="Close">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="output-content" class="output-content-area"></div>
+  </div>
+
+  <!-- ── Command palette ── -->
+  <div id="command-palette-overlay" class="hidden">
+    <div id="command-palette">
+      <div id="palette-input-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input id="palette-search" type="text" placeholder="Search nodes…" autocomplete="off" spellcheck="false" />
+        <span id="palette-hint">↑↓ navigate · Enter place · Esc close</span>
+      </div>
+      <div id="palette-results"></div>
+    </div>
+  </div>
+
+  <!-- ── Confirm modal (replaces window.confirm which is suppressed in Tauri) ── -->
+  <div id="confirm-modal" class="hidden">
+    <div class="confirm-backdrop"></div>
+    <div class="confirm-box">
+      <div class="confirm-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+      <div class="confirm-message" id="confirm-message">Are you sure?</div>
+      <div class="confirm-actions">
+        <button class="confirm-btn-cancel" id="confirm-cancel">Cancel</button>
+        <button class="confirm-btn-ok" id="confirm-ok">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Shortcuts modal ── -->
+  <div id="shortcuts-modal" class="hidden">
+    <div class="shortcuts-box">
+      <div class="shortcuts-header">
+        Keyboard Shortcuts
+        <button id="btn-close-shortcuts" class="panel-close">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="shortcuts-body">
+        <div class="shortcuts-group">
+          <div class="shortcuts-group-title">Canvas</div>
+          <div class="shortcut-row"><span>Search / Command palette</span><div class="shortcut-keys"><kbd>Space</kbd><kbd>Ctrl+K</kbd></div></div>
+          <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd></div></div>
+          <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd></div></div>
+          <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
+          <div class="shortcut-row"><span>Focus mode</span><div class="shortcut-keys"><kbd>F</kbd></div></div>
+          <div class="shortcut-row"><span>Close panel</span><div class="shortcut-keys"><kbd>Dbl-click</kbd><span style="color:var(--t3);font-size:10px">empty canvas</span></div></div>
+        </div>
+        <div class="shortcuts-group">
+          <div class="shortcuts-group-title">Selection &amp; Editing</div>
+          <div class="shortcut-row"><span>Box select</span><div class="shortcut-keys"><kbd>Shift+drag</kbd></div></div>
+          <div class="shortcut-row"><span>Select all</span><div class="shortcut-keys"><kbd>Ctrl+A</kbd></div></div>
+          <div class="shortcut-row"><span>Duplicate</span><div class="shortcut-keys"><kbd>Ctrl+D</kbd></div></div>
+          <div class="shortcut-row"><span>Delete</span><div class="shortcut-keys"><kbd>Del</kbd></div></div>
+          <div class="shortcut-row"><span>Undo</span><div class="shortcut-keys"><kbd>Ctrl+Z</kbd></div></div>
+          <div class="shortcut-row"><span>Redo</span><div class="shortcut-keys"><kbd>Ctrl+Y</kbd></div></div>
+          <div class="shortcut-row"><span>Cut connector</span><div class="shortcut-keys"><kbd>Alt+drag</kbd></div></div>
+          <div class="shortcut-row"><span>Disconnect wire</span><div class="shortcut-keys"><kbd>Drag</kbd><span style="color:var(--t3);font-size:10px">port dot</span></div></div>
+        </div>
+        <div class="shortcuts-group">
+          <div class="shortcuts-group-title">Workflow</div>
+          <div class="shortcut-row"><span>Save</span><div class="shortcut-keys"><kbd>Ctrl+S</kbd></div></div>
+          <div class="shortcut-row"><span>New workflow</span><div class="shortcut-keys"><kbd>Ctrl+N</kbd></div></div>
+          <div class="shortcut-row"><span>Run workflow</span><div class="shortcut-keys"><kbd>Ctrl+Enter</kbd></div></div>
+          <div class="shortcut-row"><span>Show shortcuts</span><div class="shortcut-keys"><kbd>?</kbd></div></div>
+        </div>
+        <div class="shortcuts-group">
+          <div class="shortcuts-group-title">Node Config</div>
+          <div class="shortcut-row"><span>Open config</span><div class="shortcut-keys"><kbd>Double-click</kbd></div></div>
+          <div class="shortcut-row"><span>Close config</span><div class="shortcut-keys"><kbd>Esc</kbd></div></div>
+          <div class="shortcut-row"><span>Insert node data</span><div class="shortcut-keys"><kbd>{{</kbd><span style="color:var(--t3);font-size:10px">in any field</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Import modal ── -->
+  <div id="import-preview-modal" class="hidden">
+    <div class="import-modal-box">
+      <div class="import-modal-header">
+        <div class="import-badge">Workflow Import</div>
+        <div class="import-workflow-name" id="import-name">Loading…</div>
+        <div class="import-workflow-desc" id="import-desc"></div>
+      </div>
+      <div class="import-meta">
+        <div class="import-meta-item"><span class="import-meta-label">Nodes</span><span class="import-meta-value" id="import-node-count">—</span></div>
+        <div class="import-meta-item"><span class="import-meta-label">Connections</span><span class="import-meta-value" id="import-edge-count">—</span></div>
+        <div class="import-meta-item"><span class="import-meta-label">Version</span><span class="import-meta-value" id="import-version">—</span></div>
+      </div>
+      <div class="import-requirements" id="import-req-section">
+        <div class="import-req-label">Node Types Used</div>
+        <div id="import-req-list"></div>
+      </div>
+      <div class="import-actions">
+        <button class="import-btn-cancel" id="import-cancel">Cancel</button>
+        <button class="import-btn-confirm" id="import-confirm">Import Workflow</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings modal ── -->
+  <div id="settings-modal" class="hidden">
+    <div class="settings-box">
+      <div class="settings-header">
+        Settings
+        <button id="btn-close-settings" class="panel-close">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-group">
+          <div class="settings-group-title">Canvas</div>
+          <div class="settings-row">
+            <div><div class="settings-label">Grid snap</div><div class="settings-desc">Snap nodes to grid while dragging</div></div>
+            <input type="checkbox" id="setting-grid-snap" />
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>
+            <input type="checkbox" id="setting-autofit" checked />
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-group-title">Support development</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.8">
+            If Flowo has been useful, consider supporting development.<br>
+            <a href="https://ko-fi.com/flowo" target="_blank" rel="noopener" style="color:var(--blue)">Support on Ko-fi</a>
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-group-title">Privacy</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.8">
+            <strong style="color:var(--t1)">Flowo is 100% local-first.</strong><br>
+            All workflows and credentials are stored on your device only — nothing is sent to Flowo servers.<br><br>
+            Nodes you configure (HTTP Request, AI Prompt, etc.) make requests directly from your machine to the services you specify. Flowo never sees or logs these requests.<br><br>
+            Credentials are encrypted at rest using a device-local key.
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-group-title">About</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.8">
+            <strong style="color:var(--t1)">Flowo</strong> — local-first workflow automation<br>
+            Version <span id="app-version">0.2.0</span><br>
+            Built with Tauri · Rust · TypeScript<br>
+            <a href="https://github.com" target="_blank" style="color:var(--blue)">View on GitHub</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Onboarding modal (shown on first launch) ── -->
+  <div id="onboarding-modal" class="hidden">
+    <div class="onboarding-box">
+      <div class="onboarding-header">
+        <span class="onboarding-logo">Flowo</span>
+        <span class="onboarding-version">v0.2.0</span>
+      </div>
+      <h2 class="onboarding-title">Automate anything, locally.</h2>
+      <p class="onboarding-desc">Flowo runs entirely on your machine — no accounts, no cloud, no limits. Build automations by connecting blocks together. Each block does one thing: fetch data, send a message, run a script, call an AI.</p>
+      <div class="onboarding-steps">
+        <div class="onboarding-step">
+          <div class="onboarding-step-icon">1</div>
+          <div>
+            <div class="onboarding-step-title">Add nodes from the sidebar</div>
+            <div class="onboarding-step-desc">Click any block in the left panel to place it on the canvas. Start with a <strong>Trigger</strong> — it's what starts your workflow.</div>
+          </div>
+        </div>
+        <div class="onboarding-step">
+          <div class="onboarding-step-icon">2</div>
+          <div>
+            <div class="onboarding-step-title">Connect them with wires</div>
+            <div class="onboarding-step-desc">Drag the dot on the right of one block to the dot on the left of another. Double-click any block to configure it.</div>
+          </div>
+        </div>
+        <div class="onboarding-step">
+          <div class="onboarding-step-icon">3</div>
+          <div>
+            <div class="onboarding-step-title">Run your workflow</div>
+            <div class="onboarding-step-desc">Click <strong>Run</strong> in the top-right to test it instantly. Use <strong>Schedule Run</strong> to run it automatically in the background.</div>
+          </div>
+        </div>
+      </div>
+      <div class="onboarding-tip">Tip: Use <kbd>{{node_id.field}}</kbd> in any config field to pass data between nodes.</div>
+      <div class="onboarding-actions">
+        <button id="onboarding-load-example" class="btn-primary btn-primary-action onboarding-btn-example">Try an example — Fetch &amp; Display</button>
+        <button id="onboarding-dismiss" class="onboarding-btn-skip">Start with a blank canvas</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept=".flowo,.json" style="display:none" />
+</body>
+</html>

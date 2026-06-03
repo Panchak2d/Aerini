@@ -22,7 +22,7 @@ impl Node for EmailNode {
                 "smtp_host": { "type": "string", "description": "SMTP server e.g. smtp.gmail.com" },
                 "smtp_port": { "type": "number", "description": "587 (STARTTLS, recommended) or 465 (SSL)", "default": 587 },
                 "from":      { "type": "string", "description": "Sender email address" },
-                "to":        { "type": "string", "description": "Recipient(s), comma-separated" },
+                "to":        { "type": "string", "description": "Recipient(s), comma-separated. Maximum 50 recipients." },
                 "subject":   { "type": "string" },
                 "body":      { "type": "string" },
                 "html":      { "type": "boolean", "description": "Send as HTML email (default: false)", "default": false },
@@ -59,6 +59,16 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
         .to_string();
     let smtp_port = cfg["smtp_port"].as_u64().unwrap_or(587) as u16;
 
+    let ssrf_host = url::Host::parse(&smtp_host)
+        .map_err(|_| NodeError::unrecoverable("INVALID_HOST", "Invalid smtp_host"))?;
+    let ssrf_host_ref: url::Host<&str> = match &ssrf_host {
+        url::Host::Domain(s) => url::Host::Domain(s.as_str()),
+        url::Host::Ipv4(ip)  => url::Host::Ipv4(*ip),
+        url::Host::Ipv6(ip)  => url::Host::Ipv6(*ip),
+    };
+    crate::nodes::util::check_host_ssrf(ssrf_host_ref, smtp_port).await
+        .map_err(|e| NodeError::unrecoverable("SSRF_BLOCKED", &e))?;
+
     let from_str = cfg["from"].as_str().filter(|s| !s.is_empty())
         .ok_or_else(|| NodeError::unrecoverable("MISSING_FROM", "from address is required"))?;
     let to_str = cfg["to"].as_str().filter(|s| !s.is_empty())
@@ -71,6 +81,15 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
 
     let from_mbox = from_str.parse::<lettre::message::Mailbox>()
         .map_err(|e| NodeError::unrecoverable("INVALID_FROM", &format!("Invalid from address: {e}")))?;
+
+    const MAX_RECIPIENTS: usize = 50;
+    let recipient_count = to_str.split(',').filter(|s| !s.trim().is_empty()).count();
+    if recipient_count > MAX_RECIPIENTS {
+        return Err(NodeError::unrecoverable(
+            "TOO_MANY_RECIPIENTS",
+            format!("Recipient count ({}) exceeds the maximum of {}.", recipient_count, MAX_RECIPIENTS),
+        ));
+    }
 
     let content_type = if html { ContentType::TEXT_HTML } else { ContentType::TEXT_PLAIN };
 

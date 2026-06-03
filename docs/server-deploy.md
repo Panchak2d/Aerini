@@ -75,7 +75,7 @@ Serve mode exposes a status page at `http://127.0.0.1:<port>/` where `<port>` is
 
 - Workflow name and trigger type
 - Last run time, status, and duration
-- A Run button for manual trigger (requires the `run_secret` embedded in the config)
+- A Run button for manual trigger (requires the raw `run_secret` shown at export time)
 - Run history (requires `run_secret`)
 - Live logs via `GET /api/logs`
 
@@ -324,3 +324,19 @@ Set the webhook URL in the external service to `https://your-domain.com/webhook`
 - Set `--trusted-proxy-count` to exactly match the number of proxies between the internet and Flowo. Too high allows clients to spoof their IP via `X-Forwarded-For`.
 
 See [Security](security.md) for the full security model.
+
+---
+
+## Receiving webhooks from the internet
+
+The Webhook node binds to `127.0.0.1` (localhost only). External services like Stripe, GitHub, and Twilio cannot reach it directly without a reverse proxy or tunnel.
+
+For desktop/local deployments: see [webhooks-public.md](webhooks-public.md) for tunnel options (cloudflared, ngrok).
+
+For server deployments: configure Caddy or Nginx to forward requests to the Webhook node's port as shown in the reverse proxy section above.
+
+---
+
+## SSE event scope
+
+> **Note:** `GET /api/events` delivers execution events for **all** workflows to any token with `read` scope. In multi-user deployments where token holders should not see each other's workflow activity, avoid issuing read tokens to untrusted parties until per-workflow ACL is implemented.

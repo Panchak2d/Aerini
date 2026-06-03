@@ -1189,7 +1189,9 @@ export class Canvas {
   setNodeOutput(id: string, p: string) { const n = this.nodes.get(id); if (n) { n.outputPreview = p; n.status = "success"; } }
   resetAllStatus() { for (const n of this.nodes.values()) { n.status = "idle"; n.outputPreview = null; n.showOutput = false; n.updatePortPositions(); } }
   clearConnectorActive() { for (const c of this.connectors.values()) c.active = false; }
-  toWorkflowJson(id: string, name: string) { return serialize(id, name, this.nodes, this.connectors); }
+  toWorkflowJson(id: string, name: string, parallelExecution = false, maxConcurrentNodes = 8) {
+    return serialize(id, name, this.nodes, this.connectors, parallelExecution, maxConcurrentNodes);
+  }
 
   fitToScreen() {
     if (!this.nodes.size) return;

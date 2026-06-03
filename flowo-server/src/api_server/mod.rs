@@ -58,15 +58,109 @@ use crate::util::extract_client_ip;
 
 pub use routes::state::ApiState;
 pub use routes::state::SSE_MAX_CONNECTIONS;
+pub use routes::state::MAX_CONCURRENT_RUNS;
+
+
+/// Sets a DACL on `path` that grants full control to the file owner only,
+/// mirroring Unix `chmod 0600`. Only compiled on Windows targets.
+#[cfg(windows)]
+fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{
+        SetNamedSecurityInfoW, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, InitializeAcl, AddAccessAllowedAce, GetTokenInformation,
+        TOKEN_USER, TokenUser, ACL_REVISION,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, CloseHandle};
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    unsafe {
+        let mut token: HANDLE = INVALID_HANDLE_VALUE;
+        if windows_sys::Win32::Security::OpenProcessToken(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            windows_sys::Win32::Security::TOKEN_QUERY,
+            &mut token,
+        ) == 0 {
+            return Err(format!(
+                "OpenProcessToken failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+
+        if needed == 0 {
+            CloseHandle(token);
+            return Err("GetTokenInformation returned zero size — unexpected security configuration".to_string());
+        }
+
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(
+            token, TokenUser, buf.as_mut_ptr() as *mut _, needed, &mut needed,
+        ) == 0 {
+            CloseHandle(token);
+            return Err(format!(
+                "GetTokenInformation (second call) failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        CloseHandle(token);
+
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let sid = user.User.Sid;
+
+        // Use Vec<u32> to guarantee 4-byte alignment required by ACL header.
+        const ACL_BUF_BYTES: usize = 256;
+        let mut acl_buf = vec![0u32; ACL_BUF_BYTES / 4];
+        if InitializeAcl(acl_buf.as_mut_ptr() as *mut ACL, ACL_BUF_BYTES as u32, ACL_REVISION as u32) == 0 {
+            return Err(format!(
+                "InitializeAcl failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        if AddAccessAllowedAce(
+            acl_buf.as_mut_ptr() as *mut ACL, ACL_REVISION as u32, FILE_ALL_ACCESS, sid,
+        ) == 0 {
+            return Err(format!(
+                "AddAccessAllowedAce failed: {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+
+        let rc = SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl_buf.as_mut_ptr() as *mut ACL,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: {}", rc));
+        }
+    }
+    Ok(())
+}
 
 fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
     if path.exists() {
         let bytes = std::fs::read(path).unwrap_or_else(|e| {
-            eprintln!("FATAL: Cannot read token key file {:?}: {}", path, e);
+            tracing::error!("FATAL: Cannot read token key file {:?}: {}", path, e);
             std::process::exit(1);
         });
         if bytes.len() != 32 {
-            eprintln!(
+            tracing::error!(
                 "FATAL: Token key file {:?} has wrong length ({} bytes, expected 32). \
                  If you intentionally want to invalidate all tokens, delete the file and restart.",
                 path,
@@ -81,7 +175,7 @@ fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
         let mut key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
         std::fs::write(path, &key).unwrap_or_else(|e| {
-            eprintln!("FATAL: Cannot write token key file {:?}: {}", path, e);
+            tracing::error!("FATAL: Cannot write token key file {:?}: {}", path, e);
             std::process::exit(1);
         });
         #[cfg(unix)]
@@ -89,12 +183,35 @@ fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
             std::fs::set_permissions(path, perms).unwrap_or_else(|e| {
-                eprintln!("FATAL: Cannot set permissions on token key file {:?}: {}", path, e);
+                tracing::error!("FATAL: Cannot set permissions on token key file {:?}: {}", path, e);
                 std::process::exit(1);
             });
         }
+
+        #[cfg(windows)]
+        set_owner_only_acl(path).unwrap_or_else(|e| {
+            tracing::error!("FATAL: Cannot set ACL on token key file {:?}: {}", path, e);
+            std::process::exit(1);
+        });
+
         key
     }
+}
+
+/// Returns true only for exact localhost origins with an optional port number.
+/// Rejects subdomain lookalikes such as `http://localhost.evil.com`.
+fn is_localhost_origin(b: &[u8]) -> bool {
+    // Exact: http://localhost  or  http://localhost:<digits>
+    if b == b"http://localhost" { return true; }
+    if let Some(rest) = b.strip_prefix(b"http://localhost:") {
+        return !rest.is_empty() && rest.iter().all(|c| c.is_ascii_digit());
+    }
+    // Exact: http://127.0.0.1  or  http://127.0.0.1:<digits>
+    if b == b"http://127.0.0.1" { return true; }
+    if let Some(rest) = b.strip_prefix(b"http://127.0.0.1:") {
+        return !rest.is_empty() && rest.iter().all(|c| c.is_ascii_digit());
+    }
+    false
 }
 
 pub async fn run(
@@ -108,11 +225,13 @@ pub async fn run(
     trusted_proxy_count: usize,
     shell_exec_disabled: bool,
     code_exec_disabled: bool,
+    code_sandbox: bool,
     use_keychain: bool,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
     db_pool_size: usize,
+    max_concurrent_runs: usize,
 ) {
     crate::init_tracing();
     let data_dir = PathBuf::from(if data_dir.starts_with('~') {
@@ -197,6 +316,7 @@ pub async fn run(
         }
         if shell_exec_disabled { daemon = daemon.with_shell_disabled(true); }
         if code_exec_disabled  { daemon = daemon.with_code_disabled(true); }
+        if code_sandbox        { daemon = daemon.with_code_sandbox(true); }
         if parallel_execution {
             daemon = daemon
                 .with_parallel_execution(true)
@@ -240,6 +360,7 @@ pub async fn run(
         }
         if shell_exec_disabled { ex = ex.with_shell_disabled(true); }
         if code_exec_disabled  { ex = ex.with_code_disabled(true); }
+        if code_sandbox        { ex = ex.with_code_sandbox(true); }
         if parallel_execution {
             ex = ex.with_parallel_execution(true)
                    .with_max_concurrent_nodes(max_concurrent_nodes);
@@ -267,6 +388,7 @@ pub async fn run(
         server_max_duration_secs,
         base_executor,
         sse_semaphore: Arc::new(Semaphore::new(SSE_MAX_CONNECTIONS)),
+        run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs)),
     };
 
     let protected = Router::new()
@@ -281,6 +403,8 @@ pub async fn run(
         .route("/api/events",              get(routes::workflows::sse_events))
         .route("/api/tokens",              get(routes::tokens::list_tokens_handler).post(routes::tokens::create_token_handler))
         .route("/api/tokens/:id",          delete(routes::tokens::revoke_token_handler))
+        .route("/api/tokens/:id/workflows",             get(routes::tokens::list_token_workflows_handler))
+        .route("/api/tokens/:id/workflows/:wf_id",      post(routes::tokens::grant_token_workflow_handler).delete(routes::tokens::revoke_token_workflow_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     let extra_origins: std::sync::Arc<Vec<Vec<u8>>> = std::sync::Arc::new(
@@ -290,14 +414,14 @@ pub async fn run(
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin: &axum::http::HeaderValue, _| {
             let b = origin.as_bytes();
-            b.starts_with(b"http://localhost")
-                || b.starts_with(b"http://127.0.0.1")
+            is_localhost_origin(b)
                 || extra_c.iter().any(|o| o.as_slice() == b)
         }))
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]);
 
     let rl = Arc::new(crate::middleware::RateLimiter::new(300, 60));
+    Arc::clone(&rl).spawn_eviction_task();
     let tpc = trusted_proxy_count;
     let rate_limit_layer = middleware::from_fn(move |req: Request, next: Next| {
         let rl = Arc::clone(&rl);

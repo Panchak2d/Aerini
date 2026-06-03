@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest a new node, capability, or improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [Roadmap](https://github.com/Panchak2d/flowo/blob/main/ROADMAP.md) first — it may already be planned.
+        For open-ended discussion, use [GitHub Discussions](https://github.com/Panchak2d/flowo/discussions).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the workflow or use case this would enable or improve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should Flowo do? Be as specific as you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds exist today? Why are they insufficient?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - New node
+        - Existing node improvement
+        - Canvas / UI
+        - Engine / execution
+        - Server / deployment
+        - Documentation
+        - Other
+    validations:
+      required: true

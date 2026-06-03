@@ -49,16 +49,18 @@ impl CredentialResolver for EnvCredentialResolver {
         match std::env::var(&var_name) {
             Ok(val) if !val.is_empty() => Some(val),
             Ok(_) => {
-                eprintln!(
-                    "[credentials] WARNING: env var {} is set but empty for credential '{}'",
-                    var_name, credential_id
+                tracing::warn!(
+                    var = %var_name,
+                    credential = %credential_id,
+                    "env var is set but empty for credential"
                 );
                 None
             }
             Err(_) => {
-                eprintln!(
-                    "[credentials] ERROR: env var {} not set for credential '{}'",
-                    var_name, credential_id
+                tracing::warn!(
+                    var = %var_name,
+                    credential = %credential_id,
+                    "env var not set for credential"
                 );
                 None
             }

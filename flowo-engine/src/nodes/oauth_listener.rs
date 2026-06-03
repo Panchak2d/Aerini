@@ -3,7 +3,7 @@
 // Handles:
 //   - Token storage via OS keychain (keyring v3)                         — G1
 //   - Per-credential refresh mutex (DashMap<key, Arc<Mutex<()>>>)        — G3
-//   - Fixed OAuth redirect port 42069, no dynamic fallback               — G6
+//   - OAuth redirect port 42069 preferred; falls back to OS-assigned port — G6
 //   - TCP listener closed on every exit path (defer-style cleanup)       — G10
 //   - 60-second callback timeout
 //
@@ -40,7 +40,6 @@ use crate::error::NodeError;
 
 const KEYCHAIN_SERVICE: &str = "flowo-oauth";
 const OAUTH_PORT: u16 = 42069;
-const REDIRECT_URI: &str = "http://127.0.0.1:42069/callback";
 const CALLBACK_TIMEOUT_SECS: u64 = 60;
 /// Margin before expiry to trigger proactive refresh (5 minutes).
 const EXPIRY_MARGIN_SECS: u64 = 300;
@@ -147,11 +146,12 @@ async fn exchange_code(
     code: &str,
     client_id: &str,
     client_secret: &str,
+    redirect_uri: &str,
 ) -> Result<StoredTokens, NodeError> {
     match platform {
-        "youtube" => exchange_code_youtube(code, client_id, client_secret).await,
-        "instagram" => exchange_code_instagram(code, client_id, client_secret).await,
-        "tiktok" => exchange_code_tiktok(code, client_id, client_secret).await,
+        "youtube" => exchange_code_youtube(code, client_id, client_secret, redirect_uri).await,
+        "instagram" => exchange_code_instagram(code, client_id, client_secret, redirect_uri).await,
+        "tiktok" => exchange_code_tiktok(code, client_id, client_secret, redirect_uri).await,
         p => Err(NodeError::unrecoverable("UNKNOWN_PLATFORM", format!("Unknown platform: {}", p))),
     }
 }
@@ -178,12 +178,13 @@ async fn exchange_code_youtube(
     code: &str,
     client_id: &str,
     client_secret: &str,
+    redirect_uri: &str,
 ) -> Result<StoredTokens, NodeError> {
     let params = [
         ("code", code),
         ("client_id", client_id),
         ("client_secret", client_secret),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("grant_type", "authorization_code"),
     ];
     let resp = super::shared_http_client()
@@ -271,13 +272,14 @@ async fn exchange_code_instagram(
     code: &str,
     client_id: &str,
     client_secret: &str,
+    redirect_uri: &str,
 ) -> Result<StoredTokens, NodeError> {
     // Step 1: short-lived token
     let params = [
         ("client_id", client_id),
         ("client_secret", client_secret),
         ("grant_type", "authorization_code"),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("code", code),
     ];
     let short_resp = super::shared_http_client()
@@ -372,6 +374,7 @@ async fn exchange_code_tiktok(
     code: &str,
     client_id: &str,
     client_secret: &str,
+    redirect_uri: &str,
 ) -> Result<StoredTokens, NodeError> {
     // TikTok uses client_key instead of client_id in token requests.
     let params = [
@@ -379,7 +382,7 @@ async fn exchange_code_tiktok(
         ("client_secret", client_secret),
         ("code", code),
         ("grant_type", "authorization_code"),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
     ];
     let resp = super::shared_http_client()
         .post("https://open.tiktokapis.com/v2/oauth/token/")
@@ -453,8 +456,8 @@ async fn parse_tiktok_token_response(
 
 // ── Auth URL builders ─────────────────────────────────────────────────────────
 
-fn build_auth_url(platform: &str, client_id: &str, state: &str) -> String {
-    let redirect = pct_encode(REDIRECT_URI);
+fn build_auth_url(platform: &str, client_id: &str, state: &str, redirect_uri: &str) -> String {
+    let redirect = pct_encode(redirect_uri);
     match platform {
         "youtube" => format!(
             "https://accounts.google.com/o/oauth2/v2/auth\
@@ -511,32 +514,18 @@ fn open_browser(url: &str) {
 
 // ── Local OAuth callback listener (G10: closed on every exit path) ─────────────
 
-/// Binds port 42069. On success: returns the authorization code from the redirect.
-/// On any error or timeout: the TcpListener is dropped (closed) before returning.
-async fn listen_for_callback(expected_state: &str) -> Result<String, NodeError> {
-    let listener = TcpListener::bind(("127.0.0.1", OAUTH_PORT)).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            NodeError::unrecoverable(
-                "OAUTH_PORT_CONFLICT",
-                format!(
-                    "Port {} is in use by another application. \
-                    Close it and retry.",
-                    OAUTH_PORT
-                ),
-            )
-        } else {
-            NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())
-        }
-    })?;
-
-    // `listener` is RAII — dropped (closed) on every return path below. (G10)
+/// Waits for a single OAuth callback on an already-bound `TcpListener`.
+/// The caller owns the listener; it is dropped when this function returns.
+async fn listen_for_callback(
+    listener: &TcpListener,
+    expected_state: &str,
+) -> Result<String, NodeError> {
     let result = timeout(
         Duration::from_secs(CALLBACK_TIMEOUT_SECS),
-        accept_one_callback(&listener, expected_state),
+        accept_one_callback(listener, expected_state),
     )
     .await;
 
-    // `listener` drops here in all paths.
     match result {
         Ok(inner) => inner,
         Err(_) => Err(NodeError::unrecoverable(
@@ -558,12 +547,31 @@ async fn accept_one_callback(
         NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())
     })?;
 
-    let mut buf = vec![0u8; 4096];
-    let n = stream
-        .read(&mut buf)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string()))?;
-    let request = String::from_utf8_lossy(&buf[..n]);
+    // Read until the full HTTP headers are present (terminated by \r\n\r\n).
+    // A single read() may return a partial request if the browser's TCP packets
+    // arrive in multiple chunks — which is common when the redirect URL is long
+    // (Google auth codes + User-Agent + Accept headers can exceed 4 KB).
+    // Cap at 16 KB: no legitimate OAuth redirect request needs more.
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    loop {
+        let n = stream
+            .read(&mut tmp)
+            .await
+            .map_err(|e| NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string()))?;
+        if n == 0 {
+            break; // connection closed
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break; // full headers received
+        }
+        if buf.len() >= MAX_HEADER_BYTES {
+            break; // safety cap
+        }
+    }
+    let request = String::from_utf8_lossy(&buf);
 
     // Extract query string from "GET /callback?code=xxx&state=yyy HTTP/1.1"
     let params = request
@@ -638,8 +646,26 @@ async fn run_full_oauth_flow(
     client_id: &str,
     client_secret: &str,
 ) -> Result<StoredTokens, NodeError> {
+    // Try the preferred port first; fall back to any OS-assigned port on conflict.
+    let listener = match TcpListener::bind(("127.0.0.1", OAUTH_PORT)).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e2| {
+                NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e2.to_string())
+            })?
+        }
+        Err(e) => return Err(NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())),
+    };
+
+    let actual_port = listener
+        .local_addr()
+        .map_err(|e| NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string()))?
+        .port();
+
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", actual_port);
+
     let state = Uuid::new_v4().to_string();
-    let auth_url = build_auth_url(platform, client_id, &state);
+    let auth_url = build_auth_url(platform, client_id, &state, &redirect_uri);
     if auth_url.is_empty() {
         return Err(NodeError::unrecoverable(
             "UNKNOWN_PLATFORM",
@@ -649,12 +675,11 @@ async fn run_full_oauth_flow(
 
     open_browser(&auth_url);
 
-    let code = listen_for_callback(&state).await.map_err(|e| {
-        // Map token-exchange-specific errors cleanly (G10: listener already closed above).
-        e
-    })?;
+    // `listener` is RAII — dropped (closed) after listen_for_callback returns. (G10)
+    let code = listen_for_callback(&listener, &state).await?;
+    drop(listener);
 
-    exchange_code(platform, &code, client_id, client_secret)
+    exchange_code(platform, &code, client_id, client_secret, &redirect_uri)
         .await
         .map_err(|e| {
             NodeError::unrecoverable(

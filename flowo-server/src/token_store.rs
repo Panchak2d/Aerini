@@ -18,6 +18,7 @@ use base64::Engine;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 fn hash_token(key: &[u8; 32], raw: &str) -> String {
@@ -67,6 +68,19 @@ impl TokenStore {
                 scopes     TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 revoked_at TEXT
+            );
+            -- Per-workflow SSE ACL (P3-2).
+            -- Row presence = token is restricted to that workflow's events.
+            -- Tokens with NO rows in this table see ALL events (backward compat).
+            -- Admin-scoped tokens always see all events regardless of this table.
+            -- Note: no ON DELETE CASCADE — foreign_keys pragma is off in this db.
+            -- ACL rows for deleted tokens become orphaned but are harmless (never matched
+            -- against an active token). A future migration can clean them up.
+            CREATE TABLE IF NOT EXISTS token_workflow_acl (
+                token_id    TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                granted_at  TEXT NOT NULL,
+                PRIMARY KEY (token_id, workflow_id)
             );",
         )?;
         // Schema migration: add expires_at column for existing databases that predate M-1 fix.
@@ -132,27 +146,37 @@ impl TokenStore {
 
     /// Verify a raw bearer token. Returns `None` if not found, revoked, or expired.
     pub fn verify_token(&self, raw: &str) -> Option<TokenRecord> {
-        let hash = hash_token(&self.key, raw);
+        let provided_hash = hash_token(&self.key, raw);
         let conn = self.conn.lock().expect("token store mutex poisoned");
+        // Use the indexed WHERE clause so the lookup remains O(log n).
+        // Then re-verify with constant-time byte comparison in-process for defense-in-depth:
+        // SQLite string equality is not guaranteed constant-time, and the hash is sensitive.
+        // If the hashes don't match in-process after the DB lookup, treat as not found.
         conn.query_row(
-            "SELECT token_id, label, scopes, created_at, expires_at
+            "SELECT token_id, token_hash, label, scopes, created_at, expires_at
              FROM tokens
              WHERE token_hash = ?1
                AND revoked_at IS NULL",
-            params![hash],
+            params![provided_hash],
             |row| {
-                let scopes_j: String = row.get(2)?;
-                let scopes: Vec<String> =
-                    serde_json::from_str(&scopes_j).unwrap_or_default();
-                Ok(TokenRecord {
-                    token_id:   row.get(0)?,
-                    label:      row.get(1)?,
-                    scopes,
-                    created_at: row.get(3)?,
-                    expires_at: row.get(4)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,           // token_id
+                    row.get::<_, String>(1)?,           // token_hash (for ct_eq)
+                    row.get::<_, String>(2)?,           // label
+                    row.get::<_, String>(3)?,           // scopes
+                    row.get::<_, String>(4)?,           // created_at
+                    row.get::<_, Option<String>>(5)?,   // expires_at
+                ))
             },
-        ).ok().and_then(|record| {
+        ).ok().and_then(|(token_id, db_hash, label, scopes_j, created_at, expires_at)| {
+            // In-process constant-time confirmation — guards against any SQLite
+            // comparison short-circuit or timing side-channel.
+            let matched: bool = db_hash.as_bytes()
+                .ct_eq(provided_hash.as_bytes())
+                .into();
+            if !matched { return None; }
+            let scopes: Vec<String> = serde_json::from_str(&scopes_j).unwrap_or_default();
+            let record = TokenRecord { token_id, label, scopes, created_at, expires_at };
             if let Some(ref exp_str) = record.expires_at {
                 if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(exp_str) {
                     if Utc::now() >= exp.with_timezone(&Utc) {
@@ -207,5 +231,66 @@ impl TokenStore {
             |row| row.get::<_, i64>(0),
         ).map(|c| c == 0)
          .unwrap_or(true)
+    }
+
+    // ── Per-workflow SSE ACL (P3-2) ──────────────────────────────────────────
+
+    /// Grant a token access to a specific workflow's SSE events.
+    /// Once ANY ACL row exists for a token, it is restricted to those workflows only.
+    /// No-op if already granted.
+    pub fn acl_grant(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
+        let now  = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().expect("token store mutex poisoned");
+        conn.execute(
+            "INSERT OR IGNORE INTO token_workflow_acl (token_id, workflow_id, granted_at)
+             VALUES (?1, ?2, ?3)",
+            params![token_id, workflow_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke a token's access to a specific workflow's SSE events.
+    /// No-op if not present.
+    pub fn acl_revoke(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("token store mutex poisoned");
+        conn.execute(
+            "DELETE FROM token_workflow_acl WHERE token_id = ?1 AND workflow_id = ?2",
+            params![token_id, workflow_id],
+        )?;
+        Ok(())
+    }
+
+    /// List all workflow IDs a token has been granted access to.
+    /// Returns an empty Vec for tokens with no ACL rows (unrestricted).
+    pub fn acl_list(&self, token_id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT workflow_id FROM token_workflow_acl
+             WHERE token_id = ?1
+             ORDER BY granted_at ASC",
+        )?;
+        let rows = stmt.query_map(params![token_id], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Determine which workflow IDs a token may observe via SSE.
+    ///
+    /// Returns `None`  → no filter (see all workflows).
+    /// Returns `Some(set)` → only those workflow IDs are visible.
+    ///
+    /// Rules:
+    /// - Admin tokens: always unrestricted (None).
+    /// - Tokens with no ACL rows: unrestricted (None) — backward compat.
+    /// - Tokens with ≥1 ACL row: restricted to that set (Some).
+    pub fn acl_filter(&self, record: &TokenRecord) -> rusqlite::Result<Option<std::collections::HashSet<String>>> {
+        if record.has_scope("admin") {
+            return Ok(None);
+        }
+        let ids = self.acl_list(&record.token_id)?;
+        if ids.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(ids.into_iter().collect()))
+        }
     }
 }

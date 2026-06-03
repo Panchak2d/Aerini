@@ -140,7 +140,7 @@ pub(super) fn resolve_expression(
         return result;
     }
 
-    let segments: Vec<&str> = expr.splitn(32, '.').collect();
+    let segments: Vec<&str> = expr.split('.').collect();
 
     if segments[0].starts_with('$') {
         return resolve_special(expr, &segments, workflow, ctx, &mut warnings, env_allowlist);
@@ -293,7 +293,7 @@ pub(super) fn traverse_path(root: &Value, segments: &[&str]) -> Option<Value> {
             current = current.get(seg)?.clone();
         }
     }
-    if current.is_null() { None } else { Some(current) }
+    Some(current)
 }
 
 pub(super) fn value_to_string(v: &Value) -> String {
@@ -387,6 +387,8 @@ mod tests {
             edges: vec![],
             metadata: Default::default(),
             max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
         }
     }
 
@@ -454,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn env_allowed_resolves_from_env() {
         let wf = make_workflow(vec![]);
         let ctx = make_ctx(vec![], vec![]);
@@ -674,5 +677,21 @@ mod tests {
         assert_eq!(resolved["url"], "https://example.com/hello");
         assert_eq!(resolved["count"], 3);
         assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn null_field_differs_from_missing_field() {
+        let wf = make_workflow(vec![("n1", "Step")]);
+        let ctx = make_ctx(vec![("n1", json!({"field": null}))], vec![]);
+
+        // null field: resolves to empty string, no warning
+        let (out_null, warns_null) = resolve_string("{{Step.output.field}}", &wf, &ctx, None);
+        assert_eq!(out_null, "");
+        assert!(warns_null.is_empty(), "null field should not warn");
+
+        // missing field: resolves to empty string, WITH warning
+        let (out_miss, warns_miss) = resolve_string("{{Step.output.nonexistent}}", &wf, &ctx, None);
+        assert_eq!(out_miss, "");
+        assert!(!warns_miss.is_empty(), "missing field must warn");
     }
 }

@@ -165,18 +165,9 @@ pub async fn run_workflow(
     registry:           tauri::State<'_, Arc<NodeRegistry>>,
     cred_resolver:      tauri::State<'_, Arc<dyn CredentialResolver>>,
     event_sink:         tauri::State<'_, Arc<dyn EventSink>>,
-    db:                 tauri::State<'_, Arc<WorkflowDb>>,
     active_run:         tauri::State<'_, Arc<crate::ActiveRunToken>>,
 ) -> Result<WorkflowResult, String> {
     let workflow = Workflow::from_json(&workflow_json).map_err(|e| e.to_string())?;
-
-    let db_clone = Arc::clone(&db);
-    let parallel_execution = tokio::task::spawn_blocking(move || {
-        db_clone.get_setting("parallel_execution")
-            .unwrap_or(None)
-            .map(|v| v == "true")
-            .unwrap_or(false)
-    }).await.unwrap_or(false);
 
     let token = CancellationToken::new();
     *active_run.0.lock().unwrap() = Some(token.clone());
@@ -186,7 +177,8 @@ pub async fn run_workflow(
         Arc::clone(&*cred_resolver),
     )
     .with_event_sink(Arc::clone(&*event_sink))
-    .with_parallel_execution(parallel_execution)
+    .with_parallel_execution(workflow.parallel_execution)
+    .with_max_concurrent_nodes(workflow.max_concurrent_nodes.unwrap_or(8))
     .with_cancel_token(token);
 
     let workflow_id = workflow.id.clone();
@@ -199,7 +191,7 @@ pub async fn run_workflow(
         Ok(r) => Ok(r),
         Err(EngineError::ExecutionCancelled) => Ok(WorkflowResult {
             execution_id:      uuid::Uuid::new_v4().to_string(),
-            workflow_id:       workflow_id,
+            workflow_id,
             success:           false,
             node_outputs:      HashMap::new(),
             logs:              vec![],

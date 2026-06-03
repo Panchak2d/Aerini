@@ -115,7 +115,12 @@ async function init() {
     refreshRunBtn();
     // Keep RunManager's currentWorkflowId in sync — it uses this to route
     // node-status events to the canvas and to save history under the right ID.
-    runManager.setCurrentWorkflow(wfManager.currentId, wfManager.currentName);
+    runManager.setCurrentWorkflow(
+      wfManager.currentId,
+      wfManager.currentName,
+      wfManager.parallelExecution,
+      wfManager.maxConcurrentNodes,
+    );
   };
 
   // Shown only when current workflow has a Schedule or Webhook trigger node.
@@ -220,9 +225,11 @@ async function init() {
   initCommandPalette(allNodes, canvas, setStatus);
   initModals(allNodes, (obj) => {
     try {
-      const { id, name, nodes, connectors } = deserialize(JSON.stringify(obj));
+      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(JSON.stringify(obj));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
+      wfManager.parallelExecution  = parallelExecution;
+      wfManager.maxConcurrentNodes = maxConcurrentNodes;
       wfManager.currentId = id; wfManager.currentName = name;
       wfManager.markUnsaved(false); setTitle(name);
       document.getElementById("output-drawer")!.classList.add("hidden");
@@ -275,6 +282,38 @@ async function init() {
     }
   });
   $("btn-versions").addEventListener("click",  () => showVersionPanel(wfManager, toast));
+
+  // Workflow settings modal
+  $("btn-wf-settings").addEventListener("click", () => {
+    const modal        = $("wf-settings-modal");
+    const parallelChk  = document.getElementById("wf-setting-parallel") as HTMLInputElement;
+    const concurrencyRow = document.getElementById("wf-setting-concurrency-row") as HTMLElement;
+    const maxConcInput = document.getElementById("wf-setting-max-concurrent") as HTMLInputElement;
+    parallelChk.checked  = wfManager.parallelExecution;
+    maxConcInput.value   = String(wfManager.maxConcurrentNodes);
+    concurrencyRow.hidden = !wfManager.parallelExecution;
+    modal.classList.remove("hidden");
+  });
+  $("btn-close-wf-settings").addEventListener("click", () => {
+    $("wf-settings-modal").classList.add("hidden");
+  });
+  document.getElementById("wf-setting-parallel")!.addEventListener("change", (e) => {
+    const checked = (e.target as HTMLInputElement).checked;
+    wfManager.parallelExecution = checked;
+    wfManager.markUnsaved(true);
+    const row = document.getElementById("wf-setting-concurrency-row")!;
+    row.hidden = !checked;
+  });
+  document.getElementById("wf-setting-max-concurrent")!.addEventListener("change", (e) => {
+    const val = parseInt((e.target as HTMLInputElement).value, 10);
+    if (!isNaN(val) && val >= 1 && val <= 64) {
+      wfManager.maxConcurrentNodes = val;
+      wfManager.markUnsaved(true);
+    }
+  });
+  $("wf-settings-modal").addEventListener("click", (e) => {
+    if (e.target === $("wf-settings-modal")) $("wf-settings-modal").classList.add("hidden");
+  });
 
   const approvedForExecution = new Set<string>();
   const DANGEROUS_NODE_TYPES = new Set(["shell_exec", "code", "file"]);

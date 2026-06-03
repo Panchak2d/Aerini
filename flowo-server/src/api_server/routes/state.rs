@@ -16,6 +16,10 @@ use crate::token_store::{TokenRecord, TokenStore};
 /// Maximum concurrent SSE connections across all tokens.
 pub const SSE_MAX_CONNECTIONS: usize = 64;
 
+/// Default maximum concurrent workflow executions across all callers.
+/// Overridden by `--max-concurrent-runs` CLI flag.
+pub const MAX_CONCURRENT_RUNS: usize = 10;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub db:               Arc<WorkflowDb>,
@@ -34,6 +38,7 @@ pub struct ApiState {
     pub server_max_duration_secs: Option<u64>,
     pub base_executor: WorkflowExecutor,
     pub sse_semaphore: Arc<Semaphore>,
+    pub run_semaphore: Arc<Semaphore>,
 }
 
 pub fn require_admin(record: &TokenRecord) -> Result<(), (axum::http::StatusCode, axum::Json<serde_json::Value>)> {

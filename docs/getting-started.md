@@ -1,95 +1,24 @@
-# Getting Started
+# Getting Started with Flowo
 
-By the end of this guide you'll have Flowo installed and a working workflow that fetches data from a public API and posts it to Slack — running automatically on a schedule. Takes about 20 minutes.
+## Download and Install
 
-If you've never used automation tools before, read [Concepts](concepts.md) first. It explains what workflows, nodes, and credentials are before you start building.
+Download the latest release for your platform from the
+[GitHub Releases page](https://github.com/Panchak2d/flowo/releases/latest):
 
----
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon) | `Flowo_x.x.x_aarch64.dmg` |
+| macOS (Intel) | `Flowo_x.x.x_x64.dmg` |
+| Windows | `Flowo_x.x.x_x64-setup.exe` |
+| Linux | `Flowo_x.x.x_amd64.AppImage` |
 
-## What you need
-
-Three tools need to be installed before Flowo will build. If you've already set up a Rust development environment, you probably have all of them.
-
-| Tool | Version | Install |
-|---|---|---|
-| Rust | 1.77+ | [rustup.rs](https://rustup.rs/) |
-| Node.js | 18+ | [nodejs.org](https://nodejs.org/) |
-| Tauri CLI | 2.x | `cargo install tauri-cli --version "^2" --locked` |
-
-### Rust
-
-Rust is the programming language Flowo is written in. Installing it also installs `cargo`, which you'll use to install the Tauri CLI.
-
-Go to [rustup.rs](https://rustup.rs/) and follow the instructions for your OS. On macOS and Linux: run one command in a terminal. On Windows: download and run an installer.
-
-After installation, open a new terminal and verify it worked:
-
-```bash
-rustc --version
-cargo --version
-```
-
-Both should print version numbers. If they don't, close and reopen your terminal — the installer sometimes needs a fresh session for PATH changes to take effect.
-
-### Node.js
-
-Node.js needs to be installed and on your PATH. Two things depend on it: (1) Flowo's frontend is built with JavaScript, and (2) the Code (JS) node inside Flowo spawns Node.js at runtime to run your scripts.
-
-Go to [nodejs.org](https://nodejs.org/) and download the **LTS** version. Run the installer.
-
-After installation, verify in a new terminal:
-
-```bash
-node --version
-npm --version
-```
-
-**On Windows:** during installation, make sure the option to add Node.js to PATH is checked. If `node --version` returns "command not found" after installing, reinstall and check that box.
-
-### Tauri CLI
-
-Once Rust is installed, run this in a terminal:
-
-```bash
-cargo install tauri-cli --version "^2" --locked
-```
-
-This downloads and compiles the Tauri build tool. It takes a few minutes. Verify:
-
-```bash
-cargo tauri --version
-```
+No account required. No cloud. Runs entirely on your machine.
 
 ---
 
-## Install Flowo
+## Build from Source (Developers)
 
-```bash
-git clone https://github.com/Panchak2d/flowo
-cd flowo
-npm install
-npm run dev
-```
-
-`npm run dev` compiles the Rust code the first time, which takes 2–5 minutes. After that, the Flowo window opens.
-
-If you don't have `git`: on macOS, running `git` in the terminal prompts you to install Xcode Command Line Tools. On Windows, download from [git-scm.com](https://git-scm.com/). On Linux, use your package manager (`sudo apt install git` on Ubuntu).
-
-### Building an installer
-
-To create a proper installable app you can run without `npm run dev`:
-
-```bash
-npm run build
-```
-
-The installer appears in `src-tauri/target/release/bundle/`:
-
-| Platform | File | How to install |
-|---|---|---|
-| macOS | `.dmg` in `macos/` | Open it, drag Flowo to Applications |
-| Windows | `.exe` or `.msi` in `msi/` | Run the installer |
-| Linux | `.AppImage` in `appimage/` | `chmod +x Flowo*.AppImage` then run it |
+See [CONTRIBUTING.md](../CONTRIBUTING.md#building-from-source) for full build instructions.
 
 ---
 
@@ -176,6 +105,9 @@ This fetches a sample to-do item. JSONPlaceholder is a free, stable testing API 
 ### Step 4 — Place and connect a Code node
 
 Press `Space`, type `code`, click **Code (JS)**. Connect HTTP Request → Code.
+
+> **Requires Node.js 18+** on your PATH. Only needed if you use this node.
+> Install from [nodejs.org](https://nodejs.org) if prompted.
 
 Open the Code node config. In the **Code** field, enter:
 

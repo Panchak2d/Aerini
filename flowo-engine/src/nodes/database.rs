@@ -11,6 +11,7 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 use crate::nodes::util::scrub_url_in_error;
+use tracing::warn;
 
 /// Returns a BLAKE3 hex hash of the connection URL, used as the DashMap pool
 /// cache key. This prevents the plaintext URL (which may contain a password)
@@ -273,9 +274,28 @@ impl Node for DatabaseNode {
 /// that comes from workflow data or external input. Inline expression substitution
 /// bypasses parameterized query protection.
 fn check_query_for_inline_values(query: &str) -> Option<String> {
+    // Note: Flowo expression syntax ({{...}}) is resolved by the executor BEFORE
+    // this function is called — checking for "{{" here would be dead code. The
+    // correct enforcement point is at the workflow/executor level (pre-resolution).
+    //
+    // What we CAN check here (post-resolution) is literal SQL injection patterns:
+    //   - PostgreSQL dollar-quoting ($$...$$): produces string literals with no
+    //     single quotes, bypassing the single-quote heuristic entirely.
+    //   - Single-quoted literals: may indicate inline value substitution.
+    if query.trim().contains("$$") {
+        return Some(
+            "SQL INJECTION WARNING: This query contains PostgreSQL dollar-quoting ($$). \
+             Dollar-quoted strings bypass the single-quote injection heuristic. \
+             Use `?` placeholders and the `params` array for all dynamic values."
+            .to_string()
+        );
+    }
     if query.trim().contains('\'') {
         return Some(
-            "SQL INJECTION WARNING: This query contains single-quoted string literals.              If any quoted value originates from a workflow expression or external input,              use `?` placeholders and the `params` array instead of inline expressions.              Inline expression substitution bypasses parameterized query protection."
+            "SQL INJECTION WARNING: This query contains single-quoted string literals. \
+             If any quoted value originates from a workflow expression or external input, \
+             use `?` placeholders and the `params` array instead of inline expressions. \
+             Inline expression substitution bypasses parameterized query protection."
             .to_string()
         );
     }
@@ -298,7 +318,31 @@ async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         .map(|o| o == "execute")
         .unwrap_or(false);
     let params = parse_params(&input.input["params"]);
+    let caller_is_admin = input.context.metadata
+        .get("__caller_is_admin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let allow_raw_sql = caller_is_admin
+        && input.input["allow_raw_sql"].as_bool().unwrap_or(false);
     let inline_warning_sqlite = check_query_for_inline_values(&query);
+
+    if inline_warning_sqlite.is_some() {
+        if !allow_raw_sql {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "SQL_INJECTION_BLOCKED",
+                "Query contains single-quoted string literals that may indicate \
+                inline expression substitution. Use `?` placeholders and the `params` \
+                array instead. To allow raw SQL (advanced/trusted use only), set \
+                `allow_raw_sql: true` in the node config.",
+            ));
+        }
+        warn!(
+            workflow_id = %input.workflow_id,
+            query = %query,
+            "SQL_INJECTION_WARNING: query contains single-quoted literals with allow_raw_sql=true. \
+            Ensure no untrusted input is inlined."
+        );
+    }
 
     if let Err(e) = validate_db_path(&db_path) {
         return NodeOutput::failure(NodeError::unrecoverable("INVALID_PATH", e));
@@ -367,8 +411,12 @@ async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         Ok(Ok(data)) => {
             let row_count = data["rows"].as_array().map(|a| a.len()).unwrap_or(0);
             let mut logs = vec![format!("Query returned {} row(s)", row_count)];
-            if let Some(w) = inline_warning_sqlite { logs.push(w); }
-            NodeOutput::success_with_logs(data, logs)
+            let mut out_data = data;
+            if let Some(w) = inline_warning_sqlite {
+                logs.push(format!("[SQL_INJECTION_WARNING] {}", w));
+                out_data["_sql_injection_warning"] = serde_json::Value::String(w);
+            }
+            NodeOutput::success_with_logs(out_data, logs)
         }
     }
 }
@@ -466,7 +514,31 @@ async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         .map(|o| o == "execute")
         .unwrap_or(false);
     let params = parse_params(&input.input["params"]);
+    let caller_is_admin = input.context.metadata
+        .get("__caller_is_admin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let allow_raw_sql = caller_is_admin
+        && input.input["allow_raw_sql"].as_bool().unwrap_or(false);
     let inline_warning = check_query_for_inline_values(&query);
+
+    if inline_warning.is_some() {
+        if !allow_raw_sql {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "SQL_INJECTION_BLOCKED",
+                "Query contains single-quoted string literals that may indicate \
+                inline expression substitution. Use parameterized placeholders \
+                and the `params` array instead. To allow raw SQL (advanced/trusted \
+                use only), set `allow_raw_sql: true` in the node config.",
+            ));
+        }
+        warn!(
+            workflow_id = %input.workflow_id,
+            query = %query,
+            "SQL_INJECTION_WARNING: query contains single-quoted literals with allow_raw_sql=true. \
+            Ensure no untrusted input is inlined."
+        );
+    }
 
     let mut output = if db_type == "mysql" {
         if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url).await {
@@ -494,7 +566,10 @@ async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         }
     };
     if let Some(w) = inline_warning {
-        output.logs.push(w);
+        output.logs.push(format!("[SQL_INJECTION_WARNING] {}", w));
+        if let Some(ref mut data) = output.output {
+            data["_sql_injection_warning"] = serde_json::Value::String(w);
+        }
     }
     output
 }

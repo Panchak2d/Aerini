@@ -6,9 +6,14 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/bindings/
 src-tauri/.cargo/
+# Prevent accidental re-commit of workflow example zips inside src-tauri/
+src-tauri/*.zip
 
 node_modules/
-dist/
+# dist/ is intentionally committed (Tauri reads compiled frontend assets from it at runtime).
+# See CONTRIBUTING.md — do NOT add a bare `dist/` rule here.
+# Only ignore generated sourcemaps to keep the diff clean.
+dist/**/*.map
 build/
 .vite/
 .npm/
@@ -64,3 +69,5 @@ desktop.ini
 
 coverage/
 out/
+
+patch_staging/

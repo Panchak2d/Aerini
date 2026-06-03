@@ -66,7 +66,10 @@ pub struct ExecutionState {
     pub execution_id: String,
     pub workflow_id: String,
     pub started_at: DateTime<Utc>,
-    node_outputs: Arc<HashMap<String, Value>>,
+    // DashMap allows concurrent reads without a lock and concurrent writes via fine-grained
+    // bucket locking. Safe for the parallel executor where multiple tokio tasks may write
+    // node outputs concurrently without holding the outer RwLock the entire time.
+    node_outputs: Arc<dashmap::DashMap<String, Value>>,
     node_statuses: HashMap<String, NodeExecution>,
     pub variables: HashMap<String, Value>,
     // Loop-internal state: __loop_*_index and __loop_*_result_* keys.
@@ -82,7 +85,7 @@ impl ExecutionState {
             execution_id: Uuid::new_v4().to_string(),
             workflow_id: workflow_id.into(),
             started_at: Utc::now(),
-            node_outputs: Arc::new(HashMap::new()),
+            node_outputs: Arc::new(dashmap::DashMap::new()),
             node_statuses: HashMap::new(),
             variables,
             loop_state: HashMap::new(),
@@ -104,9 +107,7 @@ impl ExecutionState {
 
     pub fn mark_succeeded(&mut self, node_id: &str, output: NodeOutput) {
         let value = output.output.clone().unwrap_or(serde_json::Value::Null);
-        // CoW: if no other Arc references exist (common case), mutates in place — O(1).
-        // If a snapshot is still alive, clones the map before inserting — O(n).
-        Arc::make_mut(&mut self.node_outputs).insert(node_id.to_string(), value);
+        self.node_outputs.insert(node_id.to_string(), value);
         if let Some(r) = self.node_statuses.get_mut(node_id) {
             r.status = NodeStatus::Succeeded;
             r.output = Some(output);
@@ -139,8 +140,8 @@ impl ExecutionState {
     }
 
     #[allow(dead_code)]
-    pub fn get_node_output(&self, node_id: &str) -> Option<&Value> {
-        self.node_outputs.get(node_id)
+    pub fn get_node_output(&self, node_id: &str) -> Option<Value> {
+        self.node_outputs.get(node_id).map(|r| r.value().clone())
     }
 
     #[allow(dead_code)]
@@ -185,9 +186,16 @@ impl ExecutionState {
         for (k, v) in &self.loop_state {
             meta.insert(k.clone(), v.clone());
         }
+        // Convert DashMap → HashMap for the snapshot. O(n) but infrequent —
+        // snapshot() is called once per node execution, and node_outputs only
+        // contains entries for completed nodes.
+        let outputs: HashMap<String, Value> = self.node_outputs
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect();
         ExecutionContext {
             variables: self.variables.clone(),
-            node_outputs: Arc::clone(&self.node_outputs),
+            node_outputs: Arc::new(outputs),
             metadata: meta,
         }
     }

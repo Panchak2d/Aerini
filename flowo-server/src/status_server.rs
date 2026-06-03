@@ -3,7 +3,7 @@
 // remains valid. To recompute: sha256(bytes of this string) → base64-encode.
 //
 // SHA-256 (base64): EzDjh6fNSkXy+4Mk3I+Q6Pr4QSMDO7qOBhX3NHRvUFw=
-const STATUS_PAGE_CSS: &str = concat!(
+pub(crate) const STATUS_PAGE_CSS: &str = concat!(
     "*{box-sizing:border-box;margin:0;padding:0}\n",
     "    body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;font-size:14px}\n",
     "    h1{font-size:20px;font-weight:600;margin-bottom:4px}\n",
@@ -40,6 +40,21 @@ const STATUS_PAGE_CSS: &str = concat!(
     "    .history-section{margin-bottom:16px}",
 );
 
+/// Inline script content rendered between `<script>` tags in the status page.
+/// This const is the exact byte sequence hashed by the CSP script-src directive.
+/// Changing this string requires recomputing the hash in middleware.rs.
+///
+/// SHA-256 (base64): wU0Ewa2fRPMqN+gEO+pMBNDvkMABDjHCJ+3YwjpGSGo=
+pub(crate) const STATUS_PAGE_SCRIPT: &str = concat!(
+    "async function _flowoRun(){",
+    "var s=document.getElementById('_flowo_rs').value;",
+    "var r=await fetch('/api/run',{method:'POST',",
+    "headers:{'Authorization':'Bearer '+s,'Content-Type':'application/json'},",
+    "body:'{}'});",
+    "if(r.ok){document.getElementById('_flowo_rs').value='';alert('Run triggered.');}",
+    "else{alert('Invalid run secret.');}}"
+);
+
 use axum::{
     extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
@@ -50,7 +65,7 @@ use axum::{
 };
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
-use blake3;
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -82,6 +97,11 @@ pub struct StatusState {
 }
 
 pub fn router(state: StatusState) -> Router {
+    // Explicit CORS: reject all cross-origin requests.  The status server
+    // serves HTML and JSON to same-origin browser tabs only.  An explicit deny
+    // policy prevents a future wildcard regression if this router is modified.
+    let cors = tower_http::cors::CorsLayer::new();
+
     Router::new()
         .route("/",              get(status_page))
         .route("/api/status",    get(api_status))
@@ -91,6 +111,7 @@ pub fn router(state: StatusState) -> Router {
         .route("/api/runs/:id",  get(api_run_detail))
         .layer(axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(middleware::from_fn(crate::middleware::status_security_headers))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -243,22 +264,17 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
         log_section_title = "Logs (authenticated only)",
         logs     = logs_html,
         run_now_form = match &s.run_secret {
-            Some(_) => concat!(
-                "<div class='run-now-wrap'>",
-                "<input type='password' id='_flowo_rs' placeholder='Run secret' ",
-                "class='run-now-input'>",
-                "<button onclick='_flowoRun()'>&#9654; Run Now</button>",
-                "</div>",
-                "<script>",
-                "async function _flowoRun(){",
-                "var s=document.getElementById('_flowo_rs').value;",
-                "var r=await fetch('/api/run',{method:'POST',",
-                "headers:{'Authorization':'Bearer '+s,'Content-Type':'application/json'},",
-                "body:'{}'});",
-                "if(r.ok){document.getElementById('_flowo_rs').value='';alert('Run triggered.');}",
-                "else{alert('Invalid run secret.');}}",
-                "</script>"
-            ).to_string(),
+            Some(_) => format!(
+                concat!(
+                    "<div class='run-now-wrap'>",
+                    "<input type='password' id='_flowo_rs' placeholder='Run secret' ",
+                    "class='run-now-input'>",
+                    "<button onclick='_flowoRun()'>&#9654; Run Now</button>",
+                    "</div>",
+                    "<script>{}</script>"
+                ),
+                STATUS_PAGE_SCRIPT
+            ),
             None => String::new(),
         },
     ))
@@ -320,7 +336,7 @@ fn check_run_secret(
     state:   &StatusState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, &'static str)> {
-    let expected = match &state.run_secret {
+    let stored = match &state.run_secret {
         Some(s) => s,
         None => return Err((StatusCode::FORBIDDEN,
             "Run history requires a run secret. Set one at export time.")),
@@ -330,12 +346,34 @@ fn check_run_secret(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    // Hash both sides with BLAKE3 before constant-time comparison to prevent
-    // length oracle attacks (same pattern as api_run).
-    let ok: bool = blake3::hash(expected.as_bytes())
-        .as_bytes()
-        .ct_eq(blake3::hash(provided.as_bytes()).as_bytes())
-        .into();
+
+    // Since Flowo 0.3 the config stores an argon2id PHC string.
+    // Backward-compat: Flowo 0.2 configs stored a 64-char BLAKE3 hex digest.
+    // Detect by whether the value starts with the argon2 PHC prefix "$argon2".
+    // For legacy configs, fall back to the old double-hash comparison path.
+    let ok: bool = if stored.starts_with("$argon2") {
+        // New path (0.3+): verify against argon2id PHC hash.
+        // This is brute-force resistant; BLAKE3 was not.
+        match PasswordHash::new(stored) {
+            Ok(parsed_hash) => Argon2::default()
+                .verify_password(provided.as_bytes(), &parsed_hash)
+                .is_ok(),
+            Err(_) => false,
+        }
+    } else if stored.len() == 64 {
+        // Legacy path (0.2): stored is blake3_hex(raw); compare against blake3_hex(submitted).
+        // kept for configs exported before 0.3 — re-export to upgrade.
+        use blake3::hash as b3;
+        let submitted_hash = b3(provided.as_bytes()).to_hex();
+        stored.as_bytes().ct_eq(submitted_hash.as_bytes()).into()
+    } else {
+        // Very old path (pre-0.2): stored is raw secret; hash both sides.
+        use blake3::hash as b3;
+        b3(stored.as_bytes())
+            .as_bytes()
+            .ct_eq(b3(provided.as_bytes()).as_bytes())
+            .into()
+    };
     if ok { Ok(()) } else { Err((StatusCode::FORBIDDEN, "Invalid secret")) }
 }
 
@@ -393,25 +431,11 @@ async fn api_run(
     State(s): State<StatusState>,
     headers:  HeaderMap,
 ) -> impl IntoResponse {
-    match &s.run_secret {
-        Some(expected) => {
-            let provided = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .unwrap_or("");
-            // Hash both sides with BLAKE3 before constant-time comparison.
-            // Hashing normalises both sides to 32 bytes, preventing a length
-            // oracle via ct_eq short-circuiting on mismatched lengths.
-            let ok: bool = blake3::hash(expected.as_bytes())
-                .as_bytes()
-                .ct_eq(blake3::hash(provided.as_bytes()).as_bytes())
-                .into();
-            if !ok {
-                return (StatusCode::FORBIDDEN, "Invalid secret").into_response();
-            }
-        }
-        None => return (StatusCode::FORBIDDEN, "Manual trigger is disabled").into_response(),
+    if s.run_secret.is_none() {
+        return (StatusCode::FORBIDDEN, "Manual trigger is disabled").into_response();
+    }
+    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+        return (status, msg).into_response();
     }
     s.run_trigger.notify_one();
     (StatusCode::ACCEPTED, "Run triggered").into_response()
@@ -608,5 +632,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
+    /// Verifies that the SHA-256 hash of STATUS_PAGE_CSS matches the constant
+    /// used in the Content-Security-Policy style-src directive.
+    ///
+    /// If this test fails, STATUS_PAGE_CSS was changed without recomputing the
+    /// CSP hash. Update `CSP_CSS_HASH` in middleware.rs to the value printed
+    /// in the test failure message.
+    #[test]
+    fn csp_css_hash_matches_content() {
+        use sha2::{Sha256, Digest};
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        let digest = Sha256::digest(STATUS_PAGE_CSS.as_bytes());
+        let actual = BASE64.encode(digest);
+        assert_eq!(
+            actual,
+            crate::middleware::CSP_CSS_HASH,
+            "CSP style-src hash is stale.\n\
+             STATUS_PAGE_CSS changed but CSP_CSS_HASH in middleware.rs was not updated.\n\
+             New correct hash: sha256-{}",
+            actual,
+        );
+    }
+
+    /// Verifies that the SHA-256 hash of STATUS_PAGE_SCRIPT matches the constant
+    /// used in the Content-Security-Policy script-src directive.
+    ///
+    /// If this test fails, STATUS_PAGE_SCRIPT was changed without recomputing the
+    /// CSP hash. Update `CSP_SCRIPT_HASH` in middleware.rs to the value printed
+    /// in the test failure message.
+    #[test]
+    fn csp_script_hash_matches_content() {
+        use sha2::{Sha256, Digest};
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        let digest = Sha256::digest(STATUS_PAGE_SCRIPT.as_bytes());
+        let actual = BASE64.encode(digest);
+        assert_eq!(
+            actual,
+            crate::middleware::CSP_SCRIPT_HASH,
+            "CSP script-src hash is stale.\n\
+             STATUS_PAGE_SCRIPT changed but CSP_SCRIPT_HASH in middleware.rs was not updated.\n\
+             New correct hash: sha256-{}",
+            actual,
+        );
     }
 }

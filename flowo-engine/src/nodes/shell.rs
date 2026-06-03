@@ -101,12 +101,15 @@ impl Node for ShellExecNode {
         // Required: if the child fills the OS pipe buffer (~64 KB) and nothing is reading,
         // it blocks forever — wait() would never return.
         // child.wait() takes &mut self (not self), so child remains owned here for kill().
+        const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB per stream
         let stdout_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stdout.take();
             async move {
                 let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                if let Some(ref mut h) = pipe {
+                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
+                }
                 buf
             }
         });
@@ -115,7 +118,9 @@ impl Node for ShellExecNode {
             let mut pipe = child.stderr.take();
             async move {
                 let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                if let Some(ref mut h) = pipe {
+                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
+                }
                 buf
             }
         });
@@ -184,6 +189,7 @@ fn redact_command_log(cmd: &str) -> String {
     let s = redact_after_prefix(&s, "--secret=");
     let s = redact_after_prefix(&s, "--api-key=");
     let s = redact_after_prefix(&s, "--api_key=");
+    let s = redact_after_prefix(&s, "--key=");
     let s = redact_after_prefix(&s, "-p ");
     let s = redact_env_assignments(&s);
     if s.len() > 500 {
@@ -203,10 +209,18 @@ fn redact_authorization_header(cmd: &str) -> String {
         if lower[i..].starts_with("authorization:") {
             result.push_str("Authorization: [REDACTED]");
             let rest = &cmd[i + 14..];
+            // Skip the authorization value:
+            // - If a closing quote is present, consume up to and including it
+            //   (handles `-H "Authorization: Bearer token"` patterns).
+            // - Otherwise, consume to the next whitespace or end of string.
+            // Do NOT use cmd.len()-i as the fallback — that would swallow
+            // everything that follows (e.g., the URL after the header arg).
             let skip = if let Some(q) = rest.find('"') {
-                rest[q + 1..].find('"').map(|e| 14 + q + 1 + e + 1).unwrap_or(cmd.len() - i)
+                14 + q + 1
             } else {
-                rest.find(' ').map(|s| 14 + s).unwrap_or(cmd.len() - i)
+                rest.find(|c: char| c.is_ascii_whitespace())
+                    .map(|s| 14 + s)
+                    .unwrap_or(14 + rest.len())
             };
             i += skip;
         } else {
@@ -459,6 +473,8 @@ mod tests {
         let out = redact_authorization_header(cmd);
         assert!(out.contains("[REDACTED]"), "expected redaction, got: {}", out);
         assert!(!out.contains("sk-abc123"), "secret should be gone, got: {}", out);
+        // URL that follows the header must not be swallowed.
+        assert!(out.contains("https://api.example.com"), "URL must be preserved, got: {}", out);
     }
 
     // ── Full pipeline ───────────────────────────────────────────────────────

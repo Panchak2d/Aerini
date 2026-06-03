@@ -1,0 +1,31 @@
+name: Security Audit
+
+on:
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/security-audit.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  schedule:
+    # Daily at 06:00 UTC — picks up new advisories even without dependency changes
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit Rust Dependencies
+        uses: actions-rust-lang/audit@v1
+        # Issues are created automatically for critical vulnerabilities on
+        # main/master. Informational advisories are reported but do not fail.

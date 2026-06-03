@@ -81,8 +81,13 @@ async fn save_export_zip(
     filename: String,
 ) -> Result<String, String> {
     let src = std::path::PathBuf::from(&zip_path);
-    if !src.exists() {
-        return Err(format!("Export zip not found at: {}", zip_path));
+    let temp = std::env::temp_dir();
+    // Canonicalize to resolve '..' and symlinks before containment check.
+    // Also confirms the file exists — canonicalize fails if the path doesn't.
+    let canonical_src = src.canonicalize()
+        .map_err(|_| format!("Export zip not found at: {}", zip_path))?;
+    if !canonical_src.starts_with(&temp) {
+        return Err("zip_path must be within the system temp directory".to_string());
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<tauri_plugin_dialog::FilePath>>();
@@ -97,13 +102,13 @@ async fn save_export_zip(
             let dest = path.as_path()
                 .ok_or_else(|| "Invalid path".to_string())?
                 .to_path_buf();
-            std::fs::copy(&src, &dest)
+            std::fs::copy(&canonical_src, &dest)
                 .map_err(|e| format!("Copy failed: {}", e))?;
-            let _ = std::fs::remove_file(&src);
+            let _ = std::fs::remove_file(&canonical_src);
             Ok(dest.display().to_string())
         }
         Ok(None) => {
-            let _ = std::fs::remove_file(&src);
+            let _ = std::fs::remove_file(&canonical_src);
             Err("cancelled".to_string())
         }
         Err(_) => Err("Dialog error".to_string()),
@@ -193,8 +198,16 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         .await
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
+    const MAX_TEMP_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
     let bytes = BASE64.decode(&data)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
+    if bytes.len() > MAX_TEMP_FILE_BYTES {
+        return Err(format!(
+            "File too large: {} bytes (limit {} bytes)",
+            bytes.len(),
+            MAX_TEMP_FILE_BYTES,
+        ));
+    }
 
     let path = dir.join(&safe_name);
     tokio::fs::write(&path, &bytes)

@@ -57,8 +57,11 @@ async fn parallel_route_failure(
     state:        &crate::context::SharedExecutionState,
 ) -> (bool, Option<WorkflowResult>) {
     let before = active_nodes.len();
-    executor.activate_successors(node_id, "on_error", workflow, active_nodes);
+    let (_, drop_warn) = executor.activate_successors(node_id, "on_error", workflow, active_nodes);
     let on_error_wired = active_nodes.len() > before;
+    if let Some(msg) = drop_warn {
+        state.write().await.log(Some(node_id), crate::context::LogLevel::Error, msg);
+    }
 
     if on_error_wired {
         return (false, None);
@@ -310,7 +313,17 @@ pub(super) async fn run_inner_parallel(
                 join_set.spawn(async move {
                     let _permit = permit;
 
-                    let resolved_input = exec.build_input(&wf, &ndef, &st).await;
+                    let resolved_input = match exec.build_input(&wf, &ndef, &st).await {
+                        Ok(input) => input,
+                        Err(failure) => {
+                            let err_msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
+                            return NodeTaskResult {
+                                node_id:         nid,
+                                outcome:         NodeOutcome::Failed { output: failure, attempts: 1, err_msg },
+                                loop_body_nodes: vec![],
+                            };
+                        }
+                    };
 
                     // Schema validation: strict → fail; non-strict → warn and accumulate.
                     let schema_errors = WorkflowExecutor::validate_node_input(

@@ -11,18 +11,27 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use blake3;
 use tokio::sync::{oneshot, Mutex};
+use once_cell::sync::Lazy;
+use dashmap::DashSet;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
+/// Global registry of ports currently held by active Webhook nodes.
+/// Prevents two concurrent workflows from binding the same port and producing
+/// an opaque `BIND_ERR`. The entry is inserted before `bind()` and removed on
+/// all exit paths via `scopeguard::guard`.
+static ACTIVE_PORTS: Lazy<DashSet<u16>> = Lazy::new(DashSet::new);
+
 pub struct WebhookNode;
 
 // Shared across the accept loop and each hyper service invocation.
 struct HandlerState {
-    path:   String,
-    method: String,
-    secret: String,
+    path:               String,
+    method:             String,
+    secret:             String,
+    validate_timestamp: bool,
     // Taken on the first valid request; None afterwards signals the loop to exit.
     tx: Option<oneshot::Sender<Result<Value, String>>>,
 }
@@ -52,7 +61,19 @@ impl Node for WebhookNode {
                         "in a Code node immediately downstream rather than relying on this field alone."
                     )
                 },
-                "timeout_secs": { "type": "number", "description": "Wait timeout (default 60)" }
+                "timeout_secs":      { "type": "number", "description": "Wait timeout (default 60)" },
+                "validate_timestamp": {
+                    "type": "boolean",
+                    "description": concat!(
+                        "When true, requires callers to include an `x-webhook-timestamp` header containing a Unix ",
+                        "timestamp (seconds). Requests older than 5 minutes are rejected, which reduces but does ",
+                        "not eliminate the replay window — the timestamp is not cryptographically bound to the ",
+                        "request body, so an attacker can replay with a captured secret and a fresh timestamp. ",
+                        "For body integrity, verify a platform HMAC header (e.g. Stripe-Signature, ",
+                        "X-Hub-Signature-256) in a downstream Code node. ",
+                        "Disable only if the caller cannot include a timestamp (default: true)."
+                    )
+                }
             }
         })
     }
@@ -87,10 +108,27 @@ impl Node for WebhookNode {
                 "Webhook port must be 1024 or higher (privileged ports require root)",
             ));
         }
-        let path         = input.input["path"].as_str().unwrap_or("/webhook").to_string();
-        let method       = input.input["method"].as_str().unwrap_or("ANY").to_uppercase();
-        let secret       = input.input["secret"].as_str().unwrap_or("").to_string();
-        let timeout_secs = input.input["timeout_secs"].as_u64().unwrap_or(60);
+
+        // Claim the port in the global registry before binding.
+        // If the port is already held by another running Webhook node in this process,
+        // return a clear error instead of producing a confusing BIND_ERR from the OS.
+        if !ACTIVE_PORTS.insert(port) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "PORT_IN_USE",
+                format!(
+                    "Port {} is already held by another running Webhook node. \
+                     Choose a different port or wait for that workflow to finish.",
+                    port
+                ),
+            ));
+        }
+        // Release the port registration on all exit paths (normal return, error, or panic).
+        let _port_guard = scopeguard::guard((), |_| { ACTIVE_PORTS.remove(&port); });
+        let path               = input.input["path"].as_str().unwrap_or("/webhook").to_string();
+        let method             = input.input["method"].as_str().unwrap_or("ANY").to_uppercase();
+        let secret             = input.input["secret"].as_str().unwrap_or("").to_string();
+        let validate_timestamp = input.input["validate_timestamp"].as_bool().unwrap_or(true);
+        let timeout_secs       = input.input["timeout_secs"].as_u64().unwrap_or(60);
 
         let (tx, rx) = oneshot::channel::<Result<Value, String>>();
 
@@ -112,6 +150,7 @@ impl Node for WebhookNode {
             path:   path.clone(),
             method,
             secret,
+            validate_timestamp,
             tx: Some(tx),
         }));
 
@@ -290,6 +329,41 @@ async fn handle_request(
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Full::new(Bytes::new()))
                 .expect("static response builder parameters are infallible"));
+        }
+    }
+
+    // Timestamp replay-window check.
+    // When validate_timestamp is true, callers must include x-webhook-timestamp
+    // as a Unix epoch (seconds). Requests outside a ±5-minute window are rejected.
+    // This REDUCES but does not eliminate the replay window — the timestamp is not
+    // cryptographically bound to the body. An attacker with a captured secret can
+    // replay by sending a fresh timestamp with any body. For body integrity, verify
+    // a platform HMAC header in a downstream Code node.
+    if st.validate_timestamp {
+        const WINDOW_SECS: i64 = 300; // 5 minutes
+        let provided_ts = headers
+            .get("x-webhook-timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<i64>().ok());
+        match provided_ts {
+            None => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from_static(b"x-webhook-timestamp required")))
+                    .expect("static response builder parameters are infallible"));
+            }
+            Some(ts) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if (now - ts).abs() > WINDOW_SECS {
+                    return Ok(Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Full::new(Bytes::from_static(b"Timestamp too old or too far in future")))
+                        .expect("static response builder parameters are infallible"));
+                }
+            }
         }
     }
 

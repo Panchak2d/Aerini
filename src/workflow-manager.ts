@@ -66,6 +66,9 @@ export class WorkflowManager {
   canvas: Canvas;
   currentId   = `wf_${Date.now()}`;
   currentName = "Untitled";
+  /** Per-workflow parallel execution setting. Serialised into workflow JSON. */
+  parallelExecution   = false;
+  maxConcurrentNodes  = 8;
   hasUnsaved  = false;
   private sortMode = "updated_desc";
 
@@ -108,7 +111,7 @@ export class WorkflowManager {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
     this.autoSaveTimer = setTimeout(async () => {
       if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors);
+      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
       if (isTauri()) {
         try { await saveWorkflow(json); } catch (e) { console.error("Flowo: autosave failed", e); }
       } else {
@@ -229,7 +232,9 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onStatusChange("Workflow not found"); return; }
-      const { id: wfId, name, nodes, connectors } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(json);
+      this.parallelExecution = parallelExecution;
+      this.maxConcurrentNodes = maxConcurrentNodes;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       if (localStorage.getItem("flowo_autofit") !== "false") this.canvas.fitToScreen();
@@ -281,7 +286,9 @@ export class WorkflowManager {
   async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
     const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
     try {
-      const { id: wfId, name, nodes, connectors } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(json);
+      this.parallelExecution = parallelExecution;
+      this.maxConcurrentNodes = maxConcurrentNodes;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.fitToScreen();
@@ -304,7 +311,7 @@ export class WorkflowManager {
       if (!name?.trim()) { this.onStatusChange("Save cancelled"); return; }
       this.onTitleChange(this.currentName);
     }
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
     this.onStatusChange("Saving…");
     try {
       if (isTauri()) {
@@ -331,8 +338,10 @@ export class WorkflowManager {
       const ok = await this.confirmFn(`Start a new workflow? Unsaved changes to "${this.currentName}" will be lost.`);
       if (!ok) return;
     }
-    this.currentId   = `wf_${Date.now()}`;
-    this.currentName = "Untitled";
+    this.currentId          = `wf_${Date.now()}`;
+    this.currentName        = "Untitled";
+    this.parallelExecution  = false;
+    this.maxConcurrentNodes = 8;
     this.markUnsaved(false);
     this.canvas.nodes.clear();
     this.canvas.connectors.clear();
@@ -362,7 +371,9 @@ export class WorkflowManager {
     try {
       const snapshot = await getVersion(versionId);
       if (!snapshot) return null;
-      const { id: wfId, name, nodes, connectors } = deserialize(snapshot);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(snapshot);
+      this.parallelExecution = parallelExecution;
+      this.maxConcurrentNodes = maxConcurrentNodes;
       this.canvas.nodes = nodes;
       this.canvas.connectors = connectors;
       this.canvas.clearSelection();
@@ -402,7 +413,8 @@ export class WorkflowManager {
     // Capture snapshot first — before any save I/O
     const id   = this.currentId;
     const name = this.currentName;
-    const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors);
+    const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors,
+      this.parallelExecution, this.maxConcurrentNodes);
     // Persist to storage — this is required, not optional.
     // The scheduler daemon looks up the workflow from the DB by ID;
     // if the save fails the scheduler will immediately error on first run.
@@ -428,7 +440,7 @@ export class WorkflowManager {
       return;
     }
 
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
     const obj  = JSON.parse(json);
     const file = { flowo_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:"", tags:[], nodes:obj.nodes, edges:obj.edges };
     const content  = JSON.stringify(file, null, 2);

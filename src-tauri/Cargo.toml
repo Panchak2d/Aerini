@@ -18,6 +18,9 @@ flowo-engine = { path = "../flowo-engine" }
 tauri              = { version = "2.0", features = ["tray-icon"] }
 tauri-plugin-shell    = "2.0"
 tauri-plugin-dialog   = "2.0"
+# tauri-plugin-fs is used Rust-side only (std::fs in lib.rs commands).
+# No fs:allow-* capabilities are granted in capabilities/default.json — the webview
+# has no filesystem access. Do not add webview fs capabilities without security review.
 tauri-plugin-fs       = "2.0"
 tauri-plugin-autostart = "2.0"
 
@@ -33,6 +36,9 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid  = { version = "1.8", features = ["v4"] }
 zip    = { version = "2", default-features = false, features = ["deflate"] }
+blake3 = "1"
+# Password hashing for run_secret
+argon2 = "0.5"
 
 # Base64 decode for write_temp_file — already in workspace via flowo-engine
 base64 = "0.22"

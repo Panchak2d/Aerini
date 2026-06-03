@@ -32,7 +32,7 @@ mod token_store;
 mod util;
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use clap::{Parser, Subcommand};
 use flowo_engine::{
@@ -154,6 +154,16 @@ enum Command {
         #[arg(long, default_value_t = false)]
         allow_code: bool,
 
+        /// Enable Code (JS) node sandboxing when --allow-code is active.
+        /// When set, Code nodes run with:
+        ///   - Module import restrictions (child_process, fs, net, etc. blocked)
+        ///   - --disallow-code-generation-from-strings (eval/new Function blocked)
+        ///   - CPU and memory resource limits (Linux only)
+        /// Default: false (full Node.js stdlib available, matching desktop mode).
+        /// Recommended for multi-user API deployments where --allow-code must be on.
+        #[arg(long, default_value_t = false)]
+        code_sandbox: bool,
+
         /// Use the OS keychain (macOS Keychain, Windows Credential Manager,
         /// Linux SecretService) to store the encryption key instead of a
         /// plain file. Recommended on desktop-adjacent servers.
@@ -185,6 +195,12 @@ enum Command {
         /// Should be >= max_concurrent_nodes to avoid connection starvation.
         #[arg(long, env = "FLOWO_DB_POOL_SIZE")]
         db_pool_size: Option<usize>,
+
+        /// Maximum number of workflow executions allowed to run simultaneously
+        /// across all callers. Additional requests receive HTTP 429.
+        /// Default: 10.
+        #[arg(long, default_value_t = 10)]
+        max_concurrent_runs: usize,
     },
 
     /// List all scheduled workflows (API mode only).
@@ -300,7 +316,7 @@ async fn main() {
 
     match cli.command {
         Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code).await,
-        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size } => {
+        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, code_sandbox, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs } => {
             let shell_exec_disabled = !allow_shell;
             let code_exec_disabled  = !allow_code;
             let pool_size = db_pool_size.unwrap_or_else(|| {
@@ -309,7 +325,7 @@ async fn main() {
                     .unwrap_or(8)
                     .max(8)
             });
-            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, pool_size).await;
+            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, code_sandbox, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, pool_size, max_concurrent_runs).await;
         },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
         Command::Stop    { workflow, server, token } => ctl_stop(&workflow, &server, &token).await,
@@ -465,15 +481,22 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
         !matches!(b, "127.0.0.1" | "::1" | "localhost")
     }
 
-    if is_public_bind(&bind) && config.run_secret.is_none() {
-        // Logs are no longer exposed on the public page (fixed), but warn anyway
-        // so operators know to set a secret for authenticated access.
-        tracing::warn!(
-            "Status page is publicly accessible (bind={}) and run_secret is not set. \
-             Workflow metadata (run counts, timestamps) is visible to anyone who can reach port {}. \
-             Set run_secret in flowo-server.json to enable authenticated log/run access.",
-            bind, status_port
-        );
+    if config.run_secret.is_none() {
+        if is_public_bind(&bind) {
+            // Public bind with no secret: stronger warning.
+            tracing::warn!(
+                "Status page is publicly accessible (bind={}) and run_secret is not set. \
+                 Workflow metadata (run counts, timestamps) is visible to anyone who can reach port {}. \
+                 Set run_secret in flowo-server.json to enable authenticated log/run access.",
+                bind, status_port
+            );
+        } else {
+            // Loopback bind but still no secret: informational.
+            tracing::info!(
+                "run_secret is not set — the Run Now button and authenticated log endpoints are disabled. \
+                 Set run_secret in flowo-server.json to enable them."
+            );
+        }
     }
 
     // Warn if the config file permissions are too open on Unix systems.
@@ -484,7 +507,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
             if meta.mode() & 0o077 != 0 {
                 tracing::warn!(
                     "Config file {:?} is readable by group or other users (mode {:03o}). \
-                     It contains run_secret in plaintext — consider: chmod 600 {:?}",
+                     It contains the BLAKE3 hash of your run_secret — consider: chmod 600 {:?}",
                     config_path, meta.mode() & 0o777, config_path
                 );
             }
@@ -499,7 +522,11 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
         log_buffer:    log,
         run_trigger,
         run_secret:    config.run_secret,
-        rate_limiter:  Arc::new(middleware::RateLimiter::new(120, 60)),
+        rate_limiter:  {
+            let rl = Arc::new(middleware::RateLimiter::new(120, 60));
+            Arc::clone(&rl).spawn_eviction_task();
+            rl
+        },
         run_history:   Some(workflow_db),
         trusted_proxy_count,
     };
@@ -512,8 +539,39 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("Status server error");
 }
 
-async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>, db_pool_size: usize) {
-    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size).await;
+async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, code_sandbox: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>, db_pool_size: usize, max_concurrent_runs: usize) {
+    if !code_exec_disabled {
+        eprintln!();
+        eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
+        eprintln!("│  WARNING: --allow-code is active                                     │");
+        eprintln!("│                                                                       │");
+        eprintln!("│  Every API token with 'write' scope can now execute arbitrary        │");
+        eprintln!("│  JavaScript on this host via the Code (JS) node, including reading   │");
+        eprintln!("│  files and spawning subprocesses. Only use this flag on a trusted,   │");
+        eprintln!("│  single-user deployment. Do NOT enable in multi-user API mode.       │");
+        eprintln!("└─────────────────────────────────────────────────────────────────────┘");
+        eprintln!();
+    }
+    if !shell_exec_disabled {
+        eprintln!();
+        eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
+        eprintln!("│  WARNING: --allow-shell is active                                    │");
+        eprintln!("│                                                                       │");
+        eprintln!("│  Every API token with 'write' scope can now execute arbitrary OS     │");
+        eprintln!("│  commands on this host via the Shell Command node. Only use this     │");
+        eprintln!("│  flag on a trusted, single-user deployment.                          │");
+        eprintln!("└─────────────────────────────────────────────────────────────────────┘");
+        eprintln!();
+    }
+    #[cfg(target_os = "macos")]
+    if !code_exec_disabled && code_sandbox {
+        eprintln!();
+        eprintln!("WARNING: --code-sandbox is PARTIAL on macOS.");
+        eprintln!("  ESM module restrictions apply, but CPU/memory setrlimit() is Linux-only.");
+        eprintln!("  A runaway script can exhaust system resources. Deploy on Linux for full sandboxing.");
+        eprintln!();
+    }
+    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, code_sandbox, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs).await;
 }
 
 async fn ctl_list(server: &str, token: &str) {
@@ -672,11 +730,21 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
     }
 }
 
+static CLI_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn cli_http_client() -> &'static reqwest::Client {
+    CLI_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to build CLI HTTP client")
+    })
+}
+
 async fn api_get<T: serde::de::DeserializeOwned>(
     server: &str, token: &str, path: &str
 ) -> Result<T, String> {
-    let client = reqwest::Client::new();
-    let res = client.get(format!("{}{}", server, path))
+    let res = cli_http_client().get(format!("{}{}", server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
@@ -700,8 +768,7 @@ async fn api_get_items(
 async fn api_post(
     server: &str, token: &str, path: &str, body: &str
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let res = client.post(format!("{}{}", server, path))
+    let res = cli_http_client().post(format!("{}{}", server, path))
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(body.to_string())
@@ -713,8 +780,7 @@ async fn api_post(
 }
 
 async fn api_get_raw(server: &str, token: &str, path: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let res = client.get(format!("{}{}", server, path))
+    let res = cli_http_client().get(format!("{}{}", server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
@@ -731,8 +797,7 @@ async fn api_post_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn api_delete(server: &str, token: &str, path: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let res = client.delete(format!("{}{}", server, path))
+    let res = cli_http_client().delete(format!("{}{}", server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {

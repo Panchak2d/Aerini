@@ -2,6 +2,11 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2,
+};
+
 use flowo_engine::{
     db::WorkflowDb,
     model::Workflow,
@@ -21,10 +26,14 @@ pub struct ExportRequest {
 /// Response — path to the generated zip file.
 #[derive(Debug, Serialize)]
 pub struct ExportResult {
-    pub zip_path:     String,
-    pub workflow_name: String,
-    pub credentials:  Vec<CredentialExport>,
-    pub trigger_desc: String,
+    pub zip_path:             String,
+    pub workflow_name:        String,
+    pub credentials:          Vec<CredentialExport>,
+    pub trigger_desc:         String,
+    /// The raw (unhashed) run secret generated for this export.
+    /// Shown once in the UI and never stored to disk — the config file
+    /// stores only the BLAKE3 hash.
+    pub run_secret_plaintext: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,7 +108,15 @@ pub async fn generate_server_package(
 
     // Generate a per-export run secret so POST /api/run is authenticated.
     // Uses uuid v4 for 122 bits of entropy — adequate for a status page token.
-    let run_secret = uuid::Uuid::new_v4().to_string().replace('-', "");
+    // Stored as an argon2id hash (brute-force resistant); the raw secret is
+    // returned to the UI for one-time display and never written to disk.
+    // spawn_blocking: argon2 is CPU-intensive and must not block the async runtime.
+    let run_secret_raw   = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let secret_for_hash  = run_secret_raw.clone();
+    let run_secret_hash  = tokio::task::spawn_blocking(move || hash_run_secret(&secret_for_hash))
+        .await
+        .map_err(|e| format!("Internal error hashing run secret: {}", e))?
+        .map_err(|e| format!("Failed to hash run secret: {}", e))?;
 
     let server_config = serde_json::json!({
         "workflow_name":     wf.name,
@@ -107,7 +124,7 @@ pub async fn generate_server_package(
         "status_port":       request.status_port,
         "exported_at":       chrono::Utc::now().to_rfc3339(),
         "credential_env_vars": cred_env_vars,
-        "run_secret":        run_secret,
+        "run_secret":        run_secret_hash,
     });
     let server_config_str = serde_json::to_string_pretty(&server_config)
         .map_err(|e| e.to_string())?;
@@ -190,10 +207,11 @@ pub async fn generate_server_package(
     }
 
     Ok(ExportResult {
-        zip_path:      zip_path.display().to_string(),
-        workflow_name: wf.name,
+        zip_path:             zip_path.display().to_string(),
+        workflow_name:        wf.name,
         credentials,
         trigger_desc,
+        run_secret_plaintext: run_secret_raw,
     })
 }
 
@@ -365,7 +383,12 @@ pub async fn generate_docker_package(
         .map(|c| (c.credential_id.clone(), c.env_var_name.clone()))
         .collect();
 
-    let run_secret = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let run_secret_raw   = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let secret_for_hash  = run_secret_raw.clone();
+    let run_secret_hash  = tokio::task::spawn_blocking(move || hash_run_secret(&secret_for_hash))
+        .await
+        .map_err(|e| format!("Internal error hashing run secret: {}", e))?
+        .map_err(|e| format!("Failed to hash run secret: {}", e))?;
 
     let server_config = serde_json::json!({
         "workflow_name":       wf.name,
@@ -373,7 +396,7 @@ pub async fn generate_docker_package(
         "status_port":         request.status_port,
         "exported_at":         chrono::Utc::now().to_rfc3339(),
         "credential_env_vars": cred_env_vars,
-        "run_secret":          run_secret,
+        "run_secret":          run_secret_hash,
     });
     let server_config_str = serde_json::to_string_pretty(&server_config)
         .map_err(|e| e.to_string())?;
@@ -430,10 +453,11 @@ pub async fn generate_docker_package(
     }
 
     Ok(ExportResult {
-        zip_path:      zip_path.display().to_string(),
-        workflow_name: wf.name,
+        zip_path:             zip_path.display().to_string(),
+        workflow_name:        wf.name,
         credentials,
         trigger_desc,
+        run_secret_plaintext: run_secret_raw,
     })
 }
 
@@ -577,6 +601,14 @@ fn build_docker_readme(
          **Workflow:** {name}  \n\
          **Trigger:** {trigger}\n\
          \n\
+         ## Security Warning\n\
+         \n\
+         `flowo-server.json` contains the BLAKE3 hash of your `run_secret`.\\n\\
+         The raw secret was shown once at export time and is not stored in this file.\\n\\
+         Treat this zip like a credentials file: do not commit it to version\n\
+         control, do not share it over unencrypted channels, and do not store\n\
+         it in a world-readable directory.\n\
+         \n\
          ## Quick Start\n\
          \n\
          ```bash\n\
@@ -668,6 +700,17 @@ fn build_readme(
          Workflow : {name}\n\
          Trigger  : {trigger}\n\
          \n\
+         SECURITY WARNING\n\
+         ----------------\n\
+         flowo-server.json contains the BLAKE3 hash of your run_secret.\\n\\
+         The raw secret was shown once at export time and is not stored in this file.\\n\\
+         Treat this zip like a credentials file:\n\
+         - Do NOT commit it to version control.\n\
+         - Do NOT share it over unencrypted channels.\n\
+         - Do NOT store it in a world-readable directory.\n\
+         After deployment, restrict permissions:\n\
+           chmod 600 ~/.flowo-server/{safe}/flowo-server.json\n\
+         \n\
          QUICK START\n\
          -----------\n\
          1. Upload this zip to your Linux server and unzip it.\n\
@@ -714,4 +757,15 @@ fn build_readme(
         creds   = cred_section,
         safe    = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_"),
     )
+}
+
+/// Hash `raw_secret` with argon2id for storage in `flowo-server.json`.
+///
+/// argon2id is brute-force resistant (unlike BLAKE3, which is a fast hash).
+/// The stored value is an argon2 PHC string (~97 chars) that embeds the salt
+/// and parameters, making it self-contained for verification.
+fn hash_run_secret(raw: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt   = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    Ok(argon2.hash_password(raw.as_bytes(), &salt)?.to_string())
 }

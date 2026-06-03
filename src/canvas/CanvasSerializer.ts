@@ -24,13 +24,19 @@ export interface WorkflowDocument {
     version: string;
     tags: string[];
   };
+  /** When true, independent branches run concurrently. Default: false (sequential). */
+  parallel_execution?: boolean;
+  /** Max concurrent node tasks when parallel_execution is true. Default: 8. */
+  max_concurrent_nodes?: number;
 }
 
 export function serialize(
   id: string,
   name: string,
   nodes: Map<string, CanvasNode>,
-  connectors: Map<string, Connector>
+  connectors: Map<string, Connector>,
+  parallelExecution?: boolean,
+  maxConcurrentNodes?: number,
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -58,6 +64,12 @@ export function serialize(
       tags: [],
     },
   };
+  if (parallelExecution) {
+    doc.parallel_execution = true;
+    if (maxConcurrentNodes !== undefined && maxConcurrentNodes !== 8) {
+      doc.max_concurrent_nodes = maxConcurrentNodes;
+    }
+  }
   return JSON.stringify(doc, null, 2);
 }
 
@@ -71,10 +83,14 @@ export function deserialize(json: string): {
   name: string;
   nodes: Map<string, CanvasNode>;
   connectors: Map<string, Connector>;
+  parallelExecution: boolean;
+  maxConcurrentNodes: number;
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
     nodes?: unknown[]; edges?: unknown[];
+    parallel_execution?: boolean;
+    max_concurrent_nodes?: number;
   };
 
   const id   = doc.id   ?? `wf_${Date.now()}`;
@@ -124,5 +140,12 @@ export function deserialize(json: string): {
     } catch { /* skip malformed edge */ }
   }
 
-  return { id, name, nodes, connectors };
+  return {
+    id,
+    name,
+    nodes,
+    connectors,
+    parallelExecution: doc.parallel_execution ?? false,
+    maxConcurrentNodes: doc.max_concurrent_nodes ?? 8,
+  };
 }

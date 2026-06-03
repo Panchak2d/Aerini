@@ -23,6 +23,7 @@ use std::sync::OnceLock;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts};
+use crate::nodes::util::check_host_ssrf_from_url;
 
 static IMAGE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -31,6 +32,9 @@ fn image_client() -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(10)
+            // Redirects disabled: a spoofed AI API could redirect to an internal
+            // address and bypass the SSRF check in download_to_base64.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build image generation HTTP client")
     }).clone()
@@ -367,6 +371,12 @@ fn mime_to_ext(mime: &str) -> &'static str {
 
 /// Download image from URL and return raw base64 bytes (no data: URI prefix).
 async fn download_to_base64(client: &reqwest::Client, url: &str) -> Result<String, NodeError> {
+    // Validate the URL before fetching — a compromised or spoofed AI API could
+    // return an internal URL (e.g. AWS metadata endpoint) to extract infrastructure
+    // data via the image download path.
+    check_host_ssrf_from_url(url).await.map_err(|e| {
+        NodeError::unrecoverable("SSRF_BLOCKED", e)
+    })?;
     let bytes = client
         .get(url)
         .send()

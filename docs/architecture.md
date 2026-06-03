@@ -48,7 +48,7 @@ When you press Run, `WorkflowExecutor::run()`:
    - Emits a node-status event before and after execution.
 3. Returns a `WorkflowResult` with all node outputs, all log entries, and a success flag.
 
-The executor itself is linear. Parallelism within a single workflow run isn't currently implemented — nodes execute one at a time in topological order. The scheduler runs multiple workflows concurrently (each in its own Tokio task), but a single workflow's nodes are sequential.
+The executor supports both sequential and parallel execution modes. By default, nodes execute one at a time in topological order (sequential). When `parallel_execution: true` is set on a workflow, independent branches — nodes whose upstream dependencies have all completed — run concurrently via tokio tasks, bounded by `max_concurrent_nodes` (default 8). The scheduler runs multiple workflows concurrently regardless of mode, each in its own Tokio task.
 
 ## The scheduler daemon
 

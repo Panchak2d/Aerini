@@ -27,10 +27,11 @@ interface ValidateResult {
 }
 
 interface ExportResult {
-  zip_path:      string;
-  workflow_name: string;
-  credentials:   CredentialExport[];
-  trigger_desc:  string;
+  zip_path:             string;
+  workflow_name:        string;
+  credentials:         CredentialExport[];
+  trigger_desc:        string;
+  run_secret_plaintext: string;
 }
 
 type DeployTarget = "linux" | "docker";
@@ -307,7 +308,10 @@ function renderReady(
       });
 
       if (savedPath && successLinuxEl) successLinuxEl.hidden = false;
-      if (savedPath) toast("Linux server package saved", "success");
+      if (savedPath) {
+        toast("Linux server package saved", "success");
+        showRunSecretBanner(content, exportResult.run_secret_plaintext);
+      }
     } catch (err) {
       toast(`Export failed: ${String(err)}`, "error");
     } finally {
@@ -347,7 +351,10 @@ function renderReady(
       });
 
       if (savedPath && successDockerEl) successDockerEl.hidden = false;
-      if (savedPath) toast("Docker package saved", "success");
+      if (savedPath) {
+        toast("Docker package saved", "success");
+        showRunSecretBanner(content, exportResult.run_secret_plaintext);
+      }
     } catch (err) {
       toast(`Export failed: ${String(err)}`, "error");
     } finally {
@@ -355,4 +362,39 @@ function renderReady(
       if (generatingDockerEl) generatingDockerEl.hidden = true;
     }
   });
+}
+
+/// Renders a one-time run-secret banner inside the export panel.
+/// The raw secret is never stored on disk — this is the only opportunity
+/// to record it. The banner includes a copy button and a clear warning.
+function showRunSecretBanner(container: Element | null, secret: string): void {
+  if (!container) return;
+  // Remove any existing banner from a prior export in this panel session.
+  container.querySelector(".esp-run-secret-banner")?.remove();
+
+  const banner = document.createElement("div");
+  banner.className = "esp-run-secret-banner";
+  banner.innerHTML = `
+    <div class="esp-run-secret-title">⚠ Save your run secret — shown once</div>
+    <div class="esp-run-secret-desc">
+      This secret authenticates <code>POST /api/run</code> and <code>GET /api/logs</code>.
+      It is <strong>not stored in the zip</strong> — only its hash is. Copy it now.
+    </div>
+    <div class="esp-run-secret-row">
+      <code class="esp-run-secret-value">${secret}</code>
+      <button class="esp-run-secret-copy" type="button">Copy</button>
+    </div>`;
+
+  const copyBtn = banner.querySelector<HTMLButtonElement>(".esp-run-secret-copy")!;
+  copyBtn.addEventListener("click", () => {
+    navigator.clipboard.writeText(secret).then(() => {
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+    }).catch(() => {
+      copyBtn.textContent = "Copy failed";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+    });
+  });
+
+  container.appendChild(banner);
 }

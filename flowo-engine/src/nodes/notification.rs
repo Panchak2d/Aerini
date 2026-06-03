@@ -83,18 +83,25 @@ async fn send_notification(title: &str, body: &str, urgency: &str) -> Result<&'s
 
     #[cfg(target_os = "macos")]
     {
-        let script = if body.is_empty() {
-            format!("display notification \"\" with title \"{}\"", title.replace('"', "\\\""))
+        // Title and body are passed as separate argv items — they are never
+        // interpolated into AppleScript source text, which prevents injection
+        // via newlines, backticks, or AppleScript keywords in the input strings.
+        //
+        // The script reads them via `item N of argv` at runtime.
+        // An empty body is passed as "" so argv always has exactly two items.
+        let script_body = if body.is_empty() {
+            "on run argv\ndisplay notification \"\" with title (item 1 of argv)\nend run"
         } else {
-            format!(
-                "display notification \"{}\" with title \"{}\"",
-                body.replace('"', "\\\""),
-                title.replace('"', "\\\""),
-            )
+            "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run"
         };
-        let status = Command::new("osascript")
-            .arg("-e").arg(&script)
-            .status().await.map_err(|e| e.to_string())?;
+        let mut cmd = Command::new("osascript");
+        cmd.arg("-e").arg(script_body)
+           .arg("--")
+           .arg(title);
+        if !body.is_empty() {
+            cmd.arg(body);
+        }
+        let status = cmd.status().await.map_err(|e| e.to_string())?;
         if status.success() {
             return Ok("osascript");
         }
@@ -103,19 +110,60 @@ async fn send_notification(title: &str, body: &str, urgency: &str) -> Result<&'s
 
     #[cfg(target_os = "windows")]
     {
-        // PowerShell toast notification (Windows 10+)
-        let script = format!(
+        // Title and body are written into an XML temp file.
+        // No user-controlled data is interpolated into the PowerShell -Command
+        // string — the command only loads from the temp file path (a UUID-named
+        // OS temp file, not attacker-controlled).
+        //
+        // XML special characters in title/body are entity-escaped so the XML
+        // document remains well-formed even with arbitrary input.
+        fn xml_escape(s: &str) -> String {
+            s.chars().fold(String::with_capacity(s.len()), |mut a, c| {
+                match c {
+                    '&'  => a.push_str("&amp;"),
+                    '<'  => a.push_str("&lt;"),
+                    '>'  => a.push_str("&gt;"),
+                    '"'  => a.push_str("&quot;"),
+                    '\'' => a.push_str("&apos;"),
+                    _    => a.push(c),
+                }
+                a
+            })
+        }
+        let xml = format!(
+            "<toast><visual><binding template='ToastText02'>\
+             <text id='1'>{title}</text>\
+             <text id='2'>{body}</text>\
+             </binding></visual></toast>",
+            title = xml_escape(title),
+            body  = xml_escape(body),
+        );
+        // Write XML to a temp file. Only the file path (not the content) is
+        // placed into the PowerShell -Command string.
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".xml")
+            .tempfile()
+            .map_err(|e| format!("Failed to create temp file for notification: {}", e))?;
+        use std::io::Write as _;
+        tmp.write_all(xml.as_bytes())
+            .map_err(|e| format!("Failed to write notification XML: {}", e))?;
+        let path = tmp.path().to_string_lossy().to_string();
+        // path is an OS-assigned temp path. Windows forbids `"` in file paths so
+        // wrapping in double quotes is safe. Single quotes are avoided because a
+        // temp dir rooted in a user profile path like "O'Brien" would break a
+        // single-quoted PowerShell string literal.
+        let ps_cmd = format!(
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
-             $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
-             $xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('{}')) | Out-Null; \
-             $xml.GetElementsByTagName('text')[1].AppendChild($xml.CreateTextNode('{}')) | Out-Null; \
-             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Flowo').Show([Windows.UI.Notifications.ToastNotification]::new($xml))",
-            title.replace('\'', "''"),
-            body.replace('\'', "''"),
+             $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
+             $xml.LoadXml([System.IO.File]::ReadAllText(\"{}\")); \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Flowo').Show(\
+             [Windows.UI.Notifications.ToastNotification]::new($xml))",
+            path
         );
         let status = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
             .status().await.map_err(|e| e.to_string())?;
+        // tmp drops here, deleting the file.
         if status.success() {
             return Ok("powershell");
         }

@@ -189,6 +189,16 @@ async fn subfolder_mode(
 
     for sf in subfolders {
         let sf_name      = sf["name"].as_str().unwrap_or("unnamed");
+        // Sanitize subfolder name the same way individual filenames are sanitized
+        // (sanitize_filename strips / \ and .. sequences). Without this, a
+        // name like "../../escape" resolves outside the sandbox after PathBuf::join.
+        let sf_name = {
+            let no_sep: String = sf_name.chars()
+                .filter(|&c| c != '/' && c != '\\')
+                .collect();
+            let no_dotdot = no_sep.split("..").collect::<Vec<_>>().join("");
+            if no_dotdot.trim().is_empty() { "unnamed".to_string() } else { no_dotdot }
+        };
         let source_expr  = sf["source_expr"].as_str().unwrap_or("").trim();
 
         if source_expr.is_empty() {
@@ -204,7 +214,7 @@ async fn subfolder_mode(
             continue;
         }
 
-        let target_dir = PathBuf::from(folder_path).join(sf_name);
+        let target_dir = PathBuf::from(folder_path).join(&sf_name);
         if let Err(e) = fs::create_dir_all(&target_dir).await {
             all_results.push(Err(json!({
                 "filename": format!("<{}/...>", sf_name),
@@ -363,18 +373,36 @@ fn build_output(results: Vec<Result<Value, Value>>, folder: &str) -> NodeOutput 
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-/// Strip path separators and `..` sequences from a filename.
-/// An empty result falls back to "file.bin".
+/// Strip path separators, `..` sequences, null bytes, and Windows reserved device names
+/// from a filename. An empty result falls back to "file.bin".
 fn sanitize_filename(name: &str) -> String {
-    let no_sep: String = name.chars()
-        .filter(|&c| c != '/' && c != '\\')
+    // Windows reserved device names. On Windows, CreateFile("NUL") silently discards
+    // all written data; CreateFile("CON") writes to the console. Block all 22 names
+    // regardless of extension or case so "NUL.txt" and "nul" are both rejected.
+    const WINDOWS_RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    // Strip null bytes (cause ENAMETOOLONG / confusing OS errors), path separators,
+    // and .. sequences.
+    let cleaned: String = name.chars()
+        .filter(|&c| c != '\0' && c != '/' && c != '\\')
         .collect();
-    let no_dotdot = no_sep.split("..").collect::<Vec<_>>().join("");
+    let no_dotdot = cleaned.split("..").collect::<Vec<_>>().join("");
+
     if no_dotdot.trim().is_empty() {
-        "file.bin".to_string()
-    } else {
-        no_dotdot
+        return "file.bin".to_string();
     }
+
+    // Check stem (part before first '.') against reserved names, case-insensitively.
+    let stem = no_dotdot.split('.').next().unwrap_or("").to_uppercase();
+    if WINDOWS_RESERVED.contains(&stem.as_str()) {
+        return "file.bin".to_string();
+    }
+
+    no_dotdot
 }
 
 /// Decode base64. Strips a `data:<mime>;base64,` prefix if present.

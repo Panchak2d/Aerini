@@ -727,12 +727,29 @@ export async function showPopover(
     return inp;
   }, "1 = no retry"));
 
-  // Webhook — inform user of one-shot semantics in Run Now mode
+  // Webhook — inform user of one-shot semantics and replay-attack limitation
   if (node.data.node_type_id === "webhook") {
     const webhookNote = document.createElement("div");
     webhookNote.className = "popover-info-banner";
     webhookNote.innerHTML = `<strong>Run Now</strong> waits for one incoming request, then stops. For a persistent listener, use <strong>Schedule Run</strong>.`;
     body.appendChild(webhookNote);
+
+    const replayNote = document.createElement("div");
+    replayNote.className = "popover-info-banner popover-info-banner--warn";
+    replayNote.innerHTML =
+      `<strong>Secret replay risk:</strong> The secret field authenticates the caller but does not sign the request body. ` +
+      `A captured valid request can be replayed verbatim. For integrations that send HMAC body signatures ` +
+      `(Stripe, GitHub, etc.), verify the platform signature header in a downstream <strong>Code</strong> node instead of relying on this field alone.`;
+    body.appendChild(replayNote);
+
+    const tunnelNote = document.createElement("div");
+    tunnelNote.className = "popover-info-banner";
+    tunnelNote.innerHTML =
+      `<strong>ℹ Localhost only:</strong> The webhook binds to localhost. To receive requests from Stripe, GitHub, or other external services, ` +
+      `you need a public URL — use <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/" target="_blank">cloudflared</a> ` +
+      `or <a href="https://ngrok.com" target="_blank">ngrok</a>. ` +
+      `See <strong>docs/webhooks-public.md</strong> for setup instructions.`;
+    body.appendChild(tunnelNote);
   }
 
   pop.appendChild(body);

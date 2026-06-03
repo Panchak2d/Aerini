@@ -60,8 +60,6 @@ impl Node for GoogleSheetsNode {
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_RANGE", "range is required (e.g. Sheet1!A1:D1)")),
         };
 
-        let encoded_range = range.replace(' ', "%20");
-
         match action {
             "append_row" => {
                 let values = match input.input.get("values") {
@@ -72,10 +70,15 @@ impl Node for GoogleSheetsNode {
                     )),
                 };
 
-                let url = format!(
-                    "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:append?valueInputOption=RAW",
-                    spreadsheet_id, encoded_range
-                );
+                let url = {
+                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").unwrap();
+                    u.path_segments_mut().unwrap()
+                        .push(&spreadsheet_id)
+                        .push("values")
+                        .push(&format!("{}:append", range));
+                    u.set_query(Some("valueInputOption=RAW"));
+                    u.to_string()
+                };
 
                 let body = json!({ "values": values });
 
@@ -113,10 +116,14 @@ impl Node for GoogleSheetsNode {
                 }
             }
             "get_values" => {
-                let url = format!(
-                    "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
-                    spreadsheet_id, encoded_range
-                );
+                let url = {
+                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").unwrap();
+                    u.path_segments_mut().unwrap()
+                        .push(&spreadsheet_id)
+                        .push("values")
+                        .push(&range);
+                    u.to_string()
+                };
 
                 match super::shared_http_client()
                     .get(&url)

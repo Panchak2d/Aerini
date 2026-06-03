@@ -85,6 +85,10 @@ impl Node for AiMemoryNode {
                 "max_messages": {
                     "type": "number",
                     "description": "Maximum messages to return on read (default: 20, newest first)"
+                },
+                "max_stored": {
+                    "type": "number",
+                    "description": "Maximum messages to retain in storage per session. Oldest rows are pruned after append if exceeded (default: 1000, minimum: 1)."
                 }
             }
         })
@@ -118,6 +122,7 @@ impl Node for AiMemoryNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_SESSION", "session_id is required")),
         };
         let max_messages = input.input["max_messages"].as_u64().unwrap_or(20) as usize;
+        let max_stored   = input.input["max_stored"].as_u64().unwrap_or(1000).max(1) as i64;
 
         let pool = match self.get_pool() {
             Ok(p)  => p,
@@ -158,6 +163,17 @@ impl Node for AiMemoryNode {
                     params![session_id, role, content, now, seq],
                 ) {
                     Ok(_) => {
+                        // Prune oldest rows if session exceeds max_stored cap.
+                        let _ = conn.execute(
+                            "DELETE FROM ai_memory \
+                             WHERE session_id = ?1 \
+                               AND seq NOT IN ( \
+                                 SELECT seq FROM ai_memory \
+                                 WHERE session_id = ?1 \
+                                 ORDER BY seq DESC LIMIT ?2 \
+                               )",
+                            params![session_id, max_stored],
+                        );
                         let msgs  = read_messages(&conn, session_id, max_messages).unwrap_or_default();
                         let count = msgs.len();
                         NodeOutput::success_with_logs(

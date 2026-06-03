@@ -90,7 +90,7 @@ impl WorkflowExecutor {
                         execution_id: s.execution_id.clone(),
                         workflow_id:  workflow.id.clone(),
                         success:      false,
-                        node_outputs: HashMap::new(),
+                        node_outputs: (*s.snapshot().node_outputs).clone(),
                         logs:         s.logs.clone(),
                         error: Some(format!(
                             "Internal error: node '{}' in topo_order but not in workflow nodes \
@@ -173,7 +173,7 @@ impl WorkflowExecutor {
                                     execution_id: s.execution_id.clone(),
                                     workflow_id:  workflow.id.clone(),
                                     success:      false,
-                                    node_outputs: HashMap::new(),
+                                    node_outputs: (*s.snapshot().node_outputs).clone(),
                                     logs:         s.logs.clone(),
                                     error: Some(format!("Node '{}' failed: {}", node_id, err_msg)),
                                     validation_errors: validation_warnings.clone(),
@@ -189,7 +189,34 @@ impl WorkflowExecutor {
                 EngineError::NodeTypeNotRegistered { type_id: node_def.node_type_id.clone() }
             })?;
 
-            let resolved_input = self.build_input(&workflow, node_def, &state).await;
+            let resolved_input = match self.build_input(&workflow, node_def, &state).await {
+                Ok(input) => input,
+                Err(failure) => {
+                    let err_msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
+                    state.write().await.mark_failed(node_id, failure, 1);
+                    self.emit_node_status(&workflow.id, node_id, "error");
+                    let before = active_nodes.len();
+                    let (_, _) = self.activate_successors(node_id, "on_error", &workflow, &mut active_nodes);
+                    if active_nodes.len() == before {
+                        let failure_route = self.find_failure_route(node_id, &graph);
+                        if let Some(ref fid) = failure_route {
+                            active_nodes.insert(fid.clone());
+                        } else {
+                            let s = state.read().await;
+                            return Ok(WorkflowResult {
+                                execution_id: s.execution_id.clone(),
+                                workflow_id:  workflow.id.clone(),
+                                success:      false,
+                                node_outputs: (*s.snapshot().node_outputs).clone(),
+                                logs:         s.logs.clone(),
+                                error:        Some(err_msg),
+                                validation_errors: validation_warnings.clone(),
+                            });
+                        }
+                    }
+                    continue;
+                }
+            };
 
             // Validate resolved input against the node's declared input schema.
             // In non-strict mode: logs warnings and continues.
@@ -221,7 +248,7 @@ impl WorkflowExecutor {
                             execution_id: s.execution_id.clone(),
                             workflow_id:  workflow.id.clone(),
                             success:      false,
-                            node_outputs: HashMap::new(),
+                            node_outputs: (*s.snapshot().node_outputs).clone(),
                             logs:         s.logs.clone(),
                             error:        Some(err_msg),
                             validation_errors: validation_warnings.clone(),
@@ -301,7 +328,7 @@ impl WorkflowExecutor {
                             execution_id: s.execution_id.clone(),
                             workflow_id:  workflow.id.clone(),
                             success:      false,
-                            node_outputs: HashMap::new(),
+                            node_outputs: (*s.snapshot().node_outputs).clone(),
                             logs:         s.logs.clone(),
                             error: Some(format!("Node '{}' failed: {}", node_id, err_msg)),
                             validation_errors: validation_warnings.clone(),

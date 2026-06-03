@@ -18,12 +18,6 @@ function buildCategories(nodes: NodeDescriptor[]): Category[] {
     .map(k => ({ label: k.charAt(0).toUpperCase() + k.slice(1), nodes: groups.get(k)! }));
 }
 
-const CAT_STYLE: Record<string, { bg: string; fg: string }> = {
-  action:  { bg: "#0f1f35", fg: "#4d9eff" },
-  ai:      { bg: "#1a1035", fg: "#a78bfa" },
-  logic:   { bg: "#0b2820", fg: "#34d399" },
-  utility: { bg: "#211600", fg: "#f59e0b" },
-};
 
 const CAT_NAMES: Record<string, string> = {
   action: "Actions", ai: "AI", logic: "Logic", utility: "Utility",
@@ -256,10 +250,11 @@ function renderPaletteResults(q: string): void {
       row.className = "palette-result";
       if (i === paletteActive) row.classList.add("active");
       row.dataset.idx = String(i);
-      const style = CAT_STYLE[desc.node_type] ?? CAT_STYLE.utility;
-      const icon  = escapeHtml(NODE_ICONS[desc.type_id] ?? "·");
+      const icon     = escapeHtml(NODE_ICONS[desc.type_id] ?? "·");
+      const catClass = ["action", "ai", "logic", "utility"].includes(desc.node_type)
+        ? desc.node_type : "utility";
       row.innerHTML = `
-        <div class="palette-result-icon" style="background:${style.bg};color:${style.fg}">${icon}</div>
+        <div class="palette-result-icon palette-result-icon--${catClass}">${icon}</div>
         <div>
           <div class="palette-result-name">${desc.display_name}</div>
           <div class="palette-result-cat">${CAT_NAMES[desc.node_type] ?? desc.node_type}</div>

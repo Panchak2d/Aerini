@@ -45,6 +45,7 @@ const TIKTOK_CHUNK_RETRIES: u32 = 3;                   // retries per chunk (G7)
 static UPLOAD_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("Social upload HTTP client build failed")
 });
@@ -63,7 +64,7 @@ impl Node for SocialUploadNode {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["files", "platform", "title", "client_id", "client_secret"],
+            "required": ["files", "platform", "title"],
             "properties": {
                 "files":         { "type": "array",  "description": "Media contract files array" },
                 "platform":      { "type": "string",  "enum": ["youtube", "instagram", "tiktok"] },
@@ -74,8 +75,8 @@ impl Node for SocialUploadNode {
                     "type": "string",
                     "description": "Privacy level. YouTube: public|private|unlisted. TikTok: public_to_everyone|mutual_follow_friends|self_only"
                 },
-                "client_id":     { "type": "string",  "description": "OAuth client ID / client key" },
-                "client_secret": { "type": "string",  "description": "OAuth client secret" }
+                "client_id":     { "type": "string",  "description": "OAuth client ID / client key — resolved from Connections (credential store)" },
+                "client_secret": { "type": "string",  "description": "OAuth client secret — resolved from Connections (credential store)" }
             }
         })
     }

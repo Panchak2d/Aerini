@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 use crate::token_store::TokenRecord;
 use super::state::{ApiState, require_read, require_write};
@@ -29,6 +30,14 @@ pub struct PaginationParams {
 }
 
 fn default_limit() -> usize { 100 }
+
+#[derive(Deserialize, Default)]
+pub struct SseParams {
+    /// Optional workflow ID to filter SSE events. Only events for this workflow
+    /// will be forwarded. Subject to token ACL — will 403 if the token's ACL
+    /// does not include the requested workflow.
+    pub workflow_id: Option<String>,
+}
 
 pub async fn list_workflows(
     State(s):          State<ApiState>,
@@ -87,6 +96,17 @@ pub async fn delete_workflow(
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
     let _ = s.scheduler.stop_job(&id);
+
+    // Acquire (or create) the per-workflow exec lock before deleting.
+    // This serialises against a concurrent run_workflow: if a run is in
+    // progress it completes first; if delete holds the lock, run_workflow
+    // will find NOT_FOUND after the 5-second timeout.
+    let lock = {
+        let entry = s.exec_locks.entry(id.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+        Arc::clone(&*entry)
+    };
+    let _guard = lock.lock().await;
+
     let exec_locks  = Arc::clone(&s.exec_locks);
     let id_for_lock = id.clone();
 
@@ -134,6 +154,17 @@ pub async fn run_workflow(
         }
     }
 
+    // Acquire the global run semaphore BEFORE the per-workflow exec lock.
+    // If the order were reversed, callers blocked on the exec lock would each
+    // hold a semaphore slot, starving unrelated workflows.
+    let _run_permit = match Arc::clone(&s.run_semaphore).try_acquire_owned() {
+        Ok(p)  => p,
+        Err(_) => return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "server is at maximum concurrent workflow capacity, try again shortly"})),
+        ).into_response(),
+    };
+
     let lock = {
         let entry = s.exec_locks.entry(id.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
         Arc::clone(&*entry)
@@ -149,7 +180,11 @@ pub async fn run_workflow(
         ).into_response(),
     };
 
-    let executor = s.base_executor.clone();
+    let cancel = CancellationToken::new();
+    let executor = s.base_executor.clone()
+        .with_caller_is_admin(caller.has_scope("admin"))
+        .with_cancel_token(cancel);
+
     let run_result = executor.run(Arc::new(wf), b.initial_variables).await;
 
     {
@@ -169,6 +204,7 @@ pub async fn run_workflow(
 pub async fn sse_events(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
+    Query(q):          Query<SseParams>,
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) {
         return e.into_response();
@@ -182,11 +218,70 @@ pub async fn sse_events(
         ).into_response(),
     };
 
+    // Build the effective workflow filter for this connection:
+    // 1. If caller is admin — no filter unless they explicitly requested one.
+    // 2. Otherwise, compute the ACL-based filter (None = unrestricted).
+    // 3. If caller passed ?workflow_id=X, further restrict to that single ID
+    //    (only if their ACL allows it, or if they are unrestricted).
+    let acl_filter: Option<std::collections::HashSet<String>> = match s.token_store.acl_filter(&caller) {
+        Ok(f) => f,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
+        ).into_response(),
+    };
+
+    // Merge explicit ?workflow_id param with ACL filter.
+    // Result: the set of workflow IDs whose events will be forwarded to this client.
+    // None = forward everything.
+    let effective_filter: Option<std::collections::HashSet<String>> = match (&acl_filter, &q.workflow_id) {
+        // No ACL restriction, no explicit param → forward all
+        (None, None) => None,
+        // No ACL restriction, explicit param → forward only that workflow
+        (None, Some(wf)) => {
+            let mut set = std::collections::HashSet::new();
+            set.insert(wf.clone());
+            Some(set)
+        }
+        // ACL restricts to a set, no explicit param → use ACL set
+        (Some(acl), None) => Some(acl.clone()),
+        // ACL restricts to a set, explicit param → intersection; deny if not in ACL
+        (Some(acl), Some(wf)) => {
+            if !acl.contains(wf) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "token ACL does not permit access to that workflow's events"})),
+                ).into_response();
+            }
+            let mut set = std::collections::HashSet::new();
+            set.insert(wf.clone());
+            Some(set)
+        }
+    };
+
     let rx     = s.sse_tx.subscribe();
     let stream = BroadcastStream::new(rx)
-        .filter_map(|msg| {
-            msg.ok().map(|data| Ok::<axum::response::sse::Event, std::convert::Infallible>(
-                axum::response::sse::Event::default().data(data)
+        .filter_map(move |msg| {
+            let raw = msg.ok()?;
+            // If there is an active filter, parse the event JSON and check workflow_id.
+            if let Some(ref filter) = effective_filter {
+                let parsed: Option<Value> = serde_json::from_str(&raw).ok();
+                let wf_id = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("payload"))
+                    .and_then(|p| p.get("workflow_id"))
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string());
+                match wf_id {
+                    Some(id) if filter.contains(&id) => {}
+                    // Event has no workflow_id (e.g. heartbeat) — forward to all
+                    None => {}
+                    // workflow_id present but not in filter — drop
+                    _ => return None,
+                }
+            }
+            Some(Ok::<axum::response::sse::Event, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(raw)
             ))
         });
 

@@ -9,6 +9,52 @@ use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
 static NODE_BIN: OnceLock<&'static str> = OnceLock::new();
+/// Guards the macOS partial-sandbox warning so it fires once per process, not once per execution.
+static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
+
+/// ESM loader script injected when sandbox mode is active.
+/// Intercepts `import` resolution and blocks dangerous built-in modules.
+/// Written to a temp file because Node.js loaders cannot be passed inline.
+///
+/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os
+/// These cover: subprocess spawning, filesystem access, raw network access.
+/// Allowed: crypto, util, path, stream, events, url, buffer, string_decoder, querystring
+///
+/// Compatibility: --experimental-loader works on all Node.js 18+ versions.
+/// The API moved to a worker thread in 18.19 but the flag is not removed.
+const SANDBOX_LOADER_CONTENT: &str = r#"
+// Flowo Code Node sandbox loader.
+// Blocks import of dangerous built-in modules. Do not modify — auto-generated.
+const BLOCKED = new Set([
+  'node:child_process', 'child_process',
+  'node:fs',            'fs',
+  'node:fs/promises',   'fs/promises',
+  'node:net',           'net',
+  'node:http',          'http',
+  'node:https',         'https',
+  'node:http2',         'http2',
+  'node:dgram',         'dgram',
+  'node:dns',           'dns',
+  'node:dns/promises',  'dns/promises',
+  'node:os',            'os',
+  'node:cluster',       'cluster',
+  'node:worker_threads','worker_threads',
+  'node:vm',            'vm',
+  'node:repl',          'repl',
+  'node:domain',        'domain',
+]);
+
+export async function resolve(specifier, context, nextResolve) {
+  if (BLOCKED.has(specifier)) {
+    throw new Error(
+      `[Flowo sandbox] Import of '${specifier}' is blocked. ` +
+      `Filesystem, network, and subprocess access are not available in sandboxed Code nodes. ` +
+      `Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments.`
+    );
+  }
+  return nextResolve(specifier, context);
+}
+"#;
 
 /// Code node — runs a JavaScript snippet using the system Node.js installation.
 /// The snippet has access to `input` (the incoming data) and `context` (all node outputs).
@@ -47,9 +93,13 @@ impl Node for CodeNode {
         json!({
             "type": "object",
             "properties": {
-                "result":   { "description": "Value passed to output()" },
-                "stdout":   { "type": "string" },
-                "duration_ms": { "type": "number" }
+                "result":           { "description": "Value passed to output()" },
+                "stdout":           { "type": "string" },
+                "duration_ms":      { "type": "number" },
+                "_sandbox_partial": {
+                    "type": "boolean",
+                    "description": "Present and true on macOS when --code-sandbox is active. ESM module import restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied."
+                }
             }
         })
     }
@@ -88,6 +138,26 @@ impl Node for CodeNode {
         let timeout_secs = input.input["timeout_secs"]
             .as_u64().unwrap_or(10).min(60);
 
+        let sandbox_enabled = input.context.metadata.get("__code_sandbox")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // On Windows, neither the ESM module loader nor setrlimit() resource
+        // limits are implemented. Reporting "sandbox active" while providing no
+        // actual isolation is a security lie. Fail loudly so operators know their
+        // deployment is not protected, rather than silently running unsandboxed.
+        #[cfg(windows)]
+        if sandbox_enabled {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "SANDBOX_NOT_SUPPORTED",
+                "--code-sandbox is not supported on Windows. \
+                 The ESM module loader (which blocks fs/net/child_process imports) \
+                 and OS-level resource limits (setrlimit) are both unavailable on \
+                 this platform. Run without --code-sandbox for trusted deployments, \
+                 or deploy on Linux where full sandboxing is implemented.",
+            ));
+        }
+
         // Inject context and input as globals, wrap user code so output() captures the result
         let wrapper = format!(r#"
 const input   = {};
@@ -124,19 +194,126 @@ function output(v) {{ __result = v; }}
             { "node" } else { "nodejs" }
         });
 
-        let child = Command::new(node_bin)
-            .arg("--input-type=module")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+        // In sandbox mode, write the loader to a temp file.
+        // Temp file is cleaned up when the guard drops at end of scope.
+        // If the write fails (read-only /tmp, disk full, restrictive umask — all
+        // common in hardened containers), hard-fail rather than silently running
+        // without module restrictions. The caller explicitly requested sandboxing;
+        // proceeding unsandboxed violates that contract.
+        #[cfg(not(windows))]
+        let loader_tempfile: Option<tempfile::NamedTempFile> = if sandbox_enabled {
+            match write_sandbox_loader() {
+                Ok(f)  => Some(f),
+                Err(e) => {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "SANDBOX_INIT_FAILED",
+                        format!(
+                            "Code sandbox loader could not be written to temp directory: {}. \
+                             Cannot proceed unsandboxed when --code-sandbox is active. \
+                             Ensure /tmp is writable, or remove --code-sandbox for trusted deployments.",
+                            e
+                        ),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let _loader_tempfile: Option<()> = None;
 
-        let mut child = match child {
+        let mut cmd = Command::new(node_bin);
+        cmd.arg("--input-type=module");
+        if sandbox_enabled {
+            // Blocks eval() and new Function() from generating executable code.
+            cmd.arg("--disallow-code-generation-from-strings");
+        }
+        #[cfg(not(windows))]
+        if let Some(ref lf) = loader_tempfile {
+            // ESM loader intercepts import resolution to block dangerous modules.
+            cmd.arg(format!("--experimental-loader=file://{}", lf.path().display()));
+            // Suppress the loader experimental warning — it's noise for end users.
+            cmd.arg("--no-warnings");
+        }
+        cmd.stdin(Stdio::piped())
+           .stdout(Stdio::piped())
+           .stderr(Stdio::piped());
+
+        // Apply OS-level resource limits on Linux in sandbox mode.
+        // RLIMIT_AS (virtual address space): 512 MB — prevents memory exhaustion.
+        // RLIMIT_CPU (CPU seconds): timeout_secs + 5 — backstop for busy-loops.
+        // Safety: pre_exec runs between fork() and exec(). setrlimit(2) is listed
+        // in POSIX as async-signal-safe. No allocations are made in the closure.
+        #[cfg(target_os = "linux")]
+        let spawn_result = if sandbox_enabled {
+            let cpu_limit = (timeout_secs + 5) as libc::rlim_t;
+            let mem_limit = (512u64 * 1024 * 1024) as libc::rlim_t;
+            unsafe {
+                cmd.pre_exec(move || {
+                    let r1 = libc::setrlimit(libc::RLIMIT_CPU, &libc::rlimit {
+                        rlim_cur: cpu_limit,
+                        rlim_max: cpu_limit,
+                    });
+                    if r1 != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let r2 = libc::setrlimit(libc::RLIMIT_AS, &libc::rlimit {
+                        rlim_cur: mem_limit,
+                        rlim_max: mem_limit,
+                    });
+                    if r2 != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+            }.spawn()
+        } else {
+            cmd.spawn()
+        };
+        // Track whether the sandbox is partial (macOS: module restrictions apply
+        // but setrlimit CPU/memory caps are Linux-only). Surfaced in node output
+        // as `_sandbox_partial: true` so API callers can detect and alert.
+        #[cfg(target_os = "linux")]
+        let sandbox_partial = false;
+        #[cfg(not(target_os = "linux"))]
+        let sandbox_partial = sandbox_enabled;
+
+        #[cfg(not(target_os = "linux"))]
+        let spawn_result = {
+            // On macOS, the ESM module loader applies but setrlimit() is Linux-only —
+            // CPU/memory are uncapped. Windows is rejected above with SANDBOX_NOT_SUPPORTED.
+            // Warn once per process so operators know the sandbox is partial without
+            // flooding logs on every workflow execution.
+            #[cfg(target_os = "macos")]
+            if sandbox_enabled {
+                MACOS_SANDBOX_PARTIAL_WARNED.get_or_init(|| {
+                    tracing::warn!(
+                        "Code node sandbox is PARTIAL on macOS. \
+                         ESM module import restrictions (fs/net/child_process) are enforced, \
+                         but CPU and memory resource limits (setrlimit) are Linux-only and \
+                         are NOT applied. A runaway script can exhaust system resources. \
+                         The per-node timeout_secs (max 60 s) is the only effective resource \
+                         cap on this platform. For full sandboxing, deploy on Linux."
+                    );
+                });
+            }
+            cmd.spawn()
+        };
+
+        let mut child = match spawn_result {
             Ok(c)  => c,
-            Err(e) => return NodeOutput::failure(
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return NodeOutput::failure(
                 NodeError::unrecoverable(
                     "NODE_NOT_FOUND",
                     format!("Node.js not found on this system: {}. Install Node.js to use the Code node.", e)
+                )
+            ),
+            Err(e) => return NodeOutput::failure(
+                NodeError::unrecoverable(
+                    "SANDBOX_INIT_FAILED",
+                    format!("Code node sandbox failed to initialise: {}. \
+                             Resource limits could not be applied — check that the process \
+                             hard limits (RLIMIT_CPU, RLIMIT_AS) allow the requested values.", e)
                 )
             ),
         };
@@ -146,14 +323,15 @@ function output(v) {{ __result = v; }}
             let _ = stdin.write_all(wrapper.as_bytes()).await;
         }
 
-        // Spawn tasks to drain stdout/stderr concurrently with wait().
-        // child.wait() takes &mut self so child stays owned here for kill() on timeout.
+        const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB per stream
         let stdout_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stdout.take();
             async move {
                 let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                if let Some(ref mut h) = pipe {
+                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
+                }
                 buf
             }
         });
@@ -162,7 +340,9 @@ function output(v) {{ __result = v; }}
             let mut pipe = child.stderr.take();
             async move {
                 let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe { let _ = h.read_to_end(&mut buf).await; }
+                if let Some(ref mut h) = pipe {
+                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
+                }
                 buf
             }
         });
@@ -234,12 +414,16 @@ function output(v) {{ __result = v; }}
                             );
                         }
                         let result_val = parsed["result"].clone();
+                        let mut out = json!({
+                            "result":      result_val,
+                            "stdout":      stdout,
+                            "duration_ms": duration_ms
+                        });
+                        if sandbox_partial {
+                            out["_sandbox_partial"] = json!(true);
+                        }
                         NodeOutput::success_with_logs(
-                            json!({
-                                "result":      result_val,
-                                "stdout":      stdout,
-                                "duration_ms": duration_ms
-                            }),
+                            out,
                             vec![format!("Code executed in {}ms", duration_ms)],
                         )
                     }
@@ -249,3 +433,21 @@ function output(v) {{ __result = v; }}
     }
 }
 
+// ── Sandbox helpers ────────────────────────────────────────────────────────────
+
+/// Write the sandbox ESM loader script to a named temp file.
+/// The caller is responsible for keeping the returned `NamedTempFile` alive until
+/// the Node.js subprocess exits — drop = delete.
+#[cfg(not(windows))]
+fn write_sandbox_loader() -> std::io::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut f = tempfile::Builder::new()
+        .prefix("flowo-sandbox-")
+        .suffix(".mjs")
+        .tempfile()?;
+    f.write_all(SANDBOX_LOADER_CONTENT.as_bytes())?;
+    f.flush()?;
+    Ok(f)
+}
+
+// tokio::process::Command exposes pre_exec() directly on Unix — no CommandExt import needed.

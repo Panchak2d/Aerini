@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, test, lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y libdbus-1-dev
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # src-tauri excluded: requires Tauri-specific system GUI deps not available on ubuntu-latest.
+      # Build and smoke-test locally with: npm run build
+      - name: Build
+        run: cargo build -p flowo-engine -p flowo-server --locked
+
+      - name: Test
+        run: cargo test -p flowo-engine --locked
+
+      - name: Clippy
+        run: cargo clippy -p flowo-engine -p flowo-server --locked -- -D warnings

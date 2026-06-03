@@ -73,7 +73,7 @@ The desktop app stores the encryption key in the OS-native keychain, not in a pl
 
 On first launch, Flowo generates a random 32-byte key using the OS cryptographically secure random source and writes it to the keychain. Subsequent launches read it back from there.
 
-**Keychain fallback:** if the keychain is unavailable (most common on Linux without a running SecretService daemon), Flowo falls back to a plain file at `.cred.key` in the app data directory and logs a warning. On Unix, this file is created with `chmod 600`. If a working keychain becomes available later, Flowo migrates the key from the file into the keychain automatically on next launch and deletes the file.
+**Keychain fallback:** if the keychain is unavailable (most common on Linux without a running SecretService daemon), Flowo falls back to a plain file at `.cred.key` in the app data directory and logs a warning. On Unix, this file is created with `chmod 600`. On Windows, a DACL is applied that grants access only to the current user (equivalent intent). If a working keychain becomes available later, Flowo migrates the key from the file into the keychain automatically on next launch and deletes the file.
 
 If you see a startup warning about the keychain being unavailable on Linux, install and start a SecretService provider:
 
@@ -86,7 +86,7 @@ sudo apt install kwallet-pam
 
 ### Server mode — key file and its limitations
 
-The server binary stores the key in a plain file by default (`<data_dir>/flowo.key`, default `~/.flowo-server/flowo.key`). On Unix, the file is created with `chmod 600`.
+The server binary stores the key in a plain file by default (`<data_dir>/flowo.key`, default `~/.flowo-server/flowo.key`). On Unix, the file is created with `chmod 600`. On Windows, a DACL is set restricting access to the current user only.
 
 **What `chmod 600` protects against:** other OS users on the same machine reading the file directly.
 
@@ -180,18 +180,52 @@ Flowo blocks these at the HTTP node level before any request is sent. The full b
 
 **HTTP redirects are disabled.** The HTTP node does not follow redirects at all. A public server cannot return a `302` pointing to an internal address to bypass the blocklist.
 
-### The DNS rebinding gap
+### The DNS rebinding gap (TOCTOU)
 
-The SSRF blocklist checks the URL you supply. If you supply a **hostname** (not a raw IP), Flowo checks the hostname string against the blocklist but does not pre-resolve it to an IP. A domain you own — e.g. `evil.example.com` — could be configured with a DNS record pointing to `192.168.1.1`, and the hostname check would pass.
+For hostname URLs, Flowo resolves DNS **before** making the request and validates every returned IP against the block list. This closes the naive case where a domain simply points to a private IP.
+
+However, a **TOCTOU (time-of-check / time-of-use) window** remains: a malicious DNS server can return a public IP during validation and then serve a private IP when the actual TCP connection is made (fast DNS TTL expiry / DNS rebinding). The gap is inherent to DNS and cannot be closed at the application layer.
+
+**The only complete mitigation is a network-level egress firewall that blocks outbound TCP connections to private IP ranges — regardless of what the application-layer check says.**
 
 This means:
 
-- **In the desktop app**: this is only a risk if someone tricks you into running a workflow with a crafted hostname. The dangerous node confirmation prompt does not cover the HTTP node.
-- **In server mode**: if you're running API mode and accepting workflow definitions from untrusted sources, a crafted hostname in an HTTP node URL is a viable attack path. Review workflows before loading them, or run in a network environment where outbound traffic to private ranges is blocked at the firewall.
+- **In the desktop app**: the risk is low. An attacker must trick you into running a workflow with a domain they control and a DNS server that rebinds within milliseconds. The dangerous node confirmation prompt does not cover the HTTP node.
+- **In server mode**: this is a real attack surface if you accept workflow definitions from untrusted sources. The application-layer SSRF check alone is not sufficient. You must also configure egress firewall rules — see the hardening checklist in [Section 7](#7-server-mode--security-hardening-checklist) for the specific `ufw` commands.
 
 ---
 
-## 6. Webhook security
+## 6. Dangerous flags — `--allow-shell` and `--allow-code`
+
+These flags unlock the Shell Command and Code (JS) nodes in server/API mode.
+They are disabled by default precisely because they grant significant power.
+
+**What `--allow-code` actually enables:**
+
+Any API token with `write` scope can create a workflow containing a Code (JS)
+node that calls Node.js built-ins, including `child_process` and `fs`. This is
+equivalent to giving every write-token holder a shell on the host.
+
+**What `--allow-shell` actually enables:**
+
+Any API token with `write` scope can create a workflow containing a Shell Command
+node that runs arbitrary OS commands on the host.
+
+**When these flags are safe:**
+
+- Single-user desktop mode (only you have write access)
+- A server where you issue write tokens only to yourself
+
+**When these flags are never safe:**
+
+- Any multi-user or SaaS deployment
+- Any deployment where write tokens are issued to untrusted parties
+
+Both flags print a startup warning banner when active.
+
+---
+
+## 7. Webhook security
 
 When a Webhook trigger workflow is running in the background, it opens a TCP listener.
 
@@ -210,6 +244,12 @@ X-Flowo-Secret: your-secret-value
 Requests without the header, or with the wrong value, are rejected before the workflow executes.
 
 The comparison is **timing-safe** — it takes constant time regardless of how much of the secret matches. This prevents timing attacks where an attacker measures response time to guess the secret character by character.
+
+> **Replay attack limitation:** The webhook secret check validates only that the caller *knows* the secret. It does **not** cryptographically bind the secret to the request body, and it does not check a nonce or timestamp. An attacker who captures a valid request (correct secret header and body) can replay it an unlimited number of times — the server will accept each replay as a fresh trigger.
+>
+> If your webhook receives HMAC-signed events from services like Stripe or GitHub, implement body-integrity validation *in addition to* the Flowo secret check using a Code (JS) node before the main workflow logic. For example, Stripe's `Stripe-Signature` header contains an HMAC-SHA256 of the request body and a timestamp; verify this in the Code node and abort the run (throw an error) if it fails or if the timestamp is older than 5 minutes. GitHub webhooks use `X-Hub-Signature-256` for the same purpose.
+>
+> For general webhooks that do not carry their own signature, consider adding an `expires_at` field to the webhook payload and rejecting triggers where that timestamp is in the past.
 
 **Always set a secret if:**
 - Your webhook handles any action with side effects (sends a message, modifies data, triggers a purchase)
@@ -243,7 +283,7 @@ Use this as a deployment checklist. None of these are automatic.
 
 ### Strongly recommended
 
-- [ ] **Protect `flowo-server.json` in serve mode.** The config file contains `run_secret` in plaintext. After the installer runs, restrict read access:
+- [ ] **Protect `flowo-server.json` in serve mode.** The config file contains the BLAKE3 hash of your `run_secret` (the raw secret is shown once at export time and never stored on disk). Protect the file anyway — it also contains your workflow JSON and config. After the installer runs, restrict read access:
 
   ```bash
   chmod 600 ~/.flowo-server/MyWorkflow/flowo-server.json
@@ -273,14 +313,39 @@ Use this as a deployment checklist. None of these are automatic.
   sudo useradd --system --no-create-home --shell /bin/false flowo
   ```
 
-- [ ] **Use a firewall rule to block outbound private ranges.** This closes the DNS rebinding gap described in [Section 5](#the-dns-rebinding-gap). On Linux with `ufw`:
+- [ ] **Use a firewall rule to block outbound private ranges.** This closes the DNS rebinding gap described in [Section 5](#the-dns-rebinding-gap). The application-level SSRF check is defence-in-depth only — it cannot close the TOCTOU window between DNS pre-check and TCP connect. A network-level egress rule is the only complete mitigation.
 
+  Block outbound TCP to all RFC 1918 ranges, link-local, and IPv6 private ranges:
+
+  **ufw (Ubuntu/Debian):**
   ```bash
   sudo ufw deny out to 10.0.0.0/8
   sudo ufw deny out to 172.16.0.0/12
   sudo ufw deny out to 192.168.0.0/16
   sudo ufw deny out to 169.254.0.0/16
+  sudo ufw deny out to fd00::/8
   ```
+
+  **iptables/ip6tables:**
+  ```bash
+  sudo iptables  -A OUTPUT -d 10.0.0.0/8      -j DROP
+  sudo iptables  -A OUTPUT -d 172.16.0.0/12   -j DROP
+  sudo iptables  -A OUTPUT -d 192.168.0.0/16  -j DROP
+  sudo iptables  -A OUTPUT -d 169.254.0.0/16  -j DROP
+  sudo ip6tables -A OUTPUT -d fd00::/8        -j DROP
+  ```
+
+  **nftables:**
+  ```bash
+  sudo nft add table ip flowo_egress
+  sudo nft add chain ip flowo_egress output '{ type filter hook output priority 0; policy accept; }'
+  sudo nft add rule  ip flowo_egress output ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+  sudo nft add table ip6 flowo_egress
+  sudo nft add chain ip6 flowo_egress output '{ type filter hook output priority 0; policy accept; }'
+  sudo nft add rule  ip6 flowo_egress output ip6 daddr fd00::/8 drop
+  ```
+
+  **AWS / GCP / Azure:** add an egress security group or firewall rule denying outbound to the ranges above before the default allow-all rule.
 
 - [ ] **Rotate the bearer token periodically.** Update `FLOWO_TOKEN` in your `.env` file and restart the service.
 
@@ -481,9 +546,11 @@ If the keychain is unavailable at runtime, the server falls back to the file aut
 
 ### The DNS rebinding gap on the HTTP node
 
-Described in [Section 5](#the-dns-rebinding-gap). The SSRF blocklist checks IP addresses and known hostnames but does not pre-resolve arbitrary domain names. A domain pointing to a private IP passes the check.
+Described in [Section 5](#the-dns-rebinding-gap-toctou). Flowo resolves DNS and validates every returned IP before making requests. Despite this, a TOCTOU race between the DNS pre-check and the TCP connect allows a malicious DNS server to rebind a domain from a public IP (passing the check) to a private IP (used for the actual connection).
 
-**Mitigation in server mode:** firewall rules blocking outbound connections to private IP ranges.
+**This is unavoidable at the application layer.** The application-layer SSRF check is defence-in-depth; it is not a complete mitigation on its own.
+
+**Required mitigation in server mode:** configure egress firewall rules to block outbound TCP connections to private IP ranges. See the hardening checklist in Section 7 for the specific commands. Without an egress firewall, the SSRF check alone does not provide a complete security boundary.
 
 ### Prompt injection in AI workflows
 

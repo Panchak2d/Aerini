@@ -453,6 +453,10 @@ Sensitive values in the logged command (passwords, API keys) are automatically r
 
 Runs a JavaScript snippet using the system `node` binary. Useful for data transformation that expressions can't handle.
 
+> **Requires Node.js 18+** on your PATH. Only needed if you use this node — not a global prerequisite for Flowo.
+> If Node.js is not found when this node runs, you will see a clear error message.
+> Install from [nodejs.org](https://nodejs.org).
+
 | Parameter | Type | Notes |
 |---|---|---|
 | `code` | string | **required.** JavaScript to execute. |
