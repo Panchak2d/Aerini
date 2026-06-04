@@ -23,7 +23,7 @@
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::error::NodeError;
@@ -280,12 +280,12 @@ pub fn derive_ports(config: &Value) -> NodePorts {
 /// Spawn one task per file. All tasks run concurrently (all spawned before any awaited).
 async fn write_files_concurrent(
     files: &[Value],
-    dir: &PathBuf,
+    dir: &Path,
     prefix: &str,
     overwrite: bool,
 ) -> Vec<Result<Value, Value>> {
     let handles: Vec<_> = files.iter().map(|file| {
-        let dir      = dir.clone();
+        let dir      = dir.to_path_buf();
         let prefix   = prefix.to_string();
         let file     = file.clone();
         tokio::spawn(async move {
@@ -308,7 +308,7 @@ async fn write_files_concurrent(
 
 async fn write_single_file(
     file: &Value,
-    dir: &PathBuf,
+    dir: &Path,
     prefix: &str,
     overwrite: bool,
 ) -> Result<Value, Value> {

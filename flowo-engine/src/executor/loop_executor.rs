@@ -129,7 +129,7 @@ impl WorkflowExecutor {
 
             // Build input with current state (includes __loop_{id}_index variable
             // written at end of previous iteration, or absent on iteration 0).
-            let loop_input = match self.build_input(&workflow, loop_node_def, state).await {
+            let loop_input = match self.build_input(workflow, loop_node_def, state).await {
                 Ok(input) => input,
                 Err(failure) => {
                     let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
@@ -199,7 +199,7 @@ impl WorkflowExecutor {
                     format!("Body node type '{}' not registered", body_def.node_type_id)
                 })?;
 
-                let body_input = match self.build_input(&workflow, body_def, state).await {
+                let body_input = match self.build_input(workflow, body_def, state).await {
                     Ok(input) => input,
                     Err(failure) => {
                         let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());

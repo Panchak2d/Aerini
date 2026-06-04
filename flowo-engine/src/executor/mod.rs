@@ -186,6 +186,7 @@ impl WorkflowExecutor {
     ///   - A loader that blocks dangerous built-in module imports
     ///     (child_process, fs, fs/promises, net, http, https, dgram, dns, os)
     ///   - CPU and memory resource limits (Linux only, via setrlimit)
+    ///
     /// Desktop mode (sandbox = false): full Node.js stdlib available as documented.
     /// Server mode with --allow-code: sandbox defaults to true; admin may disable.
     pub fn with_code_sandbox(mut self, enabled: bool) -> Self {

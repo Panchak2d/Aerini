@@ -69,6 +69,12 @@ pub struct MigrationEngine {
     migrations: Vec<Migration>,
 }
 
+impl Default for MigrationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MigrationEngine {
     /// Build the engine with all registered migrations.
     ///

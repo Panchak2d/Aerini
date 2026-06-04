@@ -149,11 +149,11 @@ impl Node for SocialUploadNode {
 
             let result = match platform {
                 "youtube" => {
-                    upload_to_youtube(
+                    upload_to_youtube(YoutubeUploadParams {
                         filename, data, mime_type,
-                        &title, &description, &tags, &privacy,
-                        &tokens.access_token,
-                    ).await
+                        title: &title, description: &description, tags_csv: &tags, privacy: &privacy,
+                        access_token: &tokens.access_token,
+                    }).await
                 }
                 "instagram" => {
                     upload_to_instagram(filename, data, mime_type, &title).await
@@ -261,22 +261,25 @@ fn map_http_error(status: u16, platform: &str) -> UploadError {
 
 // ── YouTube ───────────────────────────────────────────────────────────────────
 
+struct YoutubeUploadParams<'a> {
+    filename:     &'a str,
+    data:         &'a str,
+    mime_type:    &'a str,
+    title:        &'a str,
+    description:  &'a str,
+    tags_csv:     &'a str,
+    privacy:      &'a str,
+    access_token: &'a str,
+}
+
 /// Uploads a single file to YouTube using the multipart upload protocol.
 ///
 /// Endpoint (VERIFIED May 2026):
 ///   POST https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status
 ///
 /// Body format: multipart/related with metadata JSON part and binary video part.
-async fn upload_to_youtube(
-    filename: &str,
-    data: &str,
-    mime_type: &str,
-    title: &str,
-    description: &str,
-    tags_csv: &str,
-    privacy: &str,
-    access_token: &str,
-) -> Result<Value, UploadError> {
+async fn upload_to_youtube(p: YoutubeUploadParams<'_>) -> Result<Value, UploadError> {
+    let YoutubeUploadParams { filename, data, mime_type, title, description, tags_csv, privacy, access_token } = p;
     let file_bytes = BASE64.decode(data).map_err(|_| upload_err(
         "DECODE_ERROR",
         "Failed to decode base64 file data",

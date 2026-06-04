@@ -26,7 +26,7 @@ pub fn scrub_url_in_error(s: &str) -> String {
         // '@' must appear before any '/' or whitespace to be part of credentials.
         let at_before_delim = match at_pos {
             None    => false,
-            Some(a) => slash_pos.map_or(true, |s| a < s) && space_pos.map_or(true, |s| a < s),
+            Some(a) => slash_pos.is_none_or(|s| a < s) && space_pos.is_none_or(|s| a < s),
         };
 
         if at_before_delim {

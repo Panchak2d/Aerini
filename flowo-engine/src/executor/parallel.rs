@@ -377,7 +377,7 @@ pub(super) async fn run_inner_parallel(
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty());
                         let variable_value = variable_key.as_ref()
-                            .and_then(|_| output.output.as_ref())
+                            .and(output.output.as_ref())
                             .and_then(|v| v.get("_variable_value").cloned());
                         NodeTaskResult {
                             node_id:         nid,
