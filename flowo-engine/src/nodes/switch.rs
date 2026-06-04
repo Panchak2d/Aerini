@@ -167,8 +167,9 @@ mod tests {
         };
         let out = SwitchNode.execute(input).await;
         assert!(out.success);
-        assert_eq!(out.output["matched_case"], "ok");
-        assert_eq!(out.output["port"], "case_1");
+        let o = out.output.as_ref().unwrap();
+        assert_eq!(o["matched_case"], "ok");
+        assert_eq!(o["port"], "case_1");
     }
 
     #[tokio::test]
@@ -179,8 +180,9 @@ mod tests {
             HashMap::new(),
         )).await;
         assert!(out.success);
-        assert_eq!(out.output["matched_case"], serde_json::Value::Null);
-        assert_eq!(out.output["port"], "default");
+        let o = out.output.as_ref().unwrap();
+        assert_eq!(o["matched_case"], serde_json::Value::Null);
+        assert_eq!(o["port"], "default");
     }
 
     #[tokio::test]

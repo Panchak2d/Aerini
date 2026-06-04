@@ -176,16 +176,18 @@ mod tests {
     async fn true_branch_output() {
         let out = IfConditionNode.execute(make_input("5 > 3")).await;
         assert!(out.success);
-        assert_eq!(out.output["branch"], "on_true");
-        assert_eq!(out.output["result"], true);
+        let o = out.output.as_ref().unwrap();
+        assert_eq!(o["branch"], "on_true");
+        assert_eq!(o["result"], true);
     }
 
     #[tokio::test]
     async fn false_branch_output() {
         let out = IfConditionNode.execute(make_input("1 > 3")).await;
         assert!(out.success);
-        assert_eq!(out.output["branch"], "on_false");
-        assert_eq!(out.output["result"], false);
+        let o = out.output.as_ref().unwrap();
+        assert_eq!(o["branch"], "on_false");
+        assert_eq!(o["result"], false);
     }
 
     #[tokio::test]
@@ -203,6 +205,6 @@ mod tests {
         };
         let out = IfConditionNode.execute(input).await;
         assert!(out.success);
-        assert_eq!(out.output["branch"], "on_false");
+        assert_eq!(out.output.as_ref().unwrap()["branch"], "on_false");
     }
 }
