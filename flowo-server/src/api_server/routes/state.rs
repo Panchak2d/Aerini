@@ -16,10 +16,7 @@ use crate::token_store::{TokenRecord, TokenStore};
 /// Maximum concurrent SSE connections across all tokens.
 pub const SSE_MAX_CONNECTIONS: usize = 64;
 
-/// Default maximum concurrent workflow executions across all callers.
-/// Overridden by `--max-concurrent-runs` CLI flag.
-pub const MAX_CONCURRENT_RUNS: usize = 10;
-
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ApiState {
     pub db:               Arc<WorkflowDb>,

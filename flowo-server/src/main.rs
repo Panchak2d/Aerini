@@ -160,6 +160,7 @@ enum Command {
         ///   - Module import restrictions (child_process, fs, net, etc. blocked)
         ///   - --disallow-code-generation-from-strings (eval/new Function blocked)
         ///   - CPU and memory resource limits (Linux only)
+        ///
         /// Default: false (full Node.js stdlib available, matching desktop mode).
         /// Recommended for multi-user API deployments where --allow-code must be on.
         #[arg(long, default_value_t = false)]
@@ -326,7 +327,14 @@ async fn main() {
                     .unwrap_or(8)
                     .max(8)
             });
-            api_mode(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, code_sandbox, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, pool_size, max_concurrent_runs).await;
+            api_mode(api_server::ServerConfig {
+                token, port, data_dir, allow_origins, allow_env_vars, bind,
+                file_sandbox_dir, trusted_proxy_count,
+                shell_exec_disabled, code_exec_disabled, code_sandbox,
+                use_keychain: keychain, parallel_execution, max_concurrent_nodes,
+                server_max_duration_secs: max_workflow_duration_secs,
+                db_pool_size: pool_size, max_concurrent_runs,
+            }).await;
         },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
         Command::Stop    { workflow, server, token } => ctl_stop(&workflow, &server, &token).await,
@@ -541,7 +549,10 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("Status server error");
 }
 
-async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_origins: Vec<String>, allow_env_vars: Vec<String>, bind: String, file_sandbox_dir: Option<std::path::PathBuf>, trusted_proxy_count: usize, shell_exec_disabled: bool, code_exec_disabled: bool, code_sandbox: bool, use_keychain: bool, parallel_execution: bool, max_concurrent_nodes: usize, max_workflow_duration_secs: Option<u64>, db_pool_size: usize, max_concurrent_runs: usize) {
+async fn api_mode(cfg: api_server::ServerConfig) {
+    let code_exec_disabled  = cfg.code_exec_disabled;
+    let shell_exec_disabled = cfg.shell_exec_disabled;
+    let code_sandbox        = cfg.code_sandbox;
     if !code_exec_disabled {
         eprintln!();
         eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
@@ -573,7 +584,7 @@ async fn api_mode(token: Option<String>, port: u16, data_dir: String, allow_orig
         eprintln!("  A runaway script can exhaust system resources. Deploy on Linux for full sandboxing.");
         eprintln!();
     }
-    api_server::run(token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, shell_exec_disabled, code_exec_disabled, code_sandbox, use_keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs).await;
+    api_server::run(cfg).await;
 }
 
 async fn ctl_list(server: &str, token: &str) {

@@ -50,15 +50,35 @@ use std::{
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Semaphore};
 use rand::RngCore;
-use base64;
 
 use crate::event_bridge::BroadcastEventSink;
 use crate::token_store::TokenStore;
 use crate::util::extract_client_ip;
 
+/// Configuration bundle for [`run`]. Groups the 17 server parameters to stay
+/// under the clippy `too_many_arguments` limit.
+pub struct ServerConfig {
+    pub token:                    Option<String>,
+    pub port:                     u16,
+    pub data_dir:                 String,
+    pub allow_origins:            Vec<String>,
+    pub allow_env_vars:           Vec<String>,
+    pub bind:                     String,
+    pub file_sandbox_dir:         Option<std::path::PathBuf>,
+    pub trusted_proxy_count:      usize,
+    pub shell_exec_disabled:      bool,
+    pub code_exec_disabled:       bool,
+    pub code_sandbox:             bool,
+    pub use_keychain:             bool,
+    pub parallel_execution:       bool,
+    pub max_concurrent_nodes:     usize,
+    pub server_max_duration_secs: Option<u64>,
+    pub db_pool_size:             usize,
+    pub max_concurrent_runs:      usize,
+}
+
 pub use routes::state::ApiState;
 pub use routes::state::SSE_MAX_CONNECTIONS;
-pub use routes::state::MAX_CONCURRENT_RUNS;
 
 
 /// Sets a DACL on `path` that grants full control to the file owner only,
@@ -174,7 +194,7 @@ fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
     } else {
         let mut key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
-        std::fs::write(path, &key).unwrap_or_else(|e| {
+        std::fs::write(path, key).unwrap_or_else(|e| {
             tracing::error!("FATAL: Cannot write token key file {:?}: {}", path, e);
             std::process::exit(1);
         });
@@ -214,25 +234,14 @@ fn is_localhost_origin(b: &[u8]) -> bool {
     false
 }
 
-pub async fn run(
-    token: Option<String>,
-    port: u16,
-    data_dir: String,
-    allow_origins: Vec<String>,
-    allow_env_vars: Vec<String>,
-    bind: String,
-    file_sandbox_dir: Option<std::path::PathBuf>,
-    trusted_proxy_count: usize,
-    shell_exec_disabled: bool,
-    code_exec_disabled: bool,
-    code_sandbox: bool,
-    use_keychain: bool,
-    parallel_execution:   bool,
-    max_concurrent_nodes: usize,
-    server_max_duration_secs: Option<u64>,
-    db_pool_size: usize,
-    max_concurrent_runs: usize,
-) {
+pub async fn run(cfg: ServerConfig) {
+    let ServerConfig {
+        token, port, data_dir, allow_origins, allow_env_vars, bind,
+        file_sandbox_dir, trusted_proxy_count, shell_exec_disabled,
+        code_exec_disabled, code_sandbox, use_keychain, parallel_execution,
+        max_concurrent_nodes, server_max_duration_secs, db_pool_size,
+        max_concurrent_runs,
+    } = cfg;
     crate::init_tracing();
     let data_dir = PathBuf::from(if data_dir.starts_with('~') {
         data_dir.replacen('~',

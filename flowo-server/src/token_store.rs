@@ -13,7 +13,6 @@
 
 use chrono::Utc;
 use rand::RngCore;
-use base64;
 use base64::Engine;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
