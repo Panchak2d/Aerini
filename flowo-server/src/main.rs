@@ -552,7 +552,6 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
 async fn api_mode(cfg: api_server::ServerConfig) {
     let code_exec_disabled  = cfg.code_exec_disabled;
     let shell_exec_disabled = cfg.shell_exec_disabled;
-    let code_sandbox        = cfg.code_sandbox;
     if !code_exec_disabled {
         eprintln!();
         eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
@@ -577,7 +576,7 @@ async fn api_mode(cfg: api_server::ServerConfig) {
         eprintln!();
     }
     #[cfg(target_os = "macos")]
-    if !code_exec_disabled && code_sandbox {
+    if !code_exec_disabled && cfg.code_sandbox {
         eprintln!();
         eprintln!("WARNING: --code-sandbox is PARTIAL on macOS.");
         eprintln!("  ESM module restrictions apply, but CPU/memory setrlimit() is Linux-only.");
