@@ -59,7 +59,7 @@ impl Node for NotificationNode {
                 vec![format!("Notification sent via {method}: {title}")],
             ),
             Err(e) => NodeOutput::failure(NodeError::unrecoverable(
-                "NOTIFY_ERROR", &format!("Desktop notification failed: {e}"),
+                "NOTIFY_ERROR", format!("Desktop notification failed: {e}"),
             )),
         }
     }

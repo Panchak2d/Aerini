@@ -80,7 +80,7 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     let html    = cfg["html"].as_bool().unwrap_or(false);
 
     let from_mbox = from_str.parse::<lettre::message::Mailbox>()
-        .map_err(|e| NodeError::unrecoverable("INVALID_FROM", &format!("Invalid from address: {e}")))?;
+        .map_err(|e| NodeError::unrecoverable("INVALID_FROM", format!("Invalid from address: {e}")))?;
 
     const MAX_RECIPIENTS: usize = 50;
     let recipient_count = to_str.split(',').filter(|s| !s.trim().is_empty()).count();
@@ -98,13 +98,13 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
         let addr = addr.trim();
         if addr.is_empty() { continue; }
         let mbox = addr.parse::<lettre::message::Mailbox>()
-            .map_err(|e| NodeError::unrecoverable("INVALID_TO", &format!("Invalid to address '{addr}': {e}")))?;
+            .map_err(|e| NodeError::unrecoverable("INVALID_TO", format!("Invalid to address '{addr}': {e}")))?;
         msg_builder = msg_builder.to(mbox);
     }
     let message = msg_builder
         .header(content_type)
         .body(body)
-        .map_err(|e| NodeError::unrecoverable("BUILD_ERROR", &format!("Failed to build email: {e}")))?;
+        .map_err(|e| NodeError::unrecoverable("BUILD_ERROR", format!("Failed to build email: {e}")))?;
 
     let username = cfg["username"].as_str().unwrap_or("").to_string();
     let password = cfg["password"].as_str().unwrap_or("").to_string();
@@ -113,7 +113,7 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_host)
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_host)
-    }.map_err(|e| NodeError::unrecoverable("TRANSPORT_ERROR", &format!("SMTP transport init failed: {e}")))?;
+    }.map_err(|e| NodeError::unrecoverable("TRANSPORT_ERROR", format!("SMTP transport init failed: {e}")))?;
 
     builder = builder.port(smtp_port);
 
@@ -124,7 +124,7 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     let transport = builder.build();
 
     transport.send(message).await
-        .map_err(|e| NodeError::recoverable("SMTP_ERROR", &format!("SMTP send failed: {e}")))?;
+        .map_err(|e| NodeError::recoverable("SMTP_ERROR", format!("SMTP send failed: {e}")))?;
 
     Ok(format!("Email sent to {to_str} via {smtp_host}:{smtp_port}"))
 }

@@ -673,6 +673,7 @@ async fn run_job_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fire_once(
     workflow_id:          &str,
     db:                   &Arc<dyn SchedulerDb>,
@@ -695,6 +696,7 @@ async fn fire_once(
     ).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fire_once_with_vars(
     workflow_id:          &str,
     db:                   &Arc<dyn SchedulerDb>,
