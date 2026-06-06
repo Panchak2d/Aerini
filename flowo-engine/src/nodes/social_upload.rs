@@ -267,6 +267,7 @@ fn map_http_error(status: u16, platform: &str) -> UploadError {
 ///   POST https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status
 ///
 /// Body format: multipart/related with metadata JSON part and binary video part.
+#[allow(clippy::too_many_arguments)]
 async fn upload_to_youtube(
     filename: &str,
     data: &str,
