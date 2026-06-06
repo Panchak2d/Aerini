@@ -9,7 +9,7 @@ use flowo_engine::{
 };
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Semaphore};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::token_store::{TokenRecord, TokenStore};
 
@@ -30,12 +30,14 @@ pub struct ApiState {
     pub file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
     pub shell_exec_disabled:  bool,
     pub code_exec_disabled:   bool,
+    pub database_exec_disabled: bool,
     pub parallel_execution:   bool,
     pub max_concurrent_nodes: usize,
     pub server_max_duration_secs: Option<u64>,
     pub base_executor: WorkflowExecutor,
     pub sse_semaphore: Arc<Semaphore>,
     pub run_semaphore: Arc<Semaphore>,
+    pub queue_timeout: Duration,
 }
 
 pub fn require_admin(record: &TokenRecord) -> Result<(), (axum::http::StatusCode, axum::Json<serde_json::Value>)> {

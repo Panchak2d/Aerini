@@ -49,4 +49,15 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/wget", "-qO-", "http://localhost:7700/api/health"]
 
 ENTRYPOINT ["/usr/local/bin/flowo-server"]
+
+# SECURITY: if FLOWO_TOKEN is not set, a random token is generated on first
+# run and printed to stdout. In Docker without an attached TTY, this token
+# can be lost in log rotation before you retrieve it, leaving the server
+# inaccessible. Always set FLOWO_TOKEN explicitly:
+#
+#   docker run -e FLOWO_TOKEN=your-secret-token flowo-server api
+#   # or in docker-compose.yml: environment: - FLOWO_TOKEN=${FLOWO_TOKEN:?must be set}
+#
+# The docker-compose.yml in this repo enforces this via ${FLOWO_TOKEN:?...}.
+# If you use the image directly without compose, set the env var.
 CMD ["api"]

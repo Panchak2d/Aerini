@@ -67,7 +67,7 @@ async function loadPage(workflowId: string, offset: number, filter: string): Pro
 
 let _migrationDone = false;
 
-async function migrateFromLocalStorage(workflowId: string, workflowName: string): Promise<void> {
+async function migrateFromLocalStorage(workflowId: string, _workflowName: string): Promise<void> {
   if (_migrationDone) return;
   _migrationDone = true;
   const LS_KEY = "flowo_run_history_v1";

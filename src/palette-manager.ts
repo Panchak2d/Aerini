@@ -1,5 +1,6 @@
 import type { NodeDescriptor } from "./ipc/workflow";
 import type { Canvas } from "./canvas/Canvas";
+import { NODE_IDS } from "./node-ids";
 import { NODE_ICONS, escapeHtml } from "./utils";
 
 interface Category { label: string; nodes: NodeDescriptor[] }
@@ -34,57 +35,57 @@ export function buildSidebarPalette(
   const PRESETS: Array<{ label: string; baseTypeId: string; config: Record<string, unknown> }> = [
     {
       label: "Claude (Anthropic)",
-      baseTypeId: "ai_prompt",
+      baseTypeId: NODE_IDS.AI_PROMPT,
       config: { provider: "anthropic", model: "claude-sonnet-4-20250514", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "GPT-4o (OpenAI)",
-      baseTypeId: "ai_prompt",
+      baseTypeId: NODE_IDS.AI_PROMPT,
       config: { provider: "openai", model: "gpt-4o", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "Gemini (Google)",
-      baseTypeId: "ai_prompt",
+      baseTypeId: NODE_IDS.AI_PROMPT,
       config: { provider: "gemini", model: "gemini-2.5-flash", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "Ollama (Local)",
-      baseTypeId: "ai_prompt",
+      baseTypeId: NODE_IDS.AI_PROMPT,
       config: { provider: "auto", model: "llama3", base_url: "http://localhost:11434/v1", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "DALL-E 3 (OpenAI)",
-      baseTypeId: "image_gen",
+      baseTypeId: NODE_IDS.IMAGE_GEN,
       config: { provider: "dalle3", n: 1, size: "1024x1024", quality: "standard" },
     },
     {
       label: "Imagen 4 (Google)",
-      baseTypeId: "image_gen",
+      baseTypeId: NODE_IDS.IMAGE_GEN,
       config: { provider: "imagen4", n: 1, aspect_ratio: "1:1" },
     },
     {
       label: "Save to Folder",
-      baseTypeId: "save_to_folder",
+      baseTypeId: NODE_IDS.SAVE_TO_FOLDER,
       config: { overwrite: true, filename_prefix: "", subfolders: [] },
     },
     {
       label: "Collect Files",
-      baseTypeId: "collect_files",
+      baseTypeId: NODE_IDS.COLLECT_FILES,
       config: { sources: [{ id: "src_1", name: "Source 1", source_expr: "" }] },
     },
     {
       label: "Upload to YouTube",
-      baseTypeId: "social_upload",
+      baseTypeId: NODE_IDS.SOCIAL_UPLOAD,
       config: { platform: "youtube", privacy: "private" },
     },
     {
       label: "Upload to Instagram",
-      baseTypeId: "social_upload",
+      baseTypeId: NODE_IDS.SOCIAL_UPLOAD,
       config: { platform: "instagram" },
     },
     {
       label: "Upload to TikTok",
-      baseTypeId: "social_upload",
+      baseTypeId: NODE_IDS.SOCIAL_UPLOAD,
       config: { platform: "tiktok", privacy: "self_only" },
     },
   ];

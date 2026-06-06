@@ -1,145 +1,186 @@
-# Flowo Server — REST API Reference
+# Flowo Server: REST API Reference
 
-Base URL: `http://<host>:<port>` (default port 4242)
+Base URL: `http://<host>:<port>` (default port 7700)
 
-All request/response bodies are JSON unless otherwise noted.
-Authentication: Bearer token via `Authorization: Bearer <token>` header (configure with `--api-key`).
+All request and response bodies are JSON unless otherwise noted.
+Authentication: `Authorization: Bearer <token>` header. Configure with `--token` or `FLOWO_TOKEN` env var.
 
 ---
 
 ## Workflows
 
-### `GET /workflows`
-List all stored workflows.
+### `GET /api/workflows`
+
+List all stored workflows. Paginated.
+
+**Query params**
+
+| Param    | Type | Default | Description          |
+|----------|------|---------|----------------------|
+| `limit`  | int  | 100     | Max records returned (cap 500) |
+| `offset` | int  | 0       | Records to skip      |
 
 **Response 200**
 ```json
-[
-  {
-    "id": "wf_abc123",
-    "name": "My Workflow",
-    "schema_version": "1.0",
-    "description": "",
-    "nodes": [...],
-    "edges": [...],
-    "metadata": {}
-  }
-]
+{
+  "items": [
+    {
+      "id": "wf_abc123",
+      "name": "My Workflow",
+      "schema_version": "1.0",
+      "description": "",
+      "nodes": [...],
+      "edges": [...],
+      "metadata": {}
+    }
+  ],
+  "total": 1,
+  "limit": 100,
+  "offset": 0
+}
 ```
 
 ---
 
-### `GET /workflows/:id`
+### `GET /api/workflows/:id`
+
 Fetch a single workflow by ID.
 
-**Response 200** — workflow object (same shape as above)  
-**Response 404** — `{"error": "workflow not found"}`
+**Response 200:** workflow object  
+**Response 404:** `{"error": "Not found"}`
 
 ---
 
-### `POST /workflows`
-Create or fully replace a workflow. The body must be a complete workflow JSON object.
+### `POST /api/workflows`
 
-**Request body** — full workflow object  
-**Response 201** — saved workflow object
+Create or replace a workflow. Upsert by ID: if a workflow with the same ID already exists, it is fully replaced.
 
----
+**Request body**
+```json
+{ "workflow_json": "<workflow JSON string>" }
+```
 
-### `PUT /workflows/:id`
-Replace a workflow by ID.
-
-**Request body** — full workflow object  
-**Response 200** — updated workflow object  
-**Response 404** — not found
+**Response 200:** `{"ok": true}`  
+**Response 400:** `{"error": "..."}`
 
 ---
 
-### `DELETE /workflows/:id`
+### `DELETE /api/workflows/:id`
+
 Delete a workflow and its scheduler entry.
 
-**Response 204** — no body  
-**Response 404** — not found
+**Response 200:** `{"ok": true}`  
+**Response 404:** `{"error": "Not found"}`
 
 ---
 
 ## Runs
 
-### `POST /workflows/:id/run`
+### `POST /api/workflows/:id/run`
+
 Trigger a single ad-hoc run of a workflow.
 
 **Request body** (optional)
 ```json
-{ "variables": { "key": "value" } }
+{ "initial_variables": { "key": "value" } }
 ```
 
 **Response 200**
 ```json
 {
   "execution_id": "exec_xyz",
-  "workflow_id":  "wf_abc123",
-  "success":      true,
-  "started_at":   "2025-01-01T12:00:00Z",
-  "duration_ms":  1234,
-  "node_results": { ... }
+  "workflow_id": "wf_abc123",
+  "success": true,
+  "node_outputs": { "Node Name": { ... } },
+  "logs": [
+    { "timestamp": "2025-01-01T12:00:00Z", "node_id": "n1", "level": "INFO", "message": "..." }
+  ],
+  "error": null,
+  "validation_errors": []
 }
 ```
 
-**Response 429** — server is at maximum concurrent workflow capacity  
-**Response 503** — workflow currently locked (another run in progress)
-
----
-
-### `GET /workflows/:id/runs`
-Return the most recent run records for a workflow (default: last 50).
-
-**Query params**
-| Param  | Type | Default | Description          |
-|--------|------|---------|----------------------|
-| `limit`| int  | 50      | Max records returned |
-
-**Response 200** — array of run record objects
+**Response 429:** workflow currently locked (another run in progress)  
+**Response 503:** server is at capacity and no slot became available within the queue timeout. Includes a `Retry-After` header (seconds).
 
 ---
 
 ## Scheduler
 
-### `POST /workflows/:id/schedule`
-Enable or update the scheduler for a workflow.
+### `GET /api/scheduler`
 
-**Request body**
-```json
-{
-  "trigger": {
-    "type": "interval",
-    "secs": 3600
-  }
-}
-```
-Supported trigger types: `interval` (`secs`), `cron` (`expr`), `once` (`run_at` ISO-8601), `webhook` (`port`, `path`, `method`, `secret`).
+List all scheduled jobs.
 
-**Response 200** — `{"status": "scheduled"}`
+**Response 200:** `{"items": [...], "total": N}`
 
 ---
 
-### `DELETE /workflows/:id/schedule`
-Disarm the scheduler for a workflow.
+### `POST /api/scheduler/:id/start`
 
-**Response 200** — `{"status": "disarmed"}`
+Start scheduling a workflow.
+
+**Request body**
+```json
+{ "always_on": false }
+```
+
+**Response 200:** `{"status": "started"}`
+
+---
+
+### `POST /api/scheduler/:id/stop`
+
+Stop a scheduled workflow.
+
+**Response 200:** `{"status": "stopped"}`
+
+---
+
+## Credentials
+
+### `GET /api/credentials`
+
+List all stored credential IDs and names (values are never returned).
+
+**Response 200:** array of credential objects
+
+---
+
+### `POST /api/credentials`
+
+Store a credential.
+
+**Request body**
+```json
+{ "id": "openai-prod", "name": "OpenAI API Key", "value": "sk-..." }
+```
+
+**Response 200:** `{"ok": true}`
+
+---
+
+### `DELETE /api/credentials/:id`
+
+Delete a credential.
+
+**Response 200:** `{"ok": true}`  
+**Response 404:** `{"error": "Not found"}`
 
 ---
 
 ## Health
 
-### `GET /health`
+### `GET /api/health`
+
 Server liveness check. No authentication required.
 
-**Response 200** — `{"status": "ok", "version": "0.1.0"}`
+**Response 200:** `{"status": "ok", "version": "0.2.0"}`
 
 ---
 
 ## Error format
 
-All error responses share this shape:
+All error responses use this shape:
 ```json
 { "error": "human-readable message" }
 ```
@@ -148,4 +189,4 @@ All error responses share this shape:
 
 ## Rate limits
 
-The server enforces a global concurrent-run ceiling (`--max-concurrent-runs`, default 16). Requests beyond the ceiling receive HTTP 429. Retry with exponential back-off.
+The server enforces a global concurrent-run ceiling via `--max-concurrent-runs` (default 10). When all slots are occupied, incoming run requests queue rather than being rejected immediately. If a slot does not open within `--max-queue-wait-secs` (default 30), the server returns 503 with a `Retry-After` header. Pass `--max-queue-wait-secs 0` to get immediate 503 on full capacity instead.

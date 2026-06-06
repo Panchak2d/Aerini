@@ -1,0 +1,50 @@
+/* ══════════════════════════════════════════
+   VARIABLES
+   ══════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  color-scheme: dark;
+  /* Surfaces */
+  --color-canvas:    #08090d;
+  --color-surface-0: #0d1117;
+  --color-surface-1: #161b22;
+  --color-surface-2: #1c2128;
+  --color-surface-3: #21262d;
+  --color-border:    #30363d;
+
+  /* Text */
+  --color-text-primary:   #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-muted:     #484f58;
+
+  /* Actions (semantic) */
+  --color-action-run: #34d399; /* green — run / success / active */
+  --color-action-nav: #4d9eff; /* blue  — navigation / focus / links */
+  --color-warning:    #f59e0b;
+  --color-error:      #f87171;
+  --color-ai:         #a78bfa;
+
+  /* Backward-compat aliases */
+  --bg0: var(--color-canvas);
+  --bg1: var(--color-surface-0);
+  --bg2: var(--color-surface-1);
+  --bg3: var(--color-surface-2);
+  --bg4: var(--color-surface-3);
+  --bd:  var(--color-border);
+  --t1:  var(--color-text-primary);
+  --t2:  var(--color-text-secondary);
+  --t3:  var(--color-text-muted);
+  --blue:   var(--color-action-nav);
+  --green:  var(--color-action-run);
+  --amber:  var(--color-warning);
+  --red:    var(--color-error);
+  --purple: var(--color-ai);
+  --accent: var(--color-action-nav); /* interactive on/selected state — settings toggles */
+
+  /* Layout */
+  --sidebar-w: 260px; --activity-bar-w: 44px; --panel-w: 320px;
+  --toolbar-h: 44px;  --status-h: 22px;       --drawer-h: 260px;
+  --radius: 8px; --trans: 150ms ease;
+}

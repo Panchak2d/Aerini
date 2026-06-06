@@ -46,3 +46,31 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -p flowo-engine -p flowo-server --locked -- -D warnings
+
+  node-checks:
+    name: Node.js dependency audit and dist staleness
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit (high severity)
+        run: npm audit --audit-level=high
+
+      - name: Check dist/ is not stale
+        # Rebuilds the Vite frontend bundle and fails if dist/ differs from what is committed.
+        # Uses `vite:build` (not `build`) because the `build` script invokes `tauri build`,
+        # which requires GUI system libraries not available in a headless CI environment.
+        # If this step fails, run `npm run vite:build` locally and commit the updated dist/.
+        run: |
+          npm run vite:build
+          git diff --exit-code dist/ || (echo "ERROR: dist/ is stale — run 'npm run vite:build' and commit the result" && exit 1)

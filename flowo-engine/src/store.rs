@@ -91,7 +91,7 @@ impl CredentialStore {
             .encrypt(nonce, req.value.as_bytes())
             .map_err(|e| EngineError::Encryption(e.to_string()))?;
 
-        let conn = self.conn.lock().expect("credential store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO credentials (id, name, cred_type, value_enc, nonce, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -104,7 +104,7 @@ impl CredentialStore {
     }
 
     pub fn retrieve(&self, id: &str) -> Result<Option<String>, EngineError> {
-        let conn = self.conn.lock().expect("credential store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result = conn.query_row(
             "SELECT value_enc, nonce FROM credentials WHERE id = ?1",
             params![id],
@@ -129,7 +129,7 @@ impl CredentialStore {
     }
 
     pub fn list(&self) -> Result<Vec<CredentialEntry>, EngineError> {
-        let conn = self.conn.lock().expect("credential store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT id, name, cred_type FROM credentials ORDER BY name")
             .map_err(|e| EngineError::Database(e.to_string()))?;
@@ -145,7 +145,7 @@ impl CredentialStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), EngineError> {
-        let conn = self.conn.lock().expect("credential store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM credentials WHERE id = ?1", params![id])
             .map_err(|e| EngineError::Database(e.to_string()))?;
         Ok(())

@@ -557,3 +557,30 @@ Described in [Section 5](#the-dns-rebinding-gap-toctou). Flowo resolves DNS and 
 Described in [Section 8](#8-ai-agent-nodes--prompt-injection). No sanitization fully prevents a determined injection in user-controlled text passed to an LLM.
 
 **Mitigation:** minimize what the agent can do downstream; validate inputs; prefer the Anthropic (single-pass, no tool loop) provider for processing untrusted content.
+
+---
+
+## 11. Known transitive dependency risks
+
+### RUSTSEC-2023-0071 — RSA Marvin Attack (MySQL / sqlx)
+
+**Severity:** Timing side-channel in RSA operations during MySQL TLS handshake.
+
+**What it is:** The `rsa` crate (version 0.9.x) is vulnerable to a timing side-channel known as the Marvin Attack. An attacker who can observe many TLS handshakes to the same MySQL endpoint may recover RSA session material by measuring response timing differences.
+
+**How it enters Flowo:** `rsa` is pulled in transitively by `sqlx` → `sqlx-mysql`. Flowo's Database node supports MySQL connections; the `rsa` crate is used internally during the MySQL authentication handshake. Flowo does not call `rsa` directly.
+
+**When the risk is mitigated:**
+- The MySQL server is operator-controlled, not reachable by untrusted workflow authors.
+- In single-user desktop mode where you write your own workflows.
+- In `--serve` mode where the exported workflow is operator-authored.
+
+**When the risk is NOT mitigated:**
+- In API mode (`flowo-server api`) where untrusted callers with write-scope tokens can create workflows and set arbitrary `connection_url` values in Database nodes. An attacker who operates a MySQL server can direct a Flowo workflow to connect to it, then measure handshake timing to attack the RSA operation.
+
+**If you run Flowo in API mode with untrusted workflow authors, you must:**
+1. Restrict Database node `connection_url` values via workflow review before deploying.
+2. Disable the Database node class entirely if untrusted callers have write scope.
+3. Track the upstream fix: https://github.com/launchbadge/sqlx/issues/3538
+
+**No action needed** for single-user desktop use or single-operator server deployments where you control all workflow content.

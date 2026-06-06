@@ -621,22 +621,23 @@ fn extract_query_param(qs: &str, key: &str) -> Option<String> {
 }
 
 fn pct_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '%' {
             let h1 = chars.next().unwrap_or('0');
             let h2 = chars.next().unwrap_or('0');
             if let Ok(b) = u8::from_str_radix(&format!("{}{}", h1, h2), 16) {
-                out.push(b as char);
+                bytes.push(b);
             }
         } else if c == '+' {
-            out.push(' ');
+            bytes.push(b' ');
         } else {
-            out.push(c);
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         }
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ── Full OAuth flow ───────────────────────────────────────────────────────────

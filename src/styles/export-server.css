@@ -1,0 +1,326 @@
+/* ══════════════════════════════════════════
+   EXPORT SERVER PANEL
+   ══════════════════════════════════════════ */
+
+.export-server-panel { max-width: 600px; }
+
+.esp-body { padding: 20px; overflow-y: auto; flex: 1; }
+
+.esp-loading {
+  padding: 32px 20px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--t3);
+}
+
+.esp-intro {
+  font-size: 13px;
+  color: var(--t2);
+  line-height: 1.6;
+  margin: 0 0 18px;
+}
+
+.esp-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.esp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.esp-field-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--t3);
+}
+.esp-field-value {
+  font-size: 13px;
+  color: var(--t1);
+}
+
+.esp-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin: 18px 0 8px;
+  border-left: 2px solid var(--bd);
+  padding-left: 8px;
+}
+
+.esp-note {
+  font-size: 12px;
+  color: var(--t3);
+  margin: -2px 0 14px;
+  line-height: 1.5;
+}
+
+.esp-muted {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.esp-callout {
+  background: rgba(77,158,255,.07);
+  border: 1px solid rgba(77,158,255,.2);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--t2);
+  line-height: 1.55;
+}
+.esp-callout-warn {
+  background: rgba(245,158,11,.07);
+  border: 1px solid rgba(245,158,11,.25);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--amber);
+  line-height: 1.55;
+}
+.esp-callout-error {
+  background: rgba(248,113,113,.07);
+  border: 1px solid rgba(248,113,113,.25);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--red);
+  line-height: 1.55;
+}
+
+.esp-mt { margin-top: 16px; }
+
+.esp-success-block:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Connect tab */
+
+.esp-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--bg4);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  color: var(--t1);
+  outline: none;
+  transition: border-color 120ms;
+}
+.esp-input:focus { border-color: var(--blue); }
+
+/* Port input: combined selector beats .esp-input specificity */
+.esp-input.esp-port-input { width: 140px; }
+
+/* Action row: groups the generate button and its spinner status label */
+.esp-action-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.esp-primary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 120ms;
+}
+.esp-primary-btn:hover:not(:disabled) { opacity: .88; }
+.esp-primary-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Spinner for generate package operation */
+@keyframes esp-spin {
+  to { transform: rotate(360deg); }
+}
+.esp-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: esp-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .esp-spinner { animation: none; opacity: .6; }
+}
+
+.esp-generating-label:not([hidden]) {
+  display: flex;
+  font-size: 12px;
+  color: var(--t2);
+  margin-top: 8px;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Credentials table */
+.esp-cred-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-bottom: 18px;
+}
+.esp-cred-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--t3);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bd);
+}
+.esp-cred-table td {
+  padding: 7px 10px;
+  color: var(--t2);
+  border-bottom: 1px solid rgba(48,54,61,.6);
+  vertical-align: middle;
+}
+.esp-cred-table td:first-child {
+  font-family: "SF Mono","Fira Code",monospace;
+  font-size: 11.5px;
+  color: var(--blue);
+  white-space: nowrap;
+}
+.esp-cred-table td:nth-child(2) {
+  font-family: "SF Mono","Fira Code",monospace;
+  font-size: 11.5px;
+  color: var(--t1);
+}
+.esp-cred-ok   { color: var(--green); font-size: 13px; }
+.esp-cred-warn { color: var(--amber); font-size: 13px; }
+.esp-cred-row--empty td { background: rgba(245,158,11,.04); }
+
+/* Port + generate button inline row */
+.esp-port-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/* Deployment target tab bar */
+.esp-tab-bar {
+  display: flex;
+  gap: 4px;
+  margin: 16px 0 0;
+  border-bottom: 1px solid var(--bd);
+  padding-bottom: 0;
+}
+
+.esp-tab {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t2);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms;
+  border-radius: 4px 4px 0 0;
+}
+
+.esp-tab:hover { color: var(--t1); }
+
+.esp-tab--active {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+.esp-pane-desc {
+  margin-top: 12px;
+}
+
+#onboarding-dismiss:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+#btn-copy-output.copied {
+  color: var(--green) !important;
+}
+
+
+/* Run-secret one-time banner (export-server-panel) */
+.esp-run-secret-banner {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: rgba(255,180,0,.07);
+  border: 1px solid rgba(255,180,0,.35);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.esp-run-secret-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #c8920a;
+}
+.esp-run-secret-desc {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+}
+.esp-run-secret-desc strong { color: var(--t1); }
+.esp-run-secret-desc code {
+  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-size: 10px;
+  background: var(--bg4);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.esp-run-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.esp-run-secret-value {
+  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-size: 11px;
+  background: var(--bg4);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: var(--green);
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+.esp-run-secret-copy {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 4px 12px;
+  background: rgba(255,180,0,.10);
+  border: 1px solid rgba(255,180,0,.35);
+  border-radius: 4px;
+  color: #c8920a;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.esp-run-secret-copy:hover { background: rgba(255,180,0,.20); }

@@ -72,6 +72,8 @@ pub struct WorkflowExecutor {
     pub(super) shell_exec_disabled: bool,
     // When true, CodeNode returns CODE_DISABLED immediately without executing.
     pub(super) code_exec_disabled:  bool,
+    // When true, DatabaseNode returns DATABASE_DISABLED immediately without connecting.
+    pub(super) database_exec_disabled: bool,
     // When true, input schema violations fail the node. When false (default), they log a warning.
     pub(super) strict_schema_validation: bool,
     // When true, independent branches execute concurrently via tokio tasks. Default: false.
@@ -87,6 +89,9 @@ pub struct WorkflowExecutor {
     // When true, Code (JS) nodes run with module import restrictions and OS resource limits.
     // Only meaningful when code_exec_disabled is false.
     pub(super) code_sandbox_enabled: bool,
+    // When set, overrides the default 512 MB RLIMIT_AS cap for Code (JS) node subprocesses.
+    // Linux only; ignored on macOS and Windows.
+    pub(super) code_max_memory_mb: Option<u64>,
 }
 
 impl WorkflowExecutor {
@@ -94,7 +99,7 @@ impl WorkflowExecutor {
         registry:            Arc<NodeRegistry>,
         credential_resolver: Arc<dyn CredentialResolver>,
     ) -> Self {
-        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None, caller_is_admin: false, code_sandbox_enabled: false }
+        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, database_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None, caller_is_admin: false, code_sandbox_enabled: false, code_max_memory_mb: None }
     }
 
     /// Restrict `{{$env.VAR}}` expressions to the listed variable names.
@@ -130,6 +135,15 @@ impl WorkflowExecutor {
     /// Recommended for API mode deployments where arbitrary JS execution is undesirable.
     pub fn with_code_disabled(mut self, disabled: bool) -> Self {
         self.code_exec_disabled = disabled;
+        self
+    }
+
+    /// Disable the Database node. When true, any DatabaseNode returns a
+    /// DATABASE_DISABLED error immediately without opening any connection.
+    /// Recommended for multi-tenant API deployments due to RUSTSEC-2023-0071
+    /// (RSA Marvin timing side-channel in sqlx-mysql) and SSRF surface reduction.
+    pub fn with_database_disabled(mut self, disabled: bool) -> Self {
+        self.database_exec_disabled = disabled;
         self
     }
 
@@ -191,6 +205,13 @@ impl WorkflowExecutor {
     /// Server mode with --allow-code: sandbox defaults to true; admin may disable.
     pub fn with_code_sandbox(mut self, enabled: bool) -> Self {
         self.code_sandbox_enabled = enabled;
+        self
+    }
+
+    /// Override the default 512 MB memory cap for Code (JS) node subprocesses.
+    /// Only effective on Linux with --code-sandbox active; no-op on macOS/Windows.
+    pub fn with_code_max_memory_mb(mut self, mb: Option<u64>) -> Self {
+        self.code_max_memory_mb = mb;
         self
     }
 
@@ -432,8 +453,14 @@ impl WorkflowExecutor {
                 if self.code_exec_disabled {
                     ctx.metadata.insert("__code_disabled".to_string(), Value::Bool(true));
                 }
+                if self.database_exec_disabled {
+                    ctx.metadata.insert("__database_disabled".to_string(), Value::Bool(true));
+                }
                 if self.code_sandbox_enabled {
                     ctx.metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
+                }
+                if let Some(mb) = self.code_max_memory_mb {
+                    ctx.metadata.insert("__code_max_memory_mb".to_string(), Value::Number(mb.into()));
                 }
                 ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.caller_is_admin));
                 ctx

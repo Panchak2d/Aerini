@@ -149,11 +149,11 @@ impl Node for SocialUploadNode {
 
             let result = match platform {
                 "youtube" => {
-                    upload_to_youtube(YoutubeUploadParams {
+                    upload_to_youtube(
                         filename, data, mime_type,
-                        title: &title, description: &description, tags_csv: &tags, privacy: &privacy,
-                        access_token: &tokens.access_token,
-                    }).await
+                        &title, &description, &tags, &privacy,
+                        &tokens.access_token,
+                    ).await
                 }
                 "instagram" => {
                     upload_to_instagram(filename, data, mime_type, &title).await
@@ -261,25 +261,22 @@ fn map_http_error(status: u16, platform: &str) -> UploadError {
 
 // ── YouTube ───────────────────────────────────────────────────────────────────
 
-struct YoutubeUploadParams<'a> {
-    filename:     &'a str,
-    data:         &'a str,
-    mime_type:    &'a str,
-    title:        &'a str,
-    description:  &'a str,
-    tags_csv:     &'a str,
-    privacy:      &'a str,
-    access_token: &'a str,
-}
-
 /// Uploads a single file to YouTube using the multipart upload protocol.
 ///
 /// Endpoint (VERIFIED May 2026):
 ///   POST https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status
 ///
 /// Body format: multipart/related with metadata JSON part and binary video part.
-async fn upload_to_youtube(p: YoutubeUploadParams<'_>) -> Result<Value, UploadError> {
-    let YoutubeUploadParams { filename, data, mime_type, title, description, tags_csv, privacy, access_token } = p;
+async fn upload_to_youtube(
+    filename: &str,
+    data: &str,
+    mime_type: &str,
+    title: &str,
+    description: &str,
+    tags_csv: &str,
+    privacy: &str,
+    access_token: &str,
+) -> Result<Value, UploadError> {
     let file_bytes = BASE64.decode(data).map_err(|_| upload_err(
         "DECODE_ERROR",
         "Failed to decode base64 file data",
@@ -357,38 +354,19 @@ async fn upload_to_youtube(p: YoutubeUploadParams<'_>) -> Result<Value, UploadEr
 
 /// Instagram requires media hosted at a publicly accessible URL (G2).
 /// Base64-encoded local data cannot be uploaded directly — return a clear error.
-///
-/// If the data field contains a URL (future extensibility), attempt the two-step
-/// container → publish flow.
 async fn upload_to_instagram(
     filename: &str,
-    data: &str,
+    _data: &str,
     _mime_type: &str,
-    caption: &str,
+    _caption: &str,
 ) -> Result<Value, UploadError> {
-    // Instagram requires publicly accessible URL — can't send raw bytes.
-    // Check if data is a URL (starts with http) or base64.
-    if !data.starts_with("http://") && !data.starts_with("https://") {
-        // Base64 local data → immediate error (G2)
-        return Err(upload_err(
-            "INSTAGRAM_NEEDS_PUBLIC_URL",
-            format!("Instagram upload of '{}' requires a public URL", filename),
-            "Instagram's API requires media to be hosted at a publicly accessible URL. \
-             Raw file data (base64) cannot be sent directly to Instagram.",
-            "Upload your file to a web server or CDN first, then use the public URL \
-             as the data field value instead of local base64 data.",
-        ));
-    }
-
-    // Future path: data is a URL — attempt Instagram container → publish flow.
-    // (Not reachable with current media contract, which always uses base64.)
-    let media_url = data;
-    let _ = (media_url, caption); // used below
     Err(upload_err(
-        "INSTAGRAM_NOT_IMPLEMENTED",
-        "Instagram URL-based publish not yet implemented",
-        "This path requires retrieving the Instagram user ID and creating a media container.",
-        "Support for URL-based Instagram uploads will be added in a future patch.",
+        "INSTAGRAM_NEEDS_PUBLIC_URL",
+        format!("Instagram upload of '{}' requires a public URL", filename),
+        "Instagram's API requires media to be hosted at a publicly accessible URL. \
+         Raw file data (base64) cannot be sent directly to Instagram.",
+        "Upload your file to a web server or CDN first, then use the public URL \
+         as the data field value instead of local base64 data.",
     ))
 }
 

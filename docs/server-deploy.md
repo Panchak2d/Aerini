@@ -2,26 +2,36 @@
 
 `flowo-server` is a headless binary that runs workflows on a Linux server without the desktop app. There are two modes:
 
-- **Serve mode** — runs one specific workflow, exported from the desktop app. The simplest path for getting a single workflow running 24/7.
-- **API mode** — manages many workflows on one server via a REST API.
+- **Serve mode:** runs one specific workflow, exported from the desktop app. The simplest path for getting a single workflow running 24/7.
+- **API mode:** manages many workflows on one server via a REST API.
+
+---
+
+## License notice for service operators
+
+`flowo-server` is licensed under AGPL-3.0. If you run a **modified** version as a network-accessible service, AGPL-3.0 requires you to make your modifications available under the same license.
+
+Running the **unmodified** binary, or modifying it solely for your own use with no other users, does not trigger this obligation.
+
+If you need to keep your modifications proprietary, a commercial license is available. See the [Commercial licensing](../README.md#commercial-licensing) section of the README.
 
 ---
 
 ## Serve mode (single workflow)
 
-### Step 1 — Export from the desktop app
+### Step 1: Export from the desktop app
 
 Open any workflow that has a Schedule or Webhook trigger. Click **File → Export for Server**.
 
 Flowo generates a zip containing:
 
-- `flowo-server` — the server binary (Linux x86-64, statically linked)
-- `flowo-server.json` — the workflow config
-- `.env.example` — a list of environment variables you need to set (one per credential used by the workflow)
-- `flowo-server.service` — a systemd unit file
-- `install.sh` — an install script that handles everything
+- `flowo-server`: the server binary (Linux x86-64, statically linked)
+- `flowo-server.json`: the workflow config
+- `.env.example`: a list of environment variables you need to set (one per credential used by the workflow)
+- `flowo-server.service`: a systemd unit file
+- `install.sh`: an install script that handles everything
 
-### Step 2 — Upload and install
+### Step 2: Upload and install
 
 Upload the zip to your Linux server and run the install script:
 
@@ -38,7 +48,7 @@ The install script:
 3. Creates `/etc/flowo/.env` from `.env.example` (you fill in the values)
 4. Installs and enables the systemd service
 
-### Step 3 — Set credentials
+### Step 3: Set credentials
 
 Open `/etc/flowo/.env` and fill in the credential values:
 
@@ -56,7 +66,7 @@ The variable names are derived from your credential IDs automatically:
 
 Hyphens and dots become underscores; the name is uppercased; `FLOWO_CRED_` is prepended.
 
-### Step 4 — Start the service
+### Step 4: Start the service
 
 ```bash
 sudo systemctl start flowo-server
@@ -87,12 +97,14 @@ The status page binds to `127.0.0.1` by default. To expose it on a network inter
 flowo-server serve [OPTIONS]
 
 Options:
-  --config <path>              Path to flowo-server.json. Default: flowo-server.json
-  --port <port>                Override the status page port from the config file
-  --bind <addr>                Interface to bind to. Default: 127.0.0.1
-  --trusted-proxy-count <n>    Number of reverse-proxy hops to trust for X-Forwarded-For. Default: 0
-  --allow-shell                Enable Shell Command nodes (disabled by default)
-  --allow-code                 Enable Code (JS) nodes (disabled by default)
+  --config <path>                  Path to flowo-server.json. Default: flowo-server.json
+  --port <port>                    Override the status page port from the config file
+  --bind <addr>                    Interface to bind to. Default: 127.0.0.1
+  --trusted-proxy-count <n>        Number of reverse-proxy hops to trust for X-Forwarded-For. Default: 0
+  --allow-shell                    Enable Shell Command nodes (disabled by default)
+  --allow-code                     Enable Code (JS) nodes (disabled by default)
+  --reject-legacy-run-secret       Refuse to start if run_secret uses a legacy BLAKE3 hash (not argon2id)
+  --ssrf-firewall-acknowledged     Suppress the SSRF egress firewall warning (set after firewall is configured)
 ```
 
 Shell Command and Code (JS) nodes are disabled in serve mode by default. Pass `--allow-shell` or `--allow-code` only after auditing every node in the exported workflow.
@@ -117,7 +129,7 @@ export FLOWO_PORT=7700
 flowo-server api
 ```
 
-If `--token` is not set, a random token is generated on first run and printed to stdout. Copy it — it's not shown again.
+If `--token` is not set, a random token is generated on first run and printed to stdout. Copy it. It is not shown again.
 
 ### API mode CLI reference
 
@@ -140,6 +152,7 @@ Options:
   --max-concurrent-nodes <n>       Max nodes executing simultaneously (parallel mode). Default: 8
   --max-workflow-duration-secs <n> Max wall-clock time for any single execution
   --db-pool-size <n>               SQLite connection pool size. Env: FLOWO_DB_POOL_SIZE
+  --ssrf-firewall-acknowledged     Suppress the SSRF egress firewall warning (set after firewall is configured)
 ```
 
 ### REST API
@@ -259,7 +272,7 @@ docker run -d \
 
 The server binds to `127.0.0.1` by default. To expose it securely over the internet, put it behind Caddy or Nginx.
 
-### Caddy (recommended — handles TLS automatically)
+### Caddy (recommended: handles TLS automatically)
 
 ```
 your-domain.com {
@@ -322,6 +335,40 @@ Set the webhook URL in the external service to `https://your-domain.com/webhook`
 - `--allow-env-vars` lets workflows read environment variables. Never include `FLOWO_TOKEN`, `FLOWO_CRED_*`, or any other sensitive variables in this list.
 - `--file-sandbox-dir` restricts File nodes to a specific directory. Set this in production to prevent workflows from reading or writing arbitrary paths on the server.
 - Set `--trusted-proxy-count` to exactly match the number of proxies between the internet and Flowo. Too high allows clients to spoof their IP via `X-Forwarded-For`.
+
+### SSRF: egress firewall required for public deployments
+
+The HTTP Request, Database, and AI nodes perform DNS pre-validation to block Server-Side Request Forgery (SSRF). However, a **TOCTOU (time-of-check/time-of-use) gap** exists between DNS resolution and the actual TCP connection. A malicious DNS server can return a public IP during the check and switch to a private IP (e.g. `169.254.169.254`) on the actual connect, bypassing the application-layer check entirely.
+
+**This cannot be fixed in application code.** When running `flowo-server` on a network-accessible address, you **must** configure a host-level egress firewall:
+
+```bash
+# Block RFC-1918, loopback, link-local, and cloud metadata (iptables example)
+iptables -A OUTPUT -d 10.0.0.0/8 -j DROP
+iptables -A OUTPUT -d 172.16.0.0/12 -j DROP
+iptables -A OUTPUT -d 192.168.0.0/16 -j DROP
+iptables -A OUTPUT -d 127.0.0.0/8 -j DROP
+iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
+iptables -A OUTPUT -d 168.63.129.16/32 -j DROP
+```
+
+See `docs/security.md` for the full recommended ruleset. Once your firewall is in place, pass `--ssrf-firewall-acknowledged` to suppress the startup warning.
+
+### Legacy run_secret (serve mode)
+
+> **Warning:** Always re-export workflows from the Flowo desktop app **0.3 or later** before deploying to a public server. Workflows exported with Flowo 0.2 or earlier store `run_secret` as a BLAKE3 hash, which is not brute-force resistant. If an attacker reads your `flowo-server.json` (e.g. from a misconfigured backup), a short `run_secret` can be cracked in seconds with a GPU.
+>
+> Pass `--reject-legacy-run-secret` to make the server refuse to start with a legacy hash.
+
+### Database nodes and RUSTSEC-2023-0071
+
+> **Warning:** Do **not** enable `--allow-database` in multi-tenant API mode where untrusted token holders can configure Database node connection strings. The `sqlx-mysql` dependency contains a timing side-channel in its RSA key exchange (RUSTSEC-2023-0071). In multi-tenant mode, a token holder who controls a MySQL connection string can measure handshake timing across many connections to recover session key material.
+>
+> This flag is safe in single-user or fully trusted deployments where you control all token holders. The upstream fix is tracked at [launchbadge/sqlx#3538](https://github.com/launchbadge/sqlx/issues/3538).
+
+### Code node sandbox on macOS
+
+When running `flowo-server api --allow-code --code-sandbox` on macOS, the ESM module import restrictions apply (blocking `fs`, `net`, `child_process`, etc.), but **CPU and memory resource limits (`setrlimit`) are Linux-only**. On macOS, a runaway script can exhaust system CPU and memory ; only the `timeout_secs` ceiling (max 60 s) applies. Deploy on Linux for full sandboxing enforcement.
 
 See [Security](security.md) for the full security model.
 

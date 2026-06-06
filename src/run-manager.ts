@@ -193,7 +193,7 @@ export class RunManager {
   // Open the output drawer directly to the History tab.
   // Called when the user clicks a bg job in the sidebar — shows past runs
   // for that workflow without needing a live lastResult.
-  openHistoryDrawer(workflowName?: string): void {
+  openHistoryDrawer(_workflowName?: string): void {
     const drawer  = document.getElementById("output-drawer");
     const tabsEl  = document.getElementById("drawer-tabs");
     const content = document.getElementById("output-content");

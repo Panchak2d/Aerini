@@ -3,7 +3,7 @@ import {
   saveCredential,
   deleteCredential,
 } from "../ipc/credentials";
-import { showConfirm } from "../app";
+import { showConfirm } from "../confirm";
 import { escapeHtml as escHtml } from "../utils";
 
 interface Credential { id: string; name: string; cred_type: string; }
@@ -41,7 +41,7 @@ export class CredentialPanel {
       <div class="cred-panel-box">
         <div class="cred-panel-header">
           <div>
-            <div class="cred-panel-title">Connections</div>
+            <div class="cred-panel-title">Credentials</div>
             <div class="cred-panel-subtitle">API keys and service credentials — stored encrypted on your device. Never sent anywhere.</div>
           </div>
           <button class="cred-panel-close" id="cred-close">
@@ -54,8 +54,8 @@ export class CredentialPanel {
         ${isEmpty ? `
         <div class="cred-empty-state">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-          <div class="cred-empty-state-title">No connections yet</div>
-          <div class="cred-empty-state-desc">Add your first API key or service credential below. Connections are used by nodes like HTTP Request, AI Prompt, and Send Email.</div>
+          <div class="cred-empty-state-title">No credentials yet</div>
+          <div class="cred-empty-state-desc">Add your first API key or service credential below. Credentials are used by nodes like HTTP Request, AI Prompt, and Send Email.</div>
         </div>` : `
         <div class="cred-list" id="cred-list">
           ${this.renderList()}
@@ -63,7 +63,7 @@ export class CredentialPanel {
 
         <div class="cred-add-section">
           <div class="cred-add-header">
-            <div class="cred-add-title">${isEmpty ? "Add your first connection" : "Add a new connection"}</div>
+            <div class="cred-add-title">${isEmpty ? "Add your first credential" : "Add a credential"}</div>
           </div>
           <div class="cred-form" id="cred-form">
             ${this.renderForm()}
@@ -91,7 +91,7 @@ export class CredentialPanel {
           <div class="cred-item-id">${escHtml(c.id)}</div>
         </div>
         <span class="cred-item-type">${escHtml(credTypeLabel(c.cred_type))}</span>
-        <button class="cred-item-del" data-id="${c.id}" title="Delete this connection">Delete</button>
+        <button class="cred-item-del" data-id="${c.id}" title="Delete this credential">Delete</button>
       </div>`).join("");
   }
 
@@ -105,7 +105,7 @@ export class CredentialPanel {
       <div class="field-group">
         <label class="field-label">Name</label>
         <input id="cred-name" type="text" placeholder="e.g. OpenAI Production Key" autocomplete="off" />
-        <div class="field-hint">A label to identify this connection in the UI</div>
+        <div class="field-hint">A label to identify this credential in the UI</div>
       </div>
       <div class="field-group">
         <label class="field-label">ID / Key</label>
@@ -126,7 +126,7 @@ export class CredentialPanel {
       </div>
       <div class="cred-form-actions">
         <div class="cred-save-error hidden" id="cred-save-error"></div>
-        <button class="btn-primary cred-save-btn" id="cred-save">Save Connection</button>
+        <button class="btn-primary cred-save-btn" id="cred-save">Save Credential</button>
       </div>`;
   }
 
@@ -203,7 +203,7 @@ export class CredentialPanel {
       } catch (e) {
         this.showFormError(`Save failed: ${e}`);
         saveBtn.disabled = false;
-        saveBtn.textContent = "Save Connection";
+        saveBtn.textContent = "Save Credential";
       }
     });
   }
@@ -219,7 +219,7 @@ export class CredentialPanel {
       btn.addEventListener("click", async () => {
         const id = btn.dataset.id!;
         const cred = this.creds.find(c => c.id === id);
-        const ok = await showConfirm(`Delete connection "${cred?.name ?? id}"? Nodes using it will stop working.`, true);
+        const ok = await showConfirm(`Delete credential "${cred?.name ?? id}"? Nodes using it will stop working.`, true, "Delete");
         if (!ok) return;
         btn.disabled = true; btn.textContent = "Deleting…";
         try {

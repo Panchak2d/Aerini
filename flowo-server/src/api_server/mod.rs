@@ -68,13 +68,17 @@ pub struct ServerConfig {
     pub trusted_proxy_count:      usize,
     pub shell_exec_disabled:      bool,
     pub code_exec_disabled:       bool,
+    pub database_exec_disabled:   bool,
     pub code_sandbox:             bool,
+    pub ssrf_firewall_acknowledged: bool,
     pub use_keychain:             bool,
     pub parallel_execution:       bool,
     pub max_concurrent_nodes:     usize,
     pub server_max_duration_secs: Option<u64>,
     pub db_pool_size:             usize,
     pub max_concurrent_runs:      usize,
+    pub max_queue_wait_secs:      u64,
+    pub max_code_memory_mb:       Option<u64>,
 }
 
 pub use routes::state::ApiState;
@@ -238,11 +242,22 @@ pub async fn run(cfg: ServerConfig) {
     let ServerConfig {
         token, port, data_dir, allow_origins, allow_env_vars, bind,
         file_sandbox_dir, trusted_proxy_count, shell_exec_disabled,
-        code_exec_disabled, code_sandbox, use_keychain, parallel_execution,
+        code_exec_disabled, database_exec_disabled, code_sandbox, ssrf_firewall_acknowledged: _,
+        use_keychain, parallel_execution,
         max_concurrent_nodes, server_max_duration_secs, db_pool_size,
-        max_concurrent_runs,
+        max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb,
     } = cfg;
     crate::init_tracing();
+
+    // Enforce minimum token length for user-supplied tokens.
+    // Auto-generated tokens are always 43 chars (URL_SAFE_NO_PAD of 32 bytes).
+    if let Some(ref t) = token {
+        if t.len() < 32 {
+            eprintln!("ERROR: FLOWO_TOKEN / --token is too short ({} chars). Minimum is 32 characters.", t.len());
+            eprintln!("       Generate a strong token with: openssl rand -base64 32");
+            std::process::exit(1);
+        }
+    }
     let data_dir = PathBuf::from(if data_dir.starts_with('~') {
         data_dir.replacen('~',
             &std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()), 1)
@@ -250,6 +265,19 @@ pub async fn run(cfg: ServerConfig) {
         data_dir
     });
     std::fs::create_dir_all(&data_dir).expect("Cannot create data dir");
+
+    // Restrict data dir to owner-only on Unix. Default umask typically produces
+    // 0755 which makes the key file discoverable even though it is 0600.
+    // Setting the directory to 0700 prevents other users from listing its contents.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|e| tracing::warn!(
+                "Could not set permissions on data dir {:?}: {}",
+                data_dir, e
+            ));
+    }
 
     let token_key = load_or_create_token_key(&data_dir.join("tokens.key"));
     let token_store = Arc::new(
@@ -325,7 +353,9 @@ pub async fn run(cfg: ServerConfig) {
         }
         if shell_exec_disabled { daemon = daemon.with_shell_disabled(true); }
         if code_exec_disabled  { daemon = daemon.with_code_disabled(true); }
+        if database_exec_disabled { daemon = daemon.with_database_disabled(true); }
         if code_sandbox        { daemon = daemon.with_code_sandbox(true); }
+        if max_code_memory_mb.is_some() { daemon = daemon.with_code_max_memory_mb(max_code_memory_mb); }
         if parallel_execution {
             daemon = daemon
                 .with_parallel_execution(true)
@@ -369,7 +399,9 @@ pub async fn run(cfg: ServerConfig) {
         }
         if shell_exec_disabled { ex = ex.with_shell_disabled(true); }
         if code_exec_disabled  { ex = ex.with_code_disabled(true); }
+        if database_exec_disabled { ex = ex.with_database_disabled(true); }
         if code_sandbox        { ex = ex.with_code_sandbox(true); }
+        if max_code_memory_mb.is_some() { ex = ex.with_code_max_memory_mb(max_code_memory_mb); }
         if parallel_execution {
             ex = ex.with_parallel_execution(true)
                    .with_max_concurrent_nodes(max_concurrent_nodes);
@@ -392,12 +424,14 @@ pub async fn run(cfg: ServerConfig) {
         file_sandbox_dir: Some(Arc::new(file_sandbox_dir)),
         shell_exec_disabled,
         code_exec_disabled,
+        database_exec_disabled,
         parallel_execution,
         max_concurrent_nodes,
         server_max_duration_secs,
         base_executor,
         sse_semaphore: Arc::new(Semaphore::new(SSE_MAX_CONNECTIONS)),
         run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs)),
+        queue_timeout: std::time::Duration::from_secs(max_queue_wait_secs),
     };
 
     let protected = Router::new()
@@ -461,6 +495,20 @@ pub async fn run(cfg: ServerConfig) {
         api_url    = %format!("http://{}:{}", bind, port),
         health_url = %format!("http://{}:{}/api/health", bind, port),
         "Flowo Server started in API mode"
+    );
+    // HTTP Request nodes perform DNS pre-validation for SSRF, but a TOCTOU gap
+    // (DNS rebinding) means application-layer checks are defense-in-depth only.
+    // In API mode any token holder with 'write' scope can submit workflows with
+    // HTTP Request nodes pointing at attacker-controlled domains.
+    // Required: configure a network-level egress firewall that blocks outbound
+    // connections to RFC-1918, loopback, link-local, and cloud metadata ranges.
+    // See docs/security.md for recommended iptables/nftables rules.
+    tracing::warn!(
+        "API mode active: HTTP Request nodes are available to all token holders with 'write' scope. \
+         The built-in SSRF protection has a DNS rebinding (TOCTOU) gap that cannot be closed at the \
+         application layer. Configure a network-level egress firewall to block connections to private, \
+         loopback, link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
+         See docs/security.md for details."
     );
     eprintln!("Control commands (from another terminal):");
     eprintln!("  flowo-server list    --token YOUR_TOKEN");

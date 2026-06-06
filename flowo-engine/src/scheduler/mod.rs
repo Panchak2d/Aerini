@@ -82,7 +82,9 @@ pub struct SchedulerDaemon {
     env_allowlist:      Option<Arc<std::collections::HashSet<String>>>,
     shell_exec_disabled: bool,
     code_exec_disabled:  bool,
+    database_exec_disabled: bool,
     code_sandbox_enabled: bool,
+    code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
     max_concurrent_runs:  usize,
@@ -110,7 +112,9 @@ impl SchedulerDaemon {
             env_allowlist: None,
             shell_exec_disabled: false,
             code_exec_disabled:  false,
+            database_exec_disabled: false,
             code_sandbox_enabled: false,
+            code_max_memory_mb:   None,
             parallel_execution:   false,
             max_concurrent_nodes: 8,
             max_concurrent_runs:  DEFAULT_MAX_CONCURRENT_RUNS,
@@ -135,6 +139,20 @@ impl SchedulerDaemon {
     /// Disable Code (JS) nodes for all workflows run by this scheduler.
     pub fn with_code_disabled(mut self, disabled: bool) -> Self {
         self.code_exec_disabled = disabled;
+        self
+    }
+
+    /// Disable Database nodes for all workflows run by this scheduler.
+    /// Recommended for multi-tenant API deployments (SSRF surface + RUSTSEC-2023-0071).
+    pub fn with_database_disabled(mut self, disabled: bool) -> Self {
+        self.database_exec_disabled = disabled;
+        self
+    }
+
+    /// Set the memory cap (MB) for Code (JS) node subprocesses.
+    /// Only effective on Linux with sandbox enabled; no-op on macOS/Windows.
+    pub fn with_code_max_memory_mb(mut self, mb: Option<u64>) -> Self {
+        self.code_max_memory_mb = mb;
         self
     }
 
@@ -412,7 +430,9 @@ impl SchedulerDaemon {
         let env_allowlist = self.env_allowlist.clone();
         let shell_exec_disabled = self.shell_exec_disabled;
         let code_exec_disabled  = self.code_exec_disabled;
+        let database_exec_disabled = self.database_exec_disabled;
         let code_sandbox_enabled = self.code_sandbox_enabled;
+        let code_max_memory_mb   = self.code_max_memory_mb;
         let parallel_execution   = self.parallel_execution;
         let max_concurrent_nodes = self.max_concurrent_nodes;
         let server_max_duration_secs = self.server_max_duration_secs;
@@ -444,8 +464,8 @@ impl SchedulerDaemon {
             run_job_loop(
                 wf_id.clone(), trigger, db, registry, cred_store,
                 event_sink, exec_lock, fire_immediately, env_allowlist,
-                shell_exec_disabled, code_exec_disabled, code_sandbox_enabled,
-                parallel_execution, max_concurrent_nodes,
+                shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled,
+                code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                 server_max_duration_secs, file_sandbox_dir, run_semaphore,
             ).await;
             jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
@@ -496,7 +516,9 @@ async fn run_job_loop(
     env_allowlist:    Option<Arc<std::collections::HashSet<String>>>,
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
+    database_exec_disabled: bool,
     code_sandbox_enabled: bool,
+    code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
@@ -508,7 +530,7 @@ async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -524,7 +546,7 @@ async fn run_job_loop(
 
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -535,7 +557,7 @@ async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -560,7 +582,7 @@ async fn run_job_loop(
 
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -587,7 +609,7 @@ async fn run_job_loop(
             }
             {
                 let _permit = run_semaphore.acquire().await;
-                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
             }
             db.scheduler_set_status(&workflow_id, "done").ok();
             emit_done(&event_sink, &db, &workflow_id);
@@ -656,7 +678,7 @@ async fn run_job_loop(
                 let _permit = run_semaphore.acquire().await;
                 fire_once_with_vars(
                     &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
-                    shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes,
+                    shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                     server_max_duration_secs, &file_sandbox_dir,
                 ).await;
 
@@ -683,7 +705,9 @@ async fn fire_once(
     env_allowlist:        &Option<Arc<std::collections::HashSet<String>>>,
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
+    database_exec_disabled: bool,
     code_sandbox_enabled: bool,
+    code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
@@ -691,7 +715,7 @@ async fn fire_once(
 ) {
     fire_once_with_vars(workflow_id, db, registry, cred_store, event_sink,
         std::collections::HashMap::new(), env_allowlist,
-        shell_exec_disabled, code_exec_disabled, code_sandbox_enabled, parallel_execution, max_concurrent_nodes,
+        shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
         server_max_duration_secs, file_sandbox_dir,
     ).await;
 }
@@ -707,7 +731,9 @@ async fn fire_once_with_vars(
     env_allowlist:        &Option<Arc<std::collections::HashSet<String>>>,
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
+    database_exec_disabled: bool,
     code_sandbox_enabled: bool,
+    code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
@@ -760,8 +786,14 @@ async fn fire_once_with_vars(
     if code_exec_disabled {
         executor = executor.with_code_disabled(true);
     }
+    if database_exec_disabled {
+        executor = executor.with_database_disabled(true);
+    }
     if code_sandbox_enabled {
         executor = executor.with_code_sandbox(true);
+    }
+    if code_max_memory_mb.is_some() {
+        executor = executor.with_code_max_memory_mb(code_max_memory_mb);
     }
     if parallel_execution {
         executor = executor

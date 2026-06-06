@@ -32,7 +32,7 @@ pub struct ExportResult {
     pub trigger_desc:         String,
     /// The raw (unhashed) run secret generated for this export.
     /// Shown once in the UI and never stored to disk — the config file
-    /// stores only the BLAKE3 hash.
+    /// stores only the argon2id hash.
     pub run_secret_plaintext: String,
 }
 
@@ -511,6 +511,13 @@ ENV RUST_LOG=info
 EXPOSE 7700
 
 ENTRYPOINT ["flowo-server"]
+# SECURITY: The server binds to 0.0.0.0 so Docker port mapping works.
+# The docker-compose.yml restricts host-side exposure to 127.0.0.1:<PORT>:7700.
+# If running with docker run instead of docker compose, ALWAYS use the
+# 127.0.0.1 host prefix to avoid exposing the status page on all interfaces:
+#   docker run -p 127.0.0.1:<PORT>:7700 ...
+# Never use:
+#   docker run -p <PORT>:7700 ...  (exposes status page on all host interfaces)
 CMD ["serve", "--config", "/data/flowo-server.json", "--bind", "0.0.0.0"]
 "#.to_string()
 }
@@ -603,7 +610,7 @@ fn build_docker_readme(
          \n\
          ## Security Warning\n\
          \n\
-         `flowo-server.json` contains the BLAKE3 hash of your `run_secret`.\\n\\
+         `flowo-server.json` contains the argon2id hash of your `run_secret`.\\n\\
          The raw secret was shown once at export time and is not stored in this file.\\n\\
          Treat this zip like a credentials file: do not commit it to version\n\
          control, do not share it over unencrypted channels, and do not store\n\
@@ -662,8 +669,16 @@ fn build_docker_readme(
          \n\
          ## Port Mapping\n\
          \n\
-         The status page is bound to `127.0.0.1:{port}` by default (localhost only).\n\
-         To expose it publicly, edit `docker-compose.yml`:\n\
+         The status page is restricted to localhost via `docker-compose.yml` (`127.0.0.1:{port}:7700`).\n\
+         Always deploy with `docker compose up` — this is the only supported launch method.\n\
+         \n\
+         **If you must use `docker run` directly**, always include the `127.0.0.1` host prefix:\n\
+         ```bash\n\
+         docker run -p 127.0.0.1:{port}:7700 ...   # safe: localhost only\n\
+         # NOT: docker run -p {port}:7700 ...       # unsafe: exposes on all interfaces\n\
+         ```\n\
+         \n\
+         To expose the status page publicly, edit `docker-compose.yml`:\n\
          ```yaml\n\
          ports:\n\
            - \"0.0.0.0:{port}:7700\"   # expose on all interfaces\n\
@@ -702,7 +717,7 @@ fn build_readme(
          \n\
          SECURITY WARNING\n\
          ----------------\n\
-         flowo-server.json contains the BLAKE3 hash of your run_secret.\\n\\
+         flowo-server.json contains the argon2id hash of your run_secret.\\n\\
          The raw secret was shown once at export time and is not stored in this file.\\n\\
          Treat this zip like a credentials file:\n\
          - Do NOT commit it to version control.\n\

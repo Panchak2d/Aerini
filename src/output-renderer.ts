@@ -106,7 +106,7 @@ export function renderResultsTab(result: WorkflowResult, nodes: NodeMap): HTMLEl
   }
 
   // Default to last output node, or first entry
-  const outputEntry = entries.find(([id]) => nodes.get(id)?.data.node_type_id === "output");
+  const outputEntry = entries.find(([id]) => nodes.get(id)?.data.node_type_id === NODE_IDS.OUTPUT);
   if (outputEntry) select.value = outputEntry[0];
 
   selectorRow.appendChild(select);
@@ -125,7 +125,7 @@ export function renderResultsTab(result: WorkflowResult, nodes: NodeMap): HTMLEl
     const name   = node?.data.name ?? cleanNodeId(id);
 
     // media_batch requires async rendering (video/audio need write_temp_file)
-    if (typeId === "output") {
+    if (typeId === NODE_IDS.OUTPUT) {
       const obj = out as Record<string, unknown>;
       if (obj?.output_type === "media_batch") {
         display.innerHTML = "";
@@ -311,10 +311,10 @@ function renderTypedOutput(typeId: string, out: unknown, nodeName: string): stri
     case NODE_IDS.HTTP_REQUEST: return renderHttpOutput(out, nodeName);
     case NODE_IDS.AI_PROMPT:
     case NODE_IDS.AI_AGENT:    return renderAiOutput(out, nodeName);
-    case "output":      return renderOutputNodeResult(out, nodeName);
-    case "social_upload": return renderSocialUploadOutput(out, nodeName);
+    case NODE_IDS.OUTPUT:         return renderOutputNodeResult(out, nodeName);
+    case NODE_IDS.SOCIAL_UPLOAD:  return renderSocialUploadOutput(out, nodeName);
     case NODE_IDS.CODE:
-    case "transform_data": return renderCodeOutput(out, nodeName);
+    case NODE_IDS.TRANSFORM_DATA: return renderCodeOutput(out, nodeName);
     default:            return renderGenericOutput(out, nodeName);
   }
 }
@@ -523,7 +523,7 @@ function previewForNode(typeId: string, out: unknown): string {
       const content = obj?.content ?? obj?.text ?? obj?.result;
       return typeof content === "string" ? content.slice(0, 60) : extractPreview(out);
     }
-    case "output": {
+    case NODE_IDS.OUTPUT: {
       const label   = typeof obj?.label === "string" ? obj.label : "";
       // media_batch: show file count instead of trying to preview base64 data
       if (obj?.output_type === "media_batch") {
@@ -564,13 +564,13 @@ function errorSuggestion(message: string, typeId: string): string {
       : "Check the server address and port.";
   }
   if (m.includes("timeout")) return "The request timed out. Try increasing the timeout in the node config.";
-  if (m.includes("unauthorized") || m.includes("401")) return "Authentication failed. Check your credentials in Connections.";
+  if (m.includes("unauthorized") || m.includes("401")) return "Authentication failed. Check your credentials in Credentials.";
   if (m.includes("forbidden") || m.includes("403")) return "Access denied. Verify your API key has the required permissions.";
   if (m.includes("not found") || m.includes("404")) return "The requested resource was not found. Check the URL or endpoint path.";
-  if (m.includes("api key") || m.includes("apikey") || m.includes("api_key")) return "API key missing or invalid. Configure it in Connections.";
+  if (m.includes("api key") || m.includes("apikey") || m.includes("api_key")) return "API key missing or invalid. Configure it in Credentials.";
   if (m.includes("json") || m.includes("parse")) return "The response could not be parsed. Check the input format.";
   if (m.includes("rate limit") || m.includes("429")) return "Rate limit exceeded. Add a Delay node before this one, or reduce execution frequency.";
-  if (m.includes("smtp") || m.includes("email")) return "Email delivery failed. Check your SMTP credentials in Connections.";
+  if (m.includes("smtp") || m.includes("email")) return "Email delivery failed. Check your SMTP credentials in Credentials.";
   return "";
 }
 

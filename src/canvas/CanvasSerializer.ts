@@ -2,6 +2,7 @@ import { CanvasNode }  from "./Node";
 import { Connector }  from "./Connector";
 import type { CanvasNodeData } from "./Node";
 import type { NodeDescriptor } from "../ipc/workflow";
+import { NODE_IDS } from "../node-ids";
 
 // Populated by app.ts after ALL_NODES is defined
 let _nodeRegistry: Map<string, NodeDescriptor> = new Map();
@@ -47,13 +48,13 @@ export function serialize(
     // and must not appear in the JSON sent to run_workflow. Any connector
     // attached to a note is also excluded.
     nodes: Array.from(nodes.values())
-      .filter(n => n.data.node_type_id !== "note")
+      .filter(n => n.data.node_type_id !== NODE_IDS.NOTE)
       .map(n => n.toWorkflowNode()),
     edges: Array.from(connectors.values())
       .filter(c => {
         const from = nodes.get(c.data.from_node);
         const to   = nodes.get(c.data.to_node);
-        return from?.data.node_type_id !== "note" && to?.data.node_type_id !== "note";
+        return from?.data.node_type_id !== NODE_IDS.NOTE && to?.data.node_type_id !== NODE_IDS.NOTE;
       })
       .map(c => c.toWorkflowEdge()),
     metadata: {
@@ -102,7 +103,7 @@ export function deserialize(json: string): {
     try {
       const data: CanvasNodeData = {
         id:            String(raw.id           ?? `node_${Date.now()}_${Math.random().toString(36).slice(2)}`),
-        node_type_id:  String(raw.node_type_id ?? "manual_trigger"),
+        node_type_id:  String(raw.node_type_id ?? NODE_IDS.MANUAL_TRIGGER),
         node_type:     (raw.node_type as "action"|"ai"|"logic"|"utility") ?? "action",
         name:          String(raw.name         ?? "Node"),
         config:        (raw.config             as Record<string, unknown>) ?? {},

@@ -94,15 +94,15 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.scheduleTrigger":    NODE_IDS.SCHEDULE,
   "n8n-nodes-base.httpRequest":        NODE_IDS.HTTP_REQUEST,
   "n8n-nodes-base.code":               NODE_IDS.CODE,
-  "n8n-nodes-base.if":                 "if_condition",
-  "n8n-nodes-base.switch":             "switch",
-  "n8n-nodes-base.emailSend":          "email_send",
+  "n8n-nodes-base.if":                 NODE_IDS.IF_CONDITION,
+  "n8n-nodes-base.switch":             NODE_IDS.SWITCH,
+  "n8n-nodes-base.emailSend":          NODE_IDS.EMAIL_SEND,
   "n8n-nodes-base.readWriteFile":      NODE_IDS.FILE,
-  "n8n-nodes-base.set":                "set_variable",
-  "n8n-nodes-base.wait":               "wait",
-  "n8n-nodes-base.noOp":               "output",
-  "n8n-nodes-base.stickyNote":         "note",
-  "n8n-nodes-base.merge":              "merge",
+  "n8n-nodes-base.set":                NODE_IDS.SET_VARIABLE,
+  "n8n-nodes-base.wait":               NODE_IDS.WAIT,
+  "n8n-nodes-base.noOp":               NODE_IDS.OUTPUT,
+  "n8n-nodes-base.stickyNote":         NODE_IDS.NOTE,
+  "n8n-nodes-base.merge":              NODE_IDS.MERGE,
   "n8n-nodes-base.slack":              "slack",
   "n8n-nodes-base.gmail":              "email",
   "n8n-nodes-base.googleSheets":       "google_sheets",
@@ -197,9 +197,10 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
 }
 
 function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" {
-  const logic   = ["if_condition","switch","loop","stop"];
-  const utility = ["delay","wait","transform","json","set_variable","get_variable","output","note"];
-  const ai      = [NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, "ai_memory", "text_splitter"];
+  const logic:   string[] = [NODE_IDS.IF_CONDITION, NODE_IDS.SWITCH, NODE_IDS.LOOP, NODE_IDS.STOP];
+  const utility: string[] = [NODE_IDS.DELAY, NODE_IDS.WAIT, NODE_IDS.TRANSFORM, NODE_IDS.JSON_NODE,
+                              NODE_IDS.SET_VARIABLE, NODE_IDS.GET_VARIABLE, NODE_IDS.OUTPUT, NODE_IDS.NOTE];
+  const ai:      string[] = [NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.AI_MEMORY, NODE_IDS.TEXT_SPLITTER];
   if (logic.includes(typeId))   return "logic";
   if (utility.includes(typeId)) return "utility";
   if (ai.includes(typeId))      return "ai";
@@ -208,6 +209,6 @@ function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" 
 
 function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
   const inputs = TRIGGER_NODE_IDS.has(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
-  const outputs = typeId === "stop" ? [] : [{ id: "output", label: "Out", position: "right" }];
+  const outputs = typeId === NODE_IDS.STOP ? [] : [{ id: "output", label: "Out", position: "right" }];
   return { inputs, outputs };
 }

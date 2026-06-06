@@ -1,71 +1,101 @@
 use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Per-IP sliding-window rate limiter backed by a `DashMap`.
 ///
-/// `max_requests` in `window_secs` seconds per client address.
-/// Evicts stale entries automatically when the map exceeds 10 000 entries.
+/// Each IP address entry holds a `VecDeque<Instant>` of accepted request
+/// timestamps within the current window. On each call to `is_allowed`:
+/// 1. Timestamps older than `window_secs` are pruned from the front.
+/// 2. If fewer than `max_requests` timestamps remain, the request is accepted
+///    and the current timestamp is appended.
+/// 3. Otherwise the request is rejected.
+///
+/// This is a true sliding-window implementation: there is no 2× burst at
+/// the window boundary because the window is measured from each individual
+/// request's timestamp, not from an epoch boundary.
+///
+/// Memory: each entry holds at most `max_requests` timestamps. The map is
+/// bounded to 10 000 active IPs, with stale entries evicted via a background
+/// task (see `spawn_eviction_task`).
 pub struct RateLimiter {
-    map:          DashMap<IpAddr, (u32, Instant)>,
-    max_requests: u32,
-    window_secs:  u64,
+    map:          DashMap<IpAddr, VecDeque<Instant>>,
+    max_requests: usize,
+    window:       Duration,
 }
 
 impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
-        Self { map: DashMap::new(), max_requests, window_secs }
+        Self {
+            map:          DashMap::new(),
+            max_requests: max_requests as usize,
+            window:       Duration::from_secs(window_secs),
+        }
     }
 
     /// Spawns a Tokio background task that evicts stale entries every
-    /// `window_secs` seconds.  Call once after creating the limiter.
-    /// Without this, stale entries only evict when the map exceeds 10 000
-    /// entries — on low-traffic deployments they never evict, leaking memory
-    /// under sustained IP churn (e.g. a botnet scan).
+    /// `window_secs` seconds. Call once after creating the limiter.
+    /// Without this, IPs with no traffic accumulate as empty `VecDeque`
+    /// entries and leak memory under sustained IP churn (e.g. a botnet scan).
     pub fn spawn_eviction_task(self: Arc<Self>) {
         let weak = Arc::downgrade(&self);
-        let interval_secs = self.window_secs;
+        let interval = self.window;
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(
-                std::time::Duration::from_secs(interval_secs),
-            );
+            let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // skip the immediate first tick
             loop {
                 ticker.tick().await;
                 match weak.upgrade() {
-                    None => break, // RateLimiter dropped — stop the task
+                    None => break,
                     Some(rl) => {
-                        let cutoff = Instant::now()
-                            - std::time::Duration::from_secs(rl.window_secs * 2);
-                        rl.map.retain(|_, v| v.1 > cutoff);
+                        let cutoff = Instant::now() - rl.window;
+                        // Remove entries that have no timestamps within the window.
+                        rl.map.retain(|_, timestamps| {
+                            timestamps.retain(|&ts| ts > cutoff);
+                            !timestamps.is_empty()
+                        });
                     }
                 }
             }
         });
     }
-    /// should be rejected.  Eviction of stale entries runs inline when the map
-    /// grows large, preventing unbounded growth under IP rotation or DoS.
+
+    /// Returns `true` if the request from `ip` is within the rate limit.
+    ///
+    /// Inline eviction fires when the map exceeds 10 000 entries to bound
+    /// memory usage between background eviction cycles.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
+        let now    = Instant::now();
+        let cutoff = now - self.window;
+
         let allowed = {
-            let mut entry = self.map.entry(ip).or_insert((0u32, now));
-            if now.duration_since(entry.1).as_secs() >= self.window_secs {
-                *entry = (1, now);
-                true
-            } else if entry.0 < self.max_requests {
-                entry.0 += 1;
+            let mut entry = self.map.entry(ip).or_insert_with(VecDeque::new);
+            // Prune timestamps outside the sliding window.
+            while entry.front().map(|&ts| ts <= cutoff).unwrap_or(false) {
+                entry.pop_front();
+            }
+            if entry.len() < self.max_requests {
+                entry.push_back(now);
                 true
             } else {
                 false
             }
         };
+
+        // Inline eviction: if the map has grown very large, prune all stale entries.
+        // This is a best-effort bound on memory between background eviction cycles.
         if self.map.len() > 10_000 {
-            let cutoff = now - std::time::Duration::from_secs(self.window_secs * 2);
-            self.map.retain(|_, v| v.1 > cutoff);
+            let cutoff2 = now - self.window;
+            self.map.retain(|_, timestamps| {
+                timestamps.retain(|&ts| ts > cutoff2);
+                !timestamps.is_empty()
+            });
         }
+
         allowed
     }
 }

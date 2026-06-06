@@ -73,8 +73,7 @@ impl TokenStore {
             -- Tokens with NO rows in this table see ALL events (backward compat).
             -- Admin-scoped tokens always see all events regardless of this table.
             -- Note: no ON DELETE CASCADE — foreign_keys pragma is off in this db.
-            -- ACL rows for deleted tokens become orphaned but are harmless (never matched
-            -- against an active token). A future migration can clean them up.
+            -- ACL rows for revoked tokens are deleted by revoke_token().
             CREATE TABLE IF NOT EXISTS token_workflow_acl (
                 token_id    TEXT NOT NULL,
                 workflow_id TEXT NOT NULL,
@@ -110,7 +109,7 @@ impl TokenStore {
             let secs_i64 = i64::try_from(secs).unwrap_or(i64::MAX);
             (now + chrono::Duration::seconds(secs_i64)).to_rfc3339()
         });
-        let conn     = self.conn.lock().expect("token store mutex poisoned");
+        let conn     = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO tokens (token_id, token_hash, label, scopes, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -123,7 +122,7 @@ impl TokenStore {
     /// If token is already present and active, no-op.
     pub fn import_token(&self, raw: &str, label: &str, scopes: &[&str]) -> rusqlite::Result<()> {
         let hash = hash_token(&self.key, raw);
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tokens WHERE token_hash = ?1",
             params![hash],
@@ -146,7 +145,7 @@ impl TokenStore {
     /// Verify a raw bearer token. Returns `None` if not found, revoked, or expired.
     pub fn verify_token(&self, raw: &str) -> Option<TokenRecord> {
         let provided_hash = hash_token(&self.key, raw);
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Use the indexed WHERE clause so the lookup remains O(log n).
         // Then re-verify with constant-time byte comparison in-process for defense-in-depth:
         // SQLite string equality is not guaranteed constant-time, and the hash is sensitive.
@@ -188,19 +187,25 @@ impl TokenStore {
     }
 
     /// Revoke a token by its `token_id`. No-op if already revoked or not found.
+    /// Also cleans up ACL rows for the token atomically in the same transaction.
     pub fn revoke_token(&self, token_id: &str) -> rusqlite::Result<()> {
         let now  = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().expect("token store mutex poisoned");
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE tokens SET revoked_at = ?1 WHERE token_id = ?2 AND revoked_at IS NULL",
             params![now, token_id],
         )?;
-        Ok(())
+        tx.execute(
+            "DELETE FROM token_workflow_acl WHERE token_id = ?1",
+            params![token_id],
+        )?;
+        tx.commit()
     }
 
     /// List all tokens (active and revoked), ordered by creation time.
     pub fn list_tokens(&self) -> rusqlite::Result<Vec<TokenInfo>> {
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT token_id, label, scopes, created_at, revoked_at, expires_at
              FROM tokens
@@ -223,7 +228,7 @@ impl TokenStore {
 
     /// Returns `true` if the store has no tokens at all (first-run detection).
     pub fn is_empty(&self) -> bool {
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM tokens",
             [],
@@ -239,7 +244,7 @@ impl TokenStore {
     /// No-op if already granted.
     pub fn acl_grant(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
         let now  = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR IGNORE INTO token_workflow_acl (token_id, workflow_id, granted_at)
              VALUES (?1, ?2, ?3)",
@@ -251,7 +256,7 @@ impl TokenStore {
     /// Revoke a token's access to a specific workflow's SSE events.
     /// No-op if not present.
     pub fn acl_revoke(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "DELETE FROM token_workflow_acl WHERE token_id = ?1 AND workflow_id = ?2",
             params![token_id, workflow_id],
@@ -262,7 +267,7 @@ impl TokenStore {
     /// List all workflow IDs a token has been granted access to.
     /// Returns an empty Vec for tokens with no ACL rows (unrestricted).
     pub fn acl_list(&self, token_id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().expect("token store mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT workflow_id FROM token_workflow_acl
              WHERE token_id = ?1

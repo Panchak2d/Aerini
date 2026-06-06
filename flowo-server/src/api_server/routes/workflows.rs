@@ -157,12 +157,32 @@ pub async fn run_workflow(
     // Acquire the global run semaphore BEFORE the per-workflow exec lock.
     // If the order were reversed, callers blocked on the exec lock would each
     // hold a semaphore slot, starving unrelated workflows.
-    let _run_permit = match Arc::clone(&s.run_semaphore).try_acquire_owned() {
-        Ok(p)  => p,
-        Err(_) => return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error": "server is at maximum concurrent workflow capacity, try again shortly"})),
-        ).into_response(),
+    //
+    // acquire_owned() queues the request; the caller waits up to queue_timeout
+    // for a free slot rather than being rejected immediately.
+    let _run_permit = match tokio::time::timeout(
+        s.queue_timeout,
+        Arc::clone(&s.run_semaphore).acquire_owned(),
+    ).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            // Semaphore closed — should not happen in normal operation.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "run semaphore closed"})),
+            ).into_response();
+        }
+        Err(_elapsed) => {
+            let retry_after = s.queue_timeout.as_secs().to_string();
+            let mut response = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "server is at capacity, no execution slot became available within the queue timeout"})),
+            ).into_response();
+            if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after) {
+                response.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+            }
+            return response;
+        }
     };
 
     let lock = {

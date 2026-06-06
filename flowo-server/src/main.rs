@@ -97,6 +97,21 @@ enum Command {
         /// audited every node in the exported workflow.
         #[arg(long, default_value_t = false)]
         allow_code: bool,
+
+        /// Reject configs where run_secret is stored as a legacy BLAKE3 hash.
+        /// When set, the server refuses to start if run_secret does not begin with
+        /// "$argon2" (the brute-force resistant argon2id format introduced in 0.3).
+        /// Re-export the workflow from the Flowo desktop app to upgrade.
+        /// Will become the default in a future release.
+        #[arg(long, default_value_t = false)]
+        reject_legacy_run_secret: bool,
+
+        /// Suppress the SSRF firewall warning when the server is bound to a non-loopback
+        /// address. Pass this flag only after configuring a host-level egress firewall that
+        /// blocks outbound connections to RFC-1918, loopback, link-local, and cloud metadata
+        /// ranges (e.g. 169.254.169.254). See docs/security.md for recommended rules.
+        #[arg(long, default_value_t = false)]
+        ssrf_firewall_acknowledged: bool,
     },
 
     /// Run the multi-workflow REST API server.
@@ -155,7 +170,13 @@ enum Command {
         #[arg(long, default_value_t = false)]
         allow_code: bool,
 
-        /// Enable Code (JS) node sandboxing when --allow-code is active.
+        /// Allow Database nodes (disabled by default in API mode).
+        /// Database nodes can connect to PostgreSQL, MySQL, SQLite, and Redis.
+        /// Disabled by default due to SSRF surface and RUSTSEC-2023-0071
+        /// (RSA timing side-channel in sqlx-mysql). Only enable this flag if you
+        /// control all workflows running on this server and trust all token holders.
+        #[arg(long, default_value_t = false)]
+        allow_database: bool,
         /// When set, Code nodes run with:
         ///   - Module import restrictions (child_process, fs, net, etc. blocked)
         ///   - --disallow-code-generation-from-strings (eval/new Function blocked)
@@ -165,6 +186,13 @@ enum Command {
         /// Recommended for multi-user API deployments where --allow-code must be on.
         #[arg(long, default_value_t = false)]
         code_sandbox: bool,
+
+        /// Suppress the SSRF firewall warning when the server is bound to a non-loopback
+        /// address. Pass this flag only after configuring a host-level egress firewall that
+        /// blocks outbound connections to RFC-1918, loopback, link-local, and cloud metadata
+        /// ranges (e.g. 169.254.169.254). See docs/security.md for recommended rules.
+        #[arg(long, default_value_t = false)]
+        ssrf_firewall_acknowledged: bool,
 
         /// Use the OS keychain (macOS Keychain, Windows Credential Manager,
         /// Linux SecretService) to store the encryption key instead of a
@@ -199,10 +227,26 @@ enum Command {
         db_pool_size: Option<usize>,
 
         /// Maximum number of workflow executions allowed to run simultaneously
-        /// across all callers. Additional requests receive HTTP 429.
+        /// across all callers. When all slots are occupied, new run requests
+        /// wait in a queue until a slot opens or the queue timeout expires.
         /// Default: 10.
         #[arg(long, default_value_t = 10)]
         max_concurrent_runs: usize,
+
+        /// How long (seconds) a run request waits for a free execution slot
+        /// before the server gives up and returns 503. Set to 0 to disable
+        /// queueing entirely (reverts to immediate 503 on capacity). Default: 30.
+        #[arg(long, default_value_t = 30)]
+        max_queue_wait_secs: u64,
+
+        /// Maximum memory (MB) for a single Code (JS) node process.
+        /// Only effective when both --allow-code and --code-sandbox are set on Linux.
+        /// On Linux this sets a hard RLIMIT_AS (virtual address space) ceiling on the Node.js subprocess.
+        /// On macOS this flag is accepted but has no effect — setrlimit CPU/memory caps
+        /// are not enforced for subprocesses on macOS. Deploy on Linux for full enforcement.
+        /// Default: 512 MB (when --code-sandbox is active on Linux).
+        #[arg(long)]
+        max_code_memory_mb: Option<u64>,
     },
 
     /// List all scheduled workflows (API mode only).
@@ -317,10 +361,11 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code).await,
-        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, code_sandbox, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs } => {
-            let shell_exec_disabled = !allow_shell;
-            let code_exec_disabled  = !allow_code;
+        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged).await,
+        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, allow_database, code_sandbox, ssrf_firewall_acknowledged, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb } => {
+            let shell_exec_disabled    = !allow_shell;
+            let code_exec_disabled     = !allow_code;
+            let database_exec_disabled = !allow_database;
             let pool_size = db_pool_size.unwrap_or_else(|| {
                 std::thread::available_parallelism()
                     .map(|n| n.get())
@@ -330,10 +375,13 @@ async fn main() {
             api_mode(api_server::ServerConfig {
                 token, port, data_dir, allow_origins, allow_env_vars, bind,
                 file_sandbox_dir, trusted_proxy_count,
-                shell_exec_disabled, code_exec_disabled, code_sandbox,
+                shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox,
+                ssrf_firewall_acknowledged,
                 use_keychain: keychain, parallel_execution, max_concurrent_nodes,
                 server_max_duration_secs: max_workflow_duration_secs,
                 db_pool_size: pool_size, max_concurrent_runs,
+                max_queue_wait_secs,
+                max_code_memory_mb,
             }).await;
         },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
@@ -345,7 +393,7 @@ async fn main() {
     }
 }
 
-async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: String, trusted_proxy_count: usize, allow_shell: bool, allow_code: bool) {
+async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: String, trusted_proxy_count: usize, allow_shell: bool, allow_code: bool, reject_legacy_run_secret: bool, ssrf_firewall_acknowledged: bool) {
     init_tracing();
     let config = match ServerConfig::from_file(&config_path) {
         Ok(c)  => c,
@@ -414,6 +462,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
     // explicitly opted in with --allow-shell / --allow-code.
     let has_shell_node = workflow.nodes.iter().any(|n| n.node_type_id == "shell_exec");
     let has_code_node  = workflow.nodes.iter().any(|n| n.node_type_id == "code");
+    let has_http_node  = workflow.nodes.iter().any(|n| n.node_type_id == "http_request");
     if has_shell_node && !allow_shell {
         tracing::warn!(
             "Workflow contains a Shell Command node but --allow-shell was not set. \
@@ -424,6 +473,35 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
         tracing::warn!(
             "Workflow contains a Code (JS) node but --allow-code was not set. \
              Code execution is DISABLED. Pass --allow-code only after auditing the workflow."
+        );
+    }
+    if has_http_node {
+        // The HTTP Request node performs DNS pre-validation to block SSRF, but a
+        // TOCTOU window exists: a malicious DNS server can return an allowed IP
+        // during validation and a private IP (e.g. 169.254.169.254) on the real
+        // connect. Application-layer checks are defense-in-depth only.
+        // Required: configure a network-level egress firewall that blocks outbound
+        // connections to RFC-1918, loopback, link-local, and cloud metadata ranges.
+        // See docs/security.md for recommended iptables/nftables rules.
+        tracing::warn!(
+            "Workflow contains an HTTP Request node. The built-in SSRF protection has a \
+             DNS rebinding (TOCTOU) gap that cannot be closed at the application layer. \
+             Configure a network-level egress firewall to block connections to private, \
+             loopback, link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
+             See docs/security.md for details."
+        );
+    }
+
+    if is_public_bind(&bind) && !ssrf_firewall_acknowledged {
+        tracing::warn!(
+            "flowo-server is bound to {} (non-loopback). \
+             The SSRF DNS pre-check has a TOCTOU gap that cannot be closed at the application layer — \
+             a malicious DNS server can bypass it. \
+             Configure a host-level egress firewall to block connections to RFC-1918, loopback, \
+             link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
+             See docs/security.md for recommended iptables/nftables rules. \
+             Pass --ssrf-firewall-acknowledged to suppress this warning once the firewall is in place.",
+            bind
         );
     }
 
@@ -507,6 +585,28 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
                  Set run_secret in flowo-server.json to enable them."
             );
         }
+    } else if let Some(ref secret) = config.run_secret {
+        if !secret.starts_with("$argon2") {
+            if reject_legacy_run_secret {
+                tracing::error!(
+                    "Refusing to start: run_secret in {:?} uses a legacy BLAKE3 hash \
+                     (not brute-force resistant) and --reject-legacy-run-secret is set. \
+                     Re-export this workflow from the Flowo desktop app to upgrade to argon2id.",
+                    config_path
+                );
+                std::process::exit(1);
+            }
+            // Legacy config (pre-0.3): run_secret stored as BLAKE3 hex, which is a fast
+            // hash and not brute-force resistant. Re-export to upgrade to argon2id.
+            tracing::warn!(
+                "run_secret in {:?} uses a legacy BLAKE3 hash (not brute-force resistant). \
+                 Re-export this workflow from the Flowo desktop app to upgrade to argon2id. \
+                 Until re-exported, a short run_secret can be cracked quickly if the config \
+                 file is read by an attacker. Pass --reject-legacy-run-secret to refuse startup \
+                 with a legacy hash.",
+                config_path
+            );
+        }
     }
 
     // Warn if the config file permissions are too open on Unix systems.
@@ -517,7 +617,7 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
             if meta.mode() & 0o077 != 0 {
                 tracing::warn!(
                     "Config file {:?} is readable by group or other users (mode {:03o}). \
-                     It contains the BLAKE3 hash of your run_secret — consider: chmod 600 {:?}",
+                     It contains the argon2id hash of your run_secret — consider: chmod 600 {:?}",
                     config_path, meta.mode() & 0o777, config_path
                 );
             }
@@ -550,8 +650,13 @@ async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: Stri
 }
 
 async fn api_mode(cfg: api_server::ServerConfig) {
-    let code_exec_disabled  = cfg.code_exec_disabled;
-    let shell_exec_disabled = cfg.shell_exec_disabled;
+    let code_exec_disabled          = cfg.code_exec_disabled;
+    let shell_exec_disabled         = cfg.shell_exec_disabled;
+    let database_exec_disabled      = cfg.database_exec_disabled;
+    let trusted_proxy_count         = cfg.trusted_proxy_count;
+    let bind                        = cfg.bind.clone();
+    let ssrf_firewall_acknowledged  = cfg.ssrf_firewall_acknowledged;
+
     if !code_exec_disabled {
         eprintln!();
         eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
@@ -572,6 +677,47 @@ async fn api_mode(cfg: api_server::ServerConfig) {
         eprintln!("│  Every API token with 'write' scope can now execute arbitrary OS     │");
         eprintln!("│  commands on this host via the Shell Command node. Only use this     │");
         eprintln!("│  flag on a trusted, single-user deployment.                          │");
+        eprintln!("└─────────────────────────────────────────────────────────────────────┘");
+        eprintln!();
+    }
+    if !database_exec_disabled {
+        eprintln!();
+        eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
+        eprintln!("│  WARNING: --allow-database is active                                 │");
+        eprintln!("│                                                                       │");
+        eprintln!("│  Database nodes can connect to any reachable PostgreSQL, MySQL,      │");
+        eprintln!("│  SQLite, or Redis endpoint. In multi-tenant deployments this         │");
+        eprintln!("│  expands the SSRF attack surface and exposes a timing side-channel   │");
+        eprintln!("│  in sqlx-mysql (RUSTSEC-2023-0071). Only enable on single-user or   │");
+        eprintln!("│  fully trusted deployments where you control all token holders.      │");
+        eprintln!("└─────────────────────────────────────────────────────────────────────┘");
+        eprintln!();
+    }
+    fn is_public_bind(b: &str) -> bool {
+        !matches!(b, "127.0.0.1" | "::1" | "localhost")
+    }
+    if is_public_bind(&bind) && trusted_proxy_count == 0 {
+        eprintln!();
+        eprintln!("WARNING: Server bound to {} with --trusted-proxy-count 0 (default).", bind);
+        eprintln!("  If behind a reverse proxy (nginx, Caddy, etc.), the rate limiter will use");
+        eprintln!("  the proxy's IP for all clients — per-IP rate limiting will not work.");
+        eprintln!("  Set --trusted-proxy-count to the number of proxies in front of this server.");
+        eprintln!("  See docs/security.md for details.");
+        eprintln!();
+    }
+    if is_public_bind(&bind) && !ssrf_firewall_acknowledged {
+        eprintln!();
+        eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
+        eprintln!("│  WARNING: SSRF DNS rebinding (TOCTOU) — egress firewall required     │");
+        eprintln!("│                                                                       │");
+        eprintln!("│  The built-in SSRF DNS pre-check has a TOCTOU gap: a malicious DNS   │");
+        eprintln!("│  server can bypass it. This cannot be closed at the application      │");
+        eprintln!("│  layer. You MUST configure a host-level egress firewall that blocks  │");
+        eprintln!("│  outbound connections to RFC-1918, loopback, link-local, and cloud   │");
+        eprintln!("│  metadata ranges (e.g. 169.254.169.254).                             │");
+        eprintln!("│                                                                       │");
+        eprintln!("│  See docs/security.md for recommended iptables/nftables rules.       │");
+        eprintln!("│  Pass --ssrf-firewall-acknowledged to suppress this warning.         │");
         eprintln!("└─────────────────────────────────────────────────────────────────────┘");
         eprintln!();
     }
@@ -711,11 +857,11 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
         return j["workflow_id"].as_str().expect("workflow_id is a string — confirmed by find predicate").to_string();
     }
 
-    // Partial name match (case-insensitive)
+    // Exact name match (case-insensitive)
     let lower = name_or_id.to_lowercase();
     let matches: Vec<_> = jobs.iter().filter(|j|
         j["workflow_name"].as_str()
-            .map(|n| n.to_lowercase().contains(&lower))
+            .map(|n| n.to_lowercase() == lower)
             .unwrap_or(false)
     ).collect();
 

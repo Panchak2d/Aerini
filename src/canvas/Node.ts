@@ -1,4 +1,5 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
+import { NODE_IDS } from "../node-ids";
 import { NODE_ICONS } from "../utils";
 
 export interface CanvasNodeData {
@@ -168,7 +169,7 @@ export class CanvasNode {
 
   draw(ctx: CanvasRenderingContext2D, dt = 0): void {
     // Note node gets its own minimal sticky-note rendering
-    if (this.data.node_type_id === "note") {
+    if (this.data.node_type_id === NODE_IDS.NOTE) {
       this.drawNote(ctx);
       return;
     }

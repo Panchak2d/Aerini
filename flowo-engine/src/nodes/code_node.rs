@@ -241,14 +241,19 @@ function output(v) {{ __result = v; }}
            .stderr(Stdio::piped());
 
         // Apply OS-level resource limits on Linux in sandbox mode.
-        // RLIMIT_AS (virtual address space): 512 MB — prevents memory exhaustion.
+        // RLIMIT_AS (virtual address space): configurable via __code_max_memory_mb (default 512 MB).
         // RLIMIT_CPU (CPU seconds): timeout_secs + 5 — backstop for busy-loops.
         // Safety: pre_exec runs between fork() and exec(). setrlimit(2) is listed
         // in POSIX as async-signal-safe. No allocations are made in the closure.
         #[cfg(target_os = "linux")]
         let spawn_result = if sandbox_enabled {
             let cpu_limit = (timeout_secs + 5) as libc::rlim_t;
-            let mem_limit = (512u64 * 1024 * 1024) as libc::rlim_t;
+            let mem_limit = input.context.metadata.get("__code_max_memory_mb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(512)
+                .min(16_384) // cap at 16 TB — prevents u64 overflow on * 1024 * 1024
+                * 1024 * 1024;
+            let mem_limit = mem_limit as libc::rlim_t;
             unsafe {
                 cmd.pre_exec(move || {
                     let r1 = libc::setrlimit(libc::RLIMIT_CPU, &libc::rlimit {

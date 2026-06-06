@@ -275,6 +275,16 @@ impl Node for DatabaseNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
+        if input.context.metadata.get("__database_disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "DATABASE_DISABLED",
+                "Database node is disabled in this deployment. \
+                 Pass --allow-database to the server to enable it.",
+            ));
+        }
         let db_type = input.input["db_type"].as_str().unwrap_or("sqlite");
         match db_type {
             "postgres" | "mysql" => execute_sqlx(input).await,

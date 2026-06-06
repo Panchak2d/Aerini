@@ -3,10 +3,22 @@ ignore = [
     # RUSTSEC-2023-0071: rsa 0.9.10 Marvin Attack timing side-channel.
     # No patched version of rsa exists. This is a transitive dep via sqlx-mysql.
     # Flowo does not use rsa directly; the MySQL auth handshake uses it internally.
-    # Mitigated by: (1) MySQL connections are to trusted infrastructure, not attacker-
-    # controlled endpoints; (2) exploiting requires sustained observation of many
-    # handshakes by a network-adjacent attacker. Track upstream:
-    # https://github.com/launchbadge/sqlx/issues/3538
+    #
+    # ACCEPTED RISK — with explicit operator scope:
+    # The "trusted infrastructure" assumption holds only when the operator controls
+    # the MySQL server that the Database node connects to. It does NOT hold when an
+    # untrusted user can configure the Database node's connection_url to point at an
+    # arbitrary MySQL server (e.g. an attacker-operated server in multi-tenant API
+    # deployments). In that scenario, the attacker can measure RSA timing during the
+    # TLS handshake to recover session material.
+    #
+    # If you run Flowo in API mode and allow untrusted callers to configure Database
+    # node connection strings, treat this advisory as unmitigated until sqlx ships
+    # a fix. See docs/security.md#known-transitive-dependency-risks for details.
+    #
+    # Exploiting requires: sustained measurement of many handshakes by a
+    # network-adjacent attacker (high bar on WAN; realistic on LAN or same-host).
+    # Track upstream: https://github.com/launchbadge/sqlx/issues/3538
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2026-0097: rand unsoundness with custom logger.

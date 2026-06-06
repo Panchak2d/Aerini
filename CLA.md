@@ -12,7 +12,7 @@ Except for the license grants made herein, each contributor retains all right, t
 
 "You" means the individual or legal entity entering into this Agreement.
 
-"Project" means the software known as Flowo, currently maintained at https://github.com/Panchak2d/flowo and any successor location. The Maintainer will notify contributors in writing of any change to the Project's canonical location no less than 30 days before such change takes effect.
+"Project" means the software known as Flowo, currently maintained at https://github.com/Panchak2d/flowo and any successor location. The Maintainer will post a notice to the Project's primary repository, website, or other public communication channel of any change to the Project's canonical location no less than 30 days before such change takes effect.
 
 "Contribution" means any original work of authorship — including source code, documentation, or configuration — that You intentionally submit to the Maintainer for inclusion in the Project. A submission is a Contribution only if it is accompanied by a pull request, patch, or written correspondence that explicitly identifies it as a proposed contribution to the Project's codebase or documentation. General discussion, bug reports, and feature requests unaccompanied by code or documentation do not constitute Contributions.
 
@@ -23,6 +23,8 @@ Where a Contribution incorporates third-party material, You must identify that m
 "AI/ML System" means any machine learning model, neural network, large language model, generative AI system, or other computational system that learns internal representations or parameters from data, regardless of architecture, scale, modality, or intended use.
 
 "Training Data" means any data, code, text, or other material used to train, fine-tune, pre-train, distil, or otherwise update the learned parameters or weights of an AI/ML System. For the avoidance of doubt, "Training Data" does not include: (a) use of Contributions by development tools that provide code completion, search indexing, or static analysis without updating any model weights or parameters; or (b) indexing of Contributions by search engines solely for the purpose of document retrieval.
+
+"Commercial License" means any license to the Project offered by the Maintainer outside the terms of AGPL-3.0, under separate proprietary or commercial terms, whether perpetual or subscription-based.
 
 ---
 
@@ -36,7 +38,7 @@ Subject to the terms of this Agreement, You grant to the Maintainer and the Main
 
 **Scope of AI/ML Training Exclusion.** This exclusion binds the Maintainer, the Maintainer's Successors and Assigns, and parties who receive this software directly from the Maintainer with explicit notice of this restriction. Parties who receive the AGPL-licensed code through downstream distribution are governed by AGPL-3.0 terms only; the AGPL does not include an AI training restriction. This exclusion represents a binding commitment for direct recipients and a statement of the project's values — it is not a claim of universal enforcement across all possible downstream uses of AGPL-licensed copies.
 
-**Sublicense Flow-Down.** The Maintainer shall include a contractually binding restatement of the AI/ML Training Exclusion in every sublicense agreement it executes that grants rights to reproduce, distribute, or otherwise exploit Contributions. Any sublicense that does not include such a restatement is void to the extent it purports to authorise the excluded use. If a sublicensee breaches the AI/ML Training Exclusion as a direct result of the Maintainer's failure to include the required restatement, the Maintainer shall be liable to You as provided in Section 6.2.
+**Sublicense Flow-Down.** The Maintainer shall include a contractually binding restatement of the AI/ML Training Exclusion in every sublicense agreement it executes that grants rights to reproduce, distribute, or otherwise exploit Contributions. Any sublicense that does not include such a restatement is void to the extent it purports to authorise the excluded use. If a sublicensee breaches the AI/ML Training Exclusion as a direct result of the Maintainer's failure to include the required restatement, the Maintainer shall be liable to You for direct damages arising directly from that failure.
 
 This grant does not transfer ownership of Your copyright. You retain all ownership of Your Contributions and may continue to use, publish, and license them independently.
 
@@ -47,6 +49,10 @@ This grant does not transfer ownership of Your copyright. You retain all ownersh
 Subject to the terms of this Agreement, You grant to the Maintainer and the Maintainer's Successors and Assigns a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable patent license to make, have made (meaning to contract third parties to manufacture or build on Your behalf), use, offer to sell, sell, import, and otherwise transfer Your Contributions and derivative works thereof. This license applies only to patent claims owned or licensable by You that are necessarily infringed by Your Contributions alone or by the combination of Your Contributions with the Project.
 
 **Defensive Termination.** If You, or any entity acting on Your behalf or under Your direction, initiates patent litigation — including a cross-claim or counterclaim in any proceeding — against the Maintainer, any Successor or Assign, or any user of the Project, alleging that the Project or any Contribution incorporated therein directly or indirectly infringes a patent, then the patent license granted to the Maintainer under this Section shall terminate automatically as of the date such litigation is filed. This termination does not affect any other provision of this Agreement, including the copyright license in Section 2.
+
+**Moral Rights.** To the extent permitted by applicable law, You waive and agree not to assert any moral rights or equivalent rights in or to Your Contributions against the Maintainer, its successors, assigns, or any sublicensees.
+
+**Trademark.** No trademark rights are granted under this Agreement. Nothing in this Agreement grants any right to use the Maintainer's trade names, trademarks, service marks, or product names.
 
 ---
 
@@ -78,8 +84,6 @@ IN NO EVENT SHALL YOU BE LIABLE TO THE MAINTAINER OR ANY THIRD PARTY FOR ANY IND
 
 **6.1 Contributor Indemnification.** If any representation in Section 4 proves materially false or inaccurate — meaning the inaccuracy has a material adverse effect on the Maintainer's ability to use, distribute, or sublicense the relevant Contribution or to defend against a third-party claim — You agree to indemnify, defend, and hold harmless the Maintainer and the Maintainer's Successors and Assigns against any and all claims, damages, losses, liabilities, costs, and expenses — including reasonable legal fees — arising out of or connected with that inaccuracy, including claims by third parties asserting ownership of or rights in Your Contributions.
 
-**6.2 Maintainer Indemnification.** If the Maintainer materially breaches this Agreement — including by violating the AI/ML Training Exclusion, failing to include the required AI/ML Training Exclusion restatement in a sublicense as required by Section 2, or failing to satisfy the conditions of Section 13 prior to an assignment or equivalent transfer — the Maintainer agrees to indemnify, defend, and hold harmless You against any and all claims, damages, losses, liabilities, costs, and expenses — including reasonable legal fees — arising directly and proximately from that breach.
-
 ---
 
 ## 7. Discretion to Accept
@@ -110,7 +114,7 @@ The Maintainer will acknowledge receipt in writing within 7 days. The Contributi
 
 ## 10. Electronic Signatures
 
-Signatures collected via CLA Assistant (cla-assistant.io) using GitHub OAuth constitute valid and binding electronic signatures for the purposes of this Agreement, including under the Information Technology Act, 2000 and the Information Technology (Amendment) Act, 2008 (India). The version of this Agreement in force at the time of signing is recorded alongside each signature.
+The parties intend signatures collected via CLA Assistant (cla-assistant.io) using GitHub OAuth to constitute valid electronic signatures to the fullest extent permitted by applicable law, including under the Information Technology Act, 2000 and the Information Technology (Amendment) Act, 2008 (India). The version of this Agreement in force at the time of signing is recorded alongside each signature.
 
 The Maintainer shall maintain a permanent record of all signatories — including GitHub username, date of signing, and the version of this Agreement signed — committed to the Project's primary repository and updated no less frequently than monthly. This record supplements the CLA Assistant signature log and constitutes an independent backup record of each contributor's acceptance.
 
@@ -142,7 +146,7 @@ The Maintainer may assign or transfer rights in the Project and this Agreement �
 
 (a) The Successor or Assign agrees in writing to be bound by the terms of this Agreement, including the AI/ML Training Exclusion in Section 2 and this Section 13.
 
-(b) The Successor or Assign commits in writing to maintaining the Project (or a substantive portion thereof) under AGPL-3.0 as a publicly available open-source release. This commitment shall be structured as a condition of the assignment — not merely as a contractual covenant between the Maintainer and the Successor or Assign — such that a material breach of this commitment by the Successor or Assign entitles affected contributors to seek injunctive relief directly against the Successor or Assign in addition to any other remedy available under Section 11. This commitment does not prevent the Successor or Assign from also offering the Project under a commercial license consistent with the dual-license model described in Section 2.
+(b) The Successor or Assign commits in writing to maintaining the Project (or a substantive portion thereof) under AGPL-3.0 as a publicly available open-source release. This commitment shall be structured as a condition of the assignment — not merely as a contractual covenant between the Maintainer and the Successor or Assign — such that a material breach of this commitment by the Successor or Assign entitles affected contributors to seek injunctive relief directly against the Successor or Assign in addition to any other remedy available under Section 11. This commitment does not prevent the Successor or Assign from also offering the Project under a commercial license consistent with the dual-license model described in Section 2. Contributors are intended third-party beneficiaries of this Section and may enforce its terms directly against any Successor or Assign without joining the Maintainer as a party.
 
 (c) The Maintainer notifies contributors of the assignment by posting a notice to the Project's primary repository no less than 30 days before the assignment takes effect, where practicable.
 
@@ -169,6 +173,12 @@ Before either party pursues a claim for indemnification under Section 6 or comme
 If the breach is not capable of being fully cured within thirty (30) days but the breaching party commences cure within that period and diligently pursues completion, the cure period shall be extended by such additional time as is reasonably necessary, not to exceed ninety (90) days in total from the date of the original notice.
 
 This Section does not apply to: (a) a breach of the AI/ML Training Exclusion in Section 2, which may be acted upon immediately without a cure period; or (b) a breach involving fraud, wilful misconduct, or deliberate misrepresentation, which may likewise be acted upon immediately.
+
+---
+
+## 17. Survival
+
+The following provisions survive any termination or expiry of this Agreement: Section 2 (Copyright License Grant, including the AI/ML Training Exclusion and its obligations on the Maintainer), Section 3 (Patent License Grant), Section 6.1 (Indemnification by Contributor), Section 11 (Dispute Resolution), Section 13 (Assignment Restriction), and any accrued obligations under Section 6 arising prior to termination.
 
 ---
 
@@ -234,8 +244,6 @@ Section 5 of Part I applies equally to all Contributions made under this Corpora
 ## C6. Indemnification
 
 If any representation in Section C4 proves materially false or inaccurate — meaning the inaccuracy has a material adverse effect on the Maintainer's ability to use, distribute, or sublicense the relevant Contribution or to defend against a third-party claim — the Corporation agrees to indemnify, defend, and hold harmless Panchaketu Debbarma and the Maintainer's Successors and Assigns against any and all claims, damages, losses, liabilities, costs, and expenses — including reasonable legal fees — arising out of or connected with that inaccuracy.
-
-Section 6.2 of Part I (Maintainer Indemnification) applies equally to this Corporate CLA.
 
 ---
 
