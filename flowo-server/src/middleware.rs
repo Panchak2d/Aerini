@@ -73,7 +73,7 @@ impl RateLimiter {
         let cutoff = now - self.window;
 
         let allowed = {
-            let mut entry = self.map.entry(ip).or_insert_with(VecDeque::new);
+            let mut entry = self.map.entry(ip).or_default();
             // Prune timestamps outside the sliding window.
             while entry.front().map(|&ts| ts <= cutoff).unwrap_or(false) {
                 entry.pop_front();

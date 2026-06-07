@@ -361,7 +361,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged } => serve_mode(config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged).await,
+        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged } => serve_mode(ServeArgs { config_path: config, port_override: port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged }).await,
         Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, allow_database, code_sandbox, ssrf_firewall_acknowledged, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb } => {
             let shell_exec_disabled    = !allow_shell;
             let code_exec_disabled     = !allow_code;
@@ -393,7 +393,20 @@ async fn main() {
     }
 }
 
-async fn serve_mode(config_path: PathBuf, port_override: Option<u16>, bind: String, trusted_proxy_count: usize, allow_shell: bool, allow_code: bool, reject_legacy_run_secret: bool, ssrf_firewall_acknowledged: bool) {
+/// Arguments for [`serve_mode`]. Groups the parameters to stay under the
+/// clippy `too_many_arguments` limit.
+struct ServeArgs {
+    config_path:              PathBuf,
+    port_override:            Option<u16>,
+    bind:                     String,
+    trusted_proxy_count:      usize,
+    allow_shell:              bool,
+    allow_code:               bool,
+    reject_legacy_run_secret: bool,
+    ssrf_firewall_acknowledged: bool,
+}
+
+async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged }: ServeArgs) {
     init_tracing();
     let config = match ServerConfig::from_file(&config_path) {
         Ok(c)  => c,
