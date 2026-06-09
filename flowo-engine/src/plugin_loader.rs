@@ -532,9 +532,9 @@ mod tests {
     #[test]
     fn load_plugin_nonexistent_file_returns_io_error() {
         let l = loader();
-        let err = l
-            .load_plugin(Path::new("/nonexistent/path/to/plugin.wasm"))
-            .expect_err("expected Io error");
+        let result = l.load_plugin(Path::new("/nonexistent/path/to/plugin.wasm"));
+        assert!(result.is_err(), "expected Io error, got Ok");
+        let err = result.err().unwrap();
         assert!(
             matches!(err, PluginLoadError::Io(_)),
             "expected Io, got: {err:?}"
@@ -555,9 +555,9 @@ mod tests {
         tmp.write_all(b"(component)").expect("tempfile write failed");
         tmp.flush().expect("tempfile flush failed");
 
-        let err = l
-            .load_plugin(tmp.path())
-            .expect_err("expected MissingInterface error");
+        let result = l.load_plugin(tmp.path());
+        assert!(result.is_err(), "expected MissingInterface error, got Ok");
+        let err = result.err().unwrap();
         assert!(
             matches!(err, PluginLoadError::MissingInterface),
             "expected MissingInterface, got: {err:?}"
