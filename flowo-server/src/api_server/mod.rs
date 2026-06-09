@@ -38,6 +38,7 @@ use flowo_engine::{
     executor::{CredentialResolver, WorkflowExecutor},
     node::NodeRegistry,
     nodes::register_builtins,
+    plugin_loader::load_plugins,
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
     EventSink,
@@ -79,6 +80,7 @@ pub struct ServerConfig {
     pub max_concurrent_runs:      usize,
     pub max_queue_wait_secs:      u64,
     pub max_code_memory_mb:       Option<u64>,
+    pub plugin_dir:               Option<PathBuf>,
 }
 
 pub use routes::state::ApiState;
@@ -246,6 +248,7 @@ pub async fn run(cfg: ServerConfig) {
         use_keychain, parallel_execution,
         max_concurrent_nodes, server_max_duration_secs, db_pool_size,
         max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb,
+        plugin_dir,
     } = cfg;
     crate::init_tracing();
 
@@ -329,6 +332,16 @@ pub async fn run(cfg: ServerConfig) {
 
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
+    if let Some(ref dir) = plugin_dir {
+        if !dir.exists() {
+            tracing::warn!(
+                "plugin_dir {:?} does not exist — no plugins loaded",
+                dir
+            );
+        } else {
+            load_plugins(&mut registry, dir);
+        }
+    }
     let registry = Arc::new(registry);
 
     let (sse_tx, _) = broadcast::channel::<String>(256);

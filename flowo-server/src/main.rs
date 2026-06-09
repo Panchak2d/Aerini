@@ -41,6 +41,7 @@ use flowo_engine::{
     node::NodeRegistry,
     nodes::register_builtins,
     nodes::database::start_pool_eviction_task,
+    plugin_loader::load_plugins,
     scheduler::{extract_trigger, SchedulerDaemon, SchedulerDb},
 };
 
@@ -112,6 +113,38 @@ enum Command {
         /// ranges (e.g. 169.254.169.254). See docs/security.md for recommended rules.
         #[arg(long, default_value_t = false)]
         ssrf_firewall_acknowledged: bool,
+
+        /// Enable parallel execution of independent workflow branches.
+        /// When set, nodes whose upstream dependencies have all completed run
+        /// concurrently instead of sequentially. Off by default.
+        #[arg(long, default_value_t = false)]
+        parallel_execution: bool,
+
+        /// Maximum number of nodes executing simultaneously in parallel mode.
+        /// Ignored when --parallel-execution is not set. Default: 8.
+        #[arg(long, default_value_t = 8)]
+        max_concurrent_nodes: usize,
+
+        /// Maximum wall-clock time (seconds) for any single workflow execution.
+        /// Acts as a server-level ceiling. Min: 10, Max: 86400 (24 h). Default: no limit.
+        #[arg(long)]
+        max_workflow_duration_secs: Option<u64>,
+
+        /// When set, Code nodes run with module import restrictions and eval blocked.
+        /// CPU and memory resource limits apply on Linux only.
+        #[arg(long, default_value_t = false)]
+        code_sandbox: bool,
+
+        /// Maximum memory (MB) for a single Code (JS) node process.
+        /// Only effective when both --allow-code and --code-sandbox are set on Linux.
+        #[arg(long)]
+        max_code_memory_mb: Option<u64>,
+
+        /// Directory to load WASM plugin nodes from.
+        /// Each .wasm file in this directory is loaded as a plugin node.
+        /// Files that fail to load are skipped with a warning.
+        #[arg(long)]
+        plugin_dir: Option<PathBuf>,
     },
 
     /// Run the multi-workflow REST API server.
@@ -247,6 +280,12 @@ enum Command {
         /// Default: 512 MB (when --code-sandbox is active on Linux).
         #[arg(long)]
         max_code_memory_mb: Option<u64>,
+
+        /// Directory to load WASM plugin nodes from.
+        /// Each .wasm file in this directory is loaded as a plugin node.
+        /// Files that fail to load are skipped with a warning.
+        #[arg(long)]
+        plugin_dir: Option<PathBuf>,
     },
 
     /// List all scheduled workflows (API mode only).
@@ -361,8 +400,8 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged } => serve_mode(ServeArgs { config_path: config, port_override: port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged }).await,
-        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, allow_database, code_sandbox, ssrf_firewall_acknowledged, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb } => {
+        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir } => serve_mode(ServeArgs { config_path: config, port_override: port, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }).await,
+        Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, allow_database, code_sandbox, ssrf_firewall_acknowledged, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb, plugin_dir } => {
             let shell_exec_disabled    = !allow_shell;
             let code_exec_disabled     = !allow_code;
             let database_exec_disabled = !allow_database;
@@ -382,6 +421,7 @@ async fn main() {
                 db_pool_size: pool_size, max_concurrent_runs,
                 max_queue_wait_secs,
                 max_code_memory_mb,
+                plugin_dir,
             }).await;
         },
         Command::List    { server, token }       => ctl_list(&server, &token).await,
@@ -396,17 +436,23 @@ async fn main() {
 /// Arguments for [`serve_mode`]. Groups the parameters to stay under the
 /// clippy `too_many_arguments` limit.
 struct ServeArgs {
-    config_path:              PathBuf,
-    port_override:            Option<u16>,
-    bind:                     String,
-    trusted_proxy_count:      usize,
-    allow_shell:              bool,
-    allow_code:               bool,
-    reject_legacy_run_secret: bool,
+    config_path:                PathBuf,
+    port_override:              Option<u16>,
+    bind:                       String,
+    trusted_proxy_count:        usize,
+    allow_shell:                bool,
+    allow_code:                 bool,
+    reject_legacy_run_secret:   bool,
     ssrf_firewall_acknowledged: bool,
+    parallel_execution:         bool,
+    max_concurrent_nodes:       usize,
+    max_workflow_duration_secs: Option<u64>,
+    code_sandbox:               bool,
+    max_code_memory_mb:         Option<u64>,
+    plugin_dir:                 Option<PathBuf>,
 }
 
-async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged }: ServeArgs) {
+async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_count, allow_shell, allow_code, reject_legacy_run_secret, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }: ServeArgs) {
     init_tracing();
     let config = match ServerConfig::from_file(&config_path) {
         Ok(c)  => c,
@@ -442,6 +488,13 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
 
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry, &data_dir, None);
+    if let Some(ref dir) = plugin_dir {
+        if !dir.exists() {
+            tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
+        } else {
+            load_plugins(&mut registry, dir);
+        }
+    }
     start_pool_eviction_task(&tokio::runtime::Handle::current());
     let registry = Arc::new(registry);
 
@@ -518,6 +571,15 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         );
     }
 
+    #[cfg(target_os = "macos")]
+    if allow_code && code_sandbox {
+        tracing::warn!(
+            "--code-sandbox is PARTIAL on macOS. ESM module restrictions apply, but \
+             CPU/memory setrlimit() is Linux-only. A runaway script can exhaust system \
+             resources. Deploy on Linux for full sandboxing."
+        );
+    }
+
     let mut daemon = SchedulerDaemon::new(
         Arc::clone(&db) as Arc<dyn SchedulerDb>,
         Arc::clone(&registry),
@@ -529,6 +591,20 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     }
     if !allow_code {
         daemon = daemon.with_code_disabled(true);
+    }
+    if code_sandbox {
+        daemon = daemon.with_code_sandbox(true);
+    }
+    if max_code_memory_mb.is_some() {
+        daemon = daemon.with_code_max_memory_mb(max_code_memory_mb);
+    }
+    if parallel_execution {
+        daemon = daemon
+            .with_parallel_execution(true)
+            .with_max_concurrent_nodes(max_concurrent_nodes);
+    }
+    if max_workflow_duration_secs.is_some() {
+        daemon = daemon.with_server_max_duration_secs(max_workflow_duration_secs);
     }
     let daemon = Arc::new(daemon);
 
@@ -861,44 +937,82 @@ async fn ctl_tokens(action: TokenAction) {
 }
 
 /// Resolves a workflow name or partial ID to a full workflow ID.
+///
+/// Match priority (stops at first tier that yields exactly one result):
+/// 1. Exact workflow ID
+/// 2. Exact workflow name (case-insensitive)
+/// 3. Workflow ID prefix (case-insensitive)
+/// 4. Workflow name substring (case-insensitive)
+///
+/// If any tier yields multiple matches the candidates are printed and the
+/// process exits — the caller must supply a more specific identifier.
 async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> String {
     let jobs = api_get_items(server, token, "/api/scheduler").await
         .unwrap_or_else(|e| { eprintln!("ERROR: {}", e); std::process::exit(1); });
 
-    // Exact ID match first
+    let lower = name_or_id.to_lowercase();
+
+    // Helper: print ambiguous matches and exit.
+    let print_ambiguous = |label: &str, matches: &[&serde_json::Value]| -> ! {
+        eprintln!("ERROR: '{}' {} — use the full ID:", name_or_id, label);
+        for j in matches {
+            eprintln!("  {}  —  {}",
+                j["workflow_id"].as_str().unwrap_or("?"),
+                j["workflow_name"].as_str().unwrap_or("?"),
+            );
+        }
+        std::process::exit(1);
+    };
+
+    // Tier 1: exact ID
     if let Some(j) = jobs.iter().find(|j| j["workflow_id"].as_str() == Some(name_or_id)) {
-        return j["workflow_id"].as_str().expect("workflow_id is a string — confirmed by find predicate").to_string();
+        return j["workflow_id"].as_str()
+            .expect("workflow_id is a string — confirmed by find predicate")
+            .to_string();
     }
 
-    // Exact name match (case-insensitive)
-    let lower = name_or_id.to_lowercase();
-    let matches: Vec<_> = jobs.iter().filter(|j|
-        j["workflow_name"].as_str()
-            .map(|n| n.to_lowercase() == lower)
+    // Tier 2: exact name (case-insensitive)
+    let exact_name: Vec<_> = jobs.iter().filter(|j|
+        j["workflow_name"].as_str().map(|n| n.to_lowercase() == lower).unwrap_or(false)
+    ).collect();
+    match exact_name.len() {
+        0 => {}
+        1 => return exact_name[0]["workflow_id"].as_str()
+                .expect("workflow_id is a string")
+                .to_string(),
+        _ => print_ambiguous("matches multiple workflows by name", &exact_name),
+    }
+
+    // Tier 3: ID prefix (case-insensitive)
+    let id_prefix: Vec<_> = jobs.iter().filter(|j|
+        j["workflow_id"].as_str()
+            .map(|id| id.to_lowercase().starts_with(&lower))
             .unwrap_or(false)
     ).collect();
-
-    match matches.len() {
-        0 => {
-            eprintln!("ERROR: No workflow found matching '{}'. Run `flowo-server list` to see all.", name_or_id);
-            std::process::exit(1);
-        }
-        1 => {
-            matches[0]["workflow_id"].as_str()
-                .expect("workflow_id is a string — matched workflow has string id")
-                .to_string()
-        }
-        _ => {
-            eprintln!("ERROR: '{}' matches multiple workflows — use the full ID:", name_or_id);
-            for j in &matches {
-                eprintln!("  {}  —  {}",
-                    j["workflow_id"].as_str().unwrap_or("?"),
-                    j["workflow_name"].as_str().unwrap_or("?"),
-                );
-            }
-            std::process::exit(1);
-        }
+    match id_prefix.len() {
+        0 => {}
+        1 => return id_prefix[0]["workflow_id"].as_str()
+                .expect("workflow_id is a string")
+                .to_string(),
+        _ => print_ambiguous("is an ambiguous ID prefix — matches", &id_prefix),
     }
+
+    // Tier 4: name substring (case-insensitive)
+    let name_sub: Vec<_> = jobs.iter().filter(|j|
+        j["workflow_name"].as_str()
+            .map(|n| n.to_lowercase().contains(&lower))
+            .unwrap_or(false)
+    ).collect();
+    match name_sub.len() {
+        0 => {}
+        1 => return name_sub[0]["workflow_id"].as_str()
+                .expect("workflow_id is a string")
+                .to_string(),
+        _ => print_ambiguous("matches multiple workflows by name substring", &name_sub),
+    }
+
+    eprintln!("ERROR: No workflow found matching '{}'. Run `flowo-server list` to see all.", name_or_id);
+    std::process::exit(1);
 }
 
 static CLI_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -924,16 +1038,33 @@ async fn api_get<T: serde::de::DeserializeOwned>(
     res.json::<T>().await.map_err(|e| e.to_string())
 }
 
-/// Fetch a paginated endpoint and return the `items` array.
-/// Handles responses shaped as `{"items":[...],"total":N,...}`.
+/// Fetch a paginated endpoint and return all items.
+/// Handles responses shaped as `{"items":[...],"total":N,"limit":N,"offset":N}`.
+/// Pages through all results using limit/offset until total is exhausted.
 async fn api_get_items(
     server: &str, token: &str, path: &str
 ) -> Result<Vec<serde_json::Value>, String> {
-    let raw: serde_json::Value = api_get(server, token, &format!("{}?limit=500", path)).await?;
-    match raw.get("items").and_then(|v| v.as_array()) {
-        Some(items) => Ok(items.clone()),
-        None => Err(format!("unexpected response shape from {}: missing 'items' field", path)),
+    const PAGE_SIZE: usize = 500;
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let raw: serde_json::Value = api_get(
+            server, token,
+            &format!("{}?limit={}&offset={}", path, PAGE_SIZE, offset),
+        ).await?;
+        let total = raw.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let page = match raw.get("items").and_then(|v| v.as_array()) {
+            Some(items) => items.clone(),
+            None => return Err(format!("unexpected response shape from {}: missing 'items' field", path)),
+        };
+        let fetched = page.len();
+        all.extend(page);
+        offset += fetched;
+        if fetched == 0 || all.len() >= total {
+            break;
+        }
     }
+    Ok(all)
 }
 
 async fn api_post(
@@ -977,13 +1108,13 @@ async fn api_delete(server: &str, token: &str, path: &str) -> Result<String, Str
     res.text().await.map_err(|e| e.to_string())
 }
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { return s; }
-    let mut boundary = max;
-    while boundary > 0 && !s.is_char_boundary(boundary) {
-        boundary -= 1;
+fn truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
     }
-    &s[..boundary]
+    let cut = max.saturating_sub(1);
+    chars[..cut].iter().collect::<String>() + "…"
 }
 
 fn init_tracing() {

@@ -43,5 +43,8 @@ argon2 = "0.5"
 # Base64 decode for write_temp_file — already in workspace via flowo-engine
 base64 = "0.22"
 
+# Structured logging — used for plugin_dir warnings in setup
+tracing = "0.1"
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

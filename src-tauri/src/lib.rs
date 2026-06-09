@@ -9,6 +9,7 @@ use flowo_engine::{
     node::NodeRegistry,
     nodes::register_builtins,
     nodes::database::start_pool_eviction_task,
+    plugin_loader::load_plugins,
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
     EventSink,
@@ -266,6 +267,14 @@ pub fn run() {
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
             start_pool_eviction_task(tauri::async_runtime::handle().inner());
+            if let Some(dir_str) = db.get_setting("plugin_dir").unwrap_or(None) {
+                let dir = std::path::PathBuf::from(&dir_str);
+                if !dir.exists() {
+                    tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
+                } else {
+                    load_plugins(&mut registry, &dir);
+                }
+            }
             let registry = Arc::new(registry);
 
             let resolver = Arc::new(StoreCredentialResolver { store: Arc::clone(&cred_store) });

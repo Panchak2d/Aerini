@@ -1,0 +1,14 @@
+[package]
+name = "flowo-plugin-echo"
+version = "0.1.0"
+edition = "2021"
+description = "Flowo plugin template — rename and adapt to create your own node"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# wit-bindgen provides the generate! macro and runtime support for the WIT interface.
+# Pin to this exact version so the generated bindings match the WIT file.
+wit-bindgen = "0.57.1"

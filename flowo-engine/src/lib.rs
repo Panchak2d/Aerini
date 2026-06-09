@@ -35,6 +35,7 @@ pub mod migration;
 pub mod model;
 pub mod node;
 pub mod nodes;
+pub mod plugin_loader;
 pub mod scheduler;
 pub mod store;
 
@@ -42,10 +43,23 @@ pub mod store;
 pub use model::Workflow;
 pub use node::NodeRegistry;
 
+/// The current engine version. Included in run records and API responses.
 pub const ENGINE_VERSION: &str = "0.2.0";
 
 // ── EventSink ─────────────────────────────────────────────────────────────────
 
+/// Receives structured events emitted by the executor as a workflow runs.
+///
+/// In the desktop app this routes events to Tauri's IPC layer; in the server
+/// binary it broadcasts over an SSE channel. Embedders implement this trait to
+/// forward events to whatever consumer fits their context (log sink, WebSocket,
+/// in-memory queue, etc.).
+///
+/// # Non-blocking contract
+///
+/// `emit()` must return quickly — do not `await` inside it. Hand off to an
+/// async consumer via a channel (`tokio::sync::mpsc::unbounded_channel` works
+/// well) rather than blocking the calling thread.
 pub trait EventSink: Send + Sync + 'static {
     /// Emit a named event with a JSON payload to the consumer.
     /// Implementations must be non-blocking — do not await inside emit().

@@ -25,6 +25,10 @@ use std::sync::Arc;
 
 // ── Node type category ────────────────────────────────────────────────────────
 
+/// Palette category for a node type.
+///
+/// Controls which section of the node picker the node appears in.
+/// Has no effect on execution behavior — the executor treats all categories identically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
@@ -36,9 +40,16 @@ pub enum NodeType {
 
 // ── Retry policy ──────────────────────────────────────────────────────────────
 
+/// Per-node retry configuration.
+///
+/// The executor re-attempts a node that returns a *recoverable* failure up to
+/// `max_attempts` times. Nodes returning an unrecoverable error are never retried
+/// regardless of this setting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
+    /// Total attempts allowed, including the first. `1` means no automatic retry.
     pub max_attempts: u32,
+    /// Fixed wait between attempts in milliseconds.
     pub backoff_ms: u64,
 }
 
@@ -61,6 +72,11 @@ pub struct CanvasPosition {
 
 // ── Workflow node ─────────────────────────────────────────────────────────────
 
+/// A single node instance on the workflow canvas.
+///
+/// `node_type_id` determines which registered [`crate::node::Node`] implementation is
+/// invoked. `config` holds the user-provided parameter values as freeform JSON;
+/// the node's `execute()` method deserializes the fields it needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowNode {
     /// Unique ID within this workflow (e.g. "node_abc123").
@@ -94,6 +110,7 @@ pub struct WorkflowNode {
     #[serde(default)]
     pub retry: RetryPolicy,
 
+    /// Reserved for future use — not read by the executor in the current version.
     #[serde(default)]
     pub fallback_node: Option<String>,
 
@@ -110,6 +127,11 @@ pub struct WorkflowNode {
 
 // ── Workflow edge ─────────────────────────────────────────────────────────────
 
+/// A directed connection between two nodes on the workflow canvas.
+///
+/// The executor uses `from_port` to determine which edge to follow after a node
+/// produces output. Multi-output nodes (e.g. `if_condition`, `switch`) write a
+/// `branch` key to their output; the executor matches that value against `from_port`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowEdge {
     /// Unique ID for this edge (used by canvas to track connectors).
@@ -120,10 +142,16 @@ pub struct WorkflowEdge {
     pub to_node: String,
     /// Input port name on the target node (e.g. "input").
     pub to_port: String,
+    /// Optional expression evaluated by the frontend canvas to control edge visibility.
+    /// Not evaluated by the executor — routing is determined by `from_port` alone.
     #[serde(default)]
     pub condition: Option<String>,
+    /// Alternate target node activated when the source node succeeds.
+    /// Used by the graph builder to register additional reachability edges.
     #[serde(default)]
     pub on_success: Option<String>,
+    /// Target node activated when the source node fails after all retry attempts.
+    /// When set, the executor routes the failure here instead of aborting the run.
     #[serde(default)]
     pub on_failure: Option<String>,
 }
@@ -159,6 +187,12 @@ use crate::migration::CURRENT_VERSION;
 
 fn default_schema_version() -> String { CURRENT_VERSION.to_string() }
 
+/// The root workflow document.
+///
+/// Stored as JSON in SQLite and exchanged over Tauri IPC and the server API.
+/// Use [`Workflow::from_json`] to deserialize — it applies any pending schema
+/// migrations before deserializing. Field names are part of the wire contract
+/// with the TypeScript frontend; do not rename without a coordinated frontend update.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     #[serde(default = "default_schema_version")]
@@ -235,6 +269,11 @@ impl Workflow {
 
 // ── Runtime models (not stored in JSON) ──────────────────────────────────────
 
+/// The fully resolved input passed to [`crate::node::Node::execute`].
+///
+/// Built by the executor immediately before calling `execute()`. The `input` field
+/// contains the node's config values with all `{{...}}` expressions evaluated and
+/// credential values already substituted — the node sees plaintext secrets directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInput {
     pub node_id: String,
@@ -245,6 +284,10 @@ pub struct NodeInput {
     pub context: ExecutionContext,
 }
 
+/// Read-only snapshot of workflow execution state at the moment a node is about to run.
+///
+/// Passed inside [`NodeInput`]. Nodes use this to read outputs from upstream nodes
+/// (via `node_outputs`) and workflow-level variables (via `variables`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionContext {
     pub variables: HashMap<String, Value>,
@@ -264,6 +307,12 @@ impl Default for ExecutionContext {
     }
 }
 
+/// The result returned by [`crate::node::Node::execute`].
+///
+/// Use the constructors ([`NodeOutput::success`], [`NodeOutput::failure`], etc.)
+/// rather than constructing this struct directly. When `success` is `true`, the
+/// `output` value is stored in the execution context and made available to downstream
+/// nodes via `{{$nodes.node_id.field}}` expressions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeOutput {
     pub success: bool,
@@ -277,12 +326,20 @@ impl NodeOutput {
     pub fn success(output: Value) -> Self {
         Self { success: true, output: Some(output), error: None, logs: vec![] }
     }
+    /// Construct a success result and attach additional log lines to the run history.
+    ///
+    /// Use instead of [`NodeOutput::success`] when the node has diagnostic output
+    /// worth preserving on the happy path (HTTP response headers, row counts, etc.).
     pub fn success_with_logs(output: Value, logs: Vec<String>) -> Self {
         Self { success: true, output: Some(output), error: None, logs }
     }
     pub fn failure(error: crate::error::NodeError) -> Self {
         Self { success: false, output: None, error: Some(error), logs: vec![] }
     }
+    /// Construct a failure result and attach additional log lines to the run history.
+    ///
+    /// Use instead of [`NodeOutput::failure`] when the node captured stderr or other
+    /// diagnostics before the error occurred.
     pub fn failure_with_logs(error: crate::error::NodeError, logs: Vec<String>) -> Self {
         Self { success: false, output: None, error: Some(error), logs }
     }

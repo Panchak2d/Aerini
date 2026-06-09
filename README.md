@@ -38,6 +38,7 @@ Developer guides:
 |---|---|
 | [Architecture](docs/architecture.md) | How the engine, Tauri shell, and server binary fit together |
 | [Custom Node Authoring](docs/node-authoring.md) | Adding new node types to Flowo |
+| [Plugin Authoring](docs/plugin-authoring.md) | Writing and distributing `.wasm` plugin nodes |
 | [Schema Migrations](docs/schema-migrations.md) | How workflow format changes are handled across versions |
 
 ---
@@ -59,6 +60,14 @@ Flowo ships 39 built-in nodes:
 **Integrations:** Slack, Discord, GitHub, Google Sheets, Notion, Telegram, Stripe
 
 **Data & Utility:** Transform Data, JSON, Set Variable, Get Variable, Output
+
+---
+
+## Plugins
+
+Flowo supports `.wasm` plugin nodes. Write a new node type in Rust, compile it to `wasm32-wasip2`, and drop the `.wasm` file into your plugin directory. Plugin nodes appear in the palette automatically and execute with the same isolation guarantees as built-in nodes — each call runs in a sandboxed Wasmtime instance with 64 MiB memory limit and outbound HTTP access but no filesystem access.
+
+See [Plugin Authoring](docs/plugin-authoring.md) to get started, or copy `examples/plugin-template/` as a starting point.
 
 ---
 

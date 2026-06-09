@@ -35,11 +35,18 @@ mod parallel;
 
 // ── Execution result ──────────────────────────────────────────────────────────
 
+/// The outcome of a complete workflow execution.
+///
+/// Returned by [`WorkflowExecutor::run`]. `success: false` with a populated `error`
+/// indicates the workflow was aborted. Individual node failures within an
+/// otherwise-successful run appear only in `logs`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowResult {
     pub execution_id: String,
     pub workflow_id: String,
     pub success: bool,
+    /// Output values from each completed node, keyed by node ID.
+    /// Each value is the `output` field from that node's [`crate::model::NodeOutput`].
     pub node_outputs: HashMap<String, Value>,
     pub logs: Vec<crate::context::ExecutionLogEntry>,
     pub error: Option<String>,
@@ -51,13 +58,34 @@ pub struct WorkflowResult {
 
 // ── Credential resolver ───────────────────────────────────────────────────────
 
+/// Provides resolved credential values to the executor at run time.
+///
+/// The executor calls `resolve(credential_id)` for each credential reference in
+/// the workflow before passing input to a node. Nodes receive the resolved plaintext
+/// value directly — they never see credential IDs or the backing store.
+///
+/// **Desktop app:** reads from the AES-256-GCM encrypted SQLite credential store.
+/// **Server binary:** reads from environment variables.
+/// **Embedders:** implement this trait for whatever secret store fits your context.
 #[async_trait::async_trait]
 pub trait CredentialResolver: Send + Sync + 'static {
+    /// Return the plaintext value for `credential_id`, or `None` if not found.
+    ///
+    /// `None` causes the corresponding credential field to resolve to an empty string
+    /// in the node's input. The executor does not treat a missing credential as a hard failure.
     async fn resolve(&self, credential_id: &str) -> Option<String>;
 }
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
+/// Runs a single workflow to completion.
+///
+/// Constructed with [`WorkflowExecutor::new`] and configured through fluent builder
+/// methods. The executor is `Clone` — you can share a configured instance across
+/// multiple concurrent `run()` calls without additional locking.
+///
+/// Each `run()` call creates its own internal execution state and does not mutate
+/// the executor, so clones are safe to use concurrently.
 #[derive(Clone)]
 pub struct WorkflowExecutor {
     pub(super) registry:            Arc<NodeRegistry>,
@@ -95,6 +123,10 @@ pub struct WorkflowExecutor {
 }
 
 impl WorkflowExecutor {
+    /// Create an executor with the minimum required components.
+    ///
+    /// All optional configuration (event sink, sandboxing, timeouts, parallel execution)
+    /// defaults to off. Use the builder methods to enable features before calling `run()`.
     pub fn new(
         registry:            Arc<NodeRegistry>,
         credential_resolver: Arc<dyn CredentialResolver>,
@@ -297,6 +329,15 @@ impl WorkflowExecutor {
         }
     }
 
+    /// Execute `workflow`, returning a [`WorkflowResult`] on success.
+    ///
+    /// `initial_variables` are merged into the execution context before the first node
+    /// runs and are accessible in any node config field via `{{$vars.key}}` expressions.
+    ///
+    /// Returns `Err(EngineError::WorkflowTimeout)` if the workflow exceeds its configured
+    /// maximum duration. Graph errors (cycles, unknown node references) and unregistered
+    /// node types also return `Err`. Individual node failures are recorded in the result
+    /// and do not cause an `Err` return unless the workflow has no recovery path.
     pub async fn run(
         &self,
         workflow: Arc<Workflow>,

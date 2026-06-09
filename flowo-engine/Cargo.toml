@@ -106,6 +106,15 @@ redis = { version = "1.0", features = ["tokio-comp"] }
 #   default-https-client     — modern rustls 0.23 TLS path (avoids RUSTSEC-2026-0099 legacy stack)
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 
+# WASM plugin system (Patches W1–W4)
+# component-model feature only — component-model-async is NOT enabled (sync WIT interface).
+# 45.0.1 is safe from RUSTSEC-2026-0091 (string transcoding OOB, fixed in 43.0.1+).
+# wasmtime-wasi and wasmtime-wasi-http stay at 45.0.0 (no .1 patch release for those crates).
+# wasmtime-wasi-http adds wasi:http/outgoing-handler; PLAN.md incorrectly omitted this crate.
+wasmtime           = { version = "45.0.1", features = ["component-model"] }
+wasmtime-wasi      = "45.0.0"
+wasmtime-wasi-http = { version = "45.0.0", features = ["p2"] }
+
 # Security: pin rustls-webpki to patched version (RUSTSEC-2026-0098, -0099, -0104).
 # Transitive via reqwest/sqlx/rustls. Direct dep forces Cargo to unify at >=0.103.13.
 # Remove once reqwest/sqlx update their own pins.

@@ -33,14 +33,36 @@ use crate::model::{NodeInput, NodeOutput, NodeType};
 
 // ── Node trait ────────────────────────────────────────────────────────────────
 
+/// A node type that can be registered and executed by the workflow engine.
+///
+/// Implement this trait on a unit struct (or a struct holding shared read-only state).
+/// The executor holds all registered nodes behind `Arc<dyn Node>` and dispatches through
+/// them at run time — implementations must be `Send + Sync`.
+///
+/// The trait is object-safe; do not add non-object-safe methods.
 #[async_trait]
 pub trait Node: Send + Sync {
-    /// Matches WorkflowNode.node_type_id (e.g. "http_request", "shell_exec").
+    /// Matches `WorkflowNode.node_type_id` (e.g. `"http_request"`, `"shell_exec"`).
+    /// Must be globally unique across all registered nodes.
     fn type_id(&self) -> &'static str;
+
+    /// Human-readable label shown in the node palette and as the canvas block title.
     fn display_name(&self) -> &'static str;
+
+    /// Palette category — determines which section of the node picker this node appears in.
     fn node_type(&self) -> NodeType;
+
+    /// Semver version string for this implementation (e.g. `"1.0.0"`).
+    /// Stored in [`NodeDescriptor`] and included in run history for future migration tooling.
     fn version(&self) -> &'static str;
+
+    /// JSON Schema (Draft 7) describing the config fields shown in the node's config panel.
+    /// Return `serde_json::Value::Null` or `json!({})` to declare no schema constraints.
     fn input_schema(&self) -> Value;
+
+    /// JSON Schema (Draft 7) describing the shape of the value written to
+    /// [`crate::model::NodeOutput::output`] on success.
+    /// Return `serde_json::Value::Null` or `json!({})` to declare no schema constraints.
     fn output_schema(&self) -> Value;
 
     /// Port definitions — what connectors this node exposes.
@@ -64,6 +86,14 @@ pub trait Node: Send + Sync {
         None
     }
 
+    /// Execute this node with the resolved inputs in `input`.
+    ///
+    /// **Contract:**
+    /// - Never panic — return [`crate::model::NodeOutput::failure`] for all error conditions.
+    /// - Do not block the async executor — use `tokio::task::spawn_blocking` for CPU-intensive work.
+    /// - The executor retries on *recoverable* failures up to `RetryPolicy::max_attempts`.
+    ///   Mark an error unrecoverable when retrying would have no effect
+    ///   (invalid config, auth rejection, etc.).
     async fn execute(&self, input: NodeInput) -> NodeOutput;
 }
 
@@ -114,6 +144,10 @@ impl Default for NodePorts {
 
 // ── Node registry ─────────────────────────────────────────────────────────────
 
+/// Map from `type_id` to registered [`Node`] implementation.
+///
+/// Built once at startup via [`crate::nodes::register_builtins`], then wrapped in `Arc`
+/// and shared across executor instances for the lifetime of the process.
 pub struct NodeRegistry {
     nodes: HashMap<String, Arc<dyn Node>>,
 }
@@ -123,6 +157,10 @@ impl NodeRegistry {
         Self { nodes: HashMap::new() }
     }
 
+    /// Register a node implementation, keyed by its [`Node::type_id`].
+    ///
+    /// If a node with the same `type_id` is already registered it is silently
+    /// replaced. Call order determines which implementation wins for a given type.
     pub fn register(&mut self, node: Arc<dyn Node>) {
         self.nodes.insert(node.type_id().to_string(), node);
     }
@@ -149,6 +187,12 @@ impl Default for NodeRegistry {
 
 // ── Node descriptor (serializable, sent to UI) ───────────────────────────────
 
+/// Serializable snapshot of a node's static metadata.
+///
+/// Sent to the frontend so it can populate the node palette and configure
+/// port layout without holding a reference to the [`Node`] trait object.
+/// Built by [`NodeDescriptor::from_node`] and returned by
+/// [`NodeRegistry::all_descriptors`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NodeDescriptor {
     pub type_id: String,

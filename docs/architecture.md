@@ -5,7 +5,7 @@ How Flowo is structured, why it's split the way it is, and how execution actuall
 ## The three-crate split
 
 ```
-flowo-engine/     — core library: workflow model, executor, scheduler, node registry, 39 nodes
+flowo-engine/     — core library: workflow model, executor, scheduler, node registry, 39 built-in nodes, WASM plugin loader
 src-tauri/        — Tauri shell: IPC commands, system tray, app lifecycle
 flowo-server/     — headless binary: HTTP API, serve mode CLI, control commands
 ```
@@ -119,6 +119,18 @@ For version `"1.0"` workflows — which is all existing workflows — step 2 is 
 **If a workflow was created by a newer Flowo build** and this build has no migration path to that version, `from_json()` returns an error rather than silently loading malformed data. The error message tells the user to upgrade Flowo.
 
 See [`schema-migrations.md`](schema-migrations.md) for the full migration contract, how to write a migration function, and backup guidance for production deployments.
+
+## WASM plugin loader
+
+`flowo-engine/src/plugin_loader.rs` loads third-party node types from `.wasm` files at startup. It is the only part of the engine that depends on Wasmtime.
+
+`PluginLoader` holds a shared `wasmtime::Engine` (expensive to construct; one per process). `load_plugins(registry, dir)` iterates `.wasm` files in `dir`, compiles each with the Component Model enabled, validates that it exports the `flowo-node` world, calls `describe()` once to populate its `NodeDescriptor`, and registers the resulting `WasmPluginNode` in `NodeRegistry`. Failed files are logged as warnings and skipped.
+
+Each `execute()` call creates a fresh `wasmtime::Store` for isolation. The pre-linked `InstancePre` (stored in the node via `FlowoNodePre`, not the raw component bytes) is re-instantiated per call — instantiation from an `InstancePre` is fast; recompilation and re-linking are not. Execution runs inside `tokio::task::spawn_blocking` so the async executor is never blocked.
+
+The WASI surface available to plugins is: full WASIp2 (clocks, random, stdio) via `wasmtime-wasi`, and outbound HTTP via `wasmtime-wasi-http`. Filesystem access is provided at the WASI API level but all paths return errors — no directories are mounted.
+
+See [`docs/plugin-authoring.md`](plugin-authoring.md) for how to write and distribute plugins.
 
 ## What's not in the engine
 
