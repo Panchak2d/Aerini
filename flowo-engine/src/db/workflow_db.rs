@@ -4,6 +4,10 @@ use uuid::Uuid;
 use super::{WorkflowDb, WorkflowSummary, VersionRow};
 use crate::model::Workflow;
 
+/// Maximum number of versions retained per workflow.
+/// Oldest versions beyond this cap are pruned on each `save_version` call.
+const MAX_VERSIONS: usize = 50;
+
 impl WorkflowDb {
     pub fn save(&self, workflow: &Workflow) -> Result<(), String> {
         let json = workflow.to_json_pretty().map_err(|e| e.to_string())?;
@@ -85,18 +89,32 @@ impl WorkflowDb {
         Ok((items, total))
     }
 
+    /// Deletes a workflow and ALL associated data atomically.
+    ///
+    /// Covers: workflow_variables, run_history, scheduled_jobs, and the workflows row.
+    /// workflow_versions are handled by the FK ON DELETE CASCADE on the workflows row.
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let mut conn = self.pool.get().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // workflow_variables: no FK cascade — must delete explicitly.
         tx.execute("DELETE FROM workflow_variables WHERE workflow_id = ?1", rusqlite::params![id])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM workflow_versions WHERE workflow_id = ?1", rusqlite::params![id])
+        // run_history and scheduled_jobs: no FK cascade — must delete explicitly.
+        tx.execute("DELETE FROM run_history WHERE workflow_id = ?1", rusqlite::params![id])
             .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM scheduled_jobs WHERE workflow_id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        // workflow_versions: FK ON DELETE CASCADE fires when the workflows row is deleted below.
         tx.execute("DELETE FROM workflows WHERE id = ?1", rusqlite::params![id])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
 
+    /// Deletes only the scheduled_job row for a workflow.
+    ///
+    /// Prefer `delete()` when removing a workflow entirely — it covers all associated
+    /// data in a single transaction. Use this only when unscheduling without deleting
+    /// the workflow itself.
     pub fn delete_scheduled_job(&self, workflow_id: &str) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
@@ -106,6 +124,10 @@ impl WorkflowDb {
         Ok(())
     }
 
+    /// Deletes all run history for a workflow.
+    ///
+    /// Prefer `delete()` when removing a workflow entirely. Use this only when
+    /// clearing history while keeping the workflow itself.
     pub fn delete_runs_for_workflow(&self, workflow_id: &str) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
@@ -162,9 +184,9 @@ impl WorkflowDb {
             "DELETE FROM workflow_versions WHERE workflow_id = ?1
              AND id NOT IN (
                  SELECT id FROM workflow_versions WHERE workflow_id = ?1
-                 ORDER BY created_at DESC LIMIT 50
+                 ORDER BY created_at DESC LIMIT ?2
              )",
-            rusqlite::params![workflow_id, workflow_id],
+            rusqlite::params![workflow_id, MAX_VERSIONS as i64],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }

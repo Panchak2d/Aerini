@@ -20,12 +20,15 @@ impl WorkflowDb {
             ],
         ).map_err(|e| e.to_string())?;
 
+        // Trim to history_limit only when over the limit (> not >=).
+        // Using >= would fire on every insert at steady state (count == limit after insert)
+        // causing a wasted DELETE + subquery on each run.
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM run_history WHERE workflow_id = ?1",
             rusqlite::params![record.workflow_id],
             |row| row.get(0),
         ).unwrap_or(0);
-        if count >= self.history_limit {
+        if count > self.history_limit {
             conn.execute(
                 "DELETE FROM run_history WHERE workflow_id = ?1
                  AND id NOT IN (
