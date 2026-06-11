@@ -3,9 +3,10 @@ use std::io::Write;
 use std::sync::Arc;
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    password_hash::{rand_core::{OsRng, RngCore}, PasswordHasher, SaltString},
     Argon2,
 };
+use base64::Engine as _;
 
 use flowo_engine::{
     db::WorkflowDb,
@@ -109,11 +110,14 @@ pub async fn generate_server_package(
         .collect();
 
     // Generate a per-export run secret so POST /api/run is authenticated.
-    // Uses uuid v4 for 122 bits of entropy — adequate for a status page token.
+    // Uses 32 bytes from OsRng (256 bits of entropy), matching the entropy
+    // source used for API tokens and credential keys throughout the codebase.
     // Stored as an argon2id hash (brute-force resistant); the raw secret is
     // returned to the UI for one-time display and never written to disk.
     // spawn_blocking: argon2 is CPU-intensive and must not block the async runtime.
-    let run_secret_raw   = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let mut raw = [0u8; 32];
+    OsRng.fill_bytes(&mut raw);
+    let run_secret_raw   = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
     let secret_for_hash  = run_secret_raw.clone();
     let run_secret_hash  = tokio::task::spawn_blocking(move || hash_run_secret(&secret_for_hash))
         .await
@@ -220,7 +224,7 @@ pub async fn generate_server_package(
 fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
     let mut out = Vec::new();
     for node in &wf.nodes {
-        for (_, cred_id) in &node.credentials {
+        for cred_id in node.credentials.values() {
             let env_var = credential_id_to_env_var(cred_id);
             if !out.iter().any(|c: &CredentialExport| &c.credential_id == cred_id) {
                 out.push(CredentialExport {
@@ -235,7 +239,7 @@ fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
 }
 
 fn credential_id_to_env_var(id: &str) -> String {
-    format!("FLOWO_CRED_{}", id.to_uppercase().replace('-', "_").replace('.', "_"))
+    format!("FLOWO_CRED_{}", id.to_uppercase().replace(['-', '.'], "_"))
 }
 
 /// Generate a Docker deployment package for single-workflow serve mode.
@@ -268,7 +272,9 @@ pub async fn generate_docker_package(
         .map(|c| (c.credential_id.clone(), c.env_var_name.clone()))
         .collect();
 
-    let run_secret_raw   = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let mut raw = [0u8; 32];
+    OsRng.fill_bytes(&mut raw);
+    let run_secret_raw   = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
     let secret_for_hash  = run_secret_raw.clone();
     let run_secret_hash  = tokio::task::spawn_blocking(move || hash_run_secret(&secret_for_hash))
         .await

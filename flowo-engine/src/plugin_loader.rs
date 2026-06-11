@@ -487,12 +487,17 @@ fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
 /// Load all WASM plugins from `plugin_dir` and register them in `registry`.
 ///
 /// Constructs a [`PluginLoader`] (and a Wasmtime engine) internally.
-/// Called by `flowo-server` and `src-tauri` after [`crate::nodes::register_builtins`]
-/// (Patch W3).
+/// Called by `flowo-server` and `src-tauri` after [`crate::nodes::register_builtins`].
+/// Seals the built-in namespace before registering any plugins so that a plugin
+/// whose `type_id` collides with a built-in is rejected rather than silently replacing it.
 ///
 /// If the Wasmtime engine fails to initialise, an error is logged and the function
 /// returns without registering any plugins — the process continues normally.
 pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
+    // Seal the built-in namespace before loading any plugins so that a plugin
+    // cannot shadow a built-in node type (e.g. "http_request", "shell_exec").
+    registry.seal_builtins();
+
     let loader = match PluginLoader::new() {
         Ok(l) => l,
         Err(e) => {
@@ -505,14 +510,25 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
     };
 
     let nodes = loader.load_plugins_from_dir(plugin_dir);
-    let count = nodes.len();
+    let mut loaded = 0usize;
+    let mut rejected = 0usize;
     for node in nodes {
-        registry.register(node);
+        match registry.register_plugin(node) {
+            Ok(()) => loaded += 1,
+            Err(_) => rejected += 1,   // warning already emitted inside register_plugin
+        }
     }
 
+    if rejected > 0 {
+        tracing::warn!(
+            "plugin_loader: {} plugin node(s) rejected (built-in type_id collision) from {}",
+            rejected,
+            plugin_dir.display()
+        );
+    }
     tracing::info!(
         "plugin_loader: loaded {} plugin node(s) from {}",
-        count,
+        loaded,
         plugin_dir.display()
     );
 }

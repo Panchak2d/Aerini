@@ -26,7 +26,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
@@ -148,21 +148,62 @@ impl Default for NodePorts {
 ///
 /// Built once at startup via [`crate::nodes::register_builtins`], then wrapped in `Arc`
 /// and shared across executor instances for the lifetime of the process.
+///
+/// # Built-in protection
+///
+/// After all built-in nodes are registered, call [`seal_builtins`] to lock the
+/// current set of type IDs as reserved. Any subsequent [`register_plugin`] call
+/// whose `type_id` collides with a built-in is rejected with an error and a
+/// `WARN`-level log, preventing malicious or misconfigured WASM plugins from
+/// silently replacing built-in node implementations.
 pub struct NodeRegistry {
-    nodes: HashMap<String, Arc<dyn Node>>,
+    nodes:    HashMap<String, Arc<dyn Node>>,
+    builtins: HashSet<String>,
 }
 
 impl NodeRegistry {
     pub fn new() -> Self {
-        Self { nodes: HashMap::new() }
+        Self { nodes: HashMap::new(), builtins: HashSet::new() }
     }
 
-    /// Register a node implementation, keyed by its [`Node::type_id`].
+    /// Register a built-in node implementation, keyed by its [`Node::type_id`].
     ///
     /// If a node with the same `type_id` is already registered it is silently
-    /// replaced. Call order determines which implementation wins for a given type.
+    /// replaced — duplicates among builtins indicate a programming error but are
+    /// not fatal. Call [`seal_builtins`] after all built-ins are registered.
     pub fn register(&mut self, node: Arc<dyn Node>) {
         self.nodes.insert(node.type_id().to_string(), node);
+    }
+
+    /// Lock the current set of registered type IDs as the built-in namespace.
+    ///
+    /// Must be called once, after [`crate::nodes::register_builtins`] and before
+    /// any [`register_plugin`] call. Subsequent plugin registrations that collide
+    /// with a sealed type ID are rejected.
+    pub fn seal_builtins(&mut self) {
+        self.builtins = self.nodes.keys().cloned().collect();
+    }
+
+    /// Register a WASM plugin node.
+    ///
+    /// Returns `Err` if the plugin's `type_id` conflicts with a sealed built-in.
+    /// A `WARN` log is emitted in both the error case (builtin collision) and the
+    /// plugin-on-plugin collision case (a different plugin already claimed the ID).
+    pub fn register_plugin(&mut self, node: Arc<dyn Node>) -> Result<(), String> {
+        let id = node.type_id();
+        if self.builtins.contains(id) {
+            let msg = format!("plugin type_id '{id}' conflicts with a built-in node — rejected");
+            tracing::warn!("{}", msg);
+            return Err(msg);
+        }
+        if self.nodes.contains_key(id) {
+            tracing::warn!(
+                "plugin type_id '{}' already registered by another plugin — overwriting",
+                id
+            );
+        }
+        self.nodes.insert(id.to_string(), node);
+        Ok(())
     }
 
     /// Look up by node_type_id (e.g. "http_request").

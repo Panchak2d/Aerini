@@ -142,7 +142,7 @@ export function buildSidebarPalette(
       const item = document.createElement("div");
       item.className = "palette-item";
       item.dataset.search = `${desc.display_name} ${desc.node_type} ${desc.type_id}`.toLowerCase();
-      item.innerHTML = `<span class="palette-dot dot-${desc.node_type}"></span><span class="palette-name">${desc.display_name}</span>`;
+      item.innerHTML = `<span class="palette-dot dot-${desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -257,8 +257,8 @@ function renderPaletteResults(q: string): void {
       row.innerHTML = `
         <div class="palette-result-icon palette-result-icon--${catClass}">${icon}</div>
         <div>
-          <div class="palette-result-name">${desc.display_name}</div>
-          <div class="palette-result-cat">${CAT_NAMES[desc.node_type] ?? desc.node_type}</div>
+          <div class="palette-result-name">${escapeHtml(desc.display_name)}</div>
+          <div class="palette-result-cat">${escapeHtml(CAT_NAMES[desc.node_type] ?? desc.node_type)}</div>
         </div>
         <kbd class="palette-result-kbd">Enter</kbd>`;
 

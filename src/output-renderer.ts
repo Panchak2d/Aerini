@@ -313,8 +313,7 @@ function renderTypedOutput(typeId: string, out: unknown, nodeName: string): stri
     case NODE_IDS.AI_AGENT:    return renderAiOutput(out, nodeName);
     case NODE_IDS.OUTPUT:         return renderOutputNodeResult(out, nodeName);
     case NODE_IDS.SOCIAL_UPLOAD:  return renderSocialUploadOutput(out, nodeName);
-    case NODE_IDS.CODE:
-    case NODE_IDS.TRANSFORM_DATA: return renderCodeOutput(out, nodeName);
+    case NODE_IDS.CODE:            return renderCodeOutput(out, nodeName);
     default:            return renderGenericOutput(out, nodeName);
   }
 }
@@ -578,7 +577,7 @@ function typeLabel(typeId: string): string {
   const labels: Record<string, string> = {
     http_request: "HTTP", ai_prompt: "AI", ai_agent: "AI Agent",
     output: "Output", schedule: "Trigger", webhook: "Webhook",
-    manual_trigger: "Trigger", code: "Code", transform_data: "Transform",
+    manual_trigger: "Trigger", code: "Code", transform: "Transform",
     if_condition: "Condition", loop: "Loop", send_email: "Email",
     shell_exec: "Shell", set_variable: "Variable", get_variable: "Variable",
   };

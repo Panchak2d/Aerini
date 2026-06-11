@@ -61,6 +61,21 @@ If you run multiple Webhook nodes concurrently, each needs a different port. Sta
 
 ---
 
+## Security: the built-in secret does not sign the request body
+
+The Webhook node's built-in **Secret** field validates that the caller knows the secret, but it does **not** cryptographically bind that secret to the request body. A network attacker who captures one valid request can replay it with the same header value, because the secret proves caller identity rather than message integrity.
+
+The optional **Validate Timestamp** setting narrows the replay window to 5 minutes, but the timestamp is not body-bound either — a captured body combined with a fresh timestamp still bypasses it.
+
+**For payment processors and other high-stakes integrations** (Stripe, GitHub, Twilio, etc.) that send their own HMAC-SHA256 body signatures, verify the platform's native header in a downstream **Code** node rather than relying on the built-in secret alone:
+
+- Stripe: verify `Stripe-Signature` (see [Stripe docs](https://stripe.com/docs/webhooks/signatures))
+- GitHub: verify `X-Hub-Signature-256` (see [GitHub docs](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries))
+
+For full details see [security.md — Webhook security](security.md#6-webhook-security).
+
+---
+
 ## Server deployments
 
 If you're running `flowo-server` on a VPS or cloud instance, use a reverse proxy (Caddy or Nginx) instead of a tunnel. See [server-deploy.md](server-deploy.md) for instructions.

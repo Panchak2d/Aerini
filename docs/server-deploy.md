@@ -91,6 +91,8 @@ Serve mode exposes a status page at `http://127.0.0.1:<port>/` where `<port>` is
 
 The status page binds to `127.0.0.1` by default. To expose it on a network interface, add `--bind 0.0.0.0` to the `ExecStart` line in the systemd unit file (but put it behind a reverse proxy with authentication first).
 
+> **Warning:** Without a `run_secret` in `flowo-server.json`, the status page is **unauthenticated** and publicly accessible. It exposes the workflow name, trigger type, run counts, last-run status, and timestamps. If this information is sensitive, always export workflows with a `run_secret` set (the desktop app generates one automatically at export time).
+
 ### Serve mode CLI reference
 
 ```bash
