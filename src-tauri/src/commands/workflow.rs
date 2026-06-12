@@ -25,6 +25,19 @@ pub async fn save_run_record(
 }
 
 #[tauri::command]
+pub async fn save_run_started(
+    id: String,
+    workflow_id: String,
+    workflow_name: String,
+    ran_at: String,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<(), String> {
+    let db = Arc::clone(&db);
+    tokio::task::spawn_blocking(move || db.save_run_started(&id, &workflow_id, &workflow_name, &ran_at))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn list_run_records(
     workflow_id: String,
     offset:      i64,

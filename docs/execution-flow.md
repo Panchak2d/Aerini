@@ -1,6 +1,6 @@
 # Execution Flow — Internals
 
-This document explains how Flowo turns a saved workflow JSON into a completed run, step by step. It is aimed at contributors and embedders, not end users.
+How Flowo turns a saved workflow JSON into a completed run. This page is for contributors and embedders, not for general use.
 
 ---
 
@@ -38,13 +38,13 @@ sequenceDiagram
     note over T,E: permit + lock released on drop
 ```
 
-Every execution is driven by a single entry point: `WorkflowExecutor::run()` in `flowo-engine/src/executor/mod.rs`.
+Every execution flows through a single entry point: `WorkflowExecutor::run()` in `flowo-engine/src/executor/mod.rs`.
 
 ---
 
 ## 1. Trigger
 
-A run begins from one of three sources:
+Runs originate from three sources:
 
 | Source | Code path |
 |---|---|
@@ -58,191 +58,119 @@ All three converge on `WorkflowExecutor::run()`. The trigger type is stored in t
 
 ## 2. Concurrent-run control
 
-Before any executor is constructed, two guards are taken:
+Two guards are acquired before any executor is constructed:
 
-1. **Global semaphore** (`run_semaphore`) — limits the total number of simultaneous executions across all workflows. Default: 16 (server) and 16 (scheduler). Configurable with `--max-concurrent-runs`. Acquiring this semaphore queues the run rather than rejecting it (scheduler) or returns HTTP 429 (server).
+**Global semaphore** (`run_semaphore`) — caps total simultaneous executions across all workflows. Default: 16 (configurable with `--max-concurrent-runs`). Acquiring this semaphore *queues* the run rather than rejecting it. The scheduler blocks until a slot opens; the server returns HTTP 429 if no slot opens within the queue timeout.
 
-2. **Per-workflow mutex** (`exec_lock` / `exec_locks`) — ensures only one instance of a given workflow runs at a time. If the lock cannot be taken, the run is skipped with a "previous run still in progress" log.
+**Per-workflow mutex** (`exec_lock`) — ensures at most one instance of a given workflow runs at a time. If the lock can't be acquired (a run is already active), the attempt is skipped with a "previous run still in progress" log entry. This is not an error — it's intentional back-pressure.
+
+Both guards are released automatically on drop when the run completes.
 
 ---
 
 ## 3. Workflow loading
 
-The executor reads the workflow from the database (`WorkflowDb`), applies any pending schema migrations (`migration.rs`), then deserialises it into a `Workflow` struct (`model.rs`).
+The executor reads the workflow from `WorkflowDb`, applies any pending schema migrations (`migration.rs`), then deserializes the result into a `Workflow` struct (`model.rs`).
 
-If `schema_version` differs from `CURRENT_VERSION` (defined in `migration.rs`), the migration chain runs upgrade functions in order until the workflow reaches the current schema.
+If `schema_version` differs from `CURRENT_VERSION`, the migration chain runs upgrade functions in sequence until the workflow reaches the current schema. This is invisible to the caller — it happens inside `Workflow::from_json()` every time a workflow is loaded.
 
 ---
 
 ## 4. Graph construction
 
-`ExecutionGraph::from_workflow()` converts the flat `nodes` / `edges` list into a directed acyclic graph using `petgraph`. It validates:
+`ExecutionGraph::from_workflow()` converts the flat `nodes` and `edges` list into a directed acyclic graph using `petgraph`. It validates:
 
-- No cycles
+- No cycles (a cycle means the workflow can never terminate)
 - All edge references resolve to known node IDs
-- At least one node with no incoming edges (trigger node)
+- At least one node with no incoming edges (the trigger)
 
-If validation fails, the executor emits a `workflow-error` event and returns without running.
+If validation fails, the executor emits a `workflow-error` event and returns without running. The error is visible in the output drawer.
 
 ---
 
 ## 5. Expression resolution
 
-Before a node executes, its `config` map is walked by the expression resolver (`expression/resolver.rs`). Expressions use the syntax `{{node_id.field.path}}` and resolve against:
+Before a node executes, its config map is walked by the expression resolver (`expression/resolver.rs`). Expressions using `{{node_name.output.field}}` syntax are resolved against:
 
-- `input.context.node_outputs` — results of previously completed nodes
-- `input.context.variables` — variables injected at run start (trigger payload, manual vars)
+- `context.node_outputs` — results of previously completed nodes
+- `context.variables` — variables injected at run start (trigger payload, initial variables from an API call)
 
-Resolution failures are logged at `Warn` level and do not stop execution — the unresolved template string is passed through unchanged.
+Resolution failures are logged at `Warn` level and do not stop execution. The unresolved `{{...}}` template is passed through unchanged, producing an empty string in the node's input.
 
 ---
 
 ## 6. Node execution
 
-Nodes are run by one of two strategies, selected by `Workflow::parallel_execution`:
+Each node receives a `NodeInput` containing its fully-resolved config and execution context. The node does its work and returns a `NodeOutput` containing:
 
-| Mode | Module | Behaviour |
-|---|---|---|
-| Sequential (default) | `executor/sequential.rs` | Topological sort, one node at a time |
-| Parallel | `executor/parallel.rs` | Ready nodes (all parents done) run concurrently up to `max_concurrent_nodes` |
+- `success: bool`
+- `output: Value` — the JSON data available to downstream nodes
+- `logs: Vec<String>` — lines shown in the Logs tab
+- `error: Option<NodeError>` — present if `success` is false
 
-Each node receives a `NodeInput` and returns a `NodeOutput`. The executor writes the output into `SharedExecutionState.node_outputs` before advancing to successors.
+After each node:
 
-The loop node (`executor/loop_executor.rs`) handles `loop_node` type specially: it iterates over an array in the node output and re-runs its subgraph for each element.
-
----
-
-## 7. Error handling
-
-`NodeOutput` carries a `success: bool` and an optional `NodeError { code, message, recoverable }`.
-
-- `recoverable: true` — the executor applies the node's retry policy (`max_attempts`, `backoff_ms`), then routes to `fallback_node` if configured.
-- `recoverable: false` — the executor short-circuits immediately, recording the failure in `SharedExecutionState`.
-
-The maximum total execution time is bounded by `server_max_duration_secs` (server flag `--max-duration`). A `CancellationToken` propagates the deadline through async tasks.
+1. The output is stored in `SharedExecutionState.node_outputs` under the node's ID.
+2. A `node-complete` event is emitted through `EventSink` (updates the canvas in real time).
+3. If `success` is false:
+   - If `on_error` port is wired: execution routes through it.
+   - If not wired: the workflow stops and the run is marked failed.
 
 ---
 
-## 8. Events
+## 7. Parallel execution
 
-Throughout execution the executor calls `EventSink::emit(event, payload)`. In the Tauri app, the event sink is a thin wrapper over `tauri::AppHandle::emit_all`. In the server, it writes to an SSE stream.
+When `parallel_execution: true` is set on a workflow, the executor uses `executor/parallel.rs` instead of `executor/sequential.rs`. Independent nodes — those whose upstream dependencies have all produced output — are dispatched as concurrent Tokio tasks, bounded by `max_concurrent_nodes` (default: 8).
 
-Key events:
-
-| Event | When |
-|---|---|
-| `workflow-started` | Immediately before node execution begins |
-| `node-started` | Before each node execute() call |
-| `node-completed` | After each successful node |
-| `node-failed` | After a non-recoverable node failure |
-| `workflow-completed` | After the last node succeeds |
-| `workflow-failed` | After a fatal failure |
-| `scheduler-status` | On scheduler state changes (waiting / running / error / done) |
+The `SharedExecutionState` is wrapped in an `Arc<Mutex<...>>` for safe concurrent access. Each task acquires the lock only to read its inputs and write its output — not during the actual node execution, which runs outside the lock.
 
 ---
 
-## 9. Result recording
+## 8. Run completion
 
-On completion, the executor writes a `RunRecord` to `WorkflowDb` (SQLite). The record includes: execution ID, workflow ID, start time, duration, success flag, and the full `node_outputs` map serialised as JSON.
+Before the first node ever executes, the executor writes a `RunRecord` to the database with status `running` — so a run that's in progress shows up in the History tab immediately, not only once it finishes.
 
-In the Tauri app, the last N records are also mirrored to `localStorage` via `run-history.ts` for instant panel display on reload.
+After all nodes have executed (or execution has been stopped by a failure or a Stop node), the executor:
+
+1. Emits a `run-complete` event through `EventSink`.
+2. Overwrites that same `RunRecord` with the final status (`success` or `failed`), duration, all node outputs, and all log entries.
+3. Releases the concurrent-run guards.
+
+The `WorkflowResult` returned from `run()` contains the same data as the `RunRecord`. Callers (the Tauri IPC handler, the HTTP `/run` endpoint) forward this to whoever triggered the run.
+
+If the process is killed or crashes between step 0 and the final write, the `running` record is left behind. The next time the scheduler starts up, it sweeps any `running` records for that workflow and relabels them `interrupted` — see [Background Runs — run history and the "interrupted" status](background-runs.md#run-history-and-the-interrupted-status) for what this looks like from the UI.
 
 ---
 
-## 10. Credential resolution
+## 9. Error recovery and retries
 
-Nodes that require credentials receive them via `CredentialResolver::resolve(credential_id)`. In the Tauri app this reads from the encrypted `CredentialStore` (keychain-backed). In the server it reads from environment variables via `EnvCredentialResolver`.
+If a node fails and `max_attempts > 1` is configured:
 
-Credentials are never written to `node_outputs` or run records.
+1. The executor waits `backoff_ms` milliseconds.
+2. Re-resolves expressions (the execution context hasn't changed between attempts).
+3. Calls `node.execute()` again.
+4. Repeats until `max_attempts` is exhausted or the node succeeds.
+
+Only errors where `NodeError.recoverable == true` are retried. Unrecoverable errors fail immediately regardless of `max_attempts`.
+
+Nodes with side effects (Slack, Send Email, Stripe, etc.) execute their side effect on every attempt. Set `max_attempts > 1` only on idempotent operations.
 
 ---
 
-## Worked example: `http_request → transform`
+## 10. Graceful shutdown
 
-This traces a two-node workflow through the full execution loop.
+This applies to `flowo-server` (both serve mode and API mode). The desktop app doesn't drain on quit — closing the window stops jobs immediately, which is why an in-progress run shows as `interrupted` afterwards (see section 8).
 
-### Workflow definition (abbreviated)
+`flowo-server` handles `SIGTERM` (the signal `systemctl stop` and `systemctl restart` send) by **draining** instead of stopping cold:
 
-```json
-{
-  "nodes": [
-    { "id": "n1", "node_type_id": "http_request", "config": { "url": "https://api.example.com/users/1", "method": "GET" } },
-    { "id": "n2", "node_type_id": "transform_data", "config": { "code": "return { name: input.body.name.toUpperCase() };" } }
-  ],
-  "edges": [{ "id": "e1", "source": "n1", "target": "n2" }]
-}
-```
+1. The scheduler flips an internal "shutting down" flag. Every trigger loop (Schedule/interval, Cron, Webhook) checks this flag at its next natural checkpoint and stops starting new runs — an interval timer won't fire again, a webhook listener starts returning `503 Service Unavailable` to new requests instead of accepting them.
+2. Any run that's *already in progress* is left alone to finish normally — it isn't aborted.
+3. The server waits for all in-progress runs to reach zero, checking every 100 ms.
+4. If everything finishes before the timeout, the process exits cleanly — every run in the history ends as `success` or `failed`, never `interrupted`.
+5. If runs are still going after the timeout, the server gives up waiting and force-stops everything so the process can actually exit (a `systemctl restart` shouldn't be able to hang forever). Any run still going at that point ends as `interrupted`.
 
-### Step 1 — n1 executes, output stored
+**The timeout** is whatever you've set with `--max-workflow-duration-secs`. If you haven't set that flag, it defaults to 30 seconds. In other words: graceful shutdown waits up to as long as your longest workflow is allowed to run, so a normal restart shouldn't cut anything off — but it won't wait forever either.
 
-`HttpRequestNode::execute()` returns:
+This is separate from the **Stop** button (desktop) and the `POST /api/scheduler/:id/stop` endpoint, which still abort immediately as before — those are explicit "I want this to stop now" actions, not a process shutdown, so they don't drain.
 
-```json
-{
-  "success": true,
-  "output": {
-    "status": 200,
-    "body": { "id": 1, "name": "alice" },
-    "headers": { "content-type": "application/json" }
-  }
-}
-```
-
-Executor writes this into `SharedExecutionState.node_outputs`:
-
-```json
-{
-  "n1": { "status": 200, "body": { "id": 1, "name": "alice" }, "headers": { ... } }
-}
-```
-
-### Step 2 — expression resolution for n2
-
-Before n2 executes, `expression::Resolver` walks `n2.config` and resolves `{{expr}}` patterns against `context.node_outputs`.
-
-Raw config (as stored):
-```json
-{ "code": "return { name: input.body.name.toUpperCase() };" }
-```
-
-n2's config has no `{{expr}}` expressions — it uses `input` (the runtime NodeInput), not cross-node references. No substitution needed. The resolved `NodeInput` passed to n2:
-
-```json
-{
-  "node_id": "n2",
-  "workflow_id": "wf_abc",
-  "execution_id": "exec_xyz",
-  "input": { "code": "return { name: input.body.name.toUpperCase() };" },
-  "context": {
-    "node_outputs": { "n1": { "status": 200, "body": { "id": 1, "name": "alice" } } },
-    "variables": {},
-    "metadata": {}
-  }
-}
-```
-
-**Expression reference example** — if n2's config were instead:
-
-```json
-{ "greeting": "Hello, {{n1.body.name}}!" }
-```
-
-The resolver would walk the config, find `{{n1.body.name}}`, look up `context.node_outputs["n1"]["body"]["name"]`, and produce:
-
-```json
-{ "greeting": "Hello, alice!" }
-```
-
-**Failed resolution** — if the path does not exist:
-
-```json
-{ "greeting": "Hello, {{n1.body.missing}}!" }
-```
-
-The resolver cannot find `missing` in n1's output. It substitutes `""` and (after the H1 fix) emits a `Warn`-level log entry:
-
-```
-[WARN] node=n2  Expression {{n1.body.missing}} could not be resolved — substituted empty string
-```
-
-Without the H1 fix this appeared at `Info`, making it invisible to anyone filtering the run log for warnings.
+In API mode, HTTP connections are drained first (existing in-flight API requests get up to 10 seconds to finish), and the scheduler drain described above happens afterwards.

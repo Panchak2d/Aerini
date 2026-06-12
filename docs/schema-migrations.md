@@ -1,12 +1,10 @@
 # Workflow Schema Migrations
 
-How Flowo handles workflow format changes across versions.
+Every workflow file carries a `schema_version` field. When Flowo needs to change the workflow JSON format in a way that would break older files, it increments this version and ships a migration function. Old workflows are upgraded automatically the first time they're loaded by a newer Flowo version.
 
-## Overview
+You never run migrations manually.
 
-Every workflow — whether stored in the local database, exported as a `.flowo` file, or deployed via `Export for Server` — carries a `schema_version` field. When the workflow JSON format needs to change in a way that would break old files, Flowo increments this version and ships a migration function that automatically upgrades old workflows on load.
-
-You never run migrations manually. They happen silently the first time a workflow is loaded by a newer Flowo version.
+---
 
 ## Current version
 
@@ -16,41 +14,45 @@ You never run migrations manually. They happen silently the first time a workflo
 
 No migrations exist yet. The framework shipped in Flowo 0.2.x ready for future schema changes.
 
+---
+
 ## How loading works
 
-`Workflow::from_json()` does the following on every load:
+`Workflow::from_json()` runs this sequence on every load:
 
-1. Parse the raw JSON into an untyped value tree.
-2. Read `schema_version` from the root. If missing, treat it as `"1.0"`.
-3. If `schema_version` matches the current version — skip migration, go to step 4.
-4. Find the migration function for that version. Apply it. Update `schema_version`. Repeat until current.
-5. Deserialize the (now-current) JSON tree into a `Workflow` struct.
+1. Parse the raw JSON.
+2. Read `schema_version` from the root. If the field is missing, treat it as `"1.0"`.
+3. If `schema_version` already matches the current version, skip to step 5.
+4. Look up the migration function for that version, apply it, update `schema_version`, and repeat until the current version is reached.
+5. Deserialize the (now current) JSON into a `Workflow` struct.
 
-This means an old workflow file is silently upgraded in memory every time it loads. The on-disk copy is only updated when you explicitly save the workflow.
+The on-disk file is not modified. The migration runs in memory. The updated format is written to disk only when you explicitly save the workflow.
 
-## What happens if no migration path exists
+---
 
-If a workflow carries a `schema_version` that this build of Flowo does not recognise — typically because it was created by a **newer** version — loading will fail with:
+## Compatibility matrix
+
+| Scenario | Result |
+|---|---|
+| Load v1.0 workflow in v1.0 Flowo | OK — no migration needed |
+| Load v1.0 workflow in v1.1 Flowo | OK — migration applied in memory |
+| Load v1.1 workflow in v1.0 Flowo | Error — no downgrade path exists |
+| Load workflow with missing `schema_version` | OK — treated as v1.0 |
+
+If a workflow carries a `schema_version` this build of Flowo doesn't recognize (because it was created by a newer version), loading fails with:
 
 ```
 Schema migration error: no migration path from schema_version '1.2' to '1.0'.
 This workflow was created by a newer version of Flowo. Upgrade Flowo to load it.
 ```
 
-This is intentional. Silently loading a newer workflow in an older build risks data loss. The correct fix is to upgrade Flowo.
+This is intentional. Silently loading a newer format in an older build risks data corruption.
 
-## Compatibility guarantees
+---
 
-| Scenario | Result |
-|---|---|
-| Load v1.0 workflow in v1.0 Flowo | OK — no migration |
-| Load v1.0 workflow in v1.1 Flowo | OK — migration applied automatically |
-| Load v1.1 workflow in v1.0 Flowo | Error — no downgrade path |
-| Load workflow with missing `schema_version` | OK — treated as v1.0 |
+## Adding a migration (for contributors)
 
-## For developers: adding a migration
-
-When a pull request changes the workflow JSON format in a breaking way:
+When a pull request changes the workflow JSON format in a breaking way, follow these five steps.
 
 ### Step 1 — Increment `CURRENT_VERSION`
 
@@ -62,12 +64,11 @@ pub const CURRENT_VERSION: &str = "1.1";  // was "1.0"
 
 ### Step 2 — Write the migration function
 
+The function receives the entire workflow JSON as a mutable `serde_json::Value` and transforms it in-place:
+
 ```rust
 fn migrate_1_0_to_1_1(raw: &mut serde_json::Value) {
-    // `raw` is the entire workflow JSON object.
-    // Mutate it in-place to match the new format.
-    //
-    // Example: rename `config.timeout` to `config.timeout_ms` and multiply by 1000.
+    // Example: rename `config.timeout` to `config.timeout_ms` and convert seconds to ms.
     if let Some(nodes) = raw.get_mut("nodes").and_then(|n| n.as_array_mut()) {
         for node in nodes {
             if let Some(config) = node.get_mut("config").and_then(|c| c.as_object_mut()) {
@@ -81,14 +82,16 @@ fn migrate_1_0_to_1_1(raw: &mut serde_json::Value) {
 }
 ```
 
-Rules for migration functions:
+Rules migration functions must follow:
 
-- **Pure and deterministic.** Same input → same output. No I/O, no randomness.
-- **Never silently drop data.** If you must remove a field, document why in the function body.
-- **Only widen, never narrow.** Migrations run against user data. A bug here corrupts every workflow on load. Review carefully.
-- **No panics.** Every `unwrap()` is a potential corruption path. Use `?` or `unwrap_or`.
+- **Pure and deterministic.** Same input always produces the same output. No I/O, no randomness.
+- **Never silently drop data.** If a field must be removed, document why in a comment.
+- **Only widen, never narrow.** Migrations run against real user data. A bug here corrupts every affected workflow on load.
+- **No panics.** Every `unwrap()` is a potential data corruption path. Use `?` or `unwrap_or` throughout.
 
-### Step 3 — Register it in `MigrationEngine::new()`
+### Step 3 — Register the migration
+
+In `MigrationEngine::new()`:
 
 ```rust
 pub fn new() -> Self {
@@ -100,7 +103,7 @@ pub fn new() -> Self {
 }
 ```
 
-If you're adding a second migration on top of a previous one:
+If a second migration is added later, append it to the chain:
 
 ```rust
 migrations: vec![
@@ -109,19 +112,13 @@ migrations: vec![
 ],
 ```
 
-The chain must be contiguous. If there is a gap (e.g. you register `1.0 → 1.2` without `1.1 → 1.2`), workflows at `"1.1"` will fail to load.
+The chain must be contiguous. A gap — registering `1.0 → 1.2` without a `1.1 → 1.2` step — means workflows at version `1.1` fail to load.
 
 ### Step 4 — Write a test
 
-In `migration.rs`, add a test that:
+In `migration.rs`, add a test that constructs a JSON object in the old format, runs it through the migration engine, and asserts the result exactly matches the new format. Do not merge a migration without a test.
 
-1. Constructs a JSON object representing a v1.0 workflow (the old format).
-2. Runs the migration engine.
-3. Asserts the result matches the v1.1 format exactly.
-
-Do not ship a migration without a test.
-
-### Step 5 — Update the default in `model.rs`
+### Step 5 — Update the default version in `model.rs`
 
 ```rust
 fn default_schema_version() -> String { "1.1".to_string() }
@@ -130,18 +127,19 @@ fn default_schema_version() -> String { "1.1".to_string() }
 schema_version: "1.1".to_string(),
 ```
 
-New workflows created after the release will carry the new version. Old workflows load via migration.
+New workflows created after the release will carry the new version. Existing workflows migrate on first load.
+
+---
 
 ## Backup guidance
 
-Because migration happens in memory on load and is only written to disk when you save, an existing database or `.flowo` export is not automatically overwritten. However:
+Because migrations run in memory and write to disk only on save, your existing database isn't automatically modified. However, once you open a workflow in a newer Flowo version and save it, the file carries the new `schema_version` — an older Flowo build can no longer open it.
 
-- If you run an older Flowo build after migration has updated an in-memory workflow and saved it, the file will now contain the new `schema_version` and the older build won't be able to load it.
+Before upgrading Flowo in any production setup, back up:
 
-**Recommendation:** before upgrading Flowo in a production deployment, back up:
-- `~/.local/share/com.flowo.app/workflows.db` (Linux desktop)
-- `~/Library/Application Support/com.flowo.app/workflows.db` (macOS desktop)
-- The data directory specified by `--data-dir` (server deployments)
-- Any `.flowo` export files you care about
+- **Desktop (Linux):** `~/.local/share/com.flowo.app/workflows.db`
+- **Desktop (macOS):** `~/Library/Application Support/com.flowo.app/workflows.db`
+- **Server:** the `--data-dir` directory (default: `~/.flowo-server/`)
+- Any exported `.flowo` files you care about
 
-This is especially important if you run both a desktop instance and a server instance against different Flowo versions.
+This matters especially if you run both a desktop instance and a server on different Flowo versions.

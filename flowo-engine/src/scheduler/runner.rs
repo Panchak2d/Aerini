@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -12,6 +13,14 @@ use crate::cron::next_cron_delay_secs;
 use crate::EventSink;
 
 use super::{SchedulerDb, SchedulerStatusEvent, TriggerKind};
+
+/// Decrements `active_runs` on drop, covering success, early return, and panic.
+struct ActiveRunGuard(Arc<AtomicUsize>);
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_job_loop(
@@ -34,18 +43,21 @@ pub(super) async fn run_job_loop(
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
     run_semaphore:    Arc<Semaphore>,
+    shutting_down:    Arc<AtomicBool>,
+    active_runs:      Arc<AtomicUsize>,
 ) {
     match trigger {
         TriggerKind::Interval { secs } => {
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
             }
             loop {
+                if shutting_down.load(Ordering::SeqCst) { break; }
                 let next = Utc::now()
                     .checked_add_signed(chrono::Duration::seconds(secs as i64))
                     .unwrap_or_else(Utc::now);
@@ -54,9 +66,10 @@ pub(super) async fn run_job_loop(
 
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
+                if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -67,12 +80,13 @@ pub(super) async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
             }
             loop {
+                if shutting_down.load(Ordering::SeqCst) { break; }
                 let now = Utc::now();
                 let delay_secs = match next_cron_delay_secs(expr, &now) {
                     Ok(d)  => d,
@@ -90,9 +104,10 @@ pub(super) async fn run_job_loop(
 
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
+                if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -119,7 +134,7 @@ pub(super) async fn run_job_loop(
             }
             {
                 let _permit = run_semaphore.acquire().await;
-                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir).await;
+                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
             }
             db.scheduler_set_status(&workflow_id, "done").ok();
             emit_done(&event_sink, &db, &workflow_id);
@@ -151,6 +166,13 @@ pub(super) async fn run_job_loop(
                         continue;
                     }
                 };
+
+                // Draining: reject new connections immediately so no new runs start.
+                if shutting_down.load(Ordering::SeqCst) {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
+                    break;
+                }
 
                 let payload = match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
@@ -189,7 +211,7 @@ pub(super) async fn run_job_loop(
                 fire_once_with_vars(
                     &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
                     shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-                    server_max_duration_secs, &file_sandbox_dir,
+                    server_max_duration_secs, &file_sandbox_dir, &active_runs,
                 ).await;
 
                 emit_waiting(&event_sink, &db, &workflow_id, None);
@@ -222,11 +244,12 @@ async fn fire_once(
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
+    active_runs:          &Arc<AtomicUsize>,
 ) {
     fire_once_with_vars(workflow_id, db, registry, cred_store, event_sink,
         std::collections::HashMap::new(), env_allowlist,
         shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-        server_max_duration_secs, file_sandbox_dir,
+        server_max_duration_secs, file_sandbox_dir, active_runs,
     ).await;
 }
 
@@ -248,6 +271,7 @@ async fn fire_once_with_vars(
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
+    active_runs:          &Arc<AtomicUsize>,
 ) {
     {
         let row   = db.scheduler_get(workflow_id).ok().flatten();
@@ -318,6 +342,8 @@ async fn fire_once_with_vars(
     }
 
     let now_str = Utc::now().to_rfc3339();
+    active_runs.fetch_add(1, Ordering::SeqCst);
+    let _run_guard = ActiveRunGuard(Arc::clone(active_runs));
     let result  = executor.run(Arc::new(workflow), vars).await;
 
     match result {

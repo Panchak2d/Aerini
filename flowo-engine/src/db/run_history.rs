@@ -7,8 +7,8 @@ impl WorkflowDb {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO run_history
-             (id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 record.id,
                 record.workflow_id,
@@ -17,6 +17,7 @@ impl WorkflowDb {
                 record.success as i64,
                 record.duration_ms,
                 record.result_json,
+                record.status,
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -41,6 +42,21 @@ impl WorkflowDb {
         Ok(())
     }
 
+    /// Writes a placeholder "running" record before execution begins, so a
+    /// crash mid-run still leaves a trace (swept to 'interrupted' on next
+    /// startup by `WorkflowDb::open`). `save_run` later overwrites this row
+    /// via `INSERT OR REPLACE` using the same `id`.
+    pub fn save_run_started(&self, id: &str, workflow_id: &str, workflow_name: &str, ran_at: &str) -> Result<(), String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO run_history
+             (id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, '', 'running')",
+            rusqlite::params![id, workflow_id, workflow_name, ran_at],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn list_runs(
         &self,
         workflow_id: &str,
@@ -58,7 +74,7 @@ impl WorkflowDb {
         };
         if let Some(sf) = success_filter {
             let mut stmt = conn.prepare(
-                "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json
+                "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status
                  FROM run_history WHERE workflow_id = ?1 AND success = ?2
                  ORDER BY ran_at DESC LIMIT ?3 OFFSET ?4"
             ).map_err(|e| e.to_string())?;
@@ -69,7 +85,7 @@ impl WorkflowDb {
             rows
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json
+                "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status
                  FROM run_history WHERE workflow_id = ?1
                  ORDER BY ran_at DESC LIMIT ?2 OFFSET ?3"
             ).map_err(|e| e.to_string())?;
@@ -84,7 +100,7 @@ impl WorkflowDb {
     pub fn get_run(&self, id: &str) -> Result<Option<RunRecord>, String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         let result = conn.query_row(
-            "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json
+            "SELECT id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status
              FROM run_history WHERE id = ?1",
             rusqlite::params![id],
             row_to_run,

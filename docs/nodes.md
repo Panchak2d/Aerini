@@ -2,9 +2,25 @@
 
 All 39 built-in nodes, organized by category.
 
-The `type_id` is the node's internal identifier — stored in workflow JSON and used in the server API. In the visual interface you search by display name. When building workflows programmatically, use the `type_id`.
+**Finding a node:** press `Space` or `Ctrl+K` on the canvas to open node search. Type any part of the node's name.
+
+**`type_id`** is the node's internal identifier — stored in workflow JSON and used in the server API. You never need to type this in the visual interface, but it matters when building or managing workflows programmatically.
 
 **Parameter types:** `string`, `number`, `boolean`, `object`, `array`. Required parameters are marked **required**.
+
+---
+
+## Quick index
+
+| Category | Nodes |
+|---|---|
+| **Triggers** | [Manual Trigger](#manual-trigger), [Schedule](#schedule), [Webhook](#webhook) |
+| **Logic** | [If / Condition](#if--condition), [Switch](#switch), [Loop (For Each)](#loop-for-each), [Merge](#merge), [Stop](#stop), [Collect Files](#collect-files) |
+| **Flow Control** | [Delay](#delay), [Wait](#wait) |
+| **AI** | [AI Prompt](#ai-prompt), [AI Agent](#ai-agent), [AI Memory](#ai-memory), [Text Splitter](#text-splitter), [Image Generation](#image-generation) |
+| **Actions** | [HTTP Request](#http-request), [Shell Command](#shell-command), [Code (JS)](#code-js), [Send Email](#send-email), [SendGrid](#sendgrid), [File](#file), [Desktop Notification](#desktop-notification), [Save to Folder](#save-to-folder), [Social Upload](#social-upload), [Database](#database), [S3 Storage](#s3-storage) |
+| **Integrations** | [Slack](#slack), [Discord](#discord), [GitHub](#github), [Google Sheets](#google-sheets), [Notion](#notion), [Telegram](#telegram), [Stripe](#stripe) |
+| **Data & Utility** | [Transform Data](#transform-data), [JSON](#json), [Set Variable](#set-variable), [Get Variable](#get-variable), [Output](#output) |
 
 ---
 
@@ -422,9 +438,7 @@ Makes an HTTP request to any URL and returns the response.
 
 Output: `{ status: number, headers: object, body: any }`
 
-URLs pointing to private IP ranges (10.x.x.x, 172.16.x.x, 192.168.x.x, 127.x.x.x, etc.) and cloud metadata endpoints (169.254.169.254) are blocked in server mode to prevent SSRF attacks. They work in the desktop app.
-
-Redirects are disabled — if a URL returns a 3xx redirect, you receive that response directly. Response body is capped at 10 MB.
+URLs pointing to private IP ranges (10.x.x.x, 172.16.x.x, 192.168.x.x, 127.x.x.x, etc.) and cloud metadata endpoints (169.254.169.254) are blocked to prevent SSRF attacks. Redirects are disabled — if a URL returns a 3xx response, you receive it directly rather than Flowo following it. Response body is capped at 10 MB.
 
 ### Shell Command
 

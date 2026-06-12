@@ -552,7 +552,12 @@ pub async fn run(cfg: ServerConfig) {
         .await
         .unwrap_or_else(|e| tracing::error!("Server error: {}", e));
 
-    scheduler.stop_all();
+    let in_flight = scheduler.active_runs();
+    if in_flight > 0 {
+        tracing::info!("HTTP drained — waiting for {} in-flight workflow run(s)", in_flight);
+    }
+    scheduler.drain_all().await;
+    tracing::info!("Shutdown complete");
 }
 
 async fn auth_middleware(

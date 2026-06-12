@@ -1,32 +1,43 @@
 # Code (JS) Node
 
+The Code node runs a JavaScript snippet you write, using your machine's Node.js installation. It's the escape hatch for logic that no built-in node covers: custom data transforms, conditional computations, parsing unusual formats, or anything else that's easier to write as code than to assemble from nodes.
+
+---
+
 ## Requirements
 
-Node.js 18+ must be installed and on your PATH. It is only required if you use
-this node — not a global prerequisite for Flowo.
+Node.js 18 or later must be installed and available on your PATH. It's only required if you use this node — other Flowo features don't need it.
 
-If Node.js is not found when this node runs, Flowo returns a clear error with
-installation instructions.
+To check: open a terminal and run `node --version`. If you see `v18.x.x` or higher, you're set. If the command isn't found, install Node.js from [nodejs.org](https://nodejs.org) (the LTS version works fine), then restart Flowo.
+
+If Node.js isn't found when the node runs, Flowo returns a clear error message with installation instructions rather than a cryptic failure.
 
 ---
 
 ## The input/output API
 
+Two globals are available in every script:
+
+**`input`** — the output of the upstream node, automatically injected. Access its fields directly:
+
 ```js
-// `input` — the data output of the upstream node
 const value = input.body.result;
-
-// `output(value)` — call this to pass a value downstream
-output({ transformed: value.toUpperCase() });
-
-// If you do not call output(), the node outputs null.
+const name = input.user.name;
 ```
+
+**`output(value)`** — call this to pass a value to downstream nodes. Whatever you pass here becomes the node's output:
+
+```js
+output({ transformed: value.toUpperCase() });
+```
+
+If you don't call `output()`, the node's output is `null`.
 
 ---
 
 ## Async support
 
-Top-level await and async functions work:
+Top-level `await` and async functions work without any wrapper:
 
 ```js
 const res = await fetch('https://api.example.com/data');
@@ -38,29 +49,18 @@ output(json);
 
 ## Available globals
 
-- All Node.js built-in modules (`fs`, `path`, `crypto`, `http`, etc.)
-- Native `fetch` (Node.js 18+)
-- No npm packages — for external packages, either:
-  - Use the HTTP Request node to call an API that wraps the package, or
-  - Use the Shell Command node to run a script that manages its own dependencies
+All Node.js built-in modules are available — `fs`, `path`, `crypto`, `http`, `child_process`, etc. Native `fetch` is available from Node.js 18 onward.
 
----
+**No npm packages.** The Code node doesn't manage a `node_modules` folder. For external packages, the two common approaches are:
 
-## Security note (server mode)
-
-The Code node has access to all Node.js built-in modules, including `fs`,
-`child_process`, and `net`. In desktop mode this is intentional — you are
-running your own code on your own machine.
-
-In server/API mode (`flowo-server api`), the Code node is disabled by default.
-Enabling it with `--allow-code` grants every write-token holder the ability to
-read files and spawn processes on the host. See [security.md](security.md).
+- Call an API that wraps the functionality you need (via the HTTP Request node or `fetch` inside the Code node)
+- Use the Shell Command node to run a script that has its own dependencies
 
 ---
 
 ## Examples
 
-### Transform JSON
+### Transform a list of records
 
 ```js
 const items = input.rows;
@@ -71,15 +71,18 @@ output(items.map(row => ({
 })));
 ```
 
-### Compute a value
+### Calculate an average
 
 ```js
 const temperatures = input.readings;
 const avg = temperatures.reduce((a, b) => a + b, 0) / temperatures.length;
-output({ average_celsius: avg, average_fahrenheit: avg * 9/5 + 32 });
+output({
+    average_celsius: avg,
+    average_fahrenheit: avg * 9/5 + 32
+});
 ```
 
-### Parse and reformat a date
+### Reformat a date
 
 ```js
 const raw = input.timestamp; // e.g. "2024-03-15T10:30:00Z"
@@ -90,7 +93,7 @@ output({
 });
 ```
 
-### Conditional branching helper
+### Branch on a computed value
 
 ```js
 const score = parseFloat(input.score);
@@ -102,3 +105,11 @@ if (isNaN(score)) {
     output({ status: 'fail', score });
 }
 ```
+
+---
+
+## Security
+
+In desktop mode, the Code node runs with your user's full permissions. This is intentional — you're running your own code on your own machine. Flowo warns you before running any workflow that contains a Code node.
+
+In server mode (`flowo-server`), the Code node is disabled by default. Enable it with `--allow-code` only after reviewing every workflow that uses it. Any API token holder can then execute arbitrary JavaScript on the host. See [Security](security.md) for the full implications.

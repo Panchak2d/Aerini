@@ -79,6 +79,13 @@ pub trait Node: Send + Sync {
         false
     }
 
+    /// True when this node was loaded from a WASM plugin rather than built in.
+    /// The frontend uses this to render a plugin badge in the palette.
+    /// All built-in nodes use the default (false).
+    fn is_plugin(&self) -> bool {
+        false
+    }
+
     /// Returns ports derived from the given node config, or `None` for
     /// static-port nodes (default). Only called when `is_dynamic_ports()`
     /// returns true.
@@ -247,6 +254,8 @@ pub struct NodeDescriptor {
     /// The frontend uses this to call derivePorts() instead of reading the
     /// static port list from the descriptor.
     pub dynamic_ports: bool,
+    /// True when this node was loaded from a WASM plugin rather than built in.
+    pub is_plugin: bool,
 }
 
 impl NodeDescriptor {
@@ -260,6 +269,7 @@ impl NodeDescriptor {
             output_schema: node.output_schema(),
             ports: node.ports(),
             dynamic_ports: node.is_dynamic_ports(),
+            is_plugin: node.is_plugin(),
         }
     }
 }

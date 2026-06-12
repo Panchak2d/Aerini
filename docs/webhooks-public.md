@@ -1,17 +1,19 @@
-# Exposing Webhook Nodes to the Internet
+# Exposing Webhooks to the Internet
 
-The Flowo Webhook node binds to `127.0.0.1` (localhost only). External services like Stripe, GitHub, and Twilio need a reachable public URL. This page covers two options for desktop/local setups.
+Flowo's Webhook node listens on `127.0.0.1` — your own machine only. External services like Stripe, GitHub, and Twilio need a public URL they can reach. This page covers two tools that create a secure tunnel from the internet to your local machine.
+
+If you're running `flowo-server` on a VPS or cloud server, you don't need a tunnel — use a reverse proxy instead. See [Server Deployment — receiving webhooks](server-deploy.md#receiving-webhooks-on-a-server).
 
 ---
 
 ## Option 1 — cloudflared (Cloudflare Tunnel)
 
-Cloudflare Tunnel creates a stable public URL backed by Cloudflare's edge network. No account required for temporary tunnels; free Cloudflare account required for persistent named tunnels.
+Cloudflare Tunnel creates a public HTTPS URL backed by Cloudflare's network. No account is required for temporary tunnels; a free Cloudflare account gives you a persistent named tunnel with a stable URL.
 
-### Quick start (temporary tunnel)
+### Install cloudflared
 
 ```bash
-# macOS
+# macOS (Homebrew)
 brew install cloudflare/cloudflare/cloudflared
 
 # Windows (winget)
@@ -22,60 +24,67 @@ curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloud
   -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 ```
 
-Start a tunnel pointing at your Webhook node's port:
+### Start a temporary tunnel
 
 ```bash
 cloudflared tunnel --url http://localhost:3456
 ```
 
-Cloudflared prints a URL like `https://random-name.trycloudflare.com`. Use that as the webhook URL in Stripe, GitHub, etc.
+Replace `3456` with the port configured in your Webhook node. Cloudflared prints a URL like:
 
-The URL changes every time you run the command. For a fixed URL, use a named tunnel with a free Cloudflare account — see [Cloudflare Tunnel docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/).
+```
+https://random-name.trycloudflare.com
+```
+
+Use that as the webhook URL in Stripe, GitHub, or whatever service you're integrating. The URL changes every time you restart the tunnel. For a stable URL that doesn't change, create a named tunnel with a free Cloudflare account — see the [Cloudflare Tunnel documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/).
 
 ---
 
 ## Option 2 — ngrok
 
-ngrok provides an HTTPS tunnel with a web dashboard for inspecting requests. Free tier gives a random URL that changes on each restart; paid plans give fixed URLs.
+ngrok provides an HTTPS tunnel with a web dashboard for inspecting and replaying incoming requests. The free tier gives a random URL that changes on each restart; paid plans give fixed URLs.
+
+### Install and authenticate
+
+Download from [ngrok.com/download](https://ngrok.com/download) for your platform, then authenticate once:
 
 ```bash
-# Install (see https://ngrok.com/download for your platform)
-# Then authenticate once:
-ngrok config add-authtoken <YOUR_TOKEN>
+ngrok config add-authtoken YOUR_TOKEN
+```
 
-# Start a tunnel
+Your token is on the [ngrok dashboard](https://dashboard.ngrok.com) after signing up.
+
+### Start a tunnel
+
+```bash
 ngrok http 3456
 ```
 
 ngrok prints a URL like `https://a1b2c3d4.ngrok-free.app`. Use that as your webhook URL.
 
-The ngrok dashboard at `http://127.0.0.1:4040` lets you inspect and replay incoming webhook requests — useful for debugging.
+The ngrok dashboard at `http://127.0.0.1:4040` shows every incoming request in real time — you can inspect headers, bodies, and replay requests without waiting for the real service to send them again. This is especially useful when debugging Stripe or GitHub webhooks that are hard to trigger repeatedly.
 
 ---
 
 ## Which port do I use?
 
-The port is set in the Webhook node's **Port** field (default: `3456`). If you change it, use the same port in the tunnel command.
+The port is whatever you set in the Webhook node's **Port** field (default: `3456`). Use that same number in the tunnel command.
 
-If you run multiple Webhook nodes concurrently, each needs a different port. Start a separate tunnel for each port.
-
----
-
-## Security: the built-in secret does not sign the request body
-
-The Webhook node's built-in **Secret** field validates that the caller knows the secret, but it does **not** cryptographically bind that secret to the request body. A network attacker who captures one valid request can replay it with the same header value, because the secret proves caller identity rather than message integrity.
-
-The optional **Validate Timestamp** setting narrows the replay window to 5 minutes, but the timestamp is not body-bound either — a captured body combined with a fresh timestamp still bypasses it.
-
-**For payment processors and other high-stakes integrations** (Stripe, GitHub, Twilio, etc.) that send their own HMAC-SHA256 body signatures, verify the platform's native header in a downstream **Code** node rather than relying on the built-in secret alone:
-
-- Stripe: verify `Stripe-Signature` (see [Stripe docs](https://stripe.com/docs/webhooks/signatures))
-- GitHub: verify `X-Hub-Signature-256` (see [GitHub docs](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries))
-
-For full details see [security.md — Webhook security](security.md#6-webhook-security).
+If you run multiple Webhook workflows at once, each needs a different port. Start a separate tunnel for each port.
 
 ---
 
-## Server deployments
+## Security: what the built-in secret does and doesn't do
 
-If you're running `flowo-server` on a VPS or cloud instance, use a reverse proxy (Caddy or Nginx) instead of a tunnel. See [server-deploy.md](server-deploy.md) for instructions.
+The Webhook node's **Secret** field validates that incoming requests include the right `X-Flowo-Secret` header. The comparison is timing-safe. But it proves caller identity, not message integrity — a captured request with the same header could theoretically be replayed.
+
+The optional **Validate Timestamp** setting narrows the replay window to 5 minutes, though the timestamp isn't cryptographically bound to the request body.
+
+**For payment processors and other sensitive integrations**, use the platform's own signature verification in a downstream Code node:
+
+- **Stripe** sends a `Stripe-Signature` header. See [Stripe's documentation](https://stripe.com/docs/webhooks/signatures) for verification code.
+- **GitHub** sends an `X-Hub-Signature-256` header. See [GitHub's documentation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
+
+The built-in secret is fine as a first-line check; the platform's HMAC signature is what provides cryptographic proof that the body hasn't been tampered with.
+
+Full webhook security details: [Security — Webhook security](security.md#6-webhook-security)

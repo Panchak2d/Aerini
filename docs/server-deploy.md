@@ -1,39 +1,43 @@
 # Server Deployment
 
-`flowo-server` is a headless binary that runs workflows on a Linux server without the desktop app. There are two modes:
+`flowo-server` is a command-line program that runs your workflows on a Linux server without the Flowo desktop app. Use it when you need workflows running around the clock — on a VPS, a home server, or any Linux machine.
 
-- **Serve mode:** runs one specific workflow, exported from the desktop app. The simplest path for getting a single workflow running 24/7.
-- **API mode:** manages many workflows on one server via a REST API.
+**Do you need this?** If you're happy running workflows while Flowo is open on your computer, you don't need this at all. Server deployment is for when you want uninterrupted 24/7 execution, or when you want to run workflows triggered by public webhooks from services like Stripe or GitHub.
 
----
+Two modes are available:
 
-## License notice for service operators
-
-`flowo-server` is licensed under AGPL-3.0. If you run a **modified** version as a network-accessible service, AGPL-3.0 requires you to make your modifications available under the same license.
-
-Running the **unmodified** binary, or modifying it solely for your own use with no other users, does not trigger this obligation.
-
-If you need to keep your modifications proprietary, a commercial license is available. See the [Commercial licensing](../README.md#commercial-licensing) section of the README.
+- **Serve mode** — runs one exported workflow. The simplest path for a single automation.
+- **API mode** — manages many workflows on one server via a REST API.
 
 ---
 
-## Serve mode (single workflow)
+## License notice
 
-### Step 1: Export from the desktop app
+`flowo-server` is licensed under AGPL-3.0. Running the unmodified binary for your own use does not impose any obligations. If you run a **modified** version as a network service for others, AGPL-3.0 requires you to publish your modifications under the same license. A commercial license is available if you need to keep modifications proprietary — see [Commercial licensing](../README.md#commercial-licensing).
 
-Open any workflow that has a Schedule or Webhook trigger. Click **File → Export for Server**.
+---
+
+## Serve mode — run a single workflow
+
+This is the fastest path. You export a workflow from the desktop app and run it on a server in minutes.
+
+### Step 1 — Export from the desktop app
+
+Open any workflow with a Schedule or Webhook trigger. Click **File → Export for Server**.
 
 Flowo generates a zip containing:
 
-- `flowo-server`: the server binary (Linux x86-64, statically linked)
-- `flowo-server.json`: the workflow config
-- `.env.example`: a list of environment variables you need to set (one per credential used by the workflow)
-- `flowo-server.service`: a systemd unit file
-- `install.sh`: an install script that handles everything
+| File | What it is |
+|---|---|
+| `flowo-server` | The server binary (Linux x86-64, statically linked — no dependencies to install) |
+| `flowo-server.json` | Your workflow configuration |
+| `.env.example` | A list of environment variables you need to set (one per credential the workflow uses) |
+| `flowo-server.service` | A systemd unit file so the workflow starts on boot |
+| `install.sh` | An install script that handles placement, systemd setup, and initial configuration |
 
-### Step 2: Upload and install
+### Step 2 — Upload and install
 
-Upload the zip to your Linux server and run the install script:
+Upload the zip to your server and run the install script. Replace `user@yourserver.com` with your actual server address:
 
 ```bash
 scp flowo-export.zip user@yourserver.com:/tmp/
@@ -42,38 +46,44 @@ cd /tmp && unzip flowo-export.zip && cd flowo-export
 ./install.sh
 ```
 
-The install script:
+The script does four things automatically:
 1. Copies `flowo-server` to `/usr/local/bin/`
-2. Creates `/etc/flowo/` and writes `flowo-server.json` there
-3. Creates `/etc/flowo/.env` from `.env.example` (you fill in the values)
-4. Installs and enables the systemd service
+2. Creates `/etc/flowo/` and places `flowo-server.json` there
+3. Creates `/etc/flowo/.env` from `.env.example` for you to fill in
+4. Installs and enables the systemd service so it starts on boot
 
-### Step 3: Set credentials
+### Step 3 — Set your credentials
 
-Open `/etc/flowo/.env` and fill in the credential values:
+Open the `.env` file and fill in your API keys:
 
 ```bash
 sudo nano /etc/flowo/.env
 ```
 
-The variable names are derived from your credential IDs automatically:
+The variable names are automatically derived from the credential IDs you set in the desktop app:
 
-| Credential ID | Environment variable |
+| Credential ID you set in Flowo | Environment variable name |
 |---|---|
 | `openai-prod` | `FLOWO_CRED_OPENAI_PROD` |
 | `slack-bot` | `FLOWO_CRED_SLACK_BOT` |
 | `my.key` | `FLOWO_CRED_MY_KEY` |
 
-Hyphens and dots become underscores; the name is uppercased; `FLOWO_CRED_` is prepended.
+Hyphens and dots become underscores, the name is uppercased, and `FLOWO_CRED_` is prepended. The export panel shows the complete list of variables your specific workflow needs.
 
-### Step 4: Start the service
+### Required variables (`$vars.X`)
+
+If your workflow reads `{{$vars.something}}` anywhere — in any node, at any nesting depth, including inside trigger configs — the export panel shows a separate **Required variables** section listing each one, alongside its suggested environment variable name: `something` becomes `FLOWO_VAR_SOMETHING`.
+
+This is distinct from the credential variables above. Credentials (`FLOWO_CRED_...`) come from what you've stored in the Connections panel; `$vars` variables (`FLOWO_VAR_...`) are plain values you pass in yourself — feature flags, environment names, recipient addresses, anything that isn't a secret but still shouldn't be hardcoded into the workflow JSON. Set them in `/etc/flowo/.env` the same way as credential variables. If your workflow doesn't use `$vars` at all, this section doesn't appear — there's nothing to fill in.
+
+### Step 4 — Start the service
 
 ```bash
 sudo systemctl start flowo-server
 sudo systemctl status flowo-server
 ```
 
-The service starts on boot automatically. To check logs:
+The service starts automatically on every boot. To follow the live logs:
 
 ```bash
 sudo journalctl -u flowo-server -f
@@ -81,41 +91,41 @@ sudo journalctl -u flowo-server -f
 
 ### Status page
 
-Serve mode exposes a status page at `http://127.0.0.1:<port>/` where `<port>` is the value in `flowo-server.json` (default `7700`). It shows:
+Serve mode exposes a status page at `http://127.0.0.1:7700/` (or whichever port is in `flowo-server.json`). It shows:
 
 - Workflow name and trigger type
 - Last run time, status, and duration
-- A Run button for manual trigger (requires the raw `run_secret` shown at export time)
-- Run history (requires `run_secret`)
+- A manual Run button (requires the `run_secret` shown at export time)
+- Run history
 - Live logs via `GET /api/logs`
 
-The status page binds to `127.0.0.1` by default. To expose it on a network interface, add `--bind 0.0.0.0` to the `ExecStart` line in the systemd unit file (but put it behind a reverse proxy with authentication first).
+The status page binds to `127.0.0.1` by default. To view it remotely, either SSH tunnel to it or add `--bind 0.0.0.0` to the `ExecStart` line in the systemd unit file — but put it behind a reverse proxy with authentication before doing that.
 
-> **Warning:** Without a `run_secret` in `flowo-server.json`, the status page is **unauthenticated** and publicly accessible. It exposes the workflow name, trigger type, run counts, last-run status, and timestamps. If this information is sensitive, always export workflows with a `run_secret` set (the desktop app generates one automatically at export time).
+> **Security note:** without a `run_secret` in `flowo-server.json`, the status page is unauthenticated and shows your workflow name, trigger type, and run history. The desktop app generates a `run_secret` automatically at export time. If yours doesn't have one, add `"run_secret": "a-long-random-string"` to `flowo-server.json`.
 
-### Serve mode CLI reference
+### Serve mode command reference
 
 ```bash
 flowo-server serve [OPTIONS]
 
 Options:
-  --config <path>                  Path to flowo-server.json. Default: flowo-server.json
-  --port <port>                    Override the status page port from the config file
-  --bind <addr>                    Interface to bind to. Default: 127.0.0.1
-  --trusted-proxy-count <n>        Number of reverse-proxy hops to trust for X-Forwarded-For. Default: 0
-  --allow-shell                    Enable Shell Command nodes (disabled by default)
-  --allow-code                     Enable Code (JS) nodes (disabled by default)
-  --reject-legacy-run-secret       Refuse to start if run_secret uses a legacy BLAKE3 hash (not argon2id)
-  --ssrf-firewall-acknowledged     Suppress the SSRF egress firewall warning (set after firewall is configured)
+  --config <path>                Path to flowo-server.json. Default: flowo-server.json
+  --port <port>                  Override the status page port
+  --bind <addr>                  Interface to bind to. Default: 127.0.0.1
+  --trusted-proxy-count <n>      Reverse-proxy hops to trust for X-Forwarded-For. Default: 0
+  --allow-shell                  Enable Shell Command nodes (disabled by default)
+  --allow-code                   Enable Code (JS) nodes (disabled by default)
+  --reject-legacy-run-secret     Refuse to start if run_secret uses the legacy BLAKE3 hash format
+  --ssrf-firewall-acknowledged   Suppress the SSRF egress warning (set after firewall is configured)
 ```
 
-Shell Command and Code (JS) nodes are disabled in serve mode by default. Pass `--allow-shell` or `--allow-code` only after auditing every node in the exported workflow.
+Shell Command and Code (JS) nodes are disabled in serve mode by default. Only pass `--allow-shell` or `--allow-code` after reviewing every node in the workflow you're deploying.
 
 ---
 
-## API mode (multiple workflows)
+## API mode — manage multiple workflows
 
-API mode manages many workflows on one server. It exposes a REST API secured with a bearer token.
+API mode runs many workflows on one server and exposes a REST API for programmatic management.
 
 ### Start the server
 
@@ -123,7 +133,7 @@ API mode manages many workflows on one server. It exposes a REST API secured wit
 flowo-server api --token mysecrettoken --port 7700
 ```
 
-Or use environment variables:
+Or use environment variables instead of flags:
 
 ```bash
 export FLOWO_TOKEN=mysecrettoken
@@ -131,91 +141,145 @@ export FLOWO_PORT=7700
 flowo-server api
 ```
 
-If `--token` is not set, a random token is generated on first run and printed to stdout. Copy it. It is not shown again.
+If you don't set `--token`, a random token is generated on first run and printed to stdout. Copy it — it won't be shown again.
 
-### API mode CLI reference
+### API mode command reference
 
 ```bash
 flowo-server api [OPTIONS]
 
 Options:
-  --token <token>                  Bearer token for authentication. Env: FLOWO_TOKEN
-  --port <port>                    Port to listen on. Default: 7700. Env: FLOWO_PORT
-  --data-dir <path>                Data directory for SQLite and the key file. Default: ~/.flowo-server. Env: FLOWO_DATA_DIR
-  --bind <addr>                    Interface to bind to. Default: 127.0.0.1
-  --allow-origin <origins>         Comma-separated additional CORS origins allowed
-  --allow-env-vars <vars>          Comma-separated env vars workflows may read via {{$env.VAR}}. Disabled by default.
-  --file-sandbox-dir <path>        Restrict File nodes to this directory tree
-  --trusted-proxy-count <n>        Proxies to trust for X-Forwarded-For. Default: 0
-  --allow-shell                    Enable Shell Command nodes
-  --allow-code                     Enable Code (JS) nodes
-  --keychain                       Store the encryption key in the OS keychain instead of a file
-  --parallel-execution             Run independent workflow branches concurrently
-  --max-concurrent-nodes <n>       Max nodes executing simultaneously (parallel mode). Default: 8
-  --max-workflow-duration-secs <n> Max wall-clock time for any single execution
-  --db-pool-size <n>               SQLite connection pool size. Env: FLOWO_DB_POOL_SIZE
-  --ssrf-firewall-acknowledged     Suppress the SSRF egress firewall warning (set after firewall is configured)
+  --token <token>               Bearer token for API authentication. Env: FLOWO_TOKEN
+  --port <port>                 Port to listen on. Default: 7700. Env: FLOWO_PORT
+  --data-dir <path>             Directory for the SQLite database and key file. Default: ~/.flowo-server. Env: FLOWO_DATA_DIR
+  --bind <addr>                 Interface to bind to. Default: 127.0.0.1
+  --allow-origin <origins>      Additional CORS origins (comma-separated)
+  --allow-env-vars <vars>       Environment variables workflows may read via {{$env.VAR}}. Disabled by default.
+  --file-sandbox-dir <path>     Restrict File nodes to this directory tree
+  --trusted-proxy-count <n>     Reverse-proxy hops to trust for X-Forwarded-For. Default: 0
+  --allow-shell                 Enable Shell Command nodes
+  --allow-code                  Enable Code (JS) nodes
+  --keychain                    Use the OS keychain instead of a key file for the encryption key
+  --max-concurrent-runs <n>     Maximum workflows running simultaneously. Default: 16
+  --ssrf-firewall-acknowledged  Suppress the SSRF egress warning
 ```
 
-### REST API
+Full REST API documentation: [API Reference](api-reference.md)
 
-All endpoints require `Authorization: Bearer <token>`.
+---
 
-#### Workflows
+## Receiving webhooks on a server
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/workflows` | List all workflows. Accepts `?limit=100&offset=0`. |
-| `GET` | `/api/workflows/:id` | Get a workflow by ID. |
-| `POST` | `/api/workflows` | Save a workflow. Body: `{ "workflow_json": "..." }`. |
-| `DELETE` | `/api/workflows/:id` | Delete a workflow and stop its scheduler. |
-| `POST` | `/api/workflows/:id/run` | Trigger a manual run. |
-| `GET` | `/api/workflows/:id/runs` | Run history. Accepts `?limit=50&offset=0&filter=success|failed`. |
-| `GET` | `/api/workflows/:id/runs/:exec_id` | Single run detail. |
-| `GET` | `/api/workflows/stream` | Server-sent events stream for live run updates. |
+When `flowo-server` runs on a machine with a public IP address, webhook workflows can receive requests from the internet — no tunnel required.
 
-#### Scheduler
+The workflow's Webhook node listens on the port you configured. The server accepts connections on that port (assuming it's open in your firewall). Your external service (GitHub, Stripe, etc.) sends its webhook to `https://yourserver.com:PORT/PATH`.
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/scheduler` | List all scheduled jobs and their status. |
-| `POST` | `/api/scheduler/:id/start` | Start scheduling a workflow. |
-| `POST` | `/api/scheduler/:id/stop` | Stop a scheduled workflow. |
+**Recommended setup:** put `flowo-server` behind a reverse proxy (Caddy or Nginx) so you get HTTPS and a clean domain name without exposing a numbered port directly.
 
-#### Credentials
+### Caddy example
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/credentials` | List all credential IDs and names (values never returned). |
-| `POST` | `/api/credentials` | Save a credential. Body: `{ "id": "...", "name": "...", "value": "..." }`. |
-| `DELETE` | `/api/credentials/:id` | Delete a credential. |
+Install Caddy on your server, then edit `/etc/caddy/Caddyfile`:
 
-#### Tokens
+```
+webhooks.yourserver.com {
+    reverse_proxy 127.0.0.1:3456
+}
+```
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/tokens` | List all API tokens. |
-| `POST` | `/api/tokens` | Create a new token. Body: `{ "name": "...", "role": "read" or "write" }`. |
-| `DELETE` | `/api/tokens/:id` | Delete a token. |
+Restart Caddy (`sudo systemctl restart caddy`). Caddy automatically obtains a TLS certificate from Let's Encrypt. Your webhook URL becomes `https://webhooks.yourserver.com/webhook`.
 
-#### Health
+### Nginx example
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/health` | Returns `{ "status": "ok", "version": "..." }`. No auth required. |
+```nginx
+server {
+    listen 443 ssl;
+    server_name webhooks.yourserver.com;
 
-### CLI control commands
+    ssl_certificate     /etc/letsencrypt/live/webhooks.yourserver.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/webhooks.yourserver.com/privkey.pem;
 
-These commands talk to a running API mode server:
+    location / {
+        proxy_pass http://127.0.0.1:3456;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+If you use a proxy, add `--trusted-proxy-count 1` to the `flowo-server` flags so it reads the real client IP from the `X-Forwarded-For` header instead of seeing the proxy's address.
+
+---
+
+## Running with Docker
+
+A `Dockerfile` is included if you prefer containers.
 
 ```bash
-# List all workflows
+# Build the image
+docker build -t flowo-server .
+
+# Run it
+docker run -d \
+  -p 7700:7700 \
+  -e FLOWO_TOKEN=mysecrettoken \
+  -v flowo-data:/data \
+  -e FLOWO_DATA_DIR=/data \
+  flowo-server
+```
+
+A `docker-compose.yml` is also included in the repo root for a one-command setup:
+
+```bash
+docker-compose up -d
+```
+
+---
+
+## Security hardening checklist
+
+Before exposing `flowo-server` to the internet, work through these:
+
+**Authentication**
+- [ ] `--token` is set to a long, random string (not a dictionary word)
+- [ ] The token is stored securely — not hardcoded in a shell script or committed to version control
+- [ ] The API is not publicly reachable without the token header
+
+**Networking**
+- [ ] Server is behind a reverse proxy with HTTPS
+- [ ] The API port (7700 by default) is firewalled — only the reverse proxy can reach it directly
+- [ ] Webhook ports are firewalled to only accept connections via the reverse proxy
+- [ ] An egress firewall blocks outbound connections to private IP ranges (required to fully close the DNS rebinding gap — see [Security](security.md#5-http-node--ssrf-protection))
+
+**Dangerous nodes**
+- [ ] `--allow-shell` is NOT set unless your workflow requires Shell Command nodes and you've reviewed every node in it
+- [ ] `--allow-code` is NOT set unless your workflow requires Code (JS) nodes and you've reviewed every node in it
+
+**Data**
+- [ ] `--file-sandbox-dir` is set if your workflow uses File nodes
+- [ ] `--allow-env-vars` lists only the specific variables your workflow needs, never `FLOWO_TOKEN` or `FLOWO_CRED_*`
+- [ ] The data directory is backed up regularly
+- [ ] `flowo.key` and `credentials.db` are never in the same unencrypted backup
+
+**Process**
+- [ ] Server runs as a dedicated non-root user, not as `root`
+- [ ] The systemd unit uses `NoNewPrivileges=yes` and `PrivateTmp=yes`
+
+---
+
+## CLI control commands
+
+These commands manage a running API mode server without going through the REST API:
+
+```bash
+# List all workflows on the server
 flowo-server list --token mytoken
 
-# Check status
+# Check server and scheduler status
 flowo-server status --token mytoken
 
-# Stop a workflow (partial name match accepted)
+# Stop a running workflow (partial name match accepted)
 flowo-server stop "my workflow" --token mytoken
 
 # Start a stopped workflow
@@ -225,84 +289,7 @@ flowo-server start "my workflow" --token mytoken
 flowo-server restart "my workflow" --token mytoken
 ```
 
-Use `--server http://yourserver.com:7700` to point at a remote server. Default is `http://localhost:7700`.
-
----
-
-## Docker
-
-A `Dockerfile` and `docker-compose.yml` are included in the repository. The Docker image builds a fully static musl-linked binary and runs it in a minimal Debian image.
-
-### Quick start
-
-```bash
-# Clone the repo and build the image
-git clone https://github.com/Panchak2d/flowo
-cd flowo
-docker compose up -d
-```
-
-Set `FLOWO_TOKEN` before starting:
-
-```bash
-FLOWO_TOKEN=mysecrettoken docker compose up -d
-```
-
-Or create a `.env` file:
-
-```
-FLOWO_TOKEN=mysecrettoken
-```
-
-The compose file binds to `127.0.0.1:7700` and creates a named volume `flowo_data` for persistent storage.
-
-### Build the image manually
-
-```bash
-docker build -t flowo-server .
-docker run -d \
-  -p 127.0.0.1:7700:7700 \
-  -v flowo_data:/data \
-  -e FLOWO_TOKEN=mysecrettoken \
-  -e FLOWO_PORT=7700 \
-  flowo-server api
-```
-
----
-
-## HTTPS with a reverse proxy
-
-The server binds to `127.0.0.1` by default. To expose it securely over the internet, put it behind Caddy or Nginx.
-
-### Caddy (recommended: handles TLS automatically)
-
-```
-your-domain.com {
-    reverse_proxy 127.0.0.1:7700
-}
-```
-
-Caddy fetches and renews a Let's Encrypt certificate automatically. When you add Caddy as a proxy, set `--trusted-proxy-count 1` so Flowo reads the real client IP from `X-Forwarded-For` rather than Caddy's loopback address.
-
-### Nginx
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name your-domain.com;
-
-    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:7700;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-    }
-}
-```
-
-Set `--trusted-proxy-count 1` when starting flowo-server.
+Use `--server http://yourserver.com:7700` to target a remote server. Default is `http://localhost:7700`.
 
 ---
 
@@ -310,42 +297,26 @@ Set `--trusted-proxy-count 1` when starting flowo-server.
 
 Once `flowo-server api` is running, you can point the Flowo desktop app at it for remote workflow management. Go to **Settings → Server** in the desktop app and set the server URL and token.
 
-Workflows saved through the desktop app are pushed to the server and scheduled there. Results are streamed back to the desktop in real time via server-sent events.
+Workflows saved through the desktop app are pushed to the server and scheduled there. Execution results stream back to the desktop in real time via server-sent events.
 
 ---
 
-## Receiving webhooks on a server
+## SSE event scope
 
-The Webhook node in serve mode binds to `127.0.0.1` on whatever port you configure. External traffic can't reach `127.0.0.1` directly.
-
-To receive webhooks from external services (GitHub, Stripe, etc.), the reverse proxy must forward traffic to the Webhook node's port. Example with Caddy:
-
-```
-your-domain.com/webhook {
-    reverse_proxy 127.0.0.1:3456
-}
-```
-
-Set the webhook URL in the external service to `https://your-domain.com/webhook`. Requests arriving there are forwarded to the Flowo Webhook node.
+`GET /api/events` delivers execution events for **all** workflows to any token with `read` scope. In multi-user deployments where token holders should not see each other's workflow activity, avoid issuing `read` tokens to untrusted parties until per-workflow ACL is implemented in a future release.
 
 ---
 
-## Security notes for server deployments
+## Critical security warnings
 
-- `--bind 0.0.0.0` exposes the server directly on all network interfaces. Always put a reverse proxy with TLS in front of it before doing this.
-- Shell Command and Code (JS) nodes are disabled by default. Enable them only when you control and have audited all workflows running on the server.
-- `--allow-env-vars` lets workflows read environment variables. Never include `FLOWO_TOKEN`, `FLOWO_CRED_*`, or any other sensitive variables in this list.
-- `--file-sandbox-dir` restricts File nodes to a specific directory. Set this in production to prevent workflows from reading or writing arbitrary paths on the server.
-- Set `--trusted-proxy-count` to exactly match the number of proxies between the internet and Flowo. Too high allows clients to spoof their IP via `X-Forwarded-For`.
+### Egress firewall — required for public deployments
 
-### SSRF: egress firewall required for public deployments
+The HTTP Request, Database, and AI nodes validate DNS before making requests to prevent SSRF. However, a TOCTOU gap exists between DNS resolution and the actual TCP connection. A malicious DNS server can return a valid public IP during the check, then switch to a private IP for the actual connection.
 
-The HTTP Request, Database, and AI nodes perform DNS pre-validation to block Server-Side Request Forgery (SSRF). However, a **TOCTOU (time-of-check/time-of-use) gap** exists between DNS resolution and the actual TCP connection. A malicious DNS server can return a public IP during the check and switch to a private IP (e.g. `169.254.169.254`) on the actual connect, bypassing the application-layer check entirely.
-
-**This cannot be fixed in application code.** When running `flowo-server` on a network-accessible address, you **must** configure a host-level egress firewall:
+**This cannot be fixed in application code.** When running `flowo-server` on a network-accessible address, configure a host-level egress firewall:
 
 ```bash
-# Block RFC-1918, loopback, link-local, and cloud metadata (iptables example)
+# Block RFC-1918, loopback, link-local, and cloud metadata endpoints
 iptables -A OUTPUT -d 10.0.0.0/8 -j DROP
 iptables -A OUTPUT -d 172.16.0.0/12 -j DROP
 iptables -A OUTPUT -d 192.168.0.0/16 -j DROP
@@ -354,38 +325,56 @@ iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
 iptables -A OUTPUT -d 168.63.129.16/32 -j DROP
 ```
 
-See `docs/security.md` for the full recommended ruleset. Once your firewall is in place, pass `--ssrf-firewall-acknowledged` to suppress the startup warning.
+Once your firewall is in place, pass `--ssrf-firewall-acknowledged` to suppress the startup warning.
 
 ### Legacy run_secret (serve mode)
 
-> **Warning:** Always re-export workflows from the Flowo desktop app **0.3 or later** before deploying to a public server. Workflows exported with Flowo 0.2 or earlier store `run_secret` as a BLAKE3 hash, which is not brute-force resistant. If an attacker reads your `flowo-server.json` (e.g. from a misconfigured backup), a short `run_secret` can be cracked in seconds with a GPU.
+> **Warning:** Always re-export workflows using Flowo 0.3 or later before deploying to a public server. Workflows exported with Flowo 0.2 or earlier store `run_secret` as a BLAKE3 hash, which is not brute-force resistant. If an attacker reads your `flowo-server.json` (for example from a misconfigured backup), a short `run_secret` can be cracked in seconds with a GPU.
 >
 > Pass `--reject-legacy-run-secret` to make the server refuse to start with a legacy hash.
 
 ### Database nodes and RUSTSEC-2023-0071
 
-> **Warning:** Do **not** enable `--allow-database` in multi-tenant API mode where untrusted token holders can configure Database node connection strings. The `sqlx-mysql` dependency contains a timing side-channel in its RSA key exchange (RUSTSEC-2023-0071). In multi-tenant mode, a token holder who controls a MySQL connection string can measure handshake timing across many connections to recover session key material.
+> **Warning:** Do **not** enable `--allow-database` in API mode where untrusted token holders can configure Database node connection strings. The `sqlx-mysql` dependency contains a timing side-channel in its RSA key exchange (RUSTSEC-2023-0071). In multi-tenant mode, a token holder who controls a MySQL connection string can measure handshake timing across many connections to recover session key material.
 >
-> This flag is safe in single-user or fully trusted deployments where you control all token holders. The upstream fix is tracked at [launchbadge/sqlx#3538](https://github.com/launchbadge/sqlx/issues/3538).
+> This flag is safe in single-user or fully trusted deployments where you control all token holders. Track the upstream fix at [launchbadge/sqlx#3538](https://github.com/launchbadge/sqlx/issues/3538).
 
 ### Code node sandbox on macOS
 
-When running `flowo-server api --allow-code --code-sandbox` on macOS, the ESM module import restrictions apply (blocking `fs`, `net`, `child_process`, etc.), but **CPU and memory resource limits (`setrlimit`) are Linux-only**. On macOS, a runaway script can exhaust system CPU and memory ; only the `timeout_secs` ceiling (max 60 s) applies. Deploy on Linux for full sandboxing enforcement.
-
-See [Security](security.md) for the full security model.
+When running `flowo-server api --allow-code --code-sandbox` on macOS, ESM module import restrictions apply (blocking `fs`, `net`, `child_process`, etc.), but CPU and memory resource limits (`setrlimit`) are **Linux-only**. On macOS, a runaway script can exhaust system CPU and memory — only the `timeout_secs` ceiling (max 60 seconds) applies. Deploy on Linux for full sandbox enforcement.
 
 ---
 
-## Receiving webhooks from the internet
+## Updating the server binary
 
-The Webhook node binds to `127.0.0.1` (localhost only). External services like Stripe, GitHub, and Twilio cannot reach it directly without a reverse proxy or tunnel.
+Stop the service before replacing the binary. `flowo-server` applies any pending database migrations automatically on startup — you don't need to run them manually.
 
-For desktop/local deployments: see [webhooks-public.md](webhooks-public.md) for tunnel options (cloudflared, ngrok).
+```bash
+sudo systemctl stop flowo-server
+sudo cp new-flowo-server /usr/local/bin/flowo-server
+sudo systemctl start flowo-server
+```
 
-For server deployments: configure Caddy or Nginx to forward requests to the Webhook node's port as shown in the reverse proxy section above.
+Downgrading to an older binary after a schema migration has run is not supported. If you need to roll back, restore from a backup taken before the upgrade.
 
 ---
 
-## SSE event scope
+## Troubleshooting
 
-> **Note:** `GET /api/events` delivers execution events for **all** workflows to any token with `read` scope. In multi-user deployments where token holders should not see each other's workflow activity, avoid issuing read tokens to untrusted parties until per-workflow ACL is implemented.
+**"flowo-server: command not found" after install.**
+The install script copies the binary to `/usr/local/bin/`. Confirm it's there: `ls -la /usr/local/bin/flowo-server`. If it's missing, rerun the install script or copy it manually.
+
+**Service fails to start. How do I see why?**
+```bash
+sudo journalctl -u flowo-server --no-pager -n 50
+```
+The most recent 50 log lines usually show the error. Common causes: missing or malformed `.env` file, port already in use by another process, missing `FLOWO_TOKEN`.
+
+**Workflow credentials aren't working.**
+Check that the environment variable names in `.env` exactly match the convention (`FLOWO_CRED_` + uppercased credential ID with hyphens replaced by underscores). Restart the service after editing `.env`.
+
+**Webhook requests time out or never arrive.**
+Verify the port is open in your firewall (`sudo ufw status`). If you're using a reverse proxy, confirm it's running and pointing at the right port. Test from the server itself first: `curl -X POST http://127.0.0.1:3456/webhook -d '{}'`.
+
+**"Previous run still in progress" keeps appearing.**
+Only one instance of each workflow runs at a time. If your workflow takes longer than your schedule interval, the next run is skipped. Investigate what's causing slow execution, or adjust the interval.

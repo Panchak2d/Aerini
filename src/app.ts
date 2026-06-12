@@ -13,6 +13,7 @@ import {
 } from "./palette-manager";
 import { initModals } from "./modal-manager";
 import { bindDropImport, bindFileInput } from "./drag-drop";
+import { bindPluginSettings } from "./plugin-settings";
 import { showPopover, closePopover, setDescriptorRegistry } from "./popover-config";
 import { listenCloseRequested } from "./ipc/events";
 import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionControls, bindBgRunsFilter, activateZone, getCurrentZone } from "./sidebar-sections";
@@ -176,6 +177,7 @@ async function init() {
   });
   bindDropImport(toast);
   bindFileInput(toast);
+  bindPluginSettings(toast);
 
   const { refreshRunBtn } = bindToolbar(
     canvas, wfManager, runManager, credPanel,

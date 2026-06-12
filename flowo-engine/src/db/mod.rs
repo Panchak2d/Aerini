@@ -22,6 +22,8 @@ pub struct RunRecord {
     pub success:       bool,
     pub duration_ms:   i64,
     pub result_json:   String,
+    /// One of "running", "success", "failed", "interrupted".
+    pub status:        String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub(super) fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         success:       row.get::<_, i64>(4)? != 0,
         duration_ms:   row.get(5)?,
         result_json:   row.get(6)?,
+        status:        row.get(7)?,
     })
 }
 
@@ -59,7 +62,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 1;
+    pub(super) const SCHEMA_VERSION: i64 = 2;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -82,6 +85,10 @@ impl WorkflowDb {
         {
             let conn = pool.get().map_err(|e| e.to_string())?;
             Self::run_migrations(&conn)?;
+            conn.execute(
+                "UPDATE run_history SET status = 'interrupted' WHERE status = 'running'",
+                [],
+            ).map_err(|e| e.to_string())?;
         }
 
         let history_limit = {
@@ -112,6 +119,9 @@ impl WorkflowDb {
 
         if current_version < 1 {
             Self::migrate_v1(conn)?;
+        }
+        if current_version < 2 {
+            Self::migrate_v2(conn)?;
         }
 
         Ok(())
@@ -176,6 +186,18 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+    /// Version 2 — adds `status` to `run_history` so a "running" record can be
+    /// written before execution starts, distinguishing crashed/interrupted runs
+    /// from completed ones. Existing rows default to 'complete'.
+    fn migrate_v2(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            ALTER TABLE run_history ADD COLUMN status TEXT NOT NULL DEFAULT 'complete';
+            PRAGMA user_version = 2;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -206,7 +228,7 @@ mod tests {
         let db = WorkflowDb::open(&path, 8).expect("open failed");
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
 
         cleanup(&path);
     }
@@ -232,7 +254,7 @@ mod tests {
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1, "must be migrated to v1");
+        assert_eq!(v, 2, "must be migrated to v2");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))
@@ -249,6 +271,51 @@ mod tests {
 
         WorkflowDb::open(&path, 8).expect("first open failed");
         WorkflowDb::open(&path, 8).expect("second open must not fail");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_status_column_default_and_interrupted_sweep() {
+        let path = temp_path("status_col");
+        cleanup(&path);
+
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        // save_run_started writes status = 'running'.
+        db.save_run_started("run-1", "wf-1", "My Workflow", "2024-01-01T00:00:00Z")
+            .expect("save_run_started failed");
+        let row = db.get_run("run-1").expect("get_run failed").expect("row missing");
+        assert_eq!(row.status, "running");
+        assert!(!row.success);
+        assert_eq!(row.duration_ms, 0);
+
+        // save_run upserts the same id, overwriting status to 'success'/'failed'.
+        db.save_run(&RunRecord {
+            id: "run-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "My Workflow".to_string(),
+            ran_at: "2024-01-01T00:00:05Z".to_string(),
+            success: true,
+            duration_ms: 5000,
+            result_json: "{}".to_string(),
+            status: "success".to_string(),
+        }).expect("save_run failed");
+        let row = db.get_run("run-1").expect("get_run failed").expect("row missing");
+        assert_eq!(row.status, "success");
+        assert!(row.success);
+
+        // A row left 'running' (simulating a crash) is swept to 'interrupted'
+        // the next time the database is opened.
+        db.save_run_started("run-2", "wf-1", "My Workflow", "2024-01-01T00:01:00Z")
+            .expect("save_run_started failed");
+        drop(db);
+
+        let db2 = WorkflowDb::open(&path, 8).expect("reopen failed");
+        let row1 = db2.get_run("run-1").expect("get_run failed").expect("row missing");
+        let row2 = db2.get_run("run-2").expect("get_run failed").expect("row missing");
+        assert_eq!(row1.status, "success", "completed run must be untouched");
+        assert_eq!(row2.status, "interrupted", "orphaned running row must become interrupted");
 
         cleanup(&path);
     }

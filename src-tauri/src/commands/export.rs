@@ -69,14 +69,16 @@ pub async fn validate_workflow_for_export(
 
     let trigger_desc = trigger.describe();
     let credentials  = collect_credentials(&wf);
+    let variables    = collect_vars(&wf)?;
 
-    Ok(ValidateResult { trigger_desc, credentials })
+    Ok(ValidateResult { trigger_desc, credentials, variables })
 }
 
 #[derive(Debug, Serialize)]
 pub struct ValidateResult {
     pub trigger_desc: String,
     pub credentials:  Vec<CredentialExport>,
+    pub variables:    Vec<String>,
 }
 
 /// Generate the deployment zip and return its path so the frontend can
@@ -240,6 +242,31 @@ fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
 
 fn credential_id_to_env_var(id: &str) -> String {
     format!("FLOWO_CRED_{}", id.to_uppercase().replace(['-', '.'], "_"))
+}
+
+/// Scans the full serialized workflow JSON for `$vars.<name>` references and
+/// returns the unique variable names, sorted. Covers nested config objects
+/// and trigger-node config alike, since it operates on the whole document.
+/// No `regex` dependency — manual scan for the literal prefix, since `regex`
+/// is not in either Cargo.toml (Rule 15).
+fn collect_vars(wf: &Workflow) -> Result<Vec<String>, String> {
+    let json = wf.to_json_pretty().map_err(|e| e.to_string())?;
+    const PREFIX: &str = "$vars.";
+
+    let mut names = std::collections::BTreeSet::new();
+    let mut search_from = 0;
+    while let Some(rel) = json[search_from..].find(PREFIX) {
+        let start = search_from + rel + PREFIX.len();
+        let end = json[start..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map(|i| start + i)
+            .unwrap_or(json.len());
+        if end > start {
+            names.insert(json[start..end].to_string());
+        }
+        search_from = end.max(start + 1).min(json.len());
+    }
+    Ok(names.into_iter().collect())
 }
 
 /// Generate a Docker deployment package for single-workflow serve mode.

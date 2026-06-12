@@ -37,8 +37,10 @@ Developer guides:
 | Guide | What it covers |
 |---|---|
 | [Architecture](docs/architecture.md) | How the engine, Tauri shell, and server binary fit together |
+| [Embedding flowo-engine](docs/embedding.md) | Use the engine as a Rust library in your own program |
 | [Custom Node Authoring](docs/node-authoring.md) | Adding new node types to Flowo |
 | [Plugin Authoring](docs/plugin-authoring.md) | Writing and distributing `.wasm` plugin nodes |
+| [Desktop IPC Reference](docs/desktop-ipc-reference.md) | Every command the frontend can call into the Tauri shell |
 | [Schema Migrations](docs/schema-migrations.md) | How workflow format changes are handled across versions |
 
 ---
@@ -65,9 +67,21 @@ Flowo ships 39 built-in nodes:
 
 ## Plugins
 
-Flowo supports `.wasm` plugin nodes. Write a new node type in Rust, compile it to `wasm32-wasip2`, and drop the `.wasm` file into your plugin directory. Plugin nodes appear in the palette automatically and execute with the same isolation guarantees as built-in nodes — each call runs in a sandboxed Wasmtime instance with 64 MiB memory limit and outbound HTTP access but no filesystem access.
+Flowo supports `.wasm` plugin nodes. Write a new node type in Rust, compile it to `wasm32-wasip2`, and install it through **Settings → Plugins** — pick a plugin folder, then install via the file picker or just drag the `.wasm` file onto the window. Plugin nodes appear in the palette automatically (marked with a small "P" badge so you can tell them apart from built-ins) and execute with the same isolation guarantees as built-in nodes — each call runs in a sandboxed Wasmtime instance with a 64 MiB memory limit and outbound HTTP access but no filesystem access.
+
+The Settings panel also lists installed plugins and surfaces any that failed to load (with the reason) instead of just dropping them, so a bad build doesn't disappear silently.
 
 See [Plugin Authoring](docs/plugin-authoring.md) to get started, or copy `examples/plugin-template/` as a starting point.
+
+---
+
+## Embedding the engine
+
+`flowo-engine` is a standalone Rust crate — the workflow model, executor, scheduler, and node registry don't depend on Tauri or any UI. You can pull it into your own Rust program, register your own nodes alongside (or instead of) the 39 built-ins, supply your own credential resolver and event sink, and run workflows headless — no desktop app, no database required unless you want run history.
+
+This is the same engine that powers the desktop app and `flowo-server`, so anything documented for those (retries, parallel execution, expressions, plugins) works the same way when embedded.
+
+See [Embedding flowo-engine](docs/embedding.md) for a complete working example, the stable API surface, and what's safe to depend on across versions.
 
 ---
 

@@ -159,6 +159,21 @@
 .browser-notice { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.28); border-radius: 7px; padding: 9px 11px; font-size: 12px; color: var(--amber); line-height: 1.6; }
 .browser-notice strong { display: block; font-size: 12px; margin-bottom: 2px; }
 
+.btn-sm { padding: 4px 10px; background: var(--bg4); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 12px; font-family: inherit; cursor: pointer; transition: background var(--trans), border-color var(--trans); white-space: nowrap; }
+.btn-sm:hover { background: var(--bg3); border-color: var(--t3); }
+.btn-sm:disabled { opacity: .4; cursor: not-allowed; }
+
+.settings-warn { color: var(--amber); }
+.settings-path-display { font-size: 11px; color: var(--t2); margin-top: 1px; font-family: monospace; word-break: break-all; }
+
+.plugin-list-container { display: flex; flex-direction: column; gap: 4px; }
+.plugin-list-empty { font-size: 11px; color: var(--t3); padding: 4px 0; }
+.plugin-list-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; }
+.plugin-list-item-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.plugin-list-item-name { font-size: 12px; color: var(--t1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugin-list-item-meta { font-size: 10px; color: var(--t3); font-family: monospace; }
+.plugin-list-item-error { font-size: 10px; color: var(--red); }
+
 
 /* ── CONTEXT MENU ───────────────────────────────────────────────────────────── */
 

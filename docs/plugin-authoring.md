@@ -1,62 +1,67 @@
 # Writing a Flowo Plugin Node
 
-Flowo's WASM plugin system lets you ship new node types as `.wasm` files. Once installed, plugin nodes appear in the palette and execute identically to built-in nodes — in the desktop app and `flowo-server` alike.
+Flowo's plugin system lets you ship new node types as `.wasm` files. Once installed, plugin nodes appear in the palette and behave identically to built-in nodes — in both the desktop app and `flowo-server`. The only visible difference is a small grey **"P"** badge next to the node's name in the palette and search results, so users can tell at a glance which nodes came from a plugin versus shipped with Flowo. It's purely cosmetic — wiring, execution, retries, and expressions all work exactly the same.
+
+This guide assumes you know some Rust. If you're new to Rust, the [Rust Book](https://doc.rust-lang.org/book/) covers the fundamentals; most of what you need for a plugin is covered in the first ten chapters.
 
 ---
 
-## What plugins can do
+## What a plugin can do
 
-A plugin node receives its configuration parameters and resolved credential values, runs arbitrary logic, and returns a JSON object as output. Downstream nodes can reference that output using the normal `{{...}}` expression syntax.
+A plugin node receives its configuration parameters and any resolved credential values, runs your logic, and returns a JSON object. Downstream nodes can reference that output using the normal `{{...}}` expression syntax.
 
 From inside the plugin sandbox, you can:
-- Make outbound HTTP requests (WASI HTTP is available).
-- Use Rust's standard library (strings, collections, JSON parsing via any pure-Rust crate).
-- Perform CPU-bound computation.
+- Make outbound HTTP requests (WASI HTTP is available)
+- Use Rust's standard library and any pure-Rust crates
+- Perform CPU-bound computation
 
 You cannot:
-- Access the local filesystem (no preopened directories — all filesystem calls return errors).
-- Bind ports or accept inbound connections.
-- Access Flowo's SQLite database or credential store directly.
-- Call back into Flowo's Rust API (the interface is one-directional: host calls guest).
-
-See [Security model](#security-model) for details.
+- Read or write the local filesystem (all filesystem calls return errors — no directories are mounted)
+- Bind ports or accept inbound connections
+- Access Flowo's SQLite database or credential store directly
+- Call back into Flowo's Rust runtime (communication is one-directional: host calls plugin, not the other way around)
 
 ---
 
 ## Prerequisites
 
-- **Rust stable 1.82 or later.** Earlier versions do not include the `wasm32-wasip2` target.
+- **Rust 1.82 or later** — earlier versions don't include the `wasm32-wasip2` target
 - **The WASM target:**
   ```bash
   rustup target add wasm32-wasip2
   ```
 
-No other tooling is needed. You do not need `cargo-component` or `wasm-opt`. The `wasm32-wasip2` target compiles directly to a WASM Component using the standard Rust toolchain.
+That's it. You don't need `cargo-component`, `wasm-opt`, or any other tooling. The `wasm32-wasip2` target produces a WASM Component directly using the standard Rust toolchain.
 
 ---
 
-## Starting from the template
+## Start from the template
 
-Clone the Flowo repository and copy the template:
+Copy the included template rather than starting from scratch:
 
 ```bash
+# From the Flowo repo root
 cp -r examples/plugin-template my-plugin
 cd my-plugin
 ```
 
-The template is a self-contained Rust crate. It already has the correct `crate-type`, `wit-bindgen` dependency, and WIT file. Rename the crate in `Cargo.toml`, then edit `src/lib.rs`.
+The template has everything pre-configured: the correct `crate-type`, the `wit-bindgen` dependency, and the WIT file. Rename the crate in `Cargo.toml`, then edit `src/lib.rs`.
 
-To verify the template builds before modifying it:
+Verify the template builds before you touch anything:
 
 ```bash
 cargo build --target wasm32-wasip2 --release
 ```
 
+If that succeeds, your environment is set up correctly.
+
 ---
 
 ## The WIT interface
 
-Every Flowo plugin must export the `flowo-node` world defined in `wit/node.wit`. The full annotated interface:
+Every Flowo plugin implements the `flowo-node` world defined in `wit/node.wit`. You won't usually need to edit this file — it's included in the template and you implement the functions it defines.
+
+The full annotated interface:
 
 ```wit
 package flowo:plugin@0.1.0;
@@ -72,64 +77,62 @@ interface types {
     record node-input {
         /// Node configuration parameters (from the workflow JSON).
         params: list<param>,
-        /// Resolved credential values (secrets, never credential IDs).
+        /// Resolved credential values — actual secrets, never IDs.
         credentials: list<param>,
     }
 
     /// Output returned from a plugin node's execute function.
     record node-output {
         success: bool,
-        /// JSON-encoded output data. Must be a valid JSON object string.
+        /// JSON-encoded output object. Must be a valid JSON object string.
         data: string,
-        /// Short machine-readable error code. Empty string if success.
+        /// Short machine-readable error code. Empty string on success.
         error-code: string,
-        /// Human-readable error message. Empty string if success.
+        /// Human-readable error message. Empty string on success.
         error-message: string,
         /// If true, the executor may retry this node per its RetryPolicy.
         recoverable: bool,
     }
 
-    /// Metadata describing this node type. Returned by describe().
+    /// Metadata about this node type. Returned by describe().
     record node-descriptor {
-        /// Unique identifier. Use reverse-domain format: "com.example.my-node"
+        /// Unique ID. Use reverse-domain format: "com.example.my-node"
         type-id: string,
-        /// Display name shown in the UI palette.
+        /// Display name shown in the palette.
         display-name: string,
-        /// Category for palette grouping: "action", "ai", "logic", "utility"
+        /// Palette category: "trigger", "action", "ai", "logic", "utility", "other"
         category: string,
         /// Short description shown in the UI.
         description: string,
-        /// JSON Schema string for node inputs (shown in config panel).
+        /// JSON Schema string for node inputs (drives the config panel).
         input-schema: string,
-        /// JSON Schema string for node outputs (used in expression picker).
+        /// JSON Schema string for node outputs (drives the expression picker).
         output-schema: string,
     }
 }
 
-/// The interface every Flowo plugin node must implement.
 interface node {
     use types.{node-input, node-output, node-descriptor};
 
     /// Return metadata about this node type. Called once at load time.
     describe: func() -> node-descriptor;
 
-    /// Execute the node. Called for every workflow run that reaches this node.
+    /// Execute the node. Called on every workflow run that reaches this node.
     execute: func(input: node-input) -> node-output;
 }
 
-/// The world exported by every Flowo plugin component.
 world flowo-node {
     export node;
 }
 ```
 
-WIT field names use kebab-case. `wit-bindgen` maps them to snake_case in Rust: `type-id` becomes `type_id`, `error-code` becomes `error_code`, and so on.
+WIT uses kebab-case for field names. `wit-bindgen` maps them to snake_case in Rust: `type-id` → `type_id`, `error-code` → `error_code`, and so on.
 
 ---
 
 ## Implementing `describe()`
 
-`describe()` is called once when Flowo loads the plugin. The returned `NodeDescriptor` is cached for the lifetime of the process — it is not called again during normal operation.
+`describe()` is called once when Flowo loads your plugin. The returned descriptor is cached — it won't be called again during normal operation.
 
 ```rust
 fn describe() -> NodeDescriptor {
@@ -158,21 +161,23 @@ fn describe() -> NodeDescriptor {
 }
 ```
 
-**`type_id`** must be unique across all installed plugins. Use reverse-domain notation: `com.yourname.node-name`. Flowo uses this ID to match nodes in saved workflows; changing it after publishing breaks existing workflows that use your node.
+**Key decisions:**
 
-**`category`** controls which palette group the node appears in. Accepted values: `"trigger"`, `"action"`, `"ai"`, `"logic"`, `"utility"`, `"other"`. Nodes with an unrecognised category are silently omitted from the palette — they load successfully and execute correctly if referenced in a workflow, but they will not be visible in the UI.
+**`type_id`** — must be unique across all installed plugins. Use reverse-domain notation: `com.yourname.node-name`. This ID is stored in workflow files; changing it after publishing breaks every saved workflow that uses your node. Treat it as permanent.
 
-**`input_schema` and `output_schema`** are JSON Schema strings. They control the node configuration panel and the expression picker, respectively. Both must be valid JSON objects. If you have no inputs or outputs, use `"{}"`.
+**`category`** — controls palette grouping. Accepted values are `"trigger"`, `"action"`, `"ai"`, `"logic"`, `"utility"`, and `"other"`. If you put anything else here, Flowo doesn't reject the plugin — it falls back to `"action"` and writes a warning to the log so you notice during testing. Stick to the accepted list; the fallback exists so a typo doesn't take your node out of the palette entirely, not as a second supported value.
+
+**`input_schema` / `output_schema`** — JSON Schema (draft-07) object strings. `input_schema` drives the config panel UI; `output_schema` populates the expression picker for downstream nodes. Both must be valid JSON. If your node has no inputs or outputs, use `"{}"`.
 
 ---
 
 ## Implementing `execute()`
 
-`execute()` receives a `NodeInput` and must return a `NodeOutput`. The function is synchronous from the guest's perspective.
+`execute()` receives a `NodeInput` and returns a `NodeOutput`. It's synchronous from the guest side — WASI handles the async I/O internally.
 
 ```rust
 fn execute(input: NodeInput) -> NodeOutput {
-    // Look up a parameter by key.
+    // Find a parameter by key
     let url = input
         .params
         .iter()
@@ -202,35 +207,35 @@ fn execute(input: NodeInput) -> NodeOutput {
 }
 ```
 
-**`data`** must be a valid JSON object string (`"{"key":"value"}`). If it is not valid JSON, Flowo treats the output as empty (`{}`). It is not treated as an error.
+**`data`** must be a valid JSON object string. If it's not valid JSON, Flowo treats the output as `{}` without raising an error.
 
-**`recoverable`** tells the executor whether to retry this failure according to the node's `RetryPolicy` in the workflow. Set it to `true` for transient errors (network timeouts, rate limits). Set it to `false` for permanent errors (invalid input, authentication failure).
+**`recoverable`** tells the executor whether to retry on failure (based on the node's retry settings in the workflow). Use `true` for transient problems like network timeouts and rate limits; use `false` for permanent failures like missing required input or authentication errors.
 
-**Parameters vs. credentials.** Flowo merges resolved credential values into `input.params` before calling `execute()`. Your code does not need to look in `input.credentials` separately — everything arrives in `params`.
+**Parameters and credentials both arrive in `params`.** Flowo merges resolved credential values into `input.params` before calling `execute()`. You don't need to check `input.credentials` separately — everything is in one place.
 
 ---
 
-## Making HTTP requests from a plugin
+## Making HTTP requests
 
-WASI HTTP is available. You can use any pure-Rust HTTP client that targets `wasm32-wasip2`. The [`wasi`](https://crates.io/crates/wasi) crate exposes the raw WASI interfaces. Higher-level crates like `reqwest` do not yet support `wasm32-wasip2`, so use the WASI bindings directly or a crate that wraps them.
+WASI HTTP is available. Use any pure-Rust HTTP client that targets `wasm32-wasip2`. The [`wasi`](https://crates.io/crates/wasi) crate exposes the raw interfaces. Higher-level crates like `reqwest` don't yet support `wasm32-wasip2`.
 
-Example using raw WASI HTTP:
-
-```rust
-// Add to Cargo.toml: wasi = "0.14"
-use wasi::http::outgoing_handler;
-// ... (see wasi crate docs for full example)
+```toml
+# Cargo.toml
+[dependencies]
+wasi = "0.14"
 ```
 
-**Important:** Flowo cannot apply SSRF protection inside the WASM sandbox. If you are running `flowo-server` in a multi-tenant or publicly accessible environment, use a host-level egress firewall to restrict what plugins can reach. This is the same recommendation made for the built-in HTTP node in [`docs/security.md`](security.md).
+See the [wasi crate documentation](https://docs.rs/wasi) for usage examples.
+
+**Security note:** Flowo cannot apply SSRF protection inside the WASM sandbox. If you're running `flowo-server` in a multi-tenant or publicly accessible environment, configure a host-level egress firewall to restrict what plugins can connect to. See [Security — SSRF protection](security.md#5-http-node--ssrf-protection).
 
 ---
 
-## Testing locally
+## Testing your plugin
 
-Plugins are reactor components (no `main`, no `_start`). They cannot be run directly with the `wasmtime` CLI — the CLI only runs command components. To verify a plugin before loading it into Flowo:
+Plugins are reactor WASM components, not commands — you can't run them directly with the `wasmtime` CLI. There are two approaches for testing.
 
-**Inspect the component exports** using `wasm-tools`:
+**Inspect exports first:**
 
 ```bash
 cargo install wasm-tools
@@ -238,48 +243,74 @@ cargo build --target wasm32-wasip2 --release
 wasm-tools component wit target/wasm32-wasip2/release/my_plugin.wasm
 ```
 
-This prints the resolved WIT interface exported by the component. Confirm that `flowo:plugin/node` appears in the output and that `describe` and `execute` are listed as exports.
+Confirm that `flowo:plugin/node` appears in the output and that both `describe` and `execute` are listed as exports. If they're missing, the component isn't implementing the interface correctly.
 
-**Integration test** — the most reliable approach:
+**Integration test in Flowo:**
 
-1. Copy the `.wasm` to your plugin directory.
-2. Start Flowo (desktop) or `flowo-server --plugin-dir <dir>`.
-3. Confirm the node appears in the palette.
-4. Create a workflow using the node and run it.
-5. Check the run history for output and error details.
+1. Copy the `.wasm` file to your plugin directory
+2. Start Flowo (desktop) or `flowo-server --plugin-dir <path>`
+3. Confirm the node appears in the palette
+4. Build a workflow using your node and run it
+5. Check the run history for output and any error details
+
+The integration test is the definitive check — it catches ABI mismatches that wasm-tools can't.
+
+---
+
+## Installing and managing plugins (desktop app)
+
+This part is for whoever is *using* the plugin, not writing it — point your users at this section.
+
+Open **Settings → Plugins**. The panel has three parts:
+
+- **Plugin folder** — a path on disk, set once via the **Browse** button. This is the folder Flowo scans for `.wasm` files. If it's not set yet, the panel says so and the rest of the panel is inactive until you pick one.
+- **Installed plugins** — a list of every `.wasm` file in that folder, showing the node's display name and its `type_id`. If a file is in the folder but fails to load (wrong WIT version, corrupted build, etc.), it still shows up in the list with an error message instead of just vanishing — so a broken plugin doesn't silently disappear and leave you wondering where it went. Each row has a **Remove** button.
+- **Install .wasm** — opens a file picker restricted to `.wasm` files. Pick the file, Flowo copies it into the plugin folder, and it appears in the list.
+
+**Drag-and-drop also works.** Drag a `.wasm` file straight onto the Flowo window. If a plugin folder is already set, it's installed immediately with a success toast. If no folder is set yet, you get a toast pointing you to Settings → Plugins to set one first.
+
+> If you're running Flowo in a browser during development (not the packaged desktop app), drag-and-drop install for `.wasm` files doesn't work — the browser sandbox doesn't give web pages access to dropped files' real paths. Use the **Install .wasm** button in Settings instead; that goes through the desktop file picker and isn't affected.
+
+**Restart required.** After any install or remove, a dismissible banner appears reminding you to restart Flowo. Plugins are loaded once at startup — installing or removing a file doesn't hot-swap the running palette. The banner doesn't restart anything for you and disappears if you dismiss it or close Flowo; it's just a reminder for that session.
+
+**Removing a plugin** deletes the `.wasm` file from the plugin folder. Any saved workflows that still reference that plugin's `type_id` will fail to load that node after restart — Flowo doesn't quietly substitute anything in its place.
+
+`flowo-server` uses the same plugin folder mechanism but has no Settings UI — point it at the folder with `--plugin-dir <path>` (or the equivalent config key) and restart the process to pick up changes.
 
 ---
 
 ## Distributing your plugin
 
-There is no central registry. Distribute your plugin by sharing the compiled `.wasm` file. Users place it in their plugin directory and restart Flowo.
+There's no central registry. Share the compiled `.wasm` file — your users install it via Settings → Plugins or drag-and-drop, as described above.
 
-Recommended distribution practices:
-- Include the source code. Your plugin inherits Flowo's AGPL-3.0 obligations unless it is entirely independent logic (i.e., it does not incorporate any Flowo source code). If uncertain, consult the [Flowo dual-licensing guide](dual-licensing.md).
-- Publish the `type_id` you use publicly so it can be coordinated across the community and avoid collisions.
-- Never change the `type_id` of a published plugin. Users' saved workflows reference it. Rename by publishing a new `type_id` and deprecating the old one in your documentation.
+Practices worth following:
+
+- **Publish the source.** Your plugin may inherit Flowo's AGPL-3.0 obligations depending on how it uses Flowo code. If uncertain, see [dual-licensing.md](dual-licensing.md).
+- **Never change a published `type_id`.** Users' saved workflows reference it by this string. If you need to rename, publish a new `type_id` alongside the old one and document the transition.
+- **Document your `type_id` publicly** to avoid collisions with other plugin authors.
 
 ---
 
 ## Security model
 
-Each plugin execution runs in an isolated Wasmtime `Store` with:
-- **64 MiB memory limit.** Attempts to allocate beyond this cause the plugin to receive a WASM trap.
-- **No filesystem access.** Filesystem syscalls succeed at the WASM API level but all paths return "not found" or "permission denied" — no directories are mounted.
-- **Outbound HTTP allowed.** Plugins can make HTTP requests via WASI HTTP.
-- **No shared state.** Each `execute()` call gets a fresh store. One call cannot observe or corrupt the state of another.
-- **No CPU time limit in v1.** A plugin that loops forever blocks the worker thread indefinitely. This will be addressed in a future release using Wasmtime's epoch-based interruption.
+Each plugin execution runs in an isolated Wasmtime `Store`:
 
-Plugin `.wasm` files are loaded only from operator-configured directories. Remote loading is not supported. Trust your plugin sources.
+- **64 MiB memory limit.** Allocation beyond this causes a WASM trap.
+- **No filesystem access.** All filesystem calls return errors — no directories are mounted.
+- **Outbound HTTP allowed** via WASI HTTP.
+- **No shared state between calls.** Each `execute()` call gets a fresh store. One call can't read or corrupt another's state.
+- **No CPU time limit (v1).** A plugin that loops indefinitely blocks the worker thread. This will be addressed in a future release using Wasmtime epoch-based interruption. Don't ship plugins with unbounded loops.
+
+Plugin `.wasm` files are loaded only from operator-configured directories. Remote plugin loading is not supported.
 
 ---
 
 ## Versioning and compatibility
 
-The `flowo-node` world is versioned at `flowo:plugin@0.1.0`. Flowo guarantees the following stability:
+The `flowo-node` world is versioned at `flowo:plugin@0.1.0`. Stability guarantees:
 
-- `describe()` and `execute()` function signatures will not change in a breaking way without a major version bump on the WIT package.
-- WIT records have no optional fields — all fields are required and positionally encoded in the canonical ABI. Any change to record fields (`NodeInput`, `NodeOutput`, `NodeDescriptor`) is a breaking change, regardless of whether fields are added or removed, and will be signalled by a major version bump on the WIT package.
-- Plugins compiled against an older version of the WIT file are binary-incompatible with a newer host that changed a record definition. Always use the WIT file that matches the Flowo version you are targeting.
+- `describe()` and `execute()` signatures won't change without a major WIT package version bump.
+- All record fields (`NodeInput`, `NodeOutput`, `NodeDescriptor`) are required and positionally encoded in the canonical ABI. Any field change — addition or removal — is a breaking change and will bump the major version.
+- Plugins compiled against an older WIT version are binary-incompatible with a host that changed a record definition. Always target the WIT file that matches your Flowo version.
 
-If Flowo cannot load a plugin (because the WIT interface is incompatible), it logs a warning and skips the plugin. The process does not crash.
+If Flowo can't load a plugin due to an incompatible interface, it logs a warning and skips the plugin. The process continues normally.

@@ -1,218 +1,234 @@
 # Credentials
 
-Credentials are how Flowo stores your API keys and secrets securely. Instead of pasting a key directly into a node's config (which would be visible in the workflow JSON), you store it once in the credential store and reference it by name. The actual value is encrypted on disk and only decrypted in memory at the moment a node runs.
+Most automation workflows call external services — OpenAI, Slack, Stripe, Google Sheets. Those services require a key to prove you're authorized to use them. Flowo's credential store is where you keep those keys.
+
+The reason this exists as a separate system (rather than just pasting keys directly into node config fields) is security. Credentials are encrypted on disk. They're never written to your workflow files. If you share a workflow export with a colleague, your API keys don't come along for the ride.
 
 ---
 
 ## Add a credential
 
-1. Click the **Connections** button in the sidebar (lock icon).
+1. Click the **Connections** button in the sidebar (the lock icon).
 2. Click **Add Credential**.
-3. Set an **ID** — a short slug used to reference this credential in nodes (e.g. `openai-prod`, `slack-bot`). IDs are case-sensitive. Use lowercase letters, numbers, and hyphens — no spaces.
-4. Set a **Name** — the human-readable label shown in dropdowns (e.g. `OpenAI API Key`).
-5. Paste the **Value** — the actual secret.
-6. Save.
+3. **ID** — a short slug used to reference this credential in nodes. Use lowercase letters, numbers, and hyphens. No spaces. Example: `openai-prod`, `slack-bot`, `stripe-live`.
+4. **Name** — the label shown in dropdowns when you configure nodes. Example: `OpenAI Production Key`, `Slack Bot Token`.
+5. **Value** — paste the actual key here.
+6. Click Save.
 
-The value is encrypted immediately on save. It's never stored in plaintext anywhere on disk.
+The value is encrypted the moment you save. After that point, Flowo never shows it in the UI again — you can only update or delete it.
 
 ---
 
 ## Use a credential in a node
 
-In any node that accepts an API key, the config panel shows a credential dropdown next to the key field. Select the credential by its name. The workflow JSON stores only the credential ID — the actual value is looked up at runtime and never written to disk in plaintext or sent to the frontend.
+In any node that needs an API key, the config panel shows a credential dropdown. Select the credential by its Name. The workflow file stores only the credential's ID — the actual key is looked up at runtime and never leaves the encrypted store.
 
 ---
 
-## Getting API keys for common services
-
-Here's where to find the API key for each supported service.
+## Getting API keys for supported services
 
 ### OpenAI
 
 1. Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-2. Click **Create new secret key**.
-3. Give it a name (e.g. `Flowo`), copy the key — it starts with `sk-`.
-4. Save it immediately. OpenAI only shows it once.
+2. Click **Create new secret key**. Give it a name, click Create.
+3. Copy the key immediately — it starts with `sk-`. OpenAI shows it only once.
 
-Add as a credential with ID `openai` and paste the key as the value.
+Suggested credential ID: `openai`
 
 ### Anthropic (Claude)
 
 1. Go to [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys).
-2. Click **Create Key**.
-3. Copy the key — it starts with `sk-ant-`.
+2. Click **Create Key**. Copy the key — it starts with `sk-ant-`.
+
+Suggested credential ID: `anthropic`
 
 ### Slack
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps).
-2. Create a new app or open an existing one.
-3. Go to **OAuth & Permissions → Bot Token Scopes** and add `chat:write`.
-4. Click **Install to Workspace**.
-5. Copy the **Bot User OAuth Token** — it starts with `xoxb-`.
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app (or open an existing one).
+2. Navigate to **OAuth & Permissions → Bot Token Scopes** and add `chat:write`.
+3. Click **Install to Workspace** at the top of that same page.
+4. Copy the **Bot User OAuth Token** — it starts with `xoxb-`.
 
-Before the bot can post to a channel, you must invite it: in Slack, open the channel and type `/invite @YourBotName`.
+Before the bot can post to a channel, you need to invite it: open the channel in Slack, type `/invite @YourBotName`, and send.
+
+Suggested credential ID: `slack-bot`
 
 ### SendGrid
 
 1. Go to [app.sendgrid.com/settings/api_keys](https://app.sendgrid.com/settings/api_keys).
-2. Click **Create API Key**.
-3. Choose **Restricted Access**, enable **Mail Send → Full Access**.
-4. Copy the key — it starts with `SG.`.
+2. Click **Create API Key**. Choose **Restricted Access** and enable **Mail Send → Full Access**.
+3. Copy the key — it starts with `SG.`.
 
-You also need a verified sender email address or verified domain in SendGrid before you can send. Go to **Settings → Sender Authentication** if you haven't done this.
+You also need a verified sender address or domain before you can send mail. Check **Settings → Sender Authentication** in SendGrid if you haven't done this.
+
+Suggested credential ID: `sendgrid`
 
 ### GitHub
 
 1. Go to [github.com/settings/tokens](https://github.com/settings/tokens).
 2. Click **Generate new token (classic)**.
-3. Give it a name, set an expiration, and select the scopes you need:
-   - `public_repo` — for creating issues or comments on public repos
+3. Name it, set an expiry, and select scopes:
+   - `public_repo` — for issues and comments on public repos
    - `repo` — for private repos
-4. Copy the token — it starts with `ghp_`. GitHub only shows it once.
+4. Copy the token — it starts with `ghp_`. GitHub shows it only once.
+
+Suggested credential ID: `github`
 
 ### Google Sheets
 
-Google Sheets uses OAuth 2.0, which is more involved than a simple API key. You need a Google Cloud service account.
+Google Sheets uses a service account rather than a simple API key.
 
-1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project (or use an existing one).
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create or select a project.
 2. Go to **APIs & Services → Enable APIs** and enable the **Google Sheets API**.
-3. Go to **APIs & Services → Credentials → Create Credentials → Service Account**.
-4. Give the service account a name, click through to finish creating it.
-5. Click the service account you just created, go to **Keys → Add Key → Create new key → JSON**.
-6. A JSON file downloads. Open it and copy the value of the `"private_key"` field (the long block starting with `-----BEGIN RSA PRIVATE KEY-----`). Alternatively, use the service account's email address with a personal access token approach — see Google's documentation.
-7. Back in the spreadsheet, click **Share** and share the sheet with the service account's email address (visible in the service account details, ends with `@your-project.iam.gserviceaccount.com`). Give it **Editor** access.
+3. Go to **APIs & Services → Credentials → Create Credentials → Service Account**. Give it a name and finish creating it.
+4. Open the service account, go to **Keys → Add Key → Create new key → JSON**. A JSON file downloads.
+5. Open that JSON file in a text editor and copy the entire value of the `"private_key"` field — the long block starting with `-----BEGIN RSA PRIVATE KEY-----`.
+6. Share each spreadsheet you want to access with the service account's email address (ends with `@your-project.iam.gserviceaccount.com`). Give it Editor access.
 
-> For a simpler approach: use a tool like [oauth2l](https://github.com/google/oauth2l) or a short Python script to generate a short-lived access token, and paste that as the credential value. Access tokens expire after 1 hour, so this only works for testing.
+Paste the private key as the credential value.
+
+Suggested credential ID: `google-sheets`
 
 ### Notion
 
 1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations).
-2. Click **New integration**.
-3. Give it a name, select the workspace, set **Capabilities** to read/update/insert content.
-4. Copy the **Internal Integration Token** — it starts with `secret_`.
-5. In each Notion database you want to access, click **...** (top right) → **Connections** → add your integration by name.
+2. Click **New integration**, name it, and set **Capabilities** to allow reading, inserting, and updating content.
+3. Copy the **Internal Integration Token** — it starts with `secret_`.
+4. For each Notion database you want to access: open the database, click **...** (top right) → **Connections**, and add your integration by name.
+
+Suggested credential ID: `notion`
 
 ### Telegram
 
 1. Open Telegram and search for **@BotFather**.
-2. Send `/newbot`.
-3. Follow the prompts to name your bot and get a username.
-4. BotFather sends you a token — it looks like `123456789:ABCdef...`.
+2. Send `/newbot` and follow the prompts to name your bot.
+3. BotFather sends you a token — it looks like `123456789:ABCdef...`.
 
-To find your chat ID (needed for the Telegram node's `chat_id` field): send a message to your bot, then go to `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser. Look for `"chat":{"id":...}` in the response.
+To find your chat ID (needed for the `chat_id` field in the Telegram node): send a message to your bot, then visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser. Look for `"chat":{"id":...}` in the response.
+
+Suggested credential ID: `telegram`
 
 ### Discord
 
-Discord uses webhook URLs, not a bot token. No developer account needed.
+Discord uses webhook URLs rather than a bot token. No developer account required.
 
-1. Open your Discord server. Go to **Server Settings → Integrations → Webhooks**.
-2. Click **New Webhook**.
-3. Choose the channel, give it a name.
-4. Click **Copy Webhook URL**.
+1. Open your server. Go to **Server Settings → Integrations → Webhooks**.
+2. Click **New Webhook**, pick a channel, give it a name.
+3. Click **Copy Webhook URL** — it starts with `https://discord.com/api/webhooks/...`.
 
-Paste the whole URL as the credential value. It looks like `https://discord.com/api/webhooks/123456/abcdef...`.
+Paste the entire URL as the credential value.
+
+Suggested credential ID: `discord`
 
 ### Stripe
 
 1. Go to [dashboard.stripe.com/apikeys](https://dashboard.stripe.com/apikeys).
-2. Use `sk_test_...` for testing and `sk_live_...` for production.
-3. Never put a live key in a workflow you're still developing.
+2. Use `sk_test_...` for testing, `sk_live_...` for production.
+
+Use a test key while you're developing a workflow. Switch to the live key only after you've confirmed everything works correctly.
+
+Suggested credential ID: `stripe-test` and `stripe-live` (kept separate to avoid mistakes)
 
 ### SMTP (Send Email node)
 
-The Send Email node uses SMTP directly — no API key, just a username and password. Common settings:
+The Send Email node connects via SMTP rather than using an API key. You provide a hostname, port, username, and password. Common setups:
 
 | Provider | SMTP Host | Port | Notes |
 |---|---|---|---|
-| Gmail | `smtp.gmail.com` | `587` | Use an App Password, not your account password. [Create one here](https://myaccount.google.com/apppasswords). Two-factor must be enabled on your Google account. |
+| Gmail | `smtp.gmail.com` | `587` | Use an [App Password](https://myaccount.google.com/apppasswords), not your normal password. Requires two-factor auth enabled on your Google account. |
 | Outlook / Hotmail | `smtp.office365.com` | `587` | Use your full email address as the username. |
-| Fastmail | `smtp.fastmail.com` | `587` | Use your full email address and a [Fastmail app password](https://www.fastmail.com/help/clients/apppassword.html). |
-| Mailgun | `smtp.mailgun.org` | `587` | Find credentials in Mailgun dashboard → Sending → Domain settings → SMTP credentials. |
+| Fastmail | `smtp.fastmail.com` | `587` | Use a [Fastmail app password](https://www.fastmail.com/help/clients/apppassword.html). |
+| Mailgun | `smtp.mailgun.org` | `587` | Find SMTP credentials under Sending → Domain settings → SMTP credentials in the Mailgun dashboard. |
 
 ---
 
 ## How encryption works
 
-Credentials are encrypted with AES-256-GCM. The desktop app stores the encryption key in the OS-native keychain. The server binary stores it in a plain file by default, with an option to use the keychain.
+Credentials are encrypted with **AES-256-GCM** — the same standard used by banks and messaging apps to protect data at rest.
 
-### Desktop app (macOS, Windows, Linux)
+When you save a credential, Flowo generates a random nonce and encrypts the value with your 256-bit key. The encrypted bytes and the nonce are stored together in `credentials.db`. The key itself is never stored in that file.
 
-The desktop app uses the OS-native keychain:
+When a node runs and needs a credential, Flowo decrypts it in memory for that single operation. The plaintext key is never written to disk, never logged, and never sent to the UI — the frontend only ever sees the credential's ID (like `slack-bot`), not the value.
 
-| Platform | Store |
+**Where the key lives:**
+
+| Platform | Key store |
 |---|---|
-| macOS | macOS Keychain (login keychain, service `flowo`, account `encryption_key`) |
+| macOS | macOS Keychain |
 | Windows | Windows Credential Manager |
-| Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
+| Linux | SecretService via D-Bus (GNOME Keyring or KWallet) |
 
-If the keychain is unavailable (common on Linux without a running SecretService daemon), the app falls back to a plain file at `.cred.key` in the app data directory and logs a warning. The file is created with `chmod 600` on Unix. If a working keychain becomes available later, Flowo migrates the key from the file into the keychain automatically on next launch and deletes the file.
-
-### Server mode (flowo-server)
-
-The server stores the key in a plain file by default:
-
-| Platform | Key file location |
-|---|---|
-| macOS | `<data_dir>/flowo.key` |
-| Windows | `<data_dir>lowo.key` |
-| Linux | `<data_dir>/flowo.key` |
-
-`<data_dir>` defaults to `~/.flowo-server` and can be changed with `--data-dir`. On Unix, the file is created with `chmod 600`.
-
-**Limitation:** `chmod 600` protects against other OS users reading the file. It does not protect against root, against a process running as the same user, or against a backup that contains both `flowo.key` and `credentials.db` — an attacker with both files can decrypt all credentials offline without touching the running server. See [Security — key storage](security.md#3-where-the-encryption-key-is-stored) for a full explanation and mitigations.
-
-To use the OS keychain instead, pass `--keychain`:
+On Linux, if no SecretService daemon is running, Flowo falls back to a plain file at `.cred.key` in the app data directory (created with `600` permissions, readable only by your user). If you see a warning about this at startup, install a keychain daemon:
 
 ```bash
-flowo-server api --keychain --token mytoken
+# GNOME
+sudo apt install gnome-keyring
+
+# KDE
+sudo apt install kwallet-pam
 ```
 
-If the keychain is unavailable at startup, the server falls back to the file automatically with a warning.
+Once a keychain becomes available, Flowo migrates the key into it automatically and deletes the file.
 
-**Back up your key.** Losing the key makes `credentials.db` permanently unreadable. There is no recovery mechanism. Never store `flowo.key` and `credentials.db` in the same unencrypted backup.
+**In server mode:** the key is stored in a file by default (`~/.flowo-server/flowo.key`). See [Security](security.md#3-the-encryption-key--your-most-important-file) for the full picture, including how to use the OS keychain on a server and what you need to know about backup safety.
 
 ---
 
 ## Delete a credential
 
-Open the Connections panel, click the trash icon next to the credential. Flowo checks whether any saved workflow references that credential ID before deleting. If it does, the delete is blocked and shows which workflows would break.
+Open the Connections panel and click the trash icon next to the credential. Flowo checks whether any workflow currently references that credential ID before deleting. If one does, the delete is blocked and shows you which workflows would break. Update those workflows first, then delete.
 
 ---
 
-## Rotating a credential
+## Rotate a credential (change to a new key)
 
-There's no in-place rotation UI. The workflow is:
+There's no in-place rotation UI. The process:
 
-1. Add the new credential with a new ID (e.g. `openai-prod-2`).
-2. Open each workflow that uses the old credential, update the affected nodes to use the new ID.
+1. Create a new credential with a new ID (e.g. `openai-v2`).
+2. Open each workflow using the old credential and update the affected nodes to use the new ID.
 3. Save each workflow.
 4. Delete the old credential.
 
 ---
 
-## Credentials in server mode
+## In server deployments
 
-When you export a workflow for server deployment, credentials are not bundled into the zip. Instead, `flowo-server` reads them from environment variables at runtime.
+When you export a workflow for server deployment, credentials are **not included** in the export zip. Instead, `flowo-server` reads credentials from environment variables at runtime.
 
-The export panel shows you exactly which environment variables to set. The naming convention is automatic:
+The export panel shows exactly which environment variables to set. The naming is automatic:
 
-```
-credential ID "openai-prod"   → FLOWO_CRED_OPENAI_PROD
-credential ID "slack-bot"     → FLOWO_CRED_SLACK_BOT
-credential ID "my.key"        → FLOWO_CRED_MY_KEY
-```
+| Credential ID | Environment variable |
+|---|---|
+| `openai-prod` | `FLOWO_CRED_OPENAI_PROD` |
+| `slack-bot` | `FLOWO_CRED_SLACK_BOT` |
+| `my.key` | `FLOWO_CRED_MY_KEY` |
 
-Set these in the `.env` file before running `install.sh`, or in your systemd unit file. See [Server Deployment](server-deploy.md) for the full workflow.
+Hyphens and dots become underscores, the name is uppercased, and `FLOWO_CRED_` is prepended. Set these variables in `/etc/flowo/.env` (or your deployment's equivalent) before starting the server.
 
-In API mode, save credentials directly to the server using the `/api/credentials` endpoint — they're encrypted the same way as the desktop app.
+Full server setup walkthrough: [Server Deployment](server-deploy.md)
 
 ---
 
-## Security notes
+## Where the encryption key is stored
 
-For the complete security model — including the key file threat model, SSRF protection, dangerous node confirmations, server hardening, and prompt injection — see [Security](security.md).
+### Desktop app
 
-- Credential values are never sent to the frontend. The TypeScript layer only ever sees credential IDs.
-- The Connections panel lists credential names and IDs only — there's no way to read back a stored value through the UI.
-- In the desktop app, you're prompted to confirm before running any workflow that contains Shell Command or Code (JS) nodes. These nodes can access credentials indirectly through `{{$env.VAR_NAME}}` — but `$env` is disabled in the desktop app, so this path is closed.
-- In server mode, `$env` is opt-in per variable. Never add `FLOWO_TOKEN` or `FLOWO_CRED_*` variables to the `--allow-env-vars` list — doing so lets any workflow read and exfiltrate them.
+| Platform | Key store |
+|---|---|
+| macOS | macOS Keychain (login keychain, service `flowo`, account `encryption_key`) |
+| Windows | Windows Credential Manager |
+| Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
+
+If the keychain is unavailable (common on Linux without a running SecretService daemon), the app falls back to a plain file at `.cred.key` in the app data directory with `chmod 600`. Once a keychain becomes available, Flowo migrates the key into it automatically on next launch and deletes the file.
+
+### Server mode
+
+The server stores the key in a plain file by default — `<data_dir>/flowo.key` (default: `~/.flowo-server/flowo.key`), created with `chmod 600`.
+
+`chmod 600` protects against other OS users. It does not protect against root, against a process running as the same user, or against a backup that contains both `flowo.key` and `credentials.db` together. To use the OS keychain instead:
+
+```bash
+flowo-server api --keychain --token mytoken
+```
+
+See [Security — encryption key](security.md#3-the-encryption-key--your-most-important-file) for the full picture.

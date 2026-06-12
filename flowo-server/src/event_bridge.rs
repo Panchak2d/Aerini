@@ -147,6 +147,7 @@ impl EventSink for EventBridge {
                                     success:       wf_result.success,
                                     duration_ms:   duration_ms.map(|d| d as i64).unwrap_or(0),
                                     result_json,
+                                    status: if wf_result.success { "success" } else { "failed" }.to_string(),
                                 };
                                 if let Err(e) = history_db.save_run(&record) {
                                     self.log.push("WARN", None,

@@ -24,6 +24,7 @@ interface CredentialEntry {
 interface ValidateResult {
   trigger_desc: string;
   credentials:  CredentialExport[];
+  variables:    string[];
 }
 
 interface ExportResult {
@@ -160,6 +161,23 @@ function renderReady(
         They are never stored in the package — only their names are listed.
       </p>`;
 
+  const varsSection = result.variables.length === 0 ? "" : `
+    <table class="esp-cred-table">
+      <thead><tr><th>Variable</th><th>Suggested env key</th></tr></thead>
+      <tbody>
+        ${result.variables.map(v => `
+          <tr>
+            <td><code>$vars.${escapeHtml(v)}</code></td>
+            <td><code>FLOWO_VAR_${escapeHtml(v.toUpperCase())}</code></td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+    <p class="esp-note">
+      These are referenced via <code>{{$vars.x}}</code> in your workflow.
+      Set them as environment variables on your server.
+    </p>`;
+
   content.innerHTML = `
     <p class="esp-intro">
       Generates a self-contained deployment package for your workflow.
@@ -172,6 +190,10 @@ function renderReady(
         <span class="esp-field-value">${escapeHtml(result.trigger_desc)}</span>
       </div>
     </div>
+
+    ${result.variables.length > 0 ? `
+    <h3 class="esp-section-title">Required variables</h3>
+    ${varsSection}` : ""}
 
     <div class="esp-tab-bar" role="tablist" aria-label="Deployment target">
       <button id="esp-tab-linux" class="esp-tab esp-tab--active" role="tab"

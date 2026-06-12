@@ -250,7 +250,15 @@ impl PluginLoader {
             "ai" => NodeType::Ai,
             "logic" => NodeType::Logic,
             "utility" => NodeType::Utility,
-            _ => NodeType::Action, // "action" and unknown values default to Action
+            "action" => NodeType::Action,
+            other => {
+                tracing::warn!(
+                    "plugin '{}': unrecognised category '{}' — defaulting to Action",
+                    type_id,
+                    other
+                );
+                NodeType::Action
+            }
         };
 
         // JSON Schema strings from the plugin — fall back to empty schema on parse failure.
@@ -392,6 +400,10 @@ impl Node for WasmPluginNode {
         // WASM plugins do not expose a version via WIT. Plugins may embed their
         // version in type_id (e.g. "com.example.my-node@1.2.0") if needed.
         "1.0.0"
+    }
+
+    fn is_plugin(&self) -> bool {
+        true
     }
 
     fn input_schema(&self) -> Value {

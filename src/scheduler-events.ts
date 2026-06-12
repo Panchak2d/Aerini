@@ -66,7 +66,8 @@ export async function bindSchedulerEvents(
         if (evt.workflow_id === wfManager.currentId) {
           runManager.showResultFromScheduler(evt.workflow_name, result);
         } else {
-          saveRunToHistory(evt.workflow_id, evt.workflow_name, result);
+          const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          saveRunToHistory(runId, evt.workflow_id, evt.workflow_name, result);
           if (!result.success) {
             toast(`"${evt.workflow_name}" failed — check Background Runs for details`, "error");
           }

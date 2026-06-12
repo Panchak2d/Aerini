@@ -176,6 +176,21 @@ async fn pick_folder_dialog(app: tauri::AppHandle) -> Option<String> {
     }
 }
 
+/// Open a native file picker dialog filtered to `.wasm` files and return the
+/// chosen path. Returns null (None → JS null) when the user cancels.
+#[tauri::command]
+async fn pick_wasm_file_dialog(app: tauri::AppHandle) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<tauri_plugin_dialog::FilePath>>();
+    app.dialog()
+        .file()
+        .add_filter("WASM Plugin", &["wasm"])
+        .pick_file(move |path| { let _ = tx.send(path); });
+    match rx.await {
+        Ok(Some(path)) => path.as_path().map(|p| p.display().to_string()),
+        _ => None,
+    }
+}
+
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
 /// G9: strips `/`, `\`, and `..` from the filename before constructing the path.
@@ -393,6 +408,7 @@ pub fn run() {
             commands::workflow::get_setting,
             commands::workflow::set_setting,
             commands::workflow::save_run_record,
+            commands::workflow::save_run_started,
             commands::workflow::list_run_records,
             commands::workflow::delete_run_record,
             commands::workflow::clear_run_records,
@@ -413,7 +429,11 @@ pub fn run() {
             commands::export::validate_workflow_for_export,
             commands::export::generate_server_package,
             commands::export::generate_docker_package,
+            commands::plugins::list_installed_plugins,
+            commands::plugins::install_plugin_from_path,
+            commands::plugins::remove_plugin,
             pick_folder_dialog,
+            pick_wasm_file_dialog,
             write_temp_file,
         ])
         .run(tauri::generate_context!())

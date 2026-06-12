@@ -31,9 +31,21 @@ export interface RunRecord {
   success:       boolean;
   duration_ms:   number;
   result_json:   string;
+  status:        string;
+}
+
+export async function saveRunStarted(
+  id:           string,
+  workflowId:   string,
+  workflowName: string,
+): Promise<void> {
+  try {
+    await invoke("save_run_started", { id, workflowId, workflowName, ranAt: new Date().toISOString() });
+  } catch (e) { console.error("Failed to save run-started record:", e); }
 }
 
 export async function saveRunToHistory(
+  id:           string,
   workflowId:   string,
   workflowName: string,
   result:       WorkflowResult,
@@ -41,13 +53,14 @@ export async function saveRunToHistory(
   await migrateFromLocalStorage(workflowId, workflowName);
   const durationMs = computeDurationMs(result.logs);
   const record: RunRecord = {
-    id:            `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id,
     workflow_id:   workflowId,
     workflow_name: workflowName,
     ran_at:        new Date().toISOString(),
     success:       result.success,
     duration_ms:   durationMs,
     result_json:   JSON.stringify(result),
+    status:        result.success ? "success" : "failed",
   };
   try { await invoke("save_run_record", { record }); }
   catch (e) { console.error("Failed to save run record:", e); }
@@ -83,6 +96,7 @@ async function migrateFromLocalStorage(workflowId: string, _workflowName: string
         id: o.id, workflow_id: workflowId, workflow_name: o.workflowName,
         ran_at: o.ranAt, success: o.success, duration_ms: o.durationMs,
         result_json: JSON.stringify(o.result),
+        status: o.success ? "success" : "failed",
       };
       try {
         await invoke("save_run_record", { record });
@@ -197,21 +211,24 @@ export function renderHistoryPanel(
 
 function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void): HTMLElement {
   const item = document.createElement("div");
-  item.className = `history-item ${record.success ? "history-ok" : "history-fail"}`;
+  const isInterrupted = record.status === "running" || record.status === "interrupted";
+  item.className = `history-item ${isInterrupted ? "history-fail" : record.success ? "history-ok" : "history-fail"}`;
   const ranAt   = new Date(record.ran_at);
   const timeStr = ranAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const dateStr = ranAt.toLocaleDateString([], { month: "short", day: "numeric" });
   const dur     = record.duration_ms < 1000 ? `${record.duration_ms}ms` : `${(record.duration_ms / 1000).toFixed(1)}s`;
+  const badgeText = isInterrupted ? "INTERRUPTED" : record.success ? "OK" : "FAIL";
   item.innerHTML = `
     <div class="history-item-row">
-      <span class="history-badge ${record.success ? "history-badge-ok" : "history-badge-fail"}">${record.success ? "OK" : "FAIL"}</span>
+      <span class="history-badge ${record.success && !isInterrupted ? "history-badge-ok" : "history-badge-fail"}">${badgeText}</span>
       <span class="history-name">${escapeHtml(record.workflow_name)}</span>
-      <span class="history-dur">${dur}</span>
+      <span class="history-dur">${isInterrupted ? "" : dur}</span>
       <button class="history-del-btn" title="Delete this run">✕</button>
     </div>
     <div class="history-meta"><span title="${dateStr} · ${timeStr}">${relativeTime(ranAt)}</span></div>`;
   item.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).classList.contains("history-del-btn")) return;
+    if (isInterrupted) return;
     try { onRestoreRun(JSON.parse(record.result_json) as WorkflowResult); } catch { /* */ }
   });
   item.querySelector<HTMLButtonElement>(".history-del-btn")!.addEventListener("click", async (e) => {

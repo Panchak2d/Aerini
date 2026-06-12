@@ -16,6 +16,8 @@ export interface NodeDescriptor {
   ports: { inputs: PortDefinition[]; outputs: PortDefinition[] };
   /** True when this node's ports are derived from config, not static. */
   dynamic_ports?: boolean;
+  /** True when this node was loaded from a WASM plugin rather than built in. */
+  is_plugin?: boolean;
 }
 
 export interface WorkflowLogEntry {
@@ -128,3 +130,26 @@ export const deleteVersion = (id: string) =>
 
 export const checkNodejsAvailable = () =>
   invoke<boolean>("check_nodejs_available");
+
+export interface PluginInfo {
+  filename: string;
+  display_name: string;
+  type_id: string;
+  category: string;
+  load_error: string | null;
+}
+
+export const pickFolderDialog = () =>
+  invoke<string | null>("pick_folder_dialog");
+
+export const pickWasmFileDialog = () =>
+  invoke<string | null>("pick_wasm_file_dialog");
+
+export const listInstalledPlugins = (pluginDir: string) =>
+  invoke<PluginInfo[]>("list_installed_plugins", { pluginDir });
+
+export const installPluginFromPath = (srcPath: string, pluginDir: string) =>
+  invoke<string>("install_plugin_from_path", { srcPath, pluginDir });
+
+export const removePlugin = (filename: string, pluginDir: string) =>
+  invoke<void>("remove_plugin", { filename, pluginDir });

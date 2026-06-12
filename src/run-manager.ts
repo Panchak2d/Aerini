@@ -8,7 +8,7 @@ import {
   syntaxHighlight, extractPreview,
   wireCopyButtons,
 } from "./output-renderer";
-import { saveRunToHistory, renderHistoryPanel, type HistoryPanel } from "./run-history";
+import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel } from "./run-history";
 import { setWorkflowRunning } from "./workflow-manager";
 import { isTauri, escapeHtml } from "./utils";
 
@@ -134,7 +134,8 @@ export class RunManager {
   // Called when a scheduler-status event arrives with a completed result.
   // Saves to history and opens the full output panel (Summary + node tabs + Logs + History).
   showResultFromScheduler(workflowName: string, result: WorkflowResult): void {
-    saveRunToHistory(this.currentWorkflowId, workflowName, result);
+    const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    saveRunToHistory(runId, this.currentWorkflowId, workflowName, result);
 
     // Always paint the final node states onto the canvas — this is what makes
     // nodes turn green/red after a scheduled run, matching the manual run UX.
@@ -290,6 +291,11 @@ export class RunManager {
       // subscription wired in app.ts → runManager.onNodeStatusEvent().
       // No per-run subscription is needed here.
 
+      // Generate the run id up front so a "running" record can be written
+      // before execution starts (crash mid-run still leaves a trace).
+      const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      saveRunStarted(runId, this.currentWorkflowId, this.currentWorkflowName);
+
       // Race the workflow against a hard timeout so the UI never gets permanently stuck
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`Workflow timed out after ${RUN_TIMEOUT_MS / 1000}s. If you have a Schedule or Webhook node, it blocks until triggered.`)), RUN_TIMEOUT_MS)
@@ -325,7 +331,7 @@ export class RunManager {
       }
 
       // Save to run history
-      saveRunToHistory(this.currentWorkflowId, this.currentWorkflowName, result);
+      saveRunToHistory(runId, this.currentWorkflowId, this.currentWorkflowName, result);
       this.lastResult = result;
 
       this.buildDrawerTabs(result);

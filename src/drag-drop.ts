@@ -2,6 +2,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { showImportPreview } from "./modal-manager";
 import { isTauri } from "./utils";
+import { getSetting, installPluginFromPath } from "./ipc/workflow";
+import { showRestartBanner } from "./plugin-settings";
 
 type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
 
@@ -21,7 +23,15 @@ export function bindDropImport(toast: ToastFn): void {
   area.addEventListener("drop", e => {
     e.preventDefault(); dragCounter = 0; overlay.classList.remove("active");
     const file = e.dataTransfer?.files[0];
-    if (file) readAndPreviewFile(file, toast);
+    if (!file) return;
+    if (file.name.toLowerCase().endsWith(".wasm")) {
+      // Reading arbitrary file paths from a DOM File object is browser-sandboxed,
+      // so .wasm installs from DOM drag are not supported here — the Tauri
+      // native drop path (below) handles the actual install.
+      toast("To install a plugin, use the Install .wasm button in Settings → Plugins.", "info");
+      return;
+    }
+    readAndPreviewFile(file, toast);
   });
 
   // Tauri v2 native OS file-drop (drag from file manager)
@@ -41,6 +51,12 @@ export function bindDropImport(toast: ToastFn): void {
         overlay.classList.remove("active");
         const paths = (event.payload as { type: string; paths: string[] }).paths;
         if (!paths?.length) return;
+
+        const wasmPath = paths.find(p => p.toLowerCase().endsWith(".wasm"));
+        if (wasmPath) {
+          handleWasmDrop(wasmPath, toast);
+          return;
+        }
 
         const flowoPath = paths.find(p =>
           p.endsWith(".flowo") || p.endsWith(".json")
@@ -76,6 +92,26 @@ export function bindFileInput(toast: ToastFn): void {
     if (file) readAndPreviewFile(file, toast);
     (e.target as HTMLInputElement).value = "";
   });
+}
+
+async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<void> {
+  let pluginDir: string | null = null;
+  try {
+    pluginDir = await getSetting("plugin_dir");
+  } catch {
+    pluginDir = null;
+  }
+  if (!pluginDir) {
+    toast("Set a plugin directory in Settings → Plugins first.", "info");
+    return;
+  }
+  try {
+    await installPluginFromPath(srcPath, pluginDir);
+    toast("Plugin installed. Restart to activate.", "success");
+    showRestartBanner();
+  } catch (e) {
+    toast(`Plugin install failed: ${e}`, "error");
+  }
 }
 
 function readAndPreviewFile(file: File, toast: ToastFn): void {

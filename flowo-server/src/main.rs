@@ -628,7 +628,6 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
 
     // SIGINT + SIGTERM
     let daemon_sd  = Arc::clone(&daemon);
-    let wf_id_sd   = workflow.id.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -642,8 +641,14 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.ok();
 
-        tracing::info!("Shutting down");
-        let _ = daemon_sd.stop_job(&wf_id_sd);
+        let in_flight = daemon_sd.active_runs();
+        if in_flight > 0 {
+            tracing::info!("Shutting down — draining {} in-flight run(s)", in_flight);
+        } else {
+            tracing::info!("Shutting down");
+        }
+        daemon_sd.drain_all().await;
+        tracing::info!("Shutdown complete");
         std::process::exit(0);
     });
 

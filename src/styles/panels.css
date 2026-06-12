@@ -432,6 +432,23 @@
   position: relative;
 }
 
+.palette-plugin-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: monospace;
+  line-height: 1;
+  color: var(--t2);
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 3px;
+  padding: 1px 4px;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
 .palette-preset-tag {
   font-size: 9px;
   font-weight: 700;

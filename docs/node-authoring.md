@@ -1,20 +1,20 @@
 # Custom Node Authoring
 
-How to add a new node type to Flowo. The surface is small: one Rust file, one registry call, one icon entry.
+How to add a new built-in node type to Flowo's engine. This is for contributors to the Flowo codebase. If you want to ship a new node type without modifying Flowo itself, see [Plugin Authoring](plugin-authoring.md) instead.
+
+The surface area is small: one Rust file, one registry call, one icon entry. No other files need to change.
 
 ---
 
 ## Overview
 
-Every node in the canvas is a Rust struct that implements the `Node` trait from `flowo-engine/src/node.rs`. The executor dispatches through `Arc<dyn Node>` — the registry maps a string type ID to an implementation.
+Every node is a Rust struct that implements the `Node` trait from `flowo-engine/src/node.rs`. The executor dispatches to nodes through `Arc<dyn Node>`, using a registry that maps string type IDs to implementations.
 
-Adding a node requires three things:
+Three things are required to add a node:
 
-1. Implement `Node` on a struct in `flowo-engine/src/nodes/`.
-2. Register it in `register_builtins()` in `flowo-engine/src/nodes/mod.rs`.
-3. Add an icon entry in `src/utils.ts` → `NODE_ICONS`.
-
-No other files require changes.
+1. Implement `Node` on a struct in `flowo-engine/src/nodes/`
+2. Register it in `register_builtins()` in `flowo-engine/src/nodes/mod.rs`
+3. Add an icon entry in `src/utils.ts` → `NODE_ICONS`
 
 ---
 
@@ -36,39 +36,36 @@ pub trait Node: Send + Sync {
 
 ### `type_id`
 
-A stable snake_case string identifier — this is what gets stored in `.flowo` files as `node_type_id`. **Never change it after shipping** — existing workflows reference it by this string. Examples: `"http_request"`, `"shell_exec"`, `"ai_prompt"`.
+A stable snake_case identifier stored in `.flowo` files as `node_type_id`. **Never change this after shipping** — saved workflows reference it by this exact string. Examples: `"http_request"`, `"ai_prompt"`, `"shell_exec"`.
 
 ### `display_name`
 
-The human-readable label shown in the node search palette and on the canvas block. Can be changed at any time.
+The human-readable label in the palette and on the canvas. Safe to change at any time.
 
 ### `node_type`
 
-Controls where the node appears in the palette and how the canvas colours it:
+Controls palette grouping and canvas color:
 
 ```rust
 pub enum NodeType {
-    Action,    // most nodes — HTTP, Shell, Email, triggers, Output, Stop
-    Ai,        // AI nodes — AI Prompt, AI Agent, AI Memory, Image Generation
-    Logic,     // branching and control — IfCondition, Switch, Loop, Merge, Collect Files
-    Utility,   // data and utility — JSON, Transform, Set/Get Variable, Output, Text Splitter
+    Action,   // HTTP, Shell, Email, triggers, Stop
+    Ai,       // AI Prompt, AI Agent, AI Memory, Image Generation
+    Logic,    // If/Condition, Switch, Loop, Merge, Collect Files
+    Utility,  // JSON, Transform, Set/Get Variable, Text Splitter
 }
 ```
 
-There are no separate `Trigger` or `Output` variants. Trigger nodes (Schedule, Webhook, Manual Trigger) use `NodeType::Action`. The Output node uses `NodeType::Utility`. Stop uses `NodeType::Logic`.
+There are no separate `Trigger` or `Output` variants. Schedule, Webhook, and Manual Trigger use `Action`. The Output node uses `Utility`. Stop uses `Logic`.
 
 ### `version`
 
-A semver string (`"1.0.0"`). Currently informational only — not used for compatibility checks.
+A semver string (`"1.0.0"`). Informational only — not used for compatibility checks.
 
 ### `input_schema` / `output_schema`
 
-JSON Schema (draft-07) objects describing the node's config fields. These serve two purposes:
+JSON Schema (draft-07) objects. `input_schema` drives the config panel UI and runtime input validation. `output_schema` populates the expression picker for downstream nodes.
 
-- The frontend uses them to auto-generate the config panel UI.
-- The executor uses them for runtime input validation (when enabled).
-
-A minimal schema with no required fields:
+Minimal schema (no required fields):
 
 ```rust
 fn input_schema(&self) -> Value {
@@ -76,7 +73,7 @@ fn input_schema(&self) -> Value {
 }
 ```
 
-A schema with required fields and types:
+Schema with required fields:
 
 ```rust
 fn input_schema(&self) -> Value {
@@ -99,7 +96,7 @@ Credential fields use the `"x-credential": true` extension — the frontend rend
 
 ### `ports`
 
-Controls the connectors drawn on the node block. The default (one input on the left, one output on the right) covers most nodes:
+Controls the connectors drawn on the node. The default (one input on the left, one output on the right) covers the majority of nodes:
 
 ```rust
 fn ports(&self) -> NodePorts {
@@ -107,7 +104,7 @@ fn ports(&self) -> NodePorts {
 }
 ```
 
-For nodes with conditional routing (like `if_condition` or `switch`), override this to add named output ports:
+For nodes with conditional routing, override this to add named outputs:
 
 ```rust
 fn ports(&self) -> NodePorts {
@@ -125,7 +122,7 @@ fn ports(&self) -> NodePorts {
 }
 ```
 
-Port `id` values are stored in `WorkflowEdge.from_port` — **do not rename them after shipping**.
+Port `id` values are stored in `WorkflowEdge.from_port` — treat them as permanent once shipped.
 
 ---
 
@@ -138,7 +135,7 @@ pub struct NodeInput {
     pub node_id:      String,
     pub workflow_id:  String,
     pub execution_id: String,
-    pub input:        Value,      // merged config + resolved credentials
+    pub input:        Value,           // merged config + resolved credentials
     pub context:      ExecutionContext,
 }
 
@@ -156,19 +153,19 @@ let url = input.input["url"].as_str().unwrap_or("");
 let timeout = input.input["timeout"].as_u64().unwrap_or(30);
 ```
 
-`input.context.node_outputs` lets you access upstream node outputs by node ID, in case you need data beyond what was wired through the config. In most nodes you don't need this — expression resolution handles wiring automatically.
+`input.context.node_outputs` lets you access upstream node outputs by node ID directly — useful for data that wasn't wired through the config panel. In most nodes you won't need this; expression resolution handles standard wiring.
 
 ---
 
 ## `NodeOutput`
 
-Return one of these from `execute()`:
+Return one of these constructors from `execute()`:
 
 ```rust
-// Success with output data
+// Success
 NodeOutput::success(json!({ "status": 200, "body": response_body }))
 
-// Success with output data and log lines
+// Success with log lines visible in the Logs tab
 NodeOutput::success_with_logs(
     json!({ "sent": true }),
     vec!["Message delivered to #general".to_string()],
@@ -186,14 +183,14 @@ NodeOutput::failure_with_logs(error, vec!["Attempted 3 retries".to_string()])
 ## `NodeError`
 
 ```rust
-// recoverable: true — executor will retry (if retries configured)
+// recoverable: true — executor retries per the node's RetryPolicy
 NodeError::recoverable("RATE_LIMITED", "429 from upstream API")
 
 // recoverable: false — no retry, branch fails immediately
 NodeError::unrecoverable("MISSING_FIELD", "url is required")
 ```
 
-The `code` field is an UPPER_SNAKE_CASE string shown in the Errors tab. Make it specific enough to be actionable: `"AUTH_FAILED"` not `"ERROR"`.
+The `code` field is shown in the Errors tab. Use UPPER_SNAKE_CASE and be specific: `"AUTH_FAILED"` rather than `"ERROR"`.
 
 ---
 
@@ -201,18 +198,18 @@ The `code` field is an UPPER_SNAKE_CASE string shown in the Errors tab. Make it 
 
 In `flowo-engine/src/nodes/mod.rs`:
 
-1. Add a `pub mod your_node;` declaration at the top with the other module declarations.
-2. Add a `registry.register(Arc::new(your_node::YourNode));` call inside `register_builtins()`.
+1. Add a `pub mod your_node;` declaration with the other module declarations (alphabetical by convention).
+2. Call `registry.register(Arc::new(your_node::YourNode));` inside `register_builtins()`.
 
 ```rust
-// mod declarations (alphabetical by convention)
+// Module declarations
 pub mod your_node;
 
-// inside register_builtins():
+// Inside register_builtins():
 registry.register(Arc::new(your_node::YourNode));
 ```
 
-If your node needs the data directory (e.g. for a local database file), it receives `data_dir: &std::path::Path` — see `ai_memory::AiMemoryNode::new(data_dir.join("ai_memory.db"))` for the pattern.
+If your node needs the data directory (for a local database file, for example), it receives `data_dir: &std::path::Path`. See `ai_memory::AiMemoryNode::new(data_dir.join("ai_memory.db"))` for the pattern.
 
 ---
 
@@ -223,11 +220,11 @@ In `src/utils.ts`, add an entry to `NODE_ICONS`:
 ```typescript
 export const NODE_ICONS: Record<string, string> = {
   // ... existing entries ...
-  your_node_type_id: "⚡",  // use any single emoji or short symbol
+  your_node_type_id: "⚡",  // any single emoji or short symbol
 };
 ```
 
-The key must exactly match the string returned by your node's `type_id()`. If the key is absent, the canvas renders a generic placeholder.
+The key must exactly match the string returned by `type_id()`. Missing entries fall back to a generic placeholder.
 
 ---
 
@@ -292,16 +289,17 @@ impl Node for ReverseNode {
 }
 ```
 
-Register in `nodes/mod.rs`:
+Register:
 
 ```rust
+// nodes/mod.rs
 pub mod reverse;
 
 // inside register_builtins():
 registry.register(Arc::new(reverse::ReverseNode));
 ```
 
-Icon in `src/utils.ts`:
+Icon:
 
 ```typescript
 reverse: "⇄",
@@ -309,13 +307,13 @@ reverse: "⇄",
 
 ---
 
-## Checklist before shipping a node
+## Checklist before shipping
 
-- [ ] `type_id()` is unique across all registered nodes
-- [ ] `type_id()` and all port `id` values will never be renamed
+- [ ] `type_id()` is unique among all registered nodes
+- [ ] `type_id()` and all port `id` values will never change after shipping
 - [ ] `input_schema` lists all required fields
-- [ ] All `NodeError` codes are UPPER_SNAKE_CASE and specific
-- [ ] `execute()` never panics — all `unwrap()` calls are on values that cannot be `None`
-- [ ] Credentials are read from `input.input` (already decrypted by executor), not fetched directly
-- [ ] Long-running operations respect cancellation (check `tokio::select!` if needed)
+- [ ] All `NodeError` codes are UPPER_SNAKE_CASE and descriptive enough to act on
+- [ ] `execute()` never panics — all `unwrap()` calls target values that cannot be `None`
+- [ ] Credentials are read from `input.input` (already decrypted), not fetched separately
+- [ ] Long-running operations use `tokio::select!` to respect cancellation
 - [ ] Icon added to `NODE_ICONS`

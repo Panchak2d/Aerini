@@ -32,6 +32,7 @@ pub use job::{ScheduledJobRow, SchedulerError, SchedulerStatusEvent, TriggerKind
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::Semaphore;
@@ -90,6 +91,10 @@ pub struct SchedulerDaemon {
     run_semaphore:        Arc<Semaphore>,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
+    /// Set to `true` by `drain_all` to prevent new iterations from starting.
+    shutting_down: Arc<AtomicBool>,
+    /// In-flight `executor.run()` count. Decremented on drop via `ActiveRunGuard`.
+    active_runs: Arc<AtomicUsize>,
 }
 
 impl SchedulerDaemon {
@@ -120,6 +125,8 @@ impl SchedulerDaemon {
             run_semaphore:        Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
             server_max_duration_secs: None,
             file_sandbox_dir: None,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            active_runs:   Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -437,6 +444,8 @@ impl SchedulerDaemon {
         let server_max_duration_secs = self.server_max_duration_secs;
         let file_sandbox_dir = self.file_sandbox_dir.clone();
         let run_semaphore = Arc::clone(&self.run_semaphore);
+        let shutting_down = Arc::clone(&self.shutting_down);
+        let active_runs   = Arc::clone(&self.active_runs);
 
         let trigger = if let Some(t) = trigger_override {
             t
@@ -466,12 +475,50 @@ impl SchedulerDaemon {
                 shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled,
                 code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                 server_max_duration_secs, file_sandbox_dir, run_semaphore,
+                shutting_down, active_runs,
             ).await;
             jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
         }));
 
         self.jobs.lock().expect("scheduler jobs mutex poisoned").insert(workflow_id.to_string(), join_handle);
         Ok(())
+    }
+
+    /// Returns the current count of in-flight `executor.run()` calls.
+    pub fn active_runs(&self) -> usize {
+        self.active_runs.load(Ordering::SeqCst)
+    }
+
+    /// Graceful drain: stops new iterations and waits for in-flight runs to finish.
+    ///
+    /// Sets `shutting_down = true` so each trigger loop exits at its next check point.
+    /// Polls `active_runs` every 100 ms. Timeout is taken from `server_max_duration_secs`
+    /// (the `--max-workflow-duration-secs` flag); defaults to 30 s when not set.
+    /// On timeout, falls back to `stop_all()` so the process never hangs on SIGTERM.
+    ///
+    /// **Does not affect `stop_job` or `stop_all` semantics** — those remain immediate
+    /// hard-abort and are unchanged for the desktop Stop button and the API stop endpoint.
+    pub async fn drain_all(&self) {
+        use std::time::{Duration, Instant};
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let timeout = self.server_max_duration_secs
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(30));
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.active_runs.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "[scheduler] drain_all: timeout ({:?}) reached — aborting remaining runs",
+                    timeout
+                );
+                self.stop_all();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn emit_status(

@@ -1,9 +1,17 @@
 # Flowo Server: REST API Reference
 
-Base URL: `http://<host>:<port>` (default port 7700)
+This is the reference for `flowo-server` in API mode. Use it to manage workflows, trigger runs, control the scheduler, and stream live events — all programmatically.
 
-All request and response bodies are JSON unless otherwise noted.
-Authentication: `Authorization: Bearer <token>` header. Configure with `--token` or `FLOWO_TOKEN` env var.
+**Base URL:** `http://<host>:<port>` (default port 7700)
+
+**Authentication:** all endpoints (except `/api/health`) require a bearer token:
+```
+Authorization: Bearer <your-token>
+```
+
+Set the token with `--token` or the `FLOWO_TOKEN` environment variable when starting the server.
+
+**Content type:** all request and response bodies are JSON.
 
 ---
 
@@ -11,14 +19,14 @@ Authentication: `Authorization: Bearer <token>` header. Configure with `--token`
 
 ### `GET /api/workflows`
 
-List all stored workflows. Paginated.
+List all stored workflows.
 
-**Query params**
+**Query parameters**
 
-| Param    | Type | Default | Description          |
-|----------|------|---------|----------------------|
-| `limit`  | int  | 100     | Max records returned (cap 500) |
-| `offset` | int  | 0       | Records to skip      |
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `limit` | int | 100 | Max records returned (capped at 500) |
+| `offset` | int | 0 | Records to skip (for pagination) |
 
 **Response 200**
 ```json
@@ -46,14 +54,14 @@ List all stored workflows. Paginated.
 
 Fetch a single workflow by ID.
 
-**Response 200:** workflow object  
+**Response 200:** the workflow object  
 **Response 404:** `{"error": "Not found"}`
 
 ---
 
 ### `POST /api/workflows`
 
-Create or replace a workflow. Upsert by ID: if a workflow with the same ID already exists, it is fully replaced.
+Create or replace a workflow. Upsert by ID: if a workflow with the same ID exists, it is fully replaced.
 
 **Request body**
 ```json
@@ -67,7 +75,7 @@ Create or replace a workflow. Upsert by ID: if a workflow with the same ID alrea
 
 ### `DELETE /api/workflows/:id`
 
-Delete a workflow and its scheduler entry.
+Delete a workflow and remove its scheduler entry.
 
 **Response 200:** `{"ok": true}`  
 **Response 404:** `{"error": "Not found"}`
@@ -78,12 +86,14 @@ Delete a workflow and its scheduler entry.
 
 ### `POST /api/workflows/:id/run`
 
-Trigger a single ad-hoc run of a workflow.
+Trigger a single run of a workflow immediately.
 
 **Request body** (optional)
 ```json
 { "initial_variables": { "key": "value" } }
 ```
+
+Initial variables are injected into the execution context and available in expressions via `{{$var.key}}`.
 
 **Response 200**
 ```json
@@ -100,8 +110,8 @@ Trigger a single ad-hoc run of a workflow.
 }
 ```
 
-**Response 429:** workflow currently locked (another run in progress)  
-**Response 503:** server is at capacity and no slot became available within the queue timeout. Includes a `Retry-After` header (seconds).
+**Response 429:** the workflow is currently locked (a run is already in progress)  
+**Response 503:** server is at capacity. Includes a `Retry-After` header (in seconds). See [Rate limits](#rate-limits) below.
 
 ---
 
@@ -109,7 +119,7 @@ Trigger a single ad-hoc run of a workflow.
 
 ### `GET /api/scheduler`
 
-List all scheduled jobs.
+List all scheduled jobs and their current status.
 
 **Response 200:** `{"items": [...], "total": N}`
 
@@ -123,6 +133,8 @@ Start scheduling a workflow.
 ```json
 { "always_on": false }
 ```
+
+Set `always_on: true` to have the scheduler automatically restart the workflow if it errors or if the server restarts.
 
 **Response 200:** `{"status": "started"}`
 
@@ -140,15 +152,15 @@ Stop a scheduled workflow.
 
 ### `GET /api/credentials`
 
-List all stored credential IDs and names (values are never returned).
+List all stored credential IDs and names. Credential values are never returned through the API.
 
-**Response 200:** array of credential objects
+**Response 200:** array of `{ "id": "...", "name": "..." }` objects
 
 ---
 
 ### `POST /api/credentials`
 
-Store a credential.
+Store a new credential.
 
 **Request body**
 ```json
@@ -170,13 +182,13 @@ Delete a credential.
 
 ## Tokens
 
-All token routes require **admin scope**. The initial token (set via `--token` / `FLOWO_TOKEN`) has admin scope by default.
+Token management endpoints require **admin scope**. The initial token set via `--token` / `FLOWO_TOKEN` has admin scope automatically.
 
 ### `GET /api/tokens`
 
-List all tokens (values are never returned).
+List all tokens. Token values are never returned.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
 **Response 200**
 ```json
@@ -196,9 +208,9 @@ List all tokens (values are never returned).
 
 ### `POST /api/tokens`
 
-Create a new token.
+Create a new token with specific scopes and an optional expiry.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
 **Request body**
 ```json
@@ -209,11 +221,11 @@ Create a new token.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
+| Field | Type | Required | Notes |
+|---|---|---|---|
 | `label` | string | yes | 1–256 characters |
 | `scopes` | array | no | Any of `read`, `write`, `admin`. Defaults to `["read", "write"]` |
-| `expires_in_secs` | int | no | Token lifetime in seconds. Omit for non-expiring |
+| `expires_in_secs` | int | no | Token lifetime in seconds. Omit for a non-expiring token |
 
 **Response 201**
 ```json
@@ -226,27 +238,28 @@ Create a new token.
 }
 ```
 
+The token value is shown only once. Copy it immediately.
+
 **Response 400:** invalid label or unrecognised scope value
 
 ---
 
 ### `DELETE /api/tokens/:id`
 
-Revoke a token by its `token_id`. You cannot revoke the token you are currently using.
+Revoke a token by its `token_id`. You cannot revoke the token you're currently authenticated with.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
 **Response 200:** `{"ok": true}`  
-**Response 400:** `{"error": "Cannot revoke the token you are currently using"}`  
-**Response 500:** internal error
+**Response 400:** `{"error": "Cannot revoke the token you are currently using"}`
 
 ---
 
 ### `GET /api/tokens/:id/workflows`
 
-List workflow IDs the token is restricted to for SSE event delivery. An empty list means the token sees all workflow events.
+List workflow IDs the token is restricted to for SSE event delivery. An empty list means the token can see all workflow events.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
 **Response 200**
 ```json
@@ -261,47 +274,39 @@ List workflow IDs the token is restricted to for SSE event delivery. An empty li
 
 ### `POST /api/tokens/:id/workflows/:wf_id`
 
-Grant a token access to a specific workflow's SSE events. Once any grant exists, the token is restricted to only those workflows.
+Restrict a token's SSE event access to a specific workflow. Once any grant exists on a token, it can only see events for its granted workflows.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
-**Response 201**
-```json
-{
-  "ok": true,
-  "token_id": "tok_abc123",
-  "workflow_id": "wf_abc123",
-  "note": "Token is now restricted to SSE events for its granted workflow(s)."
-}
-```
+**Response 201:** `{"ok": true, "token_id": "...", "workflow_id": "..."}`
 
 ---
 
 ### `DELETE /api/tokens/:id/workflows/:wf_id`
 
-Revoke a token's access to a specific workflow's SSE events.
+Remove a workflow grant from a token.
 
-**Auth:** admin scope required
+**Requires:** admin scope
 
 **Response 200:** `{"ok": true}`
 
 ---
 
-## Events
+## Events (SSE)
 
 ### `GET /api/events`
 
-Subscribe to a live Server-Sent Events (SSE) stream of workflow and scheduler events.
+Subscribe to a live stream of workflow and scheduler events using [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
 
-**Auth:** read scope required
+**Requires:** read scope
 
-**Query params**
+**Query parameters**
 
 | Param | Type | Description |
-|-------|------|-------------|
-| `workflow_id` | string | Optional. Filter events to a single workflow. Subject to token ACL — returns 403 if the token's ACL does not include that workflow. |
+|---|---|---|
+| `workflow_id` | string | Optional. Filter to events from one workflow. Returns 403 if the token's ACL doesn't include that workflow. |
 
-**Response:** `text/event-stream`. Each SSE `data` field is a JSON object:
+**Response:** `text/event-stream`. Each message's `data` field is a JSON object:
 
 ```json
 { "event": "<event-type>", "payload": { ... } }
@@ -309,20 +314,20 @@ Subscribe to a live Server-Sent Events (SSE) stream of workflow and scheduler ev
 
 **Event types**
 
-| Event | Payload fields | Description |
-|-------|---------------|-------------|
-| `node-status` | `workflow_id`, `node_id`, `status` | Node started, completed, or failed during a run |
-| `scheduler-status` | `workflow_id`, `workflow_name`, `status`, `run_count`, `last_run_at`, `next_run_at`, `last_error`, `last_result` | Scheduler job state changed. `status` is one of `waiting`, `running`, `done`, `error`, `stopped`. `last_result` (full `WorkflowResult`) is only present on `done` or `error`. |
-| `scheduler-error` | `workflow_id`, `message` | Scheduler encountered a run error |
-| `scheduler-warning` | `workflow_id`, `message` | Non-fatal scheduler warning |
-| `scheduler-skip` | `workflow_id`, `reason` | Scheduled run was skipped |
-| `scheduler-ready` | `job_count`, `timestamp` | Scheduler finished loading and is ready |
+| Event | Payload fields | When it fires |
+|---|---|---|
+| `node-status` | `workflow_id`, `node_id`, `status` | A node starts, completes, or fails during a run |
+| `scheduler-status` | `workflow_id`, `workflow_name`, `status`, `run_count`, `last_run_at`, `next_run_at`, `last_error`, `last_result` | A scheduler job's state changes. `status` is one of `waiting`, `running`, `done`, `error`, `stopped`. `last_result` is included only on `done` or `error`. |
+| `scheduler-error` | `workflow_id`, `message` | A scheduler run encountered an error |
+| `scheduler-warning` | `workflow_id`, `message` | A non-fatal scheduler warning |
+| `scheduler-skip` | `workflow_id`, `reason` | A scheduled run was skipped |
+| `scheduler-ready` | `job_count`, `timestamp` | The scheduler finished loading and is ready |
 
-**Connection limits:** at most 64 concurrent SSE connections per server instance. Excess connections receive `429 Too Many Requests`.
+**Connection limits:** maximum 64 concurrent SSE connections per server instance. Requests beyond that receive `429 Too Many Requests`.
 
-**Keep-alive:** the server sends a `ping` comment every 30 seconds to prevent proxy timeouts.
+**Keep-alive:** the server sends a `ping` comment every 30 seconds to prevent proxy timeout disconnections.
 
-**Response 403:** token ACL does not permit the requested `workflow_id`  
+**Response 403:** the token's ACL doesn't allow the requested `workflow_id`  
 **Response 429:** `{"error": "too many active SSE connections"}`
 
 ---
@@ -335,11 +340,14 @@ Server liveness check. No authentication required.
 
 **Response 200:** `{"status": "ok", "version": "0.2.0"}`
 
+Use this in load balancers, uptime monitors, and deployment health checks.
+
 ---
 
 ## Error format
 
 All error responses use this shape:
+
 ```json
 { "error": "human-readable message" }
 ```
@@ -348,4 +356,6 @@ All error responses use this shape:
 
 ## Rate limits
 
-The server enforces a global concurrent-run ceiling via `--max-concurrent-runs` (default 10). When all slots are occupied, incoming run requests queue rather than being rejected immediately. If a slot does not open within `--max-queue-wait-secs` (default 30), the server returns 503 with a `Retry-After` header. Pass `--max-queue-wait-secs 0` to get immediate 503 on full capacity instead.
+The server enforces a ceiling on simultaneous workflow runs via `--max-concurrent-runs` (default: 10). When all slots are occupied, incoming run requests queue — they don't fail immediately. If a slot doesn't open within `--max-queue-wait-secs` (default: 30 seconds), the server returns `503 Service Unavailable` with a `Retry-After` header indicating how many seconds to wait before retrying.
+
+To disable queuing and get an immediate `503` when at capacity, set `--max-queue-wait-secs 0`.
