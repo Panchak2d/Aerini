@@ -140,7 +140,7 @@ For enterprise or volume licensing: see [CONTACT.md](CONTACT.md)
 
 ## Privacy
 
-Flowo collects no telemetry, analytics, usage data, or crash reports. No network requests are made by the app or server beyond what you explicitly configure in your workflows. See the [transparency report template](docs/transparency-report-template.md) for the full audit trail.
+Flowo collects no telemetry, analytics, usage data, or crash reports. No network requests are made by the app or server beyond what you explicitly configure in your workflows. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
 
 ## Contributing
 

@@ -35,7 +35,7 @@ The CLA does not transfer copyright ownership. Contributors keep full copyright 
 
 ## How commercial license revenue is used
 
-Revenue funds ongoing maintenance: keeping the project active, dependencies current, and documentation accurate. The full allocation breakdown is published monthly in the [transparency report](transparency-report-template.md) once the donation threshold in [REWARDS.md](../REWARDS.md) is met.
+Revenue funds ongoing maintenance: keeping the project active, dependencies current, and documentation accurate. The full allocation breakdown is published monthly in the [transparency report](../transparency/TEMPLATE.md) once the donation threshold in [REWARDS.md](../REWARDS.md) is met.
 
 Flowo will remain available under AGPL-3.0 regardless of commercial revenue. The open source release is not contingent on the commercial side.
 
