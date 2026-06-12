@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
   <title>Flowo</title>
-  <script type="module" crossorigin src="./assets/index-B0VQosFx.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-BeLqzqJ9.css">
+  <script type="module" crossorigin src="./assets/index-BsxbqLlp.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-B5g_qHDU.css">
 </head>
 <body>
 
@@ -426,6 +426,27 @@
             <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>
             <input type="checkbox" id="setting-autofit" checked />
           </div>
+        </div>
+        <div class="settings-group" id="settings-plugins-group">
+          <div class="settings-group-title">Plugins</div>
+          <div class="settings-row" id="plugin-restart-banner" hidden>
+            <div class="settings-desc settings-warn">
+              Restart Flowo to apply plugin changes.
+            </div>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Plugin directory</div>
+              <div class="settings-desc">Folder where .wasm plugin files are stored.</div>
+              <div id="plugin-dir-path" class="settings-path-display">Not set</div>
+            </div>
+            <button id="btn-plugin-dir-browse" class="btn-sm">Browse</button>
+          </div>
+          <div class="settings-row">
+            <div class="settings-label">Installed plugins</div>
+            <button id="btn-install-plugin" class="btn-sm" disabled>Install .wasm</button>
+          </div>
+          <div id="plugin-list" class="plugin-list-container"></div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">Support development</div>
