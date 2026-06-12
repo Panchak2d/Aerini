@@ -50,6 +50,8 @@ jobs:
   node-checks:
     name: Node.js dependency audit and dist staleness
     runs-on: ubuntu-latest
+    env:
+      HUSKY: '0'
 
     steps:
       - uses: actions/checkout@v4

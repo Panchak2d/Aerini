@@ -291,3 +291,25 @@ For a static Linux binary (recommended for server deployments):
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p flowo-server
 ```
+
+---
+
+## Troubleshooting
+
+### AppImage build fails: `failed to run linuxdeploy`
+
+Only affects `npm run build` on Linux (the Tauri step that produces an `.AppImage`). `npm run dev` and `npm run vite:build` are unaffected.
+
+**Cause:** Missing `libfuse2` — AppImages require FUSE to mount themselves, and Ubuntu 22.04+ / Fedora / Arch do not ship it by default.
+
+**Fix:**
+
+```bash
+# Ubuntu 22.04+
+sudo apt install libfuse2t64
+
+# Ubuntu 20.04 / older distros
+sudo apt install libfuse2
+```
+
+Retry `npm run build` after installing. If the error persists, the full output just above the `failed to run linuxdeploy` line will contain a more specific message.

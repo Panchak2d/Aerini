@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Rebuild dist/ and fail the commit if it would change.
+# Only runs when src/ or frontend config files are staged — skips unrelated commits.
+staged=$(git diff --cached --name-only)
+if echo "$staged" | grep -qE '^src/|^vite\.config\.ts$|^tsconfig\.json$'; then
+  npm run vite:build || exit 1
+  if ! git diff --exit-code dist/ > /dev/null 2>&1; then
+    echo ""
+    echo "ERROR: dist/ changed after rebuild — it was stale."
+    echo "Stage the updated files and retry:"
+    echo "  git add dist/ && git commit"
+    exit 1
+  fi
+fi
