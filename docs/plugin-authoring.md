@@ -1,6 +1,6 @@
-# Writing a Flowo Plugin Node
+# Writing a Aerini Plugin Node
 
-Flowo's plugin system lets you ship new node types as `.wasm` files. Once installed, plugin nodes appear in the palette and behave identically to built-in nodes — in both the desktop app and `flowo-server`. The only visible difference is a small grey **"P"** badge next to the node's name in the palette and search results, so users can tell at a glance which nodes came from a plugin versus shipped with Flowo. It's purely cosmetic — wiring, execution, retries, and expressions all work exactly the same.
+Aerini's plugin system lets you ship new node types as `.wasm` files. Once installed, plugin nodes appear in the palette and behave identically to built-in nodes — in both the desktop app and `aerini-server`. The only visible difference is a small grey **"P"** badge next to the node's name in the palette and search results, so users can tell at a glance which nodes came from a plugin versus shipped with Aerini. It's purely cosmetic — wiring, execution, retries, and expressions all work exactly the same.
 
 This guide assumes you know some Rust. If you're new to Rust, the [Rust Book](https://doc.rust-lang.org/book/) covers the fundamentals; most of what you need for a plugin is covered in the first ten chapters.
 
@@ -18,8 +18,8 @@ From inside the plugin sandbox, you can:
 You cannot:
 - Read or write the local filesystem (all filesystem calls return errors — no directories are mounted)
 - Bind ports or accept inbound connections
-- Access Flowo's SQLite database or credential store directly
-- Call back into Flowo's Rust runtime (communication is one-directional: host calls plugin, not the other way around)
+- Access Aerini's SQLite database or credential store directly
+- Call back into Aerini's Rust runtime (communication is one-directional: host calls plugin, not the other way around)
 
 ---
 
@@ -40,7 +40,7 @@ That's it. You don't need `cargo-component`, `wasm-opt`, or any other tooling. T
 Copy the included template rather than starting from scratch:
 
 ```bash
-# From the Flowo repo root
+# From the Aerini repo root
 cp -r examples/plugin-template my-plugin
 cd my-plugin
 ```
@@ -59,12 +59,12 @@ If that succeeds, your environment is set up correctly.
 
 ## The WIT interface
 
-Every Flowo plugin implements the `flowo-node` world defined in `wit/node.wit`. You won't usually need to edit this file — it's included in the template and you implement the functions it defines.
+Every Aerini plugin implements the `aerini-node` world defined in `wit/node.wit`. You won't usually need to edit this file — it's included in the template and you implement the functions it defines.
 
 The full annotated interface:
 
 ```wit
-package flowo:plugin@0.1.0;
+package aerini:plugin@0.1.0;
 
 interface types {
     /// A key-value parameter passed to a node.
@@ -121,7 +121,7 @@ interface node {
     execute: func(input: node-input) -> node-output;
 }
 
-world flowo-node {
+world aerini-node {
     export node;
 }
 ```
@@ -132,7 +132,7 @@ WIT uses kebab-case for field names. `wit-bindgen` maps them to snake_case in Ru
 
 ## Implementing `describe()`
 
-`describe()` is called once when Flowo loads your plugin. The returned descriptor is cached — it won't be called again during normal operation.
+`describe()` is called once when Aerini loads your plugin. The returned descriptor is cached — it won't be called again during normal operation.
 
 ```rust
 fn describe() -> NodeDescriptor {
@@ -165,7 +165,7 @@ fn describe() -> NodeDescriptor {
 
 **`type_id`** — must be unique across all installed plugins. Use reverse-domain notation: `com.yourname.node-name`. This ID is stored in workflow files; changing it after publishing breaks every saved workflow that uses your node. Treat it as permanent.
 
-**`category`** — controls palette grouping. Accepted values are `"trigger"`, `"action"`, `"ai"`, `"logic"`, `"utility"`, and `"other"`. If you put anything else here, Flowo doesn't reject the plugin — it falls back to `"action"` and writes a warning to the log so you notice during testing. Stick to the accepted list; the fallback exists so a typo doesn't take your node out of the palette entirely, not as a second supported value.
+**`category`** — controls palette grouping. Accepted values are `"trigger"`, `"action"`, `"ai"`, `"logic"`, `"utility"`, and `"other"`. If you put anything else here, Aerini doesn't reject the plugin — it falls back to `"action"` and writes a warning to the log so you notice during testing. Stick to the accepted list; the fallback exists so a typo doesn't take your node out of the palette entirely, not as a second supported value.
 
 **`input_schema` / `output_schema`** — JSON Schema (draft-07) object strings. `input_schema` drives the config panel UI; `output_schema` populates the expression picker for downstream nodes. Both must be valid JSON. If your node has no inputs or outputs, use `"{}"`.
 
@@ -207,11 +207,11 @@ fn execute(input: NodeInput) -> NodeOutput {
 }
 ```
 
-**`data`** must be a valid JSON object string. If it's not valid JSON, Flowo treats the output as `{}` without raising an error.
+**`data`** must be a valid JSON object string. If it's not valid JSON, Aerini treats the output as `{}` without raising an error.
 
 **`recoverable`** tells the executor whether to retry on failure (based on the node's retry settings in the workflow). Use `true` for transient problems like network timeouts and rate limits; use `false` for permanent failures like missing required input or authentication errors.
 
-**Parameters and credentials both arrive in `params`.** Flowo merges resolved credential values into `input.params` before calling `execute()`. You don't need to check `input.credentials` separately — everything is in one place.
+**Parameters and credentials both arrive in `params`.** Aerini merges resolved credential values into `input.params` before calling `execute()`. You don't need to check `input.credentials` separately — everything is in one place.
 
 ---
 
@@ -227,7 +227,7 @@ wasi = "0.14"
 
 See the [wasi crate documentation](https://docs.rs/wasi) for usage examples.
 
-**Security note:** Flowo cannot apply SSRF protection inside the WASM sandbox. If you're running `flowo-server` in a multi-tenant or publicly accessible environment, configure a host-level egress firewall to restrict what plugins can connect to. See [Security — SSRF protection](security.md#5-http-node--ssrf-protection).
+**Security note:** Aerini cannot apply SSRF protection inside the WASM sandbox. If you're running `aerini-server` in a multi-tenant or publicly accessible environment, configure a host-level egress firewall to restrict what plugins can connect to. See [Security — SSRF protection](security.md#5-http-node--ssrf-protection).
 
 ---
 
@@ -243,12 +243,12 @@ cargo build --target wasm32-wasip2 --release
 wasm-tools component wit target/wasm32-wasip2/release/my_plugin.wasm
 ```
 
-Confirm that `flowo:plugin/node` appears in the output and that both `describe` and `execute` are listed as exports. If they're missing, the component isn't implementing the interface correctly.
+Confirm that `aerini:plugin/node` appears in the output and that both `describe` and `execute` are listed as exports. If they're missing, the component isn't implementing the interface correctly.
 
-**Integration test in Flowo:**
+**Integration test in Aerini:**
 
 1. Copy the `.wasm` file to your plugin directory
-2. Start Flowo (desktop) or `flowo-server --plugin-dir <path>`
+2. Start Aerini (desktop) or `aerini-server --plugin-dir <path>`
 3. Confirm the node appears in the palette
 4. Build a workflow using your node and run it
 5. Check the run history for output and any error details
@@ -263,19 +263,19 @@ This part is for whoever is *using* the plugin, not writing it — point your us
 
 Open **Settings → Plugins**. The panel has three parts:
 
-- **Plugin folder** — a path on disk, set once via the **Browse** button. This is the folder Flowo scans for `.wasm` files. If it's not set yet, the panel says so and the rest of the panel is inactive until you pick one.
+- **Plugin folder** — a path on disk, set once via the **Browse** button. This is the folder Aerini scans for `.wasm` files. If it's not set yet, the panel says so and the rest of the panel is inactive until you pick one.
 - **Installed plugins** — a list of every `.wasm` file in that folder, showing the node's display name and its `type_id`. If a file is in the folder but fails to load (wrong WIT version, corrupted build, etc.), it still shows up in the list with an error message instead of just vanishing — so a broken plugin doesn't silently disappear and leave you wondering where it went. Each row has a **Remove** button.
-- **Install .wasm** — opens a file picker restricted to `.wasm` files. Pick the file, Flowo copies it into the plugin folder, and it appears in the list.
+- **Install .wasm** — opens a file picker restricted to `.wasm` files. Pick the file, Aerini copies it into the plugin folder, and it appears in the list.
 
-**Drag-and-drop also works.** Drag a `.wasm` file straight onto the Flowo window. If a plugin folder is already set, it's installed immediately with a success toast. If no folder is set yet, you get a toast pointing you to Settings → Plugins to set one first.
+**Drag-and-drop also works.** Drag a `.wasm` file straight onto the Aerini window. If a plugin folder is already set, it's installed immediately with a success toast. If no folder is set yet, you get a toast pointing you to Settings → Plugins to set one first.
 
-> If you're running Flowo in a browser during development (not the packaged desktop app), drag-and-drop install for `.wasm` files doesn't work — the browser sandbox doesn't give web pages access to dropped files' real paths. Use the **Install .wasm** button in Settings instead; that goes through the desktop file picker and isn't affected.
+> If you're running Aerini in a browser during development (not the packaged desktop app), drag-and-drop install for `.wasm` files doesn't work — the browser sandbox doesn't give web pages access to dropped files' real paths. Use the **Install .wasm** button in Settings instead; that goes through the desktop file picker and isn't affected.
 
-**Restart required.** After any install or remove, a dismissible banner appears reminding you to restart Flowo. Plugins are loaded once at startup — installing or removing a file doesn't hot-swap the running palette. The banner doesn't restart anything for you and disappears if you dismiss it or close Flowo; it's just a reminder for that session.
+**Restart required.** After any install or remove, a dismissible banner appears reminding you to restart Aerini. Plugins are loaded once at startup — installing or removing a file doesn't hot-swap the running palette. The banner doesn't restart anything for you and disappears if you dismiss it or close Aerini; it's just a reminder for that session.
 
-**Removing a plugin** deletes the `.wasm` file from the plugin folder. Any saved workflows that still reference that plugin's `type_id` will fail to load that node after restart — Flowo doesn't quietly substitute anything in its place.
+**Removing a plugin** deletes the `.wasm` file from the plugin folder. Any saved workflows that still reference that plugin's `type_id` will fail to load that node after restart — Aerini doesn't quietly substitute anything in its place.
 
-`flowo-server` uses the same plugin folder mechanism but has no Settings UI — point it at the folder with `--plugin-dir <path>` (or the equivalent config key) and restart the process to pick up changes.
+`aerini-server` uses the same plugin folder mechanism but has no Settings UI — point it at the folder with `--plugin-dir <path>` (or the equivalent config key) and restart the process to pick up changes.
 
 ---
 
@@ -285,7 +285,7 @@ There's no central registry. Share the compiled `.wasm` file — your users inst
 
 Practices worth following:
 
-- **Publish the source.** Your plugin may inherit Flowo's AGPL-3.0 obligations depending on how it uses Flowo code. If uncertain, see [dual-licensing.md](dual-licensing.md).
+- **Publish the source.** Your plugin may inherit Aerini's AGPL-3.0 obligations depending on how it uses Aerini code. If uncertain, see [dual-licensing.md](dual-licensing.md).
 - **Never change a published `type_id`.** Users' saved workflows reference it by this string. If you need to rename, publish a new `type_id` alongside the old one and document the transition.
 - **Document your `type_id` publicly** to avoid collisions with other plugin authors.
 
@@ -307,10 +307,10 @@ Plugin `.wasm` files are loaded only from operator-configured directories. Remot
 
 ## Versioning and compatibility
 
-The `flowo-node` world is versioned at `flowo:plugin@0.1.0`. Stability guarantees:
+The `aerini-node` world is versioned at `aerini:plugin@0.1.0`. Stability guarantees:
 
 - `describe()` and `execute()` signatures won't change without a major WIT package version bump.
 - All record fields (`NodeInput`, `NodeOutput`, `NodeDescriptor`) are required and positionally encoded in the canonical ABI. Any field change — addition or removal — is a breaking change and will bump the major version.
-- Plugins compiled against an older WIT version are binary-incompatible with a host that changed a record definition. Always target the WIT file that matches your Flowo version.
+- Plugins compiled against an older WIT version are binary-incompatible with a host that changed a record definition. Always target the WIT file that matches your Aerini version.
 
-If Flowo can't load a plugin due to an incompatible interface, it logs a warning and skips the plugin. The process continues normally.
+If Aerini can't load a plugin due to an incompatible interface, it logs a warning and skips the plugin. The process continues normally.

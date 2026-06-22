@@ -1,6 +1,6 @@
 # Credentials
 
-Most automation workflows call external services — OpenAI, Slack, Stripe, Google Sheets. Those services require a key to prove you're authorized to use them. Flowo's credential store is where you keep those keys.
+Most automation workflows call external services — OpenAI, Slack, Stripe, Google Sheets. Those services require a key to prove you're authorized to use them. Aerini's credential store is where you keep those keys.
 
 The reason this exists as a separate system (rather than just pasting keys directly into node config fields) is security. Credentials are encrypted on disk. They're never written to your workflow files. If you share a workflow export with a colleague, your API keys don't come along for the ride.
 
@@ -15,7 +15,7 @@ The reason this exists as a separate system (rather than just pasting keys direc
 5. **Value** — paste the actual key here.
 6. Click Save.
 
-The value is encrypted the moment you save. After that point, Flowo never shows it in the UI again — you can only update or delete it.
+The value is encrypted the moment you save. After that point, Aerini never shows it in the UI again — you can only update or delete it.
 
 ---
 
@@ -146,9 +146,9 @@ The Send Email node connects via SMTP rather than using an API key. You provide 
 
 Credentials are encrypted with **AES-256-GCM** — the same standard used by banks and messaging apps to protect data at rest.
 
-When you save a credential, Flowo generates a random nonce and encrypts the value with your 256-bit key. The encrypted bytes and the nonce are stored together in `credentials.db`. The key itself is never stored in that file.
+When you save a credential, Aerini generates a random nonce and encrypts the value with your 256-bit key. The encrypted bytes and the nonce are stored together in `credentials.db`. The key itself is never stored in that file.
 
-When a node runs and needs a credential, Flowo decrypts it in memory for that single operation. The plaintext key is never written to disk, never logged, and never sent to the UI — the frontend only ever sees the credential's ID (like `slack-bot`), not the value.
+When a node runs and needs a credential, Aerini decrypts it in memory for that single operation. The plaintext key is never written to disk, never logged, and never sent to the UI — the frontend only ever sees the credential's ID (like `slack-bot`), not the value.
 
 **Where the key lives:**
 
@@ -158,7 +158,7 @@ When a node runs and needs a credential, Flowo decrypts it in memory for that si
 | Windows | Windows Credential Manager |
 | Linux | SecretService via D-Bus (GNOME Keyring or KWallet) |
 
-On Linux, if no SecretService daemon is running, Flowo falls back to a plain file at `.cred.key` in the app data directory (created with `600` permissions, readable only by your user). If you see a warning about this at startup, install a keychain daemon:
+On Linux, if no SecretService daemon is running, Aerini falls back to a plain file at `.cred.key` in the app data directory (created with `600` permissions, readable only by your user). If you see a warning about this at startup, install a keychain daemon:
 
 ```bash
 # GNOME
@@ -168,15 +168,15 @@ sudo apt install gnome-keyring
 sudo apt install kwallet-pam
 ```
 
-Once a keychain becomes available, Flowo migrates the key into it automatically and deletes the file.
+Once a keychain becomes available, Aerini migrates the key into it automatically and deletes the file.
 
-**In server mode:** the key is stored in a file by default (`~/.flowo-server/flowo.key`). See [Security](security.md#3-the-encryption-key--your-most-important-file) for the full picture, including how to use the OS keychain on a server and what you need to know about backup safety.
+**In server mode:** the key is stored in a file by default (`~/.aerini-server/aerini.key`). See [Security](security.md#3-the-encryption-key--your-most-important-file) for the full picture, including how to use the OS keychain on a server and what you need to know about backup safety.
 
 ---
 
 ## Delete a credential
 
-Open the Connections panel and click the trash icon next to the credential. Flowo checks whether any workflow currently references that credential ID before deleting. If one does, the delete is blocked and shows you which workflows would break. Update those workflows first, then delete.
+Open the Connections panel and click the trash icon next to the credential. Aerini checks whether any workflow currently references that credential ID before deleting. If one does, the delete is blocked and shows you which workflows would break. Update those workflows first, then delete.
 
 ---
 
@@ -193,17 +193,17 @@ There's no in-place rotation UI. The process:
 
 ## In server deployments
 
-When you export a workflow for server deployment, credentials are **not included** in the export zip. Instead, `flowo-server` reads credentials from environment variables at runtime.
+When you export a workflow for server deployment, credentials are **not included** in the export zip. Instead, `aerini-server` reads credentials from environment variables at runtime.
 
 The export panel shows exactly which environment variables to set. The naming is automatic:
 
 | Credential ID | Environment variable |
 |---|---|
-| `openai-prod` | `FLOWO_CRED_OPENAI_PROD` |
-| `slack-bot` | `FLOWO_CRED_SLACK_BOT` |
-| `my.key` | `FLOWO_CRED_MY_KEY` |
+| `openai-prod` | `AERINI_CRED_OPENAI_PROD` |
+| `slack-bot` | `AERINI_CRED_SLACK_BOT` |
+| `my.key` | `AERINI_CRED_MY_KEY` |
 
-Hyphens and dots become underscores, the name is uppercased, and `FLOWO_CRED_` is prepended. Set these variables in `/etc/flowo/.env` (or your deployment's equivalent) before starting the server.
+Hyphens and dots become underscores, the name is uppercased, and `AERINI_CRED_` is prepended. Set these variables in `/etc/aerini/.env` (or your deployment's equivalent) before starting the server.
 
 Full server setup walkthrough: [Server Deployment](server-deploy.md)
 
@@ -215,20 +215,20 @@ Full server setup walkthrough: [Server Deployment](server-deploy.md)
 
 | Platform | Key store |
 |---|---|
-| macOS | macOS Keychain (login keychain, service `flowo`, account `encryption_key`) |
+| macOS | macOS Keychain (login keychain, service `aerini`, account `encryption_key`) |
 | Windows | Windows Credential Manager |
 | Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
 
-If the keychain is unavailable (common on Linux without a running SecretService daemon), the app falls back to a plain file at `.cred.key` in the app data directory with `chmod 600`. Once a keychain becomes available, Flowo migrates the key into it automatically on next launch and deletes the file.
+If the keychain is unavailable (common on Linux without a running SecretService daemon), the app falls back to a plain file at `.cred.key` in the app data directory with `chmod 600`. Once a keychain becomes available, Aerini migrates the key into it automatically on next launch and deletes the file.
 
 ### Server mode
 
-The server stores the key in a plain file by default — `<data_dir>/flowo.key` (default: `~/.flowo-server/flowo.key`), created with `chmod 600`.
+The server stores the key in a plain file by default — `<data_dir>/aerini.key` (default: `~/.aerini-server/aerini.key`), created with `chmod 600`.
 
-`chmod 600` protects against other OS users. It does not protect against root, against a process running as the same user, or against a backup that contains both `flowo.key` and `credentials.db` together. To use the OS keychain instead:
+`chmod 600` protects against other OS users. It does not protect against root, against a process running as the same user, or against a backup that contains both `aerini.key` and `credentials.db` together. To use the OS keychain instead:
 
 ```bash
-flowo-server api --keychain --token mytoken
+aerini-server api --keychain --token mytoken
 ```
 
 See [Security — encryption key](security.md#3-the-encryption-key--your-most-important-file) for the full picture.

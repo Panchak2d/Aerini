@@ -18,8 +18,8 @@ Closes #<!-- issue number, or delete this line -->
 
 ## Checklist
 
-- [ ] `cargo clippy -p flowo-engine -p flowo-server -- -D warnings` passes
-- [ ] `cargo test -p flowo-engine` passes
+- [ ] `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` passes
+- [ ] `cargo test -p aerini-engine` passes
 - [ ] No `.unwrap()` in production paths
 - [ ] `dist/` not committed
 - [ ] **New node only:** registered in `nodes/mod.rs`, icon added in `src/utils.ts`, at least one `#[cfg(test)]` block added

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use flowo_engine::{
+use aerini_engine::{
     db::WorkflowDb,
-    store::{CredentialEntry, CredentialStore, CreateCredentialRequest},
+    store::{CredentialEntry, CredentialMetadata, CredentialStore, CreateCredentialRequest},
 };
 
 #[tauri::command]
@@ -10,6 +10,14 @@ pub async fn list_credentials(
     store: tauri::State<'_, Arc<CredentialStore>>,
 ) -> Result<Vec<CredentialEntry>, String> {
     store.list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_credential_metadata(
+    id:    String,
+    store: tauri::State<'_, Arc<CredentialStore>>,
+) -> Result<Option<CredentialMetadata>, String> {
+    store.get_metadata(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

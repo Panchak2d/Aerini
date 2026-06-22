@@ -18,6 +18,8 @@ export interface NodeDescriptor {
   dynamic_ports?: boolean;
   /** True when this node was loaded from a WASM plugin rather than built in. */
   is_plugin?: boolean;
+  /** One or two sentence description shown in the palette tooltip. Empty string when not set. */
+  description?: string;
 }
 
 export interface WorkflowLogEntry {
@@ -104,6 +106,9 @@ export const getSetting = (key: string) =>
 
 export const setSetting = (key: string, value: string) =>
   invoke<void>("set_setting", { key, value });
+
+export const clearChatSession = (sessionId: string) =>
+  invoke<void>("clear_chat_session", { sessionId });
 
 export interface VersionRow {
   id:          string;

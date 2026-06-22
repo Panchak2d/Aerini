@@ -24,7 +24,7 @@
 
 ## Why a CLA is required
 
-Flowo uses dual licensing (AGPL + commercial). Without a CLA, the maintainer
+Aerini uses dual licensing (AGPL + commercial). Without a CLA, the maintainer
 cannot legally include your contribution in a commercial license without
 risking legal fragmentation. The CLA makes commercial sustainability possible
 while you keep ownership of your work.
@@ -79,7 +79,7 @@ No. The maintainer receives a license to use your contribution. Ownership stays
 with you.
 
 **Why is a CLA required if the project is open source?**
-Flowo uses dual licensing: AGPL-3.0 for open source use and a commercial license for proprietary use. The CLA gives the maintainer the right to offer commercial licenses without needing each contributor's individual permission each time. See [docs/dual-licensing.md](docs/dual-licensing.md).
+Aerini uses dual licensing: AGPL-3.0 for open source use and a commercial license for proprietary use. The CLA gives the maintainer the right to offer commercial licenses without needing each contributor's individual permission each time. See [docs/dual-licensing.md](docs/dual-licensing.md).
 
 **Can my code be used to train AI models?**
 Not by the maintainer or any party that has agreed to this restriction. It is a contractual obligation, not a universal one: downstream recipients of AGPL-licensed copies are governed by AGPL-3.0 only and are not bound by it.

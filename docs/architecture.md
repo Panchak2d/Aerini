@@ -1,20 +1,20 @@
 # Architecture
 
-How Flowo is structured internally, why it's split the way it is, and how execution actually works.
+How Aerini is structured internally, why it's split the way it is, and how execution actually works.
 
-This page is for contributors and developers embedding `flowo-engine`. It is not required reading for general use.
+This page is for contributors and developers embedding `aerini-engine`. It is not required reading for general use.
 
 ---
 
 ## The three-crate split
 
 ```
-flowo-engine/   — core library: workflow model, executor, scheduler, node registry, 39 built-in nodes, WASM plugin loader
+aerini-engine/   — core library: workflow model, executor, scheduler, node registry, 39 built-in nodes, WASM plugin loader
 src-tauri/      — Tauri shell: IPC commands, system tray, app lifecycle
-flowo-server/   — headless binary: HTTP API, serve mode CLI
+aerini-server/   — headless binary: HTTP API, serve mode CLI
 ```
 
-`flowo-engine` has no Tauri dependency. It's a pure Rust library. Both `src-tauri` and `flowo-server` depend on it, but neither appears in the other's dependency tree. This makes the execution engine independently testable and makes the server binary possible without bundling a WebView runtime.
+`aerini-engine` has no Tauri dependency. It's a pure Rust library. Both `src-tauri` and `aerini-server` depend on it, but neither appears in the other's dependency tree. This makes the execution engine independently testable and makes the server binary possible without bundling a WebView runtime.
 
 The TypeScript frontend (under `src/`) is a vanilla TS/Vite application with no frontend framework. It communicates with the Tauri shell via IPC commands defined in `src-tauri/src/commands/` — see the [Desktop IPC Reference](desktop-ipc-reference.md) for the full list.
 
@@ -33,7 +33,7 @@ trait EventSink: Send + Sync {
 
 The Tauri shell implements `EventSink` by emitting events to the frontend window. The frontend's `listenNodeStatus` subscription picks them up and turns nodes green or red on the canvas in real time.
 
-`flowo-server` implements the same trait by broadcasting events over the SSE endpoint at `/api/events`. A client subscribed to that stream sees the same event shape.
+`aerini-server` implements the same trait by broadcasting events over the SSE endpoint at `/api/events`. A client subscribed to that stream sees the same event shape.
 
 The executor has no idea which runtime it's in — it calls `EventSink` and the runtime decides what happens. This is why scheduled background runs animate on the canvas exactly like manual runs: same executor, same events, same handler.
 
@@ -78,9 +78,9 @@ Concurrent-run control uses two guards acquired before any executor is construct
 
 On startup, the daemon also calls `mark_interrupted_runs()`, which relabels any run left in `status = 'running'` from a previous session as `interrupted` — see [Execution Flow — graceful shutdown](execution-flow.md#10-graceful-shutdown).
 
-`SchedulerDaemon` also exposes `drain_all()`, used for graceful shutdown in `flowo-server`. It sets a `shutting_down` flag (checked cooperatively by every trigger loop), then polls an `active_runs` counter until it reaches zero or a timeout elapses. `stop_job()` and `stop_all()` remain immediate hard stops — `drain_all()` is a separate, additive code path used only on process shutdown.
+`SchedulerDaemon` also exposes `drain_all()`, used for graceful shutdown in `aerini-server`. It sets a `shutting_down` flag (checked cooperatively by every trigger loop), then polls an `active_runs` counter until it reaches zero or a timeout elapses. `stop_job()` and `stop_all()` remain immediate hard stops — `drain_all()` is a separate, additive code path used only on process shutdown.
 
-`flowo-server` in API mode runs the same logic, but without Tauri state. It uses a `DashMap<WorkflowId, TaskHandle>` instead.
+`aerini-server` in API mode runs the same logic, but without Tauri state. It uses a `DashMap<WorkflowId, TaskHandle>` instead.
 
 ---
 
@@ -96,7 +96,7 @@ Each credential entry stores: ID, name, a random nonce, and the GCM ciphertext. 
 
 ## The expression resolver
 
-The expression resolver in `flowo-engine/src/expression/resolver.rs` is a single-pass character scanner. It finds `{{...}}` spans, resolves each expression against the execution context, and builds the output string. It never panics — any unresolvable expression produces an empty string and a warning entry in the run log.
+The expression resolver in `aerini-engine/src/expression/resolver.rs` is a single-pass character scanner. It finds `{{...}}` spans, resolves each expression against the execution context, and builds the output string. It never panics — any unresolvable expression produces an empty string and a warning entry in the run log.
 
 `$env.VAR_NAME` resolution goes through an allowlist (`env_allowlist: Option<&HashSet<String>>`). `None` disables all env access. `Some(set)` allows only listed variables. The server passes the `--allow-env-vars` set; the desktop app always passes `None`.
 
@@ -118,9 +118,9 @@ Browser dev mode disables all execution. The Run button is inert. The scheduler 
 
 ## WASM plugin loader
 
-`flowo-engine/src/plugin_loader.rs` loads third-party node types from `.wasm` files at startup. It is the only part of the engine that depends on Wasmtime.
+`aerini-engine/src/plugin_loader.rs` loads third-party node types from `.wasm` files at startup. It is the only part of the engine that depends on Wasmtime.
 
-`PluginLoader` holds a shared `wasmtime::Engine` (constructed once per process). `load_plugins(registry, dir)` iterates `.wasm` files in the plugin directory, compiles each with the Component Model enabled, validates that it exports the `flowo-node` world, calls `describe()` once to populate its `NodeDescriptor`, and registers the resulting `WasmPluginNode` in `NodeRegistry`. Failed files are logged as warnings and skipped — they don't crash the process.
+`PluginLoader` holds a shared `wasmtime::Engine` (constructed once per process). `load_plugins(registry, dir)` iterates `.wasm` files in the plugin directory, compiles each with the Component Model enabled, validates that it exports the `aerini-node` world, calls `describe()` once to populate its `NodeDescriptor`, and registers the resulting `WasmPluginNode` in `NodeRegistry`. Failed files are logged as warnings and skipped — they don't crash the process.
 
 Each `execute()` call creates a fresh `wasmtime::Store` for isolation. The pre-linked `InstancePre` (stored per node) is re-instantiated on each call — fast, because recompilation and re-linking are done once at load time. Execution runs inside `tokio::task::spawn_blocking` to avoid blocking the async executor.
 
@@ -136,4 +136,4 @@ A few things that might seem like engine concerns but aren't:
 
 **n8n import converter** — pure TypeScript in `src/modal-manager.ts`. Runs entirely in the frontend. The converted workflow is passed to the normal save flow after the user confirms the import preview.
 
-**Status page** — in `flowo-server/src/status_server.rs`. Serves HTML directly from the binary, with no external frontend assets required on the server.
+**Status page** — in `aerini-server/src/status_server.rs`. Serves HTML directly from the binary, with no external frontend assets required on the server.

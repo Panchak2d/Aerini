@@ -7,13 +7,13 @@ export function initOnboarding(canvas: Canvas, wfManager: WorkflowManager): void
   const dismiss = document.getElementById("onboarding-dismiss")!;
   const example = document.getElementById("onboarding-load-example")!;
 
-  if (localStorage.getItem("flowo_onboarded")) return;
+  if (localStorage.getItem("aerini_onboarded")) return;
 
   setTimeout(() => modal.classList.remove("hidden"), 400);
 
   const close = () => {
     modal.classList.add("hidden");
-    localStorage.setItem("flowo_onboarded", "1");
+    localStorage.setItem("aerini_onboarded", "1");
   };
 
   dismiss.addEventListener("click", close);

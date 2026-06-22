@@ -4,11 +4,11 @@ import {
   type WorkflowSummary, type VersionRow,
 } from "./ipc/workflow";
 import { invoke } from "@tauri-apps/api/core";
-import { serialize, deserialize } from "./canvas/CanvasSerializer";
+import { serialize, deserialize, type ChatSettings, DEFAULT_CHAT_SETTINGS } from "./canvas/CanvasSerializer";
 import type { Canvas } from "./canvas/Canvas";
 import { isTauri } from "./utils";
 
-const LS_KEY = "flowo_workflows_v1";
+const LS_KEY = "aerini_workflows_v1";
 
 function lsSave(id: string, name: string, json: string): void {
   try {
@@ -16,7 +16,7 @@ function lsSave(id: string, name: string, json: string): void {
     all[id] = { id, name, json, updated_at: new Date().toISOString() };
     localStorage.setItem(LS_KEY, JSON.stringify(all));
   } catch (e) {
-    console.error("Flowo: localStorage save failed", e);
+    console.error("Aerini: localStorage save failed", e);
   }
 }
 function lsList(): WorkflowSummary[] {
@@ -69,6 +69,9 @@ export class WorkflowManager {
   /** Per-workflow parallel execution setting. Serialised into workflow JSON. */
   parallelExecution   = false;
   maxConcurrentNodes  = 8;
+  /** Per-workflow Chat Panel feature toggles. Serialised into workflow JSON
+   *  under "settings.chat" — read by ChatPanel.applyToggles() on panel open. */
+  chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
   hasUnsaved  = false;
   private sortMode = "updated_desc";
 
@@ -111,9 +114,9 @@ export class WorkflowManager {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
     this.autoSaveTimer = setTimeout(async () => {
       if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
+      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings);
       if (isTauri()) {
-        try { await saveWorkflow(json); } catch (e) { console.error("Flowo: autosave failed", e); }
+        try { await saveWorkflow(json); } catch (e) { console.error("Aerini: autosave failed", e); }
       } else {
         lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json);
       }
@@ -232,12 +235,24 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onStatusChange("Workflow not found"); return; }
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.chatSettings = chatSettings;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
-      if (localStorage.getItem("flowo_autofit") !== "false") this.canvas.fitToScreen();
+      if (localStorage.getItem("aerini_autofit") !== "false") {
+        this.canvas.fitToScreen();
+      } else {
+        // Restore saved viewport for this workflow if available
+        const saved = localStorage.getItem(`aerini_viewport_${wfId}`);
+        if (saved) {
+          try {
+            const { panX, panY, zoom } = JSON.parse(saved) as { panX: number; panY: number; zoom: number };
+            this.canvas.panX = panX; this.canvas.panY = panY; this.canvas.zoom = zoom;
+          } catch { /* ignore corrupt entry */ }
+        }
+      }
       this.currentId = wfId; this.currentName = name;
       this.markUnsaved(false); this.onTitleChange(name);
       this.onPanelClose?.();
@@ -286,9 +301,10 @@ export class WorkflowManager {
   async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
     const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
     try {
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.chatSettings = chatSettings;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.fitToScreen();
@@ -311,14 +327,14 @@ export class WorkflowManager {
       if (!name?.trim()) { this.onStatusChange("Save cancelled"); return; }
       this.onTitleChange(this.currentName);
     }
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings);
     this.onStatusChange("Saving…");
     try {
       if (isTauri()) {
         await saveWorkflow(json);
         // Save a version snapshot for history — fire-and-forget, don't block save
         saveVersion(this.currentId, json).catch(e =>
-          console.warn("Flowo: saveVersion failed:", e)
+          console.warn("Aerini: saveVersion failed:", e)
         );
       } else {
         lsSave(this.currentId, this.currentName, json);
@@ -342,6 +358,7 @@ export class WorkflowManager {
     this.currentName        = "Untitled";
     this.parallelExecution  = false;
     this.maxConcurrentNodes = 8;
+    this.chatSettings       = { ...DEFAULT_CHAT_SETTINGS };
     this.markUnsaved(false);
     this.canvas.nodes.clear();
     this.canvas.connectors.clear();
@@ -360,7 +377,7 @@ export class WorkflowManager {
     try {
       return await listVersions(this.currentId);
     } catch (e) {
-      console.error("Flowo: listVersions failed:", e);
+      console.error("Aerini: listVersions failed:", e);
       return [];
     }
   }
@@ -371,9 +388,10 @@ export class WorkflowManager {
     try {
       const snapshot = await getVersion(versionId);
       if (!snapshot) return null;
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(snapshot);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(snapshot);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.chatSettings = chatSettings;
       this.canvas.nodes = nodes;
       this.canvas.connectors = connectors;
       this.canvas.clearSelection();
@@ -384,7 +402,7 @@ export class WorkflowManager {
       this.onTitleChange(name);
       return { id: wfId, name };
     } catch (e) {
-      console.error("Flowo: restoreVersion failed:", e);
+      console.error("Aerini: restoreVersion failed:", e);
       return null;
     }
   }
@@ -414,14 +432,14 @@ export class WorkflowManager {
     const id   = this.currentId;
     const name = this.currentName;
     const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors,
-      this.parallelExecution, this.maxConcurrentNodes);
+      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings);
     // Persist to storage — this is required, not optional.
     // The scheduler daemon looks up the workflow from the DB by ID;
     // if the save fails the scheduler will immediately error on first run.
     try {
       if (isTauri()) {
         await saveWorkflow(json);
-        saveVersion(id, json).catch(e => console.warn("Flowo: saveVersion failed:", e));
+        saveVersion(id, json).catch(e => console.warn("Aerini: saveVersion failed:", e));
       } else {
         lsSave(id, name, json);
       }
@@ -442,9 +460,9 @@ export class WorkflowManager {
 
     const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes);
     const obj  = JSON.parse(json);
-    const file = { flowo_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:"", tags:[], nodes:obj.nodes, edges:obj.edges };
+    const file = { aerini_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:"", tags:[], nodes:obj.nodes, edges:obj.edges };
     const content  = JSON.stringify(file, null, 2);
-    const filename = `${(this.currentName || "workflow").replace(/\s+/g, "-").toLowerCase()}.flowo`;
+    const filename = `${(this.currentName || "workflow").replace(/\s+/g, "-").toLowerCase()}.aerini`;
 
     invoke<string>("save_file_dialog", { content, filename })
       .then((savedPath) => {

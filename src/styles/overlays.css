@@ -25,8 +25,8 @@
   background: var(--bg2);
   border: 1px solid var(--bd);
   border-radius: 12px;
-  width: 520px;
-  max-height: 400px;
+  width: 560px;
+  max-height: 420px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -36,18 +36,18 @@
 #palette-input-wrap {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 13px 14px;
+  gap: 10px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--bd);
 }
-#palette-input-wrap svg { color: var(--t3); flex-shrink: 0; }
+#palette-input-wrap svg { color: var(--t2); flex-shrink: 0; }
 #palette-search {
   flex: 1;
   background: none;
   border: none;
   outline: none;
   color: var(--t1);
-  font-size: 14px;
+  font-size: 15px;
   caret-color: var(--blue);
 }
 #palette-search::placeholder { color: var(--t3); }
@@ -72,8 +72,8 @@
 .palette-result {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 8px 9px;
+  gap: 10px;
+  padding: 9px 10px;
   border-radius: 7px;
   cursor: pointer;
   transition: background var(--trans);
@@ -81,9 +81,9 @@
 .palette-result:hover,
 .palette-result.active { background: var(--bg4); }
 .palette-result-icon {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -94,7 +94,7 @@
 }
 .palette-result-name { font-size: 13px; color: var(--t1); font-weight: 500; }
 .palette-result-cat  { font-size: 11px; color: var(--t3); }
-.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 5px; }
+.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; }
 
 
 /* ── SHORTCUTS MODAL ────────────────────────────────────────────────────────── */
@@ -142,19 +142,21 @@
 #settings-modal.hidden { display: none; }
 #wf-settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
 #wf-settings-modal.hidden { display: none; }
-.settings-toggle { width: 36px; height: 20px; appearance: none; background: var(--bd); border-radius: 10px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s; }
-.settings-toggle:checked { background: var(--accent); }
-.settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.settings-toggle { width: 38px; height: 22px; appearance: none; background: var(--color-surface-3); border-radius: 11px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s; border: 1px solid var(--bd); }
+.settings-toggle:checked { background: var(--accent); border-color: var(--accent); }
+.settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .settings-toggle:checked::after { transform: translateX(16px); }
-.settings-number-input { width: 56px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; flex-shrink: 0; }
+.settings-number-input { width: 52px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; flex-shrink: 0; }
 .settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); }
 .settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; }
 .settings-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
 .settings-group { display: flex; flex-direction: column; gap: 8px; }
 .settings-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t3); }
-.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.settings-label { font-size: 13px; color: var(--t1); }
-.settings-desc { font-size: 11px; color: var(--t3); margin-top: 1px; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+#wf-settings-modal .settings-row { align-items: flex-start; }
+#wf-settings-modal .settings-row > div { flex: 1; min-width: 0; }
+.settings-label { font-size: 13px; color: var(--t1); font-weight: 400; }
+.settings-desc { font-size: 11px; color: var(--t3); margin-top: 2px; line-height: 1.45; }
 
 .browser-notice { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.28); border-radius: 7px; padding: 9px 11px; font-size: 12px; color: var(--amber); line-height: 1.6; }
 .browser-notice strong { display: block; font-size: 12px; margin-bottom: 2px; }
@@ -257,12 +259,12 @@
 
 .onboarding-box {
   background: var(--bg2);
-  border: 1px solid rgba(52,211,153,0.15);
+  border: 1px solid rgba(52,211,153,0.18);
   border-radius: 14px;
   padding: 36px 40px;
   max-width: 520px;
   width: calc(100vw - 48px);
-  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(52,211,153,0.05);
   animation: slide-up .25s ease;
 }
 
@@ -495,7 +497,7 @@
 
 #btn-focus-mode,
 #btn-versions {
-  opacity: 0.5;
+  opacity: 0.55;
   transition: opacity var(--trans), background var(--trans), border-color var(--trans), color var(--trans);
 }
 #btn-focus-mode:hover,
@@ -506,11 +508,12 @@
 
 /* ── MISC OVERRIDES & STATE ─────────────────────────────────────────────────── */
 
+/* Drawer tabs use sentence-case 12px — distinct from panel-tabs (11px uppercase) */
 .drawer-tab {
-  font-size: 12px !important;
-  text-transform: none !important;
-  letter-spacing: 0 !important;
-  padding: 3px 11px !important;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 3px 11px;
 }
 
 /* confirm-btn-ok → panels.css */

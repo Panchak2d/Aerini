@@ -32,6 +32,6 @@ Accepts a GitHub webhook, checks the event type, and posts to Slack on push even
 ## Notes
 
 - The Webhook node generates a secret token. Configure it in GitHub's webhook settings under **Secret**
-  so Flowo can verify the signature. See `docs/security.md` for details.
+  so Aerini can verify the signature. See `docs/security.md` for details.
 - To receive webhooks on a local machine, use cloudflared or ngrok to expose the port.
   See `docs/webhooks-public.md`.

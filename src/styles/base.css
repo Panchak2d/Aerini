@@ -13,6 +13,10 @@ body.focus-mode { grid-template-columns: 0px 1fr; }
 
 .field-group { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--t2); }
+.req-star { color: var(--red); margin-left: 2px; }
+.field-required-empty input[type="text"],
+.field-required-empty input[type="number"],
+.field-required-empty textarea { border-color: var(--red); }
 input[type="text"], input[type="password"], input[type="number"], select, textarea { width: 100%; background: var(--bg1); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 12px; padding: 6px 9px; outline: none; transition: border-color 100ms, box-shadow 100ms; font-family: inherit; }
 input[type="number"] { -moz-appearance: textfield; }
 input[type="number"]::-webkit-inner-spin-button,

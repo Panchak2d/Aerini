@@ -122,8 +122,24 @@ export class CredentialPanel {
             </svg>
           </button>
         </div>
-        <div class="field-hint">Stored encrypted on your device. Never sent to Flowo servers.</div>
+        <div class="field-hint">Stored encrypted on your device. Never sent to Aerini servers.</div>
       </div>
+      <details class="cred-advanced">
+        <summary class="cred-advanced-summary">Advanced (optional) — provider, model, base URL</summary>
+        <div class="field-group">
+          <label class="field-label">Provider</label>
+          <input id="cred-meta-provider" type="text" placeholder="e.g. openai, anthropic, gemini" autocomplete="off" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Model</label>
+          <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Base URL</label>
+          <input id="cred-meta-base-url" type="text" placeholder="Leave blank for provider default" autocomplete="off" />
+        </div>
+        <div class="field-hint">Not secret — used to auto-fill matching fields on AI nodes when this credential is selected.</div>
+      </details>
       <div class="cred-form-actions">
         <div class="cred-save-error hidden" id="cred-save-error"></div>
         <button class="btn-primary cred-save-btn" id="cred-save">Save Credential</button>
@@ -140,6 +156,9 @@ export class CredentialPanel {
     const typeWrap = this.el.querySelector("#cred-type-wrap") as HTMLElement;
     const showBtn  = this.el.querySelector("#cred-show")     as HTMLButtonElement;
     const eyeIcon  = this.el.querySelector("#cred-eye-icon") as SVGElement;
+    const providerInp = this.el.querySelector("#cred-meta-provider") as HTMLInputElement;
+    const modelInp    = this.el.querySelector("#cred-meta-model")    as HTMLInputElement;
+    const baseUrlInp  = this.el.querySelector("#cred-meta-base-url") as HTMLInputElement;
 
     const TYPES = [
       { value: "api_key", label: "API Key",        hint: "A plain API key passed as a header or query param", placeholder: "sk-… or your API key"       },
@@ -198,7 +217,15 @@ export class CredentialPanel {
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
       try {
-        await saveCredential({ id, name, value, cred_type: selectedCredType });
+        const provider = providerInp.value.trim();
+        const model    = modelInp.value.trim();
+        const baseUrl  = baseUrlInp.value.trim();
+        await saveCredential({
+          id, name, value, cred_type: selectedCredType,
+          provider: provider || undefined,
+          model:    model    || undefined,
+          base_url: baseUrl  || undefined,
+        });
         await this.refresh();
       } catch (e) {
         this.showFormError(`Save failed: ${e}`);

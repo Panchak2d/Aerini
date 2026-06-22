@@ -1,8 +1,8 @@
 # Exposing Webhooks to the Internet
 
-Flowo's Webhook node listens on `127.0.0.1` — your own machine only. External services like Stripe, GitHub, and Twilio need a public URL they can reach. This page covers two tools that create a secure tunnel from the internet to your local machine.
+Aerini's Webhook node listens on `127.0.0.1` — your own machine only. External services like Stripe, GitHub, and Twilio need a public URL they can reach. This page covers two tools that create a secure tunnel from the internet to your local machine.
 
-If you're running `flowo-server` on a VPS or cloud server, you don't need a tunnel — use a reverse proxy instead. See [Server Deployment — receiving webhooks](server-deploy.md#receiving-webhooks-on-a-server).
+If you're running `aerini-server` on a VPS or cloud server, you don't need a tunnel — use a reverse proxy instead. See [Server Deployment — receiving webhooks](server-deploy.md#receiving-webhooks-on-a-server).
 
 ---
 
@@ -76,7 +76,7 @@ If you run multiple Webhook workflows at once, each needs a different port. Star
 
 ## Security: what the built-in secret does and doesn't do
 
-The Webhook node's **Secret** field validates that incoming requests include the right `X-Flowo-Secret` header. The comparison is timing-safe. But it proves caller identity, not message integrity — a captured request with the same header could theoretically be replayed.
+The Webhook node's **Secret** field validates that incoming requests include the right `X-Aerini-Secret` header. The comparison is timing-safe. But it proves caller identity, not message integrity — a captured request with the same header could theoretically be replayed.
 
 The optional **Validate Timestamp** setting narrows the replay window to 5 minutes, though the timestamp isn't cryptographically bound to the request body.
 

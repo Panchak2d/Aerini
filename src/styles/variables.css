@@ -17,7 +17,7 @@
   /* Text */
   --color-text-primary:   #e6edf3;
   --color-text-secondary: #8b949e;
-  --color-text-muted:     #484f58;
+  --color-text-muted:     #6e7680; /* raised from #484f58 — was 2.09:1 on bg2, now 3.76:1 (meets WCAG 3:1 AA-large) */
 
   /* Actions (semantic) */
   --color-action-run: #34d399; /* green — run / success / active */
@@ -45,6 +45,11 @@
 
   /* Layout */
   --sidebar-w: 260px; --activity-bar-w: 44px; --panel-w: 320px;
-  --toolbar-h: 44px;  --status-h: 22px;       --drawer-h: 260px;
-  --radius: 8px; --trans: 150ms ease;
+  --toolbar-h: 44px;  --status-h: 26px;       --drawer-h: 260px;
+  /* Radius scale — use these instead of ad-hoc values */
+  --radius-sm: 6px;
+  --radius:    8px;
+  --radius-lg: 12px;
+  --trans: 150ms ease;
+  --spring: 200ms cubic-bezier(0.16,1,0.3,1);
 }

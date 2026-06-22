@@ -36,8 +36,8 @@ export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManag
 
   btn.classList.toggle("btn-always-on--active", alwaysOn);
   btn.title = alwaysOn
-    ? "Auto-start is ON — this workflow starts automatically when Flowo opens. Click to disable."
-    : "Auto-start is OFF — click to make this workflow start automatically when Flowo opens.";
+    ? "Run on launch is ON — this workflow starts automatically when Aerini opens. Click to disable."
+    : "Run on launch is OFF — click to make this workflow start automatically when Aerini opens.";
 }
 
 export function bindAlwaysOnToggle(wfManager: WorkflowManager, toast: Toast): void {
@@ -65,14 +65,14 @@ export function bindAlwaysOnToggle(wfManager: WorkflowManager, toast: Toast): vo
       }
       btn.classList.toggle("btn-always-on--active", enabling);
       btn.title = enabling
-        ? "Auto-start is ON — this workflow starts automatically when Flowo opens. Click to disable."
-        : "Auto-start is OFF — click to make this workflow start automatically when Flowo opens.";
+        ? "Run on launch is ON — this workflow starts automatically when Aerini opens. Click to disable."
+        : "Run on launch is OFF — click to make this workflow start automatically when Aerini opens.";
       toast(
-        enabling ? "Auto-start enabled — workflow will start on every app launch" : "Auto-start disabled",
+        enabling ? "Run on launch enabled — workflow will start on every app launch" : "Run on launch disabled",
         enabling ? "success" : "info",
       );
     } catch (e) {
-      toast(`Could not update auto-start: ${e}`, "error");
+      toast(`Could not update run on launch: ${e}`, "error");
     } finally {
       btn.disabled = false;
     }

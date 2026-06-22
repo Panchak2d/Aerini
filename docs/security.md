@@ -1,6 +1,6 @@
 # Security
 
-This guide covers Flowo's security model end to end — what it protects you from, how each protection works, and what you're responsible for yourself.
+This guide covers Aerini's security model end to end — what it protects you from, how each protection works, and what you're responsible for yourself.
 
 ---
 
@@ -9,8 +9,8 @@ This guide covers Flowo's security model end to end — what it protects you fro
 If you just want to know the essentials before reading further:
 
 - Credentials are encrypted with AES-256-GCM. The encryption key is stored in your OS keychain (not in the same file as the credentials).
-- Workflows, run history, and credentials never leave your machine in desktop mode. Flowo makes no telemetry calls or outbound connections beyond what your workflow nodes explicitly do.
-- Shell Command and Code (JS) nodes can execute arbitrary code on your machine. Flowo warns you before running a workflow containing them.
+- Workflows, run history, and credentials never leave your machine in desktop mode. Aerini makes no telemetry calls or outbound connections beyond what your workflow nodes explicitly do.
+- Shell Command and Code (JS) nodes can execute arbitrary code on your machine. Aerini warns you before running a workflow containing them.
 - The HTTP node blocks requests to internal/private IP addresses to prevent SSRF attacks — but this protection has a known DNS-timing gap that only an egress firewall can fully close.
 - Server deployments need additional hardening. There's a checklist at the end of [Server Deployment](server-deploy.md).
 
@@ -27,7 +27,7 @@ If you just want to know the essentials before reading further:
 7. [Server mode — hardening checklist](#7-server-mode--hardening-checklist)
 8. [AI Agent nodes — prompt injection](#8-ai-agent-nodes--prompt-injection)
 9. [Backup and recovery](#9-backup-and-recovery)
-10. [What Flowo cannot protect you from](#10-what-flowo-cannot-protect-you-from)
+10. [What Aerini cannot protect you from](#10-what-aerini-cannot-protect-you-from)
 
 ---
 
@@ -36,7 +36,7 @@ If you just want to know the essentials before reading further:
 The desktop app is designed for a single user on their own machine. Its security assumptions are:
 
 - **You are the only person using this computer.** Shared machines or multi-user enterprise environments are not the primary target.
-- **Your OS user account is not compromised.** If an attacker has access to your user session, they can potentially reach your credentials. See [Section 10](#10-what-flowo-cannot-protect-you-from).
+- **Your OS user account is not compromised.** If an attacker has access to your user session, they can potentially reach your credentials. See [Section 10](#10-what-aerini-cannot-protect-you-from).
 - **Workflows you run come from sources you trust.** The dangerous-node confirmation prompt is a safety check, not a full sandbox.
 
 **What never leaves your machine in desktop mode:**
@@ -46,9 +46,9 @@ The desktop app is designed for a single user on their own machine. Its security
 - Run history and logs
 - Node outputs
 
-The only outbound traffic is from your workflow nodes — HTTP requests, Slack messages, and similar actions you explicitly configured. Flowo itself has no telemetry, no analytics, no update pings, and no license checks.
+The only outbound traffic is from your workflow nodes — HTTP requests, Slack messages, and similar actions you explicitly configured. Aerini itself has no telemetry, no analytics, no update pings, and no license checks.
 
-**A note on dev mode:** running `npm run dev` without Tauri opens Flowo in your browser. In that mode, execution is fully disabled — the Run button does nothing. No credentials, scheduling, Code (JS), or Shell Command nodes are available. This mode is for frontend development only.
+**A note on dev mode:** running `npm run dev` without Tauri opens Aerini in your browser. In that mode, execution is fully disabled — the Run button does nothing. No credentials, scheduling, Code (JS), or Shell Command nodes are available. This mode is for frontend development only.
 
 ---
 
@@ -58,14 +58,14 @@ All credentials are encrypted with **AES-256-GCM** before being written to disk.
 
 Here's what that means in practice:
 
-1. When you save a credential, Flowo generates a random 96-bit nonce using the OS cryptographically secure random source.
+1. When you save a credential, Aerini generates a random 96-bit nonce using the OS cryptographically secure random source.
 2. Your credential value is encrypted with your 256-bit key and that nonce.
 3. The encrypted bytes and nonce are stored together in `credentials.db`. Because the nonce is unique per credential, encrypting the same value twice produces different ciphertext — so someone who sees the database can't tell whether two credentials have the same value.
-4. When a node needs a credential during execution, Flowo decrypts it in memory for that operation only. The plaintext is never written to disk, never logged, and never sent to the frontend.
+4. When a node needs a credential during execution, Aerini decrypts it in memory for that operation only. The plaintext is never written to disk, never logged, and never sent to the frontend.
 
 **What "encrypted at rest" actually means:** `credentials.db` is unreadable without the encryption key file. If someone copies the database file alone, they have encrypted bytes they can't use.
 
-**What it doesn't protect against:** if an attacker has access to both the database and the key file simultaneously — or to your live user session — the encryption provides no protection. This is discussed in [Section 3](#3-the-encryption-key--your-most-important-file) and [Section 10](#10-what-flowo-cannot-protect-you-from).
+**What it doesn't protect against:** if an attacker has access to both the database and the key file simultaneously — or to your live user session — the encryption provides no protection. This is discussed in [Section 3](#3-the-encryption-key--your-most-important-file) and [Section 10](#10-what-aerini-cannot-protect-you-from).
 
 ---
 
@@ -79,13 +79,13 @@ The desktop app stores the key in your OS-native keychain:
 
 | Platform | Key store |
 |---|---|
-| macOS | macOS Keychain (service `flowo`, account `encryption_key`) |
+| macOS | macOS Keychain (service `aerini`, account `encryption_key`) |
 | Windows | Windows Credential Manager |
 | Linux | SecretService via D-Bus (GNOME Keyring, KWallet, or equivalent) |
 
-On first launch, Flowo generates a random 32-byte key using the OS secure random source and writes it to the keychain. Every launch after that reads it back from there.
+On first launch, Aerini generates a random 32-byte key using the OS secure random source and writes it to the keychain. Every launch after that reads it back from there.
 
-**Linux keychain fallback:** if no SecretService daemon is running (common on minimal Linux installs), Flowo falls back to a plain file at `.cred.key` in the app data directory, created with `chmod 600`. You'll see a warning logged at startup when this happens. Install a keychain provider and Flowo will migrate the key into it automatically on the next launch:
+**Linux keychain fallback:** if no SecretService daemon is running (common on minimal Linux installs), Aerini falls back to a plain file at `.cred.key` in the app data directory, created with `chmod 600`. You'll see a warning logged at startup when this happens. Install a keychain provider and Aerini will migrate the key into it automatically on the next launch:
 
 ```bash
 sudo apt install gnome-keyring    # GNOME
@@ -94,7 +94,7 @@ sudo apt install kwallet-pam      # KDE
 
 ### Server mode
 
-The server binary stores the key in a plain file by default — `<data_dir>/flowo.key` (default location: `~/.flowo-server/flowo.key`). The file is created with `chmod 600` on Unix.
+The server binary stores the key in a plain file by default — `<data_dir>/aerini.key` (default location: `~/.aerini-server/aerini.key`). The file is created with `chmod 600` on Unix.
 
 **What `chmod 600` protects against:** other OS users on the same machine reading the file directly.
 
@@ -102,34 +102,34 @@ The server binary stores the key in a plain file by default — `<data_dir>/flow
 
 - Root — root bypasses file permissions entirely
 - Any process running as the same OS user (which includes shell commands launched by your own workflows if `--allow-shell` is enabled)
-- A backup that captures both `flowo.key` and `credentials.db` together — anyone with both files can decrypt all credentials offline, without touching the running server
+- A backup that captures both `aerini.key` and `credentials.db` together — anyone with both files can decrypt all credentials offline, without touching the running server
 
 These are real constraints, not theoretical ones. Use the OS keychain on the server if you can:
 
 ```bash
-flowo-server api --keychain --token mytoken
+aerini-server api --keychain --token mytoken
 ```
 
 On systemd 249+ servers, you can bind the key to the machine's TPM chip so that a stolen disk image can't be decrypted without the original hardware:
 
 ```ini
-# /etc/systemd/system/flowo-server.service
+# /etc/systemd/system/aerini-server.service
 [Service]
-LoadCredentialEncrypted=flowo-key:/etc/credstore.encrypted/flowo-key
+LoadCredentialEncrypted=aerini-key:/etc/credstore.encrypted/aerini-key
 ```
 
-Read the injected key path from `$CREDENTIALS_DIRECTORY/flowo-key` at startup.
+Read the injected key path from `$CREDENTIALS_DIRECTORY/aerini-key` at startup.
 
 ### Rules for both modes
 
 - **Back up the key.** Losing the encryption key makes `credentials.db` permanently unreadable. There is no recovery mechanism.
-- **Never commit `flowo.key` to version control.**
-- **Never store `flowo.key` and `credentials.db` in the same unencrypted backup.** Anyone with both can decrypt everything offline.
+- **Never commit `aerini.key` to version control.**
+- **Never store `aerini.key` and `credentials.db` in the same unencrypted backup.** Anyone with both can decrypt everything offline.
 - **Test your backup.** A backup you've never restored is a backup you don't actually have.
 
 ### Key integrity check
 
-Flowo validates the key on every startup. If the key file exists but is corrupt (wrong byte length after decoding), Flowo refuses to start with the message:
+Aerini validates the key on every startup. If the key file exists but is corrupt (wrong byte length after decoding), Aerini refuses to start with the message:
 
 ```
 Key file is corrupt: expected 32 bytes after base64 decode, got N
@@ -149,7 +149,7 @@ Three node types execute code or access the filesystem directly:
 | **Code (JS)** | Execute arbitrary JavaScript via a spawned Node.js process with the same reach as Shell Command |
 | **File** | Read or write files anywhere on your filesystem (in desktop mode) |
 
-Before running any workflow that contains one or more of these nodes, Flowo shows a confirmation prompt:
+Before running any workflow that contains one or more of these nodes, Aerini shows a confirmation prompt:
 
 > *"This workflow contains nodes that execute code on your computer: [node names]. Only run workflows from sources you trust. Continue?"*
 
@@ -165,7 +165,7 @@ Once you confirm, the approval is remembered for the current session — as long
 
 **SSRF** (Server-Side Request Forgery) is when a workflow is tricked into making HTTP requests to services on your local network or the server's internal network — things like Redis (`localhost:6379`), a router admin panel (`192.168.1.1`), or AWS instance metadata (`169.254.169.254`).
 
-Flowo blocks these at the HTTP node before any request is sent. The full block list:
+Aerini blocks these at the HTTP node before any request is sent. The full block list:
 
 | Category | What's blocked |
 |---|---|
@@ -180,11 +180,11 @@ Flowo blocks these at the HTTP node before any request is sent. The full block l
 
 Redirects are also disabled — the HTTP node doesn't follow `301` or `302` responses. A server can't redirect your request to an internal address to bypass the check.
 
-For hostname URLs, Flowo resolves DNS before making the request and validates every returned IP against the block list.
+For hostname URLs, Aerini resolves DNS before making the request and validates every returned IP against the block list.
 
 ### The DNS rebinding gap
 
-There's a known limitation: Flowo checks the IP at the time of DNS resolution, but the actual TCP connection happens a moment later. A malicious DNS server can return a valid public IP during the check, then switch to a private IP by the time the connection is made. This is called **DNS rebinding** (or a TOCTOU attack), and it can't be fully prevented at the application layer.
+There's a known limitation: Aerini checks the IP at the time of DNS resolution, but the actual TCP connection happens a moment later. A malicious DNS server can return a valid public IP during the check, then switch to a private IP by the time the connection is made. This is called **DNS rebinding** (or a TOCTOU attack), and it can't be fully prevented at the application layer.
 
 **The only complete fix is a network-level egress firewall** that blocks outbound connections to private IPs regardless of what the application-layer check says.
 
@@ -195,7 +195,7 @@ There's a known limitation: Flowo checks the IP at the time of DNS resolution, b
 
 ## 6. Webhook security
 
-The Webhook node's built-in **Secret** field checks that incoming requests include the right `X-Flowo-Secret` header. The comparison is timing-safe, so it can't be bypassed by measuring response time.
+The Webhook node's built-in **Secret** field checks that incoming requests include the right `X-Aerini-Secret` header. The comparison is timing-safe, so it can't be bypassed by measuring response time.
 
 However, the secret proves *who sent the request* but doesn't cryptographically bind that proof to the *request body*. A captured request could theoretically be replayed.
 
@@ -212,7 +212,7 @@ Also set `timeout_secs` on every Webhook node. Without it, a sender that connect
 
 ## 7. Server mode — hardening checklist
 
-Before exposing `flowo-server` to the internet:
+Before exposing `aerini-server` to the internet:
 
 **Authentication**
 - [ ] `--token` is a long random string — not a dictionary word or a default value
@@ -231,8 +231,8 @@ Before exposing `flowo-server` to the internet:
 
 **Credentials**
 - [ ] `--allow-env-vars` lists only the specific variables your workflow needs
-- [ ] `FLOWO_TOKEN` and `FLOWO_CRED_*` variables are never on the `--allow-env-vars` list
-- [ ] Credential environment variables are stored in `/etc/flowo/.env` with `600` permissions
+- [ ] `AERINI_TOKEN` and `AERINI_CRED_*` variables are never on the `--allow-env-vars` list
+- [ ] Credential environment variables are stored in `/etc/aerini/.env` with `600` permissions
 
 **Process**
 - [ ] Server runs as a dedicated non-root user
@@ -241,9 +241,9 @@ Before exposing `flowo-server` to the internet:
 
 ---
 
-## 7b. What flowo-server exposes publicly in serve mode
+## 7b. What aerini-server exposes publicly in serve mode
 
-When running `flowo-server serve`, the status server binds on the configured port. Some endpoints require the `run_secret`; others are always public.
+When running `aerini-server serve`, the status server binds on the configured port. Some endpoints require the `run_secret`; others are always public.
 
 | Endpoint | Auth required | What it exposes |
 |---|---|---|
@@ -288,7 +288,7 @@ There is no complete technical defense against prompt injection today. If your a
 | `credentials.db` | Encrypted credential values | High |
 | Encryption key | The key to decrypt `credentials.db` | Critical |
 
-On the desktop app, the encryption key lives in your OS keychain — back it up through your keychain backup mechanism (iCloud Keychain on macOS, for example). On the server, back up `flowo.key` manually to an encrypted location separate from the database.
+On the desktop app, the encryption key lives in your OS keychain — back it up through your keychain backup mechanism (iCloud Keychain on macOS, for example). On the server, back up `aerini.key` manually to an encrypted location separate from the database.
 
 **Losing the encryption key is permanent.** There is no recovery path. The encrypted database is unreadable without it.
 
@@ -296,13 +296,13 @@ On the desktop app, the encryption key lives in your OS keychain — back it up 
 
 ---
 
-## 10. What Flowo cannot protect you from
+## 10. What Aerini cannot protect you from
 
 These are real limitations, not gaps that will be fixed later. Understanding them lets you make informed decisions about how you deploy and use the tool.
 
 **A compromised OS user session.** If an attacker gains access to your logged-in user account — through malware, a remote exploit, or physical access — they can read the encryption key from the keychain, decrypt the credential database, and access everything. Encryption at rest is not protection against a live attacker who is you, from the OS's perspective. Full-disk encryption (FileVault, BitLocker) and strong account passwords reduce this risk but don't eliminate it.
 
-**Malicious workflows from untrusted sources.** Shell Command and Code (JS) nodes can run arbitrary code. Flowo warns you before running workflows containing them, but the warning requires you to read it. Don't run workflows from untrusted sources, regardless of what they claim to do.
+**Malicious workflows from untrusted sources.** Shell Command and Code (JS) nodes can run arbitrary code. Aerini warns you before running workflows containing them, but the warning requires you to read it. Don't run workflows from untrusted sources, regardless of what they claim to do.
 
 **Root access on a shared server.** `chmod 600` protects the key file from other unprivileged users. It does not protect against root. If you're on a shared server and the host or another tenant gains root, the key file can be read.
 
@@ -318,7 +318,7 @@ These are real limitations, not gaps that will be fixed later. Understanding the
 
 **What it is:** The `rsa` crate (version 0.9.x) is vulnerable to a timing side-channel known as the Marvin Attack. An attacker who can observe many TLS handshakes to the same MySQL endpoint may recover RSA session material by measuring response timing differences.
 
-**How it enters Flowo:** `rsa` is pulled in transitively by `sqlx` → `sqlx-mysql`. Flowo's Database node supports MySQL connections; the `rsa` crate is used internally during the MySQL authentication handshake. Flowo does not call `rsa` directly.
+**How it enters Aerini:** `rsa` is pulled in transitively by `sqlx` → `sqlx-mysql`. Aerini's Database node supports MySQL connections; the `rsa` crate is used internally during the MySQL authentication handshake. Aerini does not call `rsa` directly.
 
 **When the risk is mitigated:**
 - The MySQL server is operator-controlled and not reachable by untrusted workflow authors
@@ -326,7 +326,7 @@ These are real limitations, not gaps that will be fixed later. Understanding the
 - In serve mode where the exported workflow is operator-authored
 
 **When the risk is NOT mitigated:**
-- In API mode (`flowo-server api`) where untrusted callers with write-scope tokens can create workflows with arbitrary `connection_url` values in Database nodes. An attacker who operates a MySQL server can direct a Flowo workflow to connect to it, then measure handshake timing.
+- In API mode (`aerini-server api`) where untrusted callers with write-scope tokens can create workflows with arbitrary `connection_url` values in Database nodes. An attacker who operates a MySQL server can direct a Aerini workflow to connect to it, then measure handshake timing.
 
 **If you run API mode with untrusted workflow authors:**
 1. Review all Database node `connection_url` values before deploying workflows

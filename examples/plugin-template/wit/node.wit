@@ -1,4 +1,4 @@
-package flowo:plugin@0.1.0;
+package aerini:plugin@0.1.0;
 
 interface types {
     /// A key-value parameter passed to a node.
@@ -45,7 +45,7 @@ interface types {
     }
 }
 
-/// The interface every Flowo plugin node must implement.
+/// The interface every Aerini plugin node must implement.
 interface node {
     use types.{node-input, node-output, node-descriptor};
 
@@ -56,14 +56,14 @@ interface node {
     execute: func(input: node-input) -> node-output;
 }
 
-/// The world exported by every Flowo plugin component.
+/// The world exported by every Aerini plugin component.
 ///
 /// WASI imports (HTTP, filesystem, logging, etc.) are NOT declared here.
 /// They are provided automatically by:
 ///   - the wasm32-wasip2 target on the plugin author's side
 ///   - wasmtime-wasi added to the Linker on the host side
 /// Declaring WASI imports here would require wit/deps/ management with no benefit.
-/// This world only declares what is specific to Flowo.
-world flowo-node {
+/// This world only declares what is specific to Aerini.
+world aerini-node {
     export node;
 }

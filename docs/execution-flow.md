@@ -1,6 +1,6 @@
 # Execution Flow — Internals
 
-How Flowo turns a saved workflow JSON into a completed run. This page is for contributors and embedders, not for general use.
+How Aerini turns a saved workflow JSON into a completed run. This page is for contributors and embedders, not for general use.
 
 ---
 
@@ -38,7 +38,7 @@ sequenceDiagram
     note over T,E: permit + lock released on drop
 ```
 
-Every execution flows through a single entry point: `WorkflowExecutor::run()` in `flowo-engine/src/executor/mod.rs`.
+Every execution flows through a single entry point: `WorkflowExecutor::run()` in `aerini-engine/src/executor/mod.rs`.
 
 ---
 
@@ -49,7 +49,7 @@ Runs originate from three sources:
 | Source | Code path |
 |---|---|
 | Scheduler (interval / cron / once / webhook) | `scheduler/mod.rs` → `fire_once_with_vars()` |
-| Server HTTP `/run` endpoint | `flowo-server/src/api_server/routes/workflows.rs` |
+| Server HTTP `/run` endpoint | `aerini-server/src/api_server/routes/workflows.rs` |
 | Tauri IPC `run_workflow` command | `src-tauri/src/lib.rs` |
 
 All three converge on `WorkflowExecutor::run()`. The trigger type is stored in the `ExecutionContext` metadata map.
@@ -159,9 +159,9 @@ Nodes with side effects (Slack, Send Email, Stripe, etc.) execute their side eff
 
 ## 10. Graceful shutdown
 
-This applies to `flowo-server` (both serve mode and API mode). The desktop app doesn't drain on quit — closing the window stops jobs immediately, which is why an in-progress run shows as `interrupted` afterwards (see section 8).
+This applies to `aerini-server` (both serve mode and API mode). The desktop app doesn't drain on quit — closing the window stops jobs immediately, which is why an in-progress run shows as `interrupted` afterwards (see section 8).
 
-`flowo-server` handles `SIGTERM` (the signal `systemctl stop` and `systemctl restart` send) by **draining** instead of stopping cold:
+`aerini-server` handles `SIGTERM` (the signal `systemctl stop` and `systemctl restart` send) by **draining** instead of stopping cold:
 
 1. The scheduler flips an internal "shutting down" flag. Every trigger loop (Schedule/interval, Cron, Webhook) checks this flag at its next natural checkpoint and stops starting new runs — an interval timer won't fire again, a webhook listener starts returning `503 Service Unavailable` to new requests instead of accepting them.
 2. Any run that's *already in progress* is left alone to finish normally — it isn't aborted.

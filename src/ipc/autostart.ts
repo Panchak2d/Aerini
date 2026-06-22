@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** Returns whether Flowo is currently set to launch at login. */
+/** Returns whether Aerini is currently set to launch at login. */
 export const getAutostart = (): Promise<boolean> =>
   invoke<boolean>("get_autostart");
 

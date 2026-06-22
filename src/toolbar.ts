@@ -1,6 +1,7 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import type { CredentialPanel } from "./panels/CredentialPanel";
+import type { ChatPanel } from "./panels/ChatPanel";
 import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow } from "./ipc/workflow";
 import { isTauri } from "./utils";
@@ -28,6 +29,7 @@ export function bindToolbar(
   wfManager:        WorkflowManager,
   runManager:       RunManager,
   credPanel:        CredentialPanel,
+  chatPanel:        ChatPanel,
   toast:            Toast,
   updateStatusHint: () => void,
 ): ToolbarResult {
@@ -61,7 +63,26 @@ export function bindToolbar(
       : "";
   };
 
-  runManager.onRunStateChange = () => refreshRunBtn();
+  const runWrap = document.getElementById("run-dropdown-wrap");
+  let _flashTimer: ReturnType<typeof setTimeout> | null = null;
+
+  runManager.onRunStateChange = (running: boolean) => {
+    refreshRunBtn();
+    if (running) {
+      if (_flashTimer) { clearTimeout(_flashTimer); _flashTimer = null; }
+      runWrap?.setAttribute("data-run-state", "running");
+    } else if (!_flashTimer) {
+      runWrap?.setAttribute("data-run-state", "idle");
+    }
+  };
+
+  runManager.onRunResult = (success: boolean) => {
+    runWrap?.setAttribute("data-run-state", success ? "success" : "error");
+    _flashTimer = setTimeout(() => {
+      runWrap?.setAttribute("data-run-state", "idle");
+      _flashTimer = null;
+    }, 300);
+  };
 
   runMainBtn.addEventListener("click", () => {
     const schedulerRunning = getBgJobs().some(
@@ -111,13 +132,14 @@ export function bindToolbar(
     closeAllDropdowns();
     if (!isOpen) menu.classList.add("open");
   });
-  $("btn-export-flowo")?.addEventListener("click", () => { closeAllDropdowns(); wfManager.handleExport(); });
+  $("btn-export-aerini")?.addEventListener("click", () => { closeAllDropdowns(); wfManager.handleExport(); });
   $("btn-export-server")?.addEventListener("click", () => { closeAllDropdowns(); showExportServerPanel(wfManager.currentId, toast); });
 
   document.addEventListener("click", () => closeAllDropdowns());
 
   $("btn-new-workflow").addEventListener("click", () => wfManager.handleNew());
   $("btn-credentials").addEventListener("click",  () => credPanel.show());
+  $("btn-chat")?.addEventListener("click", () => chatPanel.toggle());
   $("btn-close-drawer").addEventListener("click", () => {
     $("output-drawer").classList.add("hidden");
     document.documentElement.style.removeProperty("--drawer-offset");
@@ -138,7 +160,7 @@ export function bindToolbar(
       const enabled = (e.target as HTMLInputElement).checked;
       try {
         await setAutostart(enabled);
-        toast(enabled ? "Flowo will now launch at login" : "Launch at login disabled", "success");
+        toast(enabled ? "Aerini will now launch at login" : "Launch at login disabled", "success");
       } catch (err) {
         toast(`Could not update launch at login: ${err}`, "error");
         (e.target as HTMLInputElement).checked = !enabled;
@@ -147,17 +169,17 @@ export function bindToolbar(
 
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;
   if (gridSnapEl) {
-    gridSnapEl.checked = localStorage.getItem("flowo_grid_snap") === "true";
+    gridSnapEl.checked = localStorage.getItem("aerini_grid_snap") === "true";
     gridSnapEl.addEventListener("change", () => {
-      localStorage.setItem("flowo_grid_snap", String(gridSnapEl.checked));
+      localStorage.setItem("aerini_grid_snap", String(gridSnapEl.checked));
     });
   }
 
   const autofitEl = document.getElementById("setting-autofit") as HTMLInputElement | null;
   if (autofitEl) {
-    autofitEl.checked = localStorage.getItem("flowo_autofit") !== "false";
+    autofitEl.checked = localStorage.getItem("aerini_autofit") !== "false";
     autofitEl.addEventListener("change", () => {
-      localStorage.setItem("flowo_autofit", String(autofitEl.checked));
+      localStorage.setItem("aerini_autofit", String(autofitEl.checked));
     });
   }
 
@@ -197,6 +219,7 @@ export function bindToolbar(
     if ((e.metaKey || e.ctrlKey) && e.key === "n")     { e.preventDefault(); wfManager.handleNew(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runWithValidation(); return; }
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "F") { e.preventDefault(); canvas.fitToScreen(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "C") { e.preventDefault(); chatPanel.toggle(); return; }
     if (inInput) return;
     if (e.key === "?" || e.key === "/") { $("shortcuts-modal").classList.remove("hidden"); return; }
     if (e.key === "Escape") {
@@ -209,18 +232,18 @@ export function bindToolbar(
     if (e.key === "m" || e.key === "M") {
       const w      = document.getElementById("minimap-wrap");
       const hidden = w?.classList.toggle("minimap-hidden");
-      localStorage.setItem("flowo_minimap_hidden", String(!!hidden));
+      localStorage.setItem("aerini_minimap_hidden", String(!!hidden));
     }
   });
 
   // Minimap toggle
   const minimapWrap   = document.getElementById("minimap-wrap");
   const minimapBtn    = document.getElementById("btn-minimap-toggle");
-  const minimapHidden = localStorage.getItem("flowo_minimap_hidden") === "true";
+  const minimapHidden = localStorage.getItem("aerini_minimap_hidden") === "true";
   if (minimapHidden) minimapWrap?.classList.add("minimap-hidden");
   minimapBtn?.addEventListener("click", () => {
     const hidden = minimapWrap?.classList.toggle("minimap-hidden");
-    localStorage.setItem("flowo_minimap_hidden", String(!!hidden));
+    localStorage.setItem("aerini_minimap_hidden", String(!!hidden));
   });
 
   bindDrawerResize();
@@ -231,6 +254,7 @@ export function bindToolbar(
 
   // Trigger initial always-on button state
   updateAlwaysOnBtn(canvas, wfManager);
+  chatPanel.refreshButtonVisibility();
   updateStatusHint();
 
   return { refreshRunBtn, runWithValidation };

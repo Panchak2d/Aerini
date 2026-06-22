@@ -168,7 +168,7 @@ function renderReady(
         ${result.variables.map(v => `
           <tr>
             <td><code>$vars.${escapeHtml(v)}</code></td>
-            <td><code>FLOWO_VAR_${escapeHtml(v.toUpperCase())}</code></td>
+            <td><code>AERINI_VAR_${escapeHtml(v.toUpperCase())}</code></td>
           </tr>
         `).join("")}
       </tbody>
@@ -238,7 +238,7 @@ function renderReady(
         <div class="esp-callout esp-mt">
           <strong>Package saved.</strong><br>
           Upload it to your server and run:<br>
-          <code>unzip flowo-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code>
+          <code>unzip aerini-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code>
         </div>
       </div>
     </div>
@@ -320,7 +320,7 @@ function renderReady(
         request: { workflow_id: workflowId, status_port: port }
       });
 
-      const filename = `flowo-server-${exportResult.workflow_name.replace(/[^a-z0-9-]/gi, "_")}.zip`;
+      const filename = `aerini-server-${exportResult.workflow_name.replace(/[^a-z0-9-]/gi, "_")}.zip`;
       const savedPath = await invoke<string>("save_export_zip", {
         zipPath: exportResult.zip_path,
         filename,
@@ -363,7 +363,7 @@ function renderReady(
         request: { workflow_id: workflowId, status_port: port }
       });
 
-      const filename = `flowo-docker-${exportResult.workflow_name.replace(/[^a-z0-9-]/gi, "_")}.zip`;
+      const filename = `aerini-docker-${exportResult.workflow_name.replace(/[^a-z0-9-]/gi, "_")}.zip`;
       const savedPath = await invoke<string>("save_export_zip", {
         zipPath: exportResult.zip_path,
         filename,

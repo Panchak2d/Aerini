@@ -58,22 +58,22 @@ export function bindDropImport(toast: ToastFn): void {
           return;
         }
 
-        const flowoPath = paths.find(p =>
-          p.endsWith(".flowo") || p.endsWith(".json")
+        const aeriniPath = paths.find(p =>
+          p.endsWith(".aerini") || p.endsWith(".json")
         );
-        if (!flowoPath) {
-          toast("Drop a .flowo file to import a workflow", "info");
+        if (!aeriniPath) {
+          toast("Drop a .aerini file to import a workflow", "info");
           return;
         }
 
         // Use read_text_file command — capability grants all file reads in tauri.conf.json
-        invoke<string>("read_text_file", { path: flowoPath })
+        invoke<string>("read_text_file", { path: aeriniPath })
           .then(content => {
             try {
               const obj = JSON.parse(content);
               showImportPreview(obj);
             } catch {
-              toast("Could not parse the dropped file — is it a valid .flowo file?", "error");
+              toast("Could not parse the dropped file — is it a valid .aerini file?", "error");
             }
           })
           .catch(e => toast(`Could not read file: ${e}`, "error"));
@@ -121,7 +121,7 @@ function readAndPreviewFile(file: File, toast: ToastFn): void {
       const obj = JSON.parse(e.target?.result as string);
       showImportPreview(obj);
     } catch {
-      toast("Invalid .flowo file — could not parse JSON", "error");
+      toast("Invalid .aerini file — could not parse JSON", "error");
     }
   };
   reader.readAsText(file);

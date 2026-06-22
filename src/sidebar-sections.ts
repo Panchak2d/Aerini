@@ -1,5 +1,5 @@
-const LS_ZONE  = "flowo_active_zone_v2";
-const LS_WIDTH = "flowo_sidebar_w_v2";
+const LS_ZONE  = "aerini_active_zone_v2";
+const LS_WIDTH = "aerini_sidebar_w_v2";
 const MIN_W = 220;
 const MAX_W = 420;
 const DEF_W = 260;

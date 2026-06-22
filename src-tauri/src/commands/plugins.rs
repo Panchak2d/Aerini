@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use flowo_engine::model::NodeType;
-use flowo_engine::plugin_loader::PluginLoader;
+use aerini_engine::model::NodeType;
+use aerini_engine::plugin_loader::PluginLoader;
 use serde::Serialize;
 
 #[derive(Serialize)]

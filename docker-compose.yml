@@ -1,15 +1,15 @@
 services:
-  flowo:
+  aerini:
     build: .
     ports:
       - "127.0.0.1:7700:7700"   # bind to localhost only — use Caddy or Nginx for TLS
     volumes:
-      - flowo_data:/data
+      - aerini_data:/data
     environment:
-      FLOWO_TOKEN: ${FLOWO_TOKEN:?Set FLOWO_TOKEN in .env or environment}
-      FLOWO_PORT: 7700
+      AERINI_TOKEN: ${AERINI_TOKEN:?Set AERINI_TOKEN in .env or environment}
+      AERINI_PORT: 7700
       RUST_LOG: info
     restart: unless-stopped
 
 volumes:
-  flowo_data:
+  aerini_data:

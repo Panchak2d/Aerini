@@ -1,6 +1,7 @@
-import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, NODE_HEADER, PORT_RADIUS } from "./Node";
+import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, NODE_HEADER, PORT_RADIUS, roundedRect, wrapText } from "./Node";
 import { Connector, PendingConnector, newConnectorId } from "./Connector";
 import { serialize } from "./CanvasSerializer";
+import { NODE_IDS } from "../node-ids";
 import type { NodeDescriptor } from "../ipc/workflow";
 
 type MoveEntry = { nodeId: string; from: { x: number; y: number }; to: { x: number; y: number } };
@@ -70,6 +71,7 @@ export class Canvas {
   private focusMode = false;
 
   _pendingWireDrop: { fromNode: string; fromPort: string; wx: number; wy: number } | null = null;
+  _pendingInputWireDrop: { toNode: string; toPort: string; wx: number; wy: number } | null = null;
   _pendingPresetConfig: Record<string, unknown> | undefined = undefined;
   _pendingPresetName:   string | undefined = undefined;
 
@@ -82,11 +84,14 @@ export class Canvas {
 
   onPaletteRequest: (() => void) | null = null;
   onWireDropRequest: ((fromNode: string, fromPort: string, wx: number, wy: number) => void) | null = null;
+  onInputWireDropRequest: ((toNode: string, toPort: string, wx: number, wy: number) => void) | null = null;
   onNodeSelected:   ((n: CanvasNode | null) => void) | null = null;
   onNodeClicked:    ((n: CanvasNode) => void) | null = null;
   onCanvasChanged:  (() => void) | null = null;
   onPanelClose:     (() => void) | null = null;
   onRunNode:        ((nodeId: string) => void) | null = null;
+  onZoomChange:     ((zoom: number) => void) | null = null;
+  onViewportChange: (() => void) | null = null;
 
   private lastTs = 0;
 
@@ -187,10 +192,30 @@ export class Canvas {
         ctx.fill();
         ctx.restore();
       }
+
+      // Source port glow — shows which port the wire is dragging from
+      const srcNode = this.nodes.get(this.pendingConn.fromNode);
+      const srcPort = srcNode?.ports.find(p => p.id === this.pendingConn!.fromPort);
+      if (srcPort) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(srcPort.x, srcPort.y, PORT_RADIUS + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = "#4d9eff88";
+        ctx.lineWidth   = 2 / this.zoom;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Build connected-port lookup for live port fill state (UX-4)
+    const connectedPorts = new Set<string>();
+    for (const c of this.connectors.values()) {
+      connectedPorts.add(`${c.data.from_node}:${c.data.from_port}`);
+      connectedPorts.add(`${c.data.to_node}:${c.data.to_port}`);
     }
 
     // Draw nodes
-    for (const n of this.nodes.values()) n.draw(ctx, dt);
+    for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts);
 
     // ── G12: output port connection-count badges ───────────────────────────
     // Count outgoing connections per (nodeId, portId).
@@ -229,6 +254,9 @@ export class Canvas {
       ctx.fillText(String(cnt > 9 ? "9+" : cnt), bx, by);
       ctx.restore();
     }
+
+    // Hover tooltip for nodes with truncated names (UX-1)
+    this.drawNodeTooltips();
 
     // Draw ghost
     if (this.pendingInsert && this.insertGhost) {
@@ -284,6 +312,61 @@ export class Canvas {
     }
 
     this.drawMinimap(W, H);
+  }
+
+  // Screen-space tooltip for a hovered node whose name is truncated (UX-1).
+  // Called last in draw() so it renders above nodes/badges/connectors.
+  // Uses CSS-pixel coordinates (not world space) so the box stays a fixed
+  // size on screen regardless of zoom level.
+  private drawNodeTooltips(): void {
+    const ctx = this.ctx;
+    const dpr = this.dpr;
+    const W   = this.el.getBoundingClientRect().width;
+
+    for (const n of this.nodes.values()) {
+      if (!n.hovered) continue;
+      if (n.data.node_type_id === NODE_IDS.NOTE) continue;
+      if (n.data.name.length <= 20) continue;
+
+      const sx = (n.data.position.x + NODE_WIDTH / 2) * this.zoom + this.panX;
+      const sy = n.data.position.y * this.zoom + this.panY;
+
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+      const padX = 8, padY = 4, gap = 8;
+      const maxBoxW = Math.max(60, W - 16);
+      let label = n.data.name;
+      let boxW  = ctx.measureText(label).width + padX * 2;
+      if (boxW > maxBoxW) {
+        const maxTextW = maxBoxW - padX * 2;
+        while (label.length > 1 && ctx.measureText(label + "…").width > maxTextW) {
+          label = label.slice(0, -1);
+        }
+        label += "…";
+        boxW = ctx.measureText(label).width + padX * 2;
+      }
+      const boxH = 11 + padY * 2;
+
+      const bx = Math.max(4, Math.min(sx - boxW / 2, W - boxW - 4));
+      const by = Math.max(4, sy - gap - boxH);
+
+      ctx.beginPath();
+      roundedRect(ctx, bx, by, boxW, boxH, 4);
+      ctx.fillStyle = "#21262d";
+      ctx.fill();
+      ctx.strokeStyle = "#30363d";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = "#e6edf3";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, bx + padX, by + boxH / 2);
+
+      ctx.restore();
+    }
   }
 
   // ── Minimap ───────────────────────────────────────────────────────────────
@@ -465,6 +548,7 @@ export class Canvas {
     if (e.key === "Escape") {
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       this.pendingInsert = null; this.insertGhost = null;
+      this._pendingInputWireDrop = null;
       this.clearSelection(); this.el.style.cursor = "default";
     }
   }
@@ -508,6 +592,11 @@ export class Canvas {
     for (const node of this.nodes.values()) {
       const p = node.portAtPoint(wx, wy);
       if (p && !p.isInput) { this.pendingConn = new PendingConnector(node.data.id, p.id, p.x, p.y); this.el.style.cursor = "crosshair"; return; }
+      if (p && p.isInput) {
+        this._pendingInputWireDrop = { toNode: node.data.id, toPort: p.id, wx: p.x, wy: p.y };
+        this.onInputWireDropRequest?.(node.data.id, p.id, p.x, p.y);
+        return;
+      }
     }
 
     // Node drag
@@ -534,7 +623,7 @@ export class Canvas {
     }
 
     // Wire click
-    for (const conn of this.connectors.values()) { if (conn.containsPoint(wx, wy, this.nodes)) { this.selectConn(conn); return; } }
+    for (const conn of this.connectors.values()) { if (conn.containsPoint(wx, wy, this.nodes, 8 / this.zoom)) { this.selectConn(conn); return; } }
 
     // Empty space: Shift = box-select, plain = pan + deselect
     if (e.shiftKey) {
@@ -568,7 +657,7 @@ export class Canvas {
     if (this.draggingNode) {
       this.didDrag = true;
       let nx = wx - this.dragOffX, ny = wy - this.dragOffY;
-      if (localStorage.getItem("flowo_grid_snap") === "true") {
+      if (localStorage.getItem("aerini_grid_snap") === "true") {
         const G = 20;
         nx = Math.round(nx / G) * G;
         ny = Math.round(ny / G) * G;
@@ -621,7 +710,7 @@ export class Canvas {
     }
     this.pendingInsert = null; this.insertGhost = null;
 
-    if (this.isPanning) { this.isPanning = false; this.el.style.cursor = "default"; return; }
+    if (this.isPanning) { this.isPanning = false; this.el.style.cursor = "default"; this.onViewportChange?.(); return; }
 
     if (this.isCutting) {
       const cut = this.doCut();
@@ -696,7 +785,7 @@ export class Canvas {
 
     // Right-click on a wire → delete it
     for (const [id, conn] of this.connectors) {
-      if (conn.containsPoint(wx, wy, this.nodes)) {
+      if (conn.containsPoint(wx, wy, this.nodes, 8 / this.zoom)) {
         this.connectors.delete(id);
         this.clearDynamicPortExpr(conn);
         this.pushUndo({ type: "delete_edge", connector: conn });
@@ -717,10 +806,12 @@ export class Canvas {
     const menu = document.createElement("div");
     menu.id = "canvas-ctx-menu";
     menu.className = "ctx-menu";
+    menu.setAttribute("role", "menu");
 
     const addItem = (label: string, icon: string, danger: boolean, action: () => void) => {
       const item = document.createElement("button");
       item.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
+      item.setAttribute("role", "menuitem");
       item.innerHTML = `<span class="ctx-menu-icon">${icon}</span><span>${label}</span>`;
       item.addEventListener("mousedown", (e) => { e.preventDefault(); menu.remove(); action(); });
       menu.appendChild(item);
@@ -847,6 +938,8 @@ export class Canvas {
     const factor  = e.deltaY > 0 ? (isPinch ? 0.95 : 0.90) : (isPinch ? 1 / 0.95 : 1 / 0.90);
     const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * factor));
     this.panX = sx - wx * nz; this.panY = sy - wy * nz; this.zoom = nz;
+    this.onZoomChange?.(this.zoom);
+    this.onViewportChange?.();
   }
 
   private onTouchStart(e: TouchEvent) {
@@ -871,6 +964,8 @@ export class Canvas {
       const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * f));
       this.panX = cx - wx * nz; this.panY = cy - wy * nz; this.zoom = nz;
       this.lastPinchDist = dist;
+      this.onZoomChange?.(this.zoom);
+      this.onViewportChange?.();
     } else if (e.touches.length === 1 && this.isPanning) {
       const r  = this.el.getBoundingClientRect();
       const sx = e.touches[0].clientX - r.left, sy = e.touches[0].clientY - r.top;
@@ -922,6 +1017,31 @@ export class Canvas {
     return out;
   }
 
+  /**
+   * Removes connectors pointing at ports that no longer exist on a node —
+   * e.g. when a save_to_folder/collect_files node's port set shrinks because
+   * a subfolder/source slot was added (which replaces the single flat-mode
+   * "input" port with slot-based ports). Call after any rebuildPorts() that
+   * may have changed which ports exist.
+   * Self-contained (does not call clearDynamicPortExpr/derivePorts/rebuildPorts)
+   * so it is safe to call unconditionally without re-entrancy.
+   */
+  pruneOrphanedConnectors(nodeId: string): void {
+    const node = this.nodes.get(nodeId);
+    if (!node) return;
+    const validPorts = new Set(node.ports.map(p => p.id));
+    for (const [cid, c] of this.connectors) {
+      if (c.data.to_node === nodeId && !validPorts.has(c.data.to_port)) {
+        if (c.data.to_port === "input") {
+          (node.data.config as Record<string, unknown>).files = "";
+        }
+        this.connectors.delete(cid);
+      } else if (c.data.from_node === nodeId && !validPorts.has(c.data.from_port)) {
+        this.connectors.delete(cid);
+      }
+    }
+  }
+
   // ── Connector ─────────────────────────────────────────────────────────────
 
   /**
@@ -939,7 +1059,11 @@ export class Canvas {
       ...((config.sources    as Slot[] | undefined) ?? []),
     ];
     const slot = slots.find(s => s.id === conn.data.to_port);
-    if (slot) slot.source_expr = "";
+    if (slot) {
+      slot.source_expr = "";
+    } else if (conn.data.to_port === "input") {
+      config.files = "";
+    }
     target.derivePorts(target.data.config as Record<string, unknown>);
     target.rebuildPorts();
   }
@@ -965,7 +1089,11 @@ export class Canvas {
       ...((config.sources    as Slot[] | undefined) ?? []),
     ];
     const slot = slots.find(s => s.id === conn.data.to_port);
-    if (slot) slot.source_expr = expr;
+    if (slot) {
+      slot.source_expr = expr;
+    } else if (conn.data.to_port === "input") {
+      config.files = expr;
+    }
     target.derivePorts(target.data.config as Record<string, unknown>);
     target.rebuildPorts();
   }
@@ -990,7 +1118,11 @@ export class Canvas {
         ...((config.sources    as Slot[] | undefined) ?? []),
       ];
       const slot = slots.find(s => s.id === portId);
-      if (slot) slot.source_expr = expr;
+      if (slot) {
+        slot.source_expr = expr;
+      } else if (portId === "input") {
+        config.files = expr;
+      }
       target.derivePorts(target.data.config as Record<string, unknown>);
       target.rebuildPorts();
     }
@@ -1125,6 +1257,46 @@ export class Canvas {
     this.onCanvasChanged?.();
   }
 
+  // node.height assumes port-row layout, which undershoots for notes (their
+  // real height depends on wrapped text length, computed in drawNote()).
+  // Mirrors that formula so overlap checks measure notes accurately.
+  private effectiveHeight(node: CanvasNode): number {
+    if (node.data.node_type_id !== NODE_IDS.NOTE) return node.height;
+    const text = String(node.data.config["text"] ?? "Double-click to edit");
+    this.ctx.font = "12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    const lines = wrapText(this.ctx, text, NODE_WIDTH - 24);
+    return Math.max(60, 28 + lines.length * 18);
+  }
+
+  // True if a box of the given size at (x, y) would overlap any existing node.
+  private overlapsExisting(x: number, y: number, h: number, excludeId?: string): boolean {
+    for (const n of this.nodes.values()) {
+      if (n.data.id === excludeId) continue;
+      const nx = n.data.position.x, ny = n.data.position.y;
+      if (x < nx + NODE_WIDTH && x + NODE_WIDTH > nx && y < ny + this.effectiveHeight(n) && y + h > ny) return true;
+    }
+    return false;
+  }
+
+  // Nudges a freshly created node straight down until it clears existing
+  // nodes, or gives up after MAX_NUDGE_TRIES (best-effort on dense canvases).
+  private avoidOverlap(node: CanvasNode): void {
+    const GAP = 30;
+    const MAX_NUDGE_TRIES = 30;
+    const h = this.effectiveHeight(node);
+    const x = node.data.position.x;
+    let y = node.data.position.y;
+    let tries = 0;
+    while (this.overlapsExisting(x, y, h, node.data.id) && tries < MAX_NUDGE_TRIES) {
+      y += h + GAP;
+      tries++;
+    }
+    if (tries > 0) {
+      node.data.position = { x, y };
+      node.updatePortPositions();
+    }
+  }
+
   dupSelected() {
     const ids = this.selectedNodes.size > 0 ? [...this.selectedNodes] : this.selectedNode ? [this.selectedNode.data.id] : [];
     if (!ids.length) return;
@@ -1132,6 +1304,7 @@ export class Canvas {
     for (const id of ids) {
       const orig = this.nodes.get(id); if (!orig) continue;
       const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
+      this.avoidOverlap(copy);
       this.nodes.set(copy.data.id, copy); this.pushUndo({ type: "add_node", node: copy }); news.push(copy);
     }
     this.clearSelection(); for (const n of news) this.selectNode(n); this.onCanvasChanged?.();
@@ -1173,6 +1346,7 @@ export class Canvas {
       node.data.name = this._pendingPresetName;
       this._pendingPresetName = undefined;
     }
+    this.avoidOverlap(node);
     this.tryWireInsert(node);
     this.onCanvasChanged?.();
     this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
@@ -1185,8 +1359,8 @@ export class Canvas {
     this.panY = r.height / 2 - wy * this.zoom;
   }
 
-  setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) n.status = s; }
-  setNodeOutput(id: string, p: string) { const n = this.nodes.get(id); if (n) { n.outputPreview = p; n.status = "success"; } }
+  setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) { n.status = s; if (s === "success") n.missingRequired = false; } }
+  setNodeOutput(id: string, p: string) { const n = this.nodes.get(id); if (n) { n.outputPreview = p; n.status = "success"; n.missingRequired = false; } }
   resetAllStatus() { for (const n of this.nodes.values()) { n.status = "idle"; n.outputPreview = null; n.showOutput = false; n.updatePortPositions(); } }
   clearConnectorActive() { for (const c of this.connectors.values()) c.active = false; }
   toWorkflowJson(id: string, name: string, parallelExecution = false, maxConcurrentNodes = 8) {
@@ -1223,6 +1397,7 @@ export class Canvas {
     if (this._pendingPresetConfig) { Object.assign(node.data.config, this._pendingPresetConfig); this._pendingPresetConfig = undefined; }
     if (this._pendingPresetName)   { node.data.name = this._pendingPresetName; this._pendingPresetName = undefined; }
 
+    this.avoidOverlap(node);
     this.nodes.set(node.data.id, node);
     this.pushUndo({ type: "add_node", node });
     this.onCanvasChanged?.();
@@ -1233,6 +1408,36 @@ export class Canvas {
       id: newConnectorId(),
       from_node: drop.fromNode, from_port: drop.fromPort,
       to_node: node.data.id, to_port: inputPortId,
+      condition: null, on_success: null, on_failure: null,
+    });
+    this.connectors.set(conn.data.id, conn);
+    this.pushUndo({ type: "add_edge", connector: conn });
+    this.onCanvasChanged?.();
+  }
+
+  // Called by app.ts after the user picks a node from the input-wire-drop palette
+  completeInputWireDrop(desc: NodeDescriptor): void {
+    const drop = this._pendingInputWireDrop;
+    if (!drop) return;
+    this._pendingInputWireDrop = null;
+
+    // Safety: desc must have at least one output port to connect from
+    if (!desc.ports.outputs.length) return;
+
+    const px = drop.wx - NODE_WIDTH * 1.5; // place to the left of dragged node
+    const py = drop.wy - 20;
+    const node = createNodeFromDescriptor(desc, px, py);
+
+    this.avoidOverlap(node);
+    this.nodes.set(node.data.id, node);
+    this.pushUndo({ type: "add_node", node });
+    this.onCanvasChanged?.();
+
+    const outputPortId = desc.ports.outputs[0].id;
+    const conn = new Connector({
+      id: newConnectorId(),
+      from_node: node.data.id, from_port: outputPortId,
+      to_node: drop.toNode, to_port: drop.toPort,
       condition: null, on_success: null, on_failure: null,
     });
     this.connectors.set(conn.data.id, conn);

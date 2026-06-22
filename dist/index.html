@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
-  <title>Flowo</title>
-  <script type="module" crossorigin src="./assets/index-BsxbqLlp.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-B5g_qHDU.css">
+  <title>Aerini</title>
+  <script type="module" crossorigin src="./assets/index-ZR4t6BJs.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-LxBg74a9.css">
 </head>
 <body>
 
@@ -73,6 +73,13 @@
         <div class="zone-search">
           <input id="node-search" type="text" placeholder="Search nodes…" autocomplete="off" spellcheck="false" />
         </div>
+        <div id="category-chips" class="category-chips">
+          <button class="cat-chip active" data-cat="all">All</button>
+          <button class="cat-chip" data-cat="ai">AI</button>
+          <button class="cat-chip" data-cat="action">Action</button>
+          <button class="cat-chip" data-cat="logic">Logic</button>
+          <button class="cat-chip" data-cat="utility">Utility</button>
+        </div>
         <div id="node-palette" class="palette-scroll"></div>
       </div>
 
@@ -127,7 +134,7 @@
     <div id="toolbar">
       <span id="workflow-name-label" class="workflow-title" title="Double-click to rename">Untitled</span>
       <span class="unsaved-dot" id="unsaved-dot"></span>
-      <span class="workflow-rename-hint" id="workflow-rename-hint" title="Double-click the name to rename">✎</span>
+      <span class="workflow-rename-hint" id="workflow-rename-hint" title="Double-click the name to rename" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
       <div class="toolbar-spacer"></div>
       <div class="toolbar-actions">
         <div class="toolbar-dropdown-wrap" id="export-dropdown-wrap">
@@ -137,10 +144,10 @@
             <svg class="dropdown-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="toolbar-dropdown-menu" id="export-dropdown-menu">
-            <button class="toolbar-dropdown-item" id="btn-export-flowo">
+            <button class="toolbar-dropdown-item" id="btn-export-aerini">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               <div>
-                <div class="dropdown-item-label">Export as .flowo</div>
+                <div class="dropdown-item-label">Export as .aerini</div>
                 <div class="dropdown-item-desc">Save workflow file to share or backup</div>
               </div>
             </button>
@@ -161,11 +168,15 @@
         <button id="btn-focus-mode" class="btn-toolbar btn-icon-only" title="Focus mode (F)" aria-label="Focus mode">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
         </button>
+        <button id="btn-chat" class="btn-toolbar btn-icon-only hidden" title="Chat (Ctrl+Shift+C)" aria-label="Chat">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          Chat
+        </button>
         <button id="btn-save" class="btn-toolbar btn-toolbar-secondary">Save</button>
-        <span id="always-on-wrap" class="always-on-wrap" data-tooltip="Add a Schedule or Webhook trigger to enable Auto-start" data-tooltip-side="left">
-          <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Auto-start this workflow on every app launch" aria-label="Auto-start workflow on launch">
+        <span id="always-on-wrap" class="always-on-wrap" data-tooltip="Add a Schedule or Webhook trigger to enable Run on launch" data-tooltip-side="left">
+          <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Run this workflow automatically every time Aerini opens" aria-label="Run workflow on every app launch">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-            Auto-start
+            Run on launch
           </button>
         </span>
         <button id="btn-versions" class="btn-toolbar btn-icon-only" title="Version history" aria-label="Version history">
@@ -202,7 +213,7 @@
       </div>
     </div>
 
-    <canvas id="canvas"></canvas>
+    <canvas id="canvas" tabindex="0" role="application" aria-label="Workflow canvas"></canvas>
 
     <div id="canvas-empty-state">
       <div class="empty-state-box">
@@ -215,13 +226,13 @@
           <line x1="25" y1="12" x2="16" y2="20" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
         </svg>
         <div class="empty-state-title">Start building your workflow</div>
-        <div class="empty-state-sub">Click any node in the sidebar to place it, or drag from the sidebar to the canvas. Drop a .flowo file to import.</div>
+        <div class="empty-state-sub">Click any node in the sidebar to place it, or drag from the sidebar to the canvas. Drop a .aerini file to import.</div>
         <div class="empty-state-shortcuts">
           <div class="empty-shortcut"><kbd>Space</kbd> Search nodes</div>
           <div class="empty-shortcut"><kbd>Ctrl+K</kbd> Palette</div>
           <div class="empty-shortcut"><kbd>Ctrl+Shift+F</kbd> Fit to screen</div>
           <div class="empty-shortcut"><kbd>?</kbd> Shortcuts</div>
-          <div class="empty-shortcut" id="empty-state-import-btn">Import .flowo</div>
+          <div class="empty-shortcut" id="empty-state-import-btn">Import .aerini</div>
         </div>
       </div>
     </div>
@@ -235,10 +246,10 @@
     </div>
 
     <div id="minimap-wrap">
-      <button id="btn-minimap-toggle" title="Toggle minimap (M)">
+      <button id="btn-minimap-toggle" title="Toggle minimap (M)" aria-label="Toggle minimap" data-tooltip="Toggle minimap">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/></svg>
       </button>
-      <canvas id="minimap-canvas" width="160" height="100"></canvas>
+      <canvas id="minimap-canvas" width="160" height="100" role="img" aria-label="Workflow minimap"></canvas>
     </div>
 
     <div id="status-bar">
@@ -300,6 +311,40 @@
     <div id="output-content" class="output-content-area"></div>
   </div>
 
+  <!-- ── Chat panel (Patch 5A) ── -->
+  <div id="chat-panel">
+    <div class="chat-panel-header">
+      <span class="chat-panel-title">Chat</span>
+      <div class="chat-session-wrap" id="chat-session-wrap">
+        <button class="chat-session-btn" id="chat-session-btn" title="Sessions">
+          <span id="chat-session-label">Session</span>
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="toolbar-dropdown-menu" id="chat-session-menu"></div>
+      </div>
+      <div class="chat-header-spacer"></div>
+      <button class="drawer-btn" id="btn-chat-clear" title="Clear chat">Clear</button>
+      <button class="drawer-btn" id="btn-chat-close" title="Close">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="chat-banner hidden" id="chat-not-running-banner">
+      <span>Start this workflow to begin chatting</span>
+      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    </div>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-input-row">
+      <button class="chat-attach-btn" id="chat-attach-btn" style="display:none" title="Attach file" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      </button>
+      <textarea id="chat-input" class="chat-input" placeholder="Type a message…" rows="1" disabled></textarea>
+      <button class="chat-send-btn" id="chat-send-btn" disabled title="Send">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+      </button>
+    </div>
+    <div class="chat-branding-footer" id="chat-branding-footer">Built with Aerini</div>
+  </div>
+
   <!-- ── Command palette ── -->
   <div id="command-palette-overlay" class="hidden">
     <div id="command-palette">
@@ -341,7 +386,7 @@
           <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd></div></div>
           <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd></div></div>
           <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
-          <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(canvas must be focused — not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
+          <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
           <div class="shortcut-row"><span>Close panel</span><div class="shortcut-keys"><kbd>Dbl-click</kbd><span class="shortcut-hint">empty canvas</span></div></div>
         </div>
         <div class="shortcuts-group">
@@ -411,27 +456,27 @@
           <div class="settings-row">
             <div>
               <div class="settings-label">Launch at login</div>
-              <div class="settings-desc">Start Flowo automatically when you log in — workflows with Schedule or Webhook triggers will run in the background immediately</div>
+              <div class="settings-desc">Start Aerini automatically when you log in — workflows with Schedule or Webhook triggers will run in the background immediately</div>
             </div>
-            <input type="checkbox" id="setting-autostart" />
+            <input type="checkbox" id="setting-autostart" class="settings-toggle" />
           </div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">Canvas</div>
           <div class="settings-row">
             <div><div class="settings-label">Grid snap</div><div class="settings-desc">Snap nodes to grid while dragging</div></div>
-            <input type="checkbox" id="setting-grid-snap" />
+            <input type="checkbox" id="setting-grid-snap" class="settings-toggle" />
           </div>
           <div class="settings-row">
             <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>
-            <input type="checkbox" id="setting-autofit" checked />
+            <input type="checkbox" id="setting-autofit" class="settings-toggle" checked />
           </div>
         </div>
         <div class="settings-group" id="settings-plugins-group">
           <div class="settings-group-title">Plugins</div>
           <div class="settings-row" id="plugin-restart-banner" hidden>
             <div class="settings-desc settings-warn">
-              Restart Flowo to apply plugin changes.
+              Restart Aerini to apply plugin changes.
             </div>
           </div>
           <div class="settings-row">
@@ -451,26 +496,26 @@
         <div class="settings-group">
           <div class="settings-group-title">Support development</div>
           <div class="settings-about-text">
-            If Flowo has been useful, consider supporting development.<br>
-            <a href="https://ko-fi.com/flowo" target="_blank" rel="noopener" class="settings-support-link">Support on Ko-fi</a>
+            If Aerini has been useful, consider supporting development.<br>
+            <a href="https://ko-fi.com/aerini" target="_blank" rel="noopener" class="settings-support-link">Support on Ko-fi</a>
           </div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">Privacy</div>
           <div class="settings-about-text">
-            <strong class="settings-text-emphasis">Flowo is 100% local-first.</strong><br>
-            All workflows and credentials are stored on your device only — nothing is sent to Flowo servers.<br><br>
-            Nodes you configure (HTTP Request, AI Prompt, etc.) make requests directly from your machine to the services you specify. Flowo never sees or logs these requests.<br><br>
+            <strong class="settings-text-emphasis">Aerini is 100% local-first.</strong><br>
+            All workflows and credentials are stored on your device only — nothing is sent to Aerini servers.<br><br>
+            Nodes you configure (HTTP Request, AI Prompt, etc.) make requests directly from your machine to the services you specify. Aerini never sees or logs these requests.<br><br>
             Credentials are encrypted at rest using a device-local key.
           </div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">About</div>
           <div class="settings-about-text">
-            <strong class="settings-text-emphasis">Flowo</strong> — local-first workflow automation<br>
-            Version <span id="app-version">0.2.0</span><br>
+            <strong class="settings-text-emphasis">Aerini</strong> — local-first workflow automation<br>
+            Version <span id="app-version"></span><br>
             Built with Tauri · Rust · TypeScript<br>
-            <a href="https://github.com/Panchak2d/flowo" target="_blank" class="settings-support-link">View on GitHub</a>
+            <a href="https://github.com/Panchak2d/aerini" target="_blank" class="settings-support-link">View on GitHub</a>
           </div>
         </div>
       </div>
@@ -504,6 +549,44 @@
             <input type="number" id="wf-setting-max-concurrent" class="settings-number-input" min="1" max="64" value="8">
           </div>
         </div>
+        <div class="settings-group">
+          <div class="settings-group-title">Chat</div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Allow file attachments</div>
+              <div class="settings-desc">Shows the attach button in the Chat panel.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-chat-attachments" class="settings-toggle">
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Allow image responses</div>
+              <div class="settings-desc">Render images the workflow returns. When off, an image reply shows as text only.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-chat-images" class="settings-toggle" checked>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Max message length</div>
+              <div class="settings-desc">Maximum characters per chat message. Default: 2000.</div>
+            </div>
+            <input type="number" id="wf-setting-chat-max-length" class="settings-number-input" min="1" max="100000" value="2000">
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Session persistence</div>
+              <div class="settings-desc">Keep chat sessions saved in this browser across app restarts.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-chat-persistence" class="settings-toggle" checked>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Show "Built with Aerini"</div>
+              <div class="settings-desc">Small footer credit shown at the bottom of the Chat panel.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-chat-branding" class="settings-toggle" checked>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -512,11 +595,11 @@
   <div id="onboarding-modal" class="hidden">
     <div class="onboarding-box">
       <div class="onboarding-header">
-        <span class="onboarding-logo">Flowo</span>
-        <span class="onboarding-version">v0.2.0</span>
+        <span class="onboarding-logo">Aerini</span>
+        <span class="onboarding-version"></span>
       </div>
       <h2 class="onboarding-title">Automate anything, locally.</h2>
-      <p class="onboarding-desc">Flowo runs entirely on your machine — no accounts, no cloud, no limits. Build automations by connecting blocks together. Each block does one thing: fetch data, send a message, run a script, call an AI.</p>
+      <p class="onboarding-desc">Aerini runs entirely on your machine — no accounts, no cloud, no limits. Build automations by connecting blocks together. Each block does one thing: fetch data, send a message, run a script, call an AI.</p>
       <div class="onboarding-steps">
         <div class="onboarding-step">
           <div class="onboarding-step-icon">1</div>
@@ -540,7 +623,7 @@
           </div>
         </div>
       </div>
-      <div class="onboarding-tip">Tip: Use <kbd>{{node_id.field}}</kbd> in any config field to pass data between nodes.</div>
+      <div class="onboarding-tip">Tip: Use <kbd>{{Node Name.output.field}}</kbd> in any config field to pass data between nodes.</div>
       <div class="onboarding-actions">
         <button id="onboarding-load-example" class="btn-primary btn-primary-action onboarding-btn-example">Try an example — Fetch &amp; Display</button>
         <button id="onboarding-dismiss" class="onboarding-btn-skip">Start with a blank canvas</button>
@@ -548,6 +631,25 @@
     </div>
   </div>
 
-  <input type="file" id="file-input" accept=".flowo,.json" hidden />
+  <!-- ── Preset template preview tooltip (Patch 4) ── -->
+  <div id="template-preview-tooltip" class="template-preview-tooltip" style="display:none">
+    <div class="tpt-node-box">
+      <span class="tpt-dot"></span>
+      <span class="tpt-name"></span>
+    </div>
+    <div class="tpt-config"></div>
+  </div>
+
+  <!-- ── Node info tooltip — shown on palette item hover ── -->
+  <div id="node-info-tooltip" class="node-info-tooltip" style="display:none">
+    <div class="nit-header">
+      <span class="nit-dot"></span>
+      <span class="nit-name"></span>
+    </div>
+    <p class="nit-desc"></p>
+    <div class="nit-ports"></div>
+  </div>
+
+  <input type="file" id="file-input" accept=".aerini,.json" hidden />
 </body>
 </html>

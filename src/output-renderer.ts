@@ -570,6 +570,8 @@ function errorSuggestion(message: string, typeId: string): string {
   if (m.includes("json") || m.includes("parse")) return "The response could not be parsed. Check the input format.";
   if (m.includes("rate limit") || m.includes("429")) return "Rate limit exceeded. Add a Delay node before this one, or reduce execution frequency.";
   if (m.includes("smtp") || m.includes("email")) return "Email delivery failed. Check your SMTP credentials in Credentials.";
+  if (m.includes("cannot read properties of undefined") || m.includes("is not defined"))
+    return "A node is trying to read a field that doesn't exist in the upstream output. Check your {{ field }} references and make sure the previous node ran successfully.";
   return "";
 }
 

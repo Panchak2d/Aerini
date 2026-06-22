@@ -1,12 +1,12 @@
 # Dual Licensing
 
-Flowo is available under two licenses for the same codebase: AGPL-3.0 for open source use, and a commercial license for proprietary use. Each person or organization picks whichever fits their situation.
+Aerini is available under two licenses for the same codebase: AGPL-3.0 for open source use, and a commercial license for proprietary use. Each person or organization picks whichever fits their situation.
 
 ---
 
 ## Why this model exists
 
-AGPL-3.0 is a strong copyleft license. If you run a modified version of `flowo-server` as a network service for others, AGPL-3.0 requires you to publish your modifications under the same license. Many companies building products or internal tools can't do that — either for business reasons or legal policy.
+AGPL-3.0 is a strong copyleft license. If you run a modified version of `aerini-server` as a network service for others, AGPL-3.0 requires you to publish your modifications under the same license. Many companies building products or internal tools can't do that — either for business reasons or legal policy.
 
 The commercial license removes that obligation. Companies that need to keep their modifications proprietary can buy a commercial license, and the AGPL copyleft requirement no longer applies to them.
 
@@ -37,7 +37,7 @@ The CLA does not transfer copyright ownership. Contributors keep full copyright 
 
 Revenue funds ongoing maintenance: keeping the project active, dependencies current, and documentation accurate. The full allocation breakdown is published monthly in the [transparency report](../transparency/TEMPLATE.md) once the donation threshold in [REWARDS.md](../REWARDS.md) is met.
 
-Flowo will remain available under AGPL-3.0 regardless of commercial revenue. The open source release is not contingent on the commercial side.
+Aerini will remain available under AGPL-3.0 regardless of commercial revenue. The open source release is not contingent on the commercial side.
 
 ---
 

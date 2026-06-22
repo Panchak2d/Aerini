@@ -1,6 +1,6 @@
 # Parallel Execution
 
-By default, Flowo runs a workflow sequentially — one node finishes, then the next one starts. When you have independent branches that don't depend on each other, this means waiting for one branch to finish before the other can begin, even if they have no relationship.
+By default, Aerini runs a workflow sequentially — one node finishes, then the next one starts. When you have independent branches that don't depend on each other, this means waiting for one branch to finish before the other can begin, even if they have no relationship.
 
 Parallel execution changes that. Independent branches run at the same time, and the workflow waits for all of them to finish before continuing to any node that depends on their results.
 
@@ -38,4 +38,4 @@ Default: 8 nodes running simultaneously. Lower this number if your workflow is h
 
 ## What "independent" means
 
-Two nodes are independent if neither is an upstream dependency of the other. Flowo determines this automatically from the edge graph — you don't need to mark anything manually. If node A produces data that node B needs, they're dependent and B will always wait for A, regardless of this setting.
+Two nodes are independent if neither is an upstream dependency of the other. Aerini determines this automatically from the edge graph — you don't need to mark anything manually. If node A produces data that node B needs, they're dependent and B will always wait for A, regardless of this setting.

@@ -5,8 +5,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Flowo version
-      description: Found in the app title bar or `cargo pkgid flowo`.
+      label: Aerini version
+      description: Found in the app title bar or `cargo pkgid aerini`.
       placeholder: "e.g. 0.2.0"
     validations:
       required: true
@@ -44,7 +44,7 @@ body:
       label: Steps to reproduce
       description: Minimal steps that consistently reproduce the bug.
       placeholder: |
-        1. Open Flowo
+        1. Open Aerini
         2. Add an HTTP node
         3. ...
     validations:

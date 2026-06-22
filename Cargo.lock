@@ -28,6 +28,108 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerini"
+version = "0.3.0"
+dependencies = [
+ "aerini-engine",
+ "argon2",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-shell",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "aerini-engine"
+version = "0.3.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "aws-sdk-s3",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "dashmap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "keyring",
+ "lettre",
+ "libc",
+ "once_cell",
+ "petgraph",
+ "r2d2",
+ "r2d2_sqlite",
+ "rand_core 0.6.4",
+ "redis",
+ "reqwest",
+ "rusqlite",
+ "rustls-webpki",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wasmtime-wasi-http",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aerini-server"
+version = "0.3.0"
+dependencies = [
+ "aerini-engine",
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "clap",
+ "dashmap",
+ "futures-core",
+ "rand 0.8.6",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2292,108 +2394,6 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
-]
-
-[[package]]
-name = "flowo"
-version = "0.2.0"
-dependencies = [
- "argon2",
- "base64 0.22.1",
- "blake3",
- "chrono",
- "flowo-engine",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-shell",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "zip",
-]
-
-[[package]]
-name = "flowo-engine"
-version = "0.2.0"
-dependencies = [
- "aes-gcm",
- "async-trait",
- "aws-sdk-s3",
- "base64 0.22.1",
- "blake3",
- "chrono",
- "dashmap",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jsonschema",
- "keyring",
- "lettre",
- "libc",
- "once_cell",
- "petgraph",
- "r2d2",
- "r2d2_sqlite",
- "rand_core 0.6.4",
- "redis",
- "reqwest",
- "rusqlite",
- "rustls-webpki",
- "scopeguard",
- "serde",
- "serde_json",
- "serial_test",
- "sqlx",
- "subtle",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
- "wasmtime",
- "wasmtime-wasi",
- "wasmtime-wasi-http",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "flowo-server"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "blake3",
- "chrono",
- "clap",
- "dashmap",
- "flowo-engine",
- "futures-core",
- "rand 0.8.6",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "subtle",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower 0.4.13",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

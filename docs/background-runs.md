@@ -1,14 +1,14 @@
 # Background Runs
 
-A background run is a workflow that keeps executing on its own — on a schedule, or waiting for incoming HTTP requests — while you use Flowo for other things, or while it runs minimized to the system tray.
+A background run is a workflow that keeps executing on its own — on a schedule, or waiting for incoming HTTP requests — while you use Aerini for other things, or while it runs minimized to the system tray.
 
 ---
 
 ## How it works
 
-When you start a background run, Flowo hands the workflow to a built-in scheduler daemon. The daemon owns the loop: it sleeps until the next scheduled time, runs the workflow, records the result, and starts waiting again. The **Background Runs** section in the sidebar shows live status for every active job.
+When you start a background run, Aerini hands the workflow to a built-in scheduler daemon. The daemon owns the loop: it sleeps until the next scheduled time, runs the workflow, records the result, and starts waiting again. The **Background Runs** section in the sidebar shows live status for every active job.
 
-The daemon runs as long as the Flowo window is open. Closing Flowo stops all background runs. For workflows that need to keep running after the app closes — or 24/7 on a server — see [Server Deployment](server-deploy.md).
+The daemon runs as long as the Aerini window is open. Closing Aerini stops all background runs. For workflows that need to keep running after the app closes — or 24/7 on a server — see [Server Deployment](server-deploy.md).
 
 ---
 
@@ -93,7 +93,7 @@ When a background run is active, the webhook listener stays open. Any matching r
 
 ### Secrets
 
-If you set a `secret`, incoming requests must include an `X-Flowo-Secret` header matching that value. The check is timing-safe (it can't be bypassed by measuring response time). Always set a secret for any webhook that triggers sensitive actions — without it, anyone who discovers the port can trigger your workflow.
+If you set a `secret`, incoming requests must include an `X-Aerini-Secret` header matching that value. The check is timing-safe (it can't be bypassed by measuring response time). Always set a secret for any webhook that triggers sensitive actions — without it, anyone who discovers the port can trigger your workflow.
 
 Always set `timeout_secs` too. Without it, a sender that connects but never sends data can block the executor indefinitely.
 
@@ -110,7 +110,7 @@ curl -X POST http://127.0.0.1:3456/webhook \
 # POST with a secret header
 curl -X POST http://127.0.0.1:3456/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Flowo-Secret: my-secret" \
+  -H "X-Aerini-Secret: my-secret" \
   -d '{"event": "test", "data": {"key": "value"}}'
 ```
 
@@ -129,7 +129,7 @@ The **Background Runs** sidebar section lists all active and recently completed 
 
 **Stop a job:** click the stop button next to the job, or right-click → **Stop**.
 
-**Always On:** right-click a job → **Always On**. The daemon automatically restarts the workflow if it errors or if Flowo restarts. Use this for workflows you want running indefinitely without any manual intervention.
+**Always On:** right-click a job → **Always On**. The daemon automatically restarts the workflow if it errors or if Aerini restarts. Use this for workflows you want running indefinitely without any manual intervention.
 
 **View run history:** click the job name to open the output drawer on the History tab. Click any past run to see its full Summary, Results, and Logs.
 
@@ -139,11 +139,11 @@ The **Background Runs** sidebar section lists all active and recently completed 
 
 Every run that's recorded in the History tab has a status: **running**, **success**, **failed**, or **interrupted**.
 
-- **running** — the run is in progress right now. Flowo writes this entry the moment a run starts, before any node has executed, so the History tab shows it immediately rather than only after the workflow finishes.
+- **running** — the run is in progress right now. Aerini writes this entry the moment a run starts, before any node has executed, so the History tab shows it immediately rather than only after the workflow finishes.
 - **success** / **failed** — the run finished. This is what you'd expect to see for almost every entry.
-- **interrupted** — the run never got to finish, and not because the workflow itself failed. This happens if Flowo (or `flowo-server`) was closed, crashed, or had its power cut while the run was still in progress. When Flowo starts back up, it checks for any run still marked "running" from before — since nothing actually crashed *during* this new session, that old entry obviously didn't complete normally, so it gets relabeled "interrupted" rather than left looking like it's still running forever.
+- **interrupted** — the run never got to finish, and not because the workflow itself failed. This happens if Aerini (or `aerini-server`) was closed, crashed, or had its power cut while the run was still in progress. When Aerini starts back up, it checks for any run still marked "running" from before — since nothing actually crashed *during* this new session, that old entry obviously didn't complete normally, so it gets relabeled "interrupted" rather than left looking like it's still running forever.
 
-If you see "interrupted" in the history, it means: that specific run was cut short by the app closing, not by an error in your workflow logic. The Logs tab for that entry will show whatever happened up to the point of interruption, but won't show a final result — there isn't one. If this happens regularly for a workflow you need running continuously, see [Server Deployment](server-deploy.md) for 24/7 execution with proper restart handling, and the [graceful shutdown](execution-flow.md#10-graceful-shutdown) behavior of `flowo-server`, which avoids interruptions during normal restarts.
+If you see "interrupted" in the history, it means: that specific run was cut short by the app closing, not by an error in your workflow logic. The Logs tab for that entry will show whatever happened up to the point of interruption, but won't show a final result — there isn't one. If this happens regularly for a workflow you need running continuously, see [Server Deployment](server-deploy.md) for 24/7 execution with proper restart handling, and the [graceful shutdown](execution-flow.md#10-graceful-shutdown) behavior of `aerini-server`, which avoids interruptions during normal restarts.
 
 ---
 
@@ -170,19 +170,19 @@ Two webhook workflows can't listen on the same port. If a second workflow tries 
 
 ## Importing workflows from n8n
 
-Flowo can import n8n workflow JSON files directly. If you've been using n8n and want to move your automations over, this is the fastest path.
+Aerini can import n8n workflow JSON files directly. If you've been using n8n and want to move your automations over, this is the fastest path.
 
 ### How to import
 
 1. In n8n, open the workflow and click **Download** (or copy the workflow JSON from the editor).
-2. In Flowo, press `Ctrl+N` to create a new workflow (so you're not accidentally overwriting an existing one).
+2. In Aerini, press `Ctrl+N` to create a new workflow (so you're not accidentally overwriting an existing one).
 3. Go to **File → Import**, or drag-and-drop the `.json` file onto the canvas.
-4. Flowo shows a preview with the workflow name, node count, and a compatibility check. Each node type is marked green (supported) or amber (not recognized).
+4. Aerini shows a preview with the workflow name, node count, and a compatibility check. Each node type is marked green (supported) or amber (not recognized).
 5. Click **Import**.
 
 ### Supported node mappings
 
-| n8n node | Flowo node |
+| n8n node | Aerini node |
 |---|---|
 | `manualTrigger` | Manual Trigger |
 | `webhook` | Webhook |
@@ -219,10 +219,10 @@ Flowo can import n8n workflow JSON files directly. If you've been using n8n and 
 Click the job in the sidebar to open the run history. The most recent entry shows whether it succeeded or failed, and the Logs tab shows exactly what happened.
 
 **The scheduler ran at the wrong time.**
-Cron expressions in Flowo are evaluated in UTC. If you expected 9 AM in your local timezone but the run fired at a different time, adjust your cron expression to account for the UTC offset. For example, if you're UTC-5, use `0 14 * * *` for 9 AM local time.
+Cron expressions in Aerini are evaluated in UTC. If you expected 9 AM in your local timezone but the run fired at a different time, adjust your cron expression to account for the UTC offset. For example, if you're UTC-5, use `0 14 * * *` for 9 AM local time.
 
 **The webhook fires but the workflow doesn't seem to run.**
 Check that the method configured in the Webhook node (`GET`, `POST`, etc.) matches the method your sender is using. Also verify the secret header matches exactly, including case. Check the Background Runs sidebar — if the job shows a red dot, open it to see the error.
 
 **"Previous run still in progress" appears in the logs.**
-Flowo only runs one instance of a workflow at a time. If a run takes longer than your schedule interval, the next scheduled run is skipped with this log message. Either reduce the interval, increase the timeout on slow nodes, or investigate why the workflow is running slowly.
+Aerini only runs one instance of a workflow at a time. If a run takes longer than your schedule interval, the next scheduled run is skipped with this log message. Either reduce the interval, increase the timeout on slow nodes, or investigate why the workflow is running slowly.

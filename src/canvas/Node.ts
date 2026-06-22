@@ -1,6 +1,6 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
 import { NODE_IDS } from "../node-ids";
-import { NODE_ICONS } from "../utils";
+import { getIconBitmap } from "../icon-cache";
 
 export interface CanvasNodeData {
   id: string;
@@ -69,6 +69,9 @@ export class CanvasNode {
   hovered   = false;
   disabled  = false;
   status: "idle" | "running" | "success" | "error" = "idle";
+  // True when this node has a required config field left empty after its
+  // popover was closed. Cleared on a successful run (UX-7).
+  missingRequired = false;
 
   // Output preview (set after execution)
   outputPreview: string | null = null;
@@ -167,7 +170,7 @@ export class CanvasNode {
     return null;
   }
 
-  draw(ctx: CanvasRenderingContext2D, dt = 0): void {
+  draw(ctx: CanvasRenderingContext2D, dt = 0, connectedPorts: Set<string> = new Set()): void {
     // Note node gets its own minimal sticky-note rendering
     if (this.data.node_type_id === NODE_IDS.NOTE) {
       this.drawNote(ctx);
@@ -282,13 +285,35 @@ export class CanvasNode {
       }
     }
 
+    // ── Incomplete-config badge (top-left, idle only) ───────────────────────
+    if (this.missingRequired && this.status === "idle") {
+      const bx = x + 10;
+      const by = y + 10;
+      ctx.beginPath();
+      ctx.arc(bx, by, 6, 0, Math.PI * 2);
+      ctx.fillStyle = "#1c2128";
+      ctx.fill();
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+      ctx.font         = "bold 9px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillStyle    = "#f59e0b";
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("!", bx, by + 0.5);
+    }
+
     // ── Node icon ──────────────────────────────────────────────────────────
-    const icon = NODE_ICONS[this.data.node_type_id] ?? meta.icon;
-    ctx.font         = "bold 13px monospace";
-    ctx.fillStyle    = accent;
-    ctx.textBaseline = "middle";
-    ctx.textAlign    = "left";
-    ctx.fillText(icon, x + 14, y + NODE_HEADER / 2);
+    const bmp = getIconBitmap(this.data.node_type_id, accent);
+    if (bmp) {
+      ctx.drawImage(bmp, x + 12, y + NODE_HEADER / 2 - 8, 16, 16);
+    } else {
+      ctx.font         = "bold 13px monospace";
+      ctx.fillStyle    = accent;
+      ctx.textBaseline = "middle";
+      ctx.textAlign    = "left";
+      ctx.fillText(meta.icon, x + 14, y + NODE_HEADER / 2);
+    }
 
     // ── Node name ──────────────────────────────────────────────────────────
     ctx.font         = "500 12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif";
@@ -317,25 +342,27 @@ export class CanvasNode {
     ctx.textBaseline = "middle";
 
     for (const port of this.ports) {
+      const isConnected = connectedPorts.has(`${this.data.id}:${port.id}`);
+
       // Port outer ring
       ctx.beginPath();
       ctx.arc(port.x, port.y, PORT_RADIUS + 2, 0, Math.PI * 2);
       ctx.fillStyle = "#161b22";
       ctx.fill();
 
-      // Port fill
+      // Port fill — solid when connected, hollow when empty
       ctx.beginPath();
       ctx.arc(port.x, port.y, PORT_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle   = "#1c2128";
+      ctx.fillStyle   = isConnected ? accent + "cc" : "#1c2128";
       ctx.strokeStyle = accent + "cc";
       ctx.lineWidth   = 1.5;
       ctx.fill();
       ctx.stroke();
 
-      // Port dot (filled if has connection — visual only hint)
+      // Port dot — full opacity when connected, dim when empty
       ctx.beginPath();
       ctx.arc(port.x, port.y, 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = accent + "66";
+      ctx.fillStyle = isConnected ? accent : accent + "33";
       ctx.fill();
 
       // Port label
@@ -488,7 +515,7 @@ export function roundedRect(
   ctx.closePath();
 }
 
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   const lines: string[] = [];
   for (const paragraph of text.split("\n")) {
     const words = paragraph.split(" ");

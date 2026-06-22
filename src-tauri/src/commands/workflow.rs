@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use flowo_engine::{
+use aerini_engine::{
     db::{RunRecord, VersionRow, WorkflowDb, WorkflowSummary},
     error::EngineError,
     executor::{CredentialResolver, WorkflowExecutor, WorkflowResult},
-    model::Workflow,
+    model::{ExecutionContext, NodeInput, Workflow},
     node::{NodeDescriptor, NodeRegistry},
     scheduler::SchedulerDaemon,
     EventSink,
@@ -243,4 +243,41 @@ pub async fn set_setting(
     let db = Arc::clone(&db);
     tokio::task::spawn_blocking(move || db.set_setting(&key, &value))
         .await.map_err(|e| e.to_string())?
+}
+
+/// Clears all AI Memory rows for one chat session (Chat Panel "Clear" button).
+///
+/// Implementation note: the AI Memory table lives in `ai_memory.rs`'s own
+/// SQLite pool (`{app_data_dir}/ai_memory.db`), opened lazily inside
+/// `AiMemoryNode`. There is no separate store module for it — `store.rs` is
+/// the *credential* store, a different database entirely. Rather than reopen
+/// a second connection to `ai_memory.db` and duplicate the DELETE query already
+/// implemented (and exercised) by `AiMemoryNode`'s `"clear"` operation, this
+/// command looks the node up in the registry and executes it directly with a
+/// synthetic, single-purpose `NodeInput`. `workflow_id`/`context` are unused by
+/// `AiMemoryNode::execute` and left as harmless placeholders.
+#[tauri::command]
+pub async fn clear_chat_session(
+    session_id: String,
+    registry:   tauri::State<'_, Arc<NodeRegistry>>,
+) -> Result<(), String> {
+    let node = registry.get("ai_memory")
+        .ok_or_else(|| "ai_memory node type is not registered".to_string())?;
+
+    let input = NodeInput {
+        node_id:      "chat_panel_clear_chat_session".to_string(),
+        workflow_id:  String::new(),
+        execution_id: uuid::Uuid::new_v4().to_string(),
+        input:        serde_json::json!({ "operation": "clear", "session_id": session_id }),
+        context:      ExecutionContext::default(),
+    };
+
+    let output = node.execute(input).await;
+    if output.success {
+        Ok(())
+    } else {
+        Err(output.error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "Failed to clear chat session".to_string()))
+    }
 }

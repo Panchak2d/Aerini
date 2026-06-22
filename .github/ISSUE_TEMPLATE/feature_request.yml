@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check the [Roadmap](https://github.com/Panchak2d/flowo/blob/main/ROADMAP.md) first — it may already be planned.
-        For open-ended discussion, use [GitHub Discussions](https://github.com/Panchak2d/flowo/discussions).
+        Check the [Roadmap](https://github.com/Panchak2d/aerini/blob/main/ROADMAP.md) first — it may already be planned.
+        For open-ended discussion, use [GitHub Discussions](https://github.com/Panchak2d/aerini/discussions).
 
   - type: textarea
     id: problem
@@ -20,7 +20,7 @@ body:
     id: solution
     attributes:
       label: Proposed solution
-      description: What should Flowo do? Be as specific as you can.
+      description: What should Aerini do? Be as specific as you can.
     validations:
       required: true
 

@@ -1,7 +1,11 @@
 [workspace]
 members = [
     "src-tauri",
-    "flowo-engine",
-    "flowo-server",
+    "aerini-engine",
+    "aerini-server",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"

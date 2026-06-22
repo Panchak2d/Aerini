@@ -8,7 +8,7 @@ use argon2::{
 };
 use base64::Engine as _;
 
-use flowo_engine::{
+use aerini_engine::{
     db::WorkflowDb,
     model::Workflow,
     scheduler::extract_trigger,
@@ -147,7 +147,7 @@ pub async fn generate_server_package(
 
     let temp_dir  = std::env::temp_dir();
     let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
-    let zip_path  = temp_dir.join(format!("flowo-server-{}.zip", safe_name));
+    let zip_path  = temp_dir.join(format!("aerini-server-{}.zip", safe_name));
 
     let zip_file = std::fs::File::create(&zip_path)
         .map_err(|e| format!("Cannot create zip: {}", e))?;
@@ -160,7 +160,7 @@ pub async fn generate_server_package(
             .compression_method(zip::CompressionMethod::Deflated);
         let exec_options = options.unix_permissions(0o755);
 
-        zip.start_file("flowo-server.json", options)
+        zip.start_file("aerini-server.json", options)
             .map_err(|e| e.to_string())?;
         zip.write_all(server_config_str.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -175,7 +175,7 @@ pub async fn generate_server_package(
         zip.write_all(install_sh.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        zip.start_file("flowo.service", options)
+        zip.start_file("aerini.service", options)
             .map_err(|e| e.to_string())?;
         zip.write_all(service_file.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -185,20 +185,20 @@ pub async fn generate_server_package(
         zip.write_all(readme.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        // Bundle the flowo-server binary if it's available as a Tauri resource.
+        // Bundle the aerini-server binary if it's available as a Tauri resource.
         // In CI the binary is compiled for x86_64-unknown-linux-musl and placed
         // in the Tauri resources directory. In dev mode it won't be present and
         // we skip it — install.sh will warn the user.
         let resource_path = app.path()
             .resource_dir()
             .ok()
-            .map(|p| p.join("flowo-server-linux-x64"));
+            .map(|p| p.join("aerini-server-linux-x64"));
 
         if let Some(bin_path) = resource_path {
             if bin_path.exists() {
                 let binary = std::fs::read(&bin_path)
                     .map_err(|e| format!("Cannot read bundled binary: {}", e))?;
-                zip.start_file("flowo-server", exec_options)
+                zip.start_file("aerini-server", exec_options)
                     .map_err(|e| e.to_string())?;
                 zip.write_all(&binary)
                     .map_err(|e| e.to_string())?;
@@ -241,7 +241,7 @@ fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
 }
 
 fn credential_id_to_env_var(id: &str) -> String {
-    format!("FLOWO_CRED_{}", id.to_uppercase().replace(['-', '.'], "_"))
+    format!("AERINI_CRED_{}", id.to_uppercase().replace(['-', '.'], "_"))
 }
 
 /// Scans the full serialized workflow JSON for `$vars.<name>` references and
@@ -271,7 +271,7 @@ fn collect_vars(wf: &Workflow) -> Result<Vec<String>, String> {
 
 /// Generate a Docker deployment package for single-workflow serve mode.
 /// Produces a zip containing: Dockerfile, docker-compose.yml, .env.example,
-/// flowo-server.json, and README.md.
+/// aerini-server.json, and README.md.
 #[tauri::command]
 pub async fn generate_docker_package(
     request: ExportRequest,
@@ -326,7 +326,7 @@ pub async fn generate_docker_package(
 
     let temp_dir  = std::env::temp_dir();
     let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
-    let zip_path  = temp_dir.join(format!("flowo-docker-{}.zip", safe_name));
+    let zip_path  = temp_dir.join(format!("aerini-docker-{}.zip", safe_name));
 
     let zip_file = std::fs::File::create(&zip_path)
         .map_err(|e| format!("Cannot create zip: {}", e))?;
@@ -336,7 +336,7 @@ pub async fn generate_docker_package(
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
-        zip.start_file("flowo-server.json", options)
+        zip.start_file("aerini-server.json", options)
             .map_err(|e| e.to_string())?;
         zip.write_all(server_config_str.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -379,7 +379,7 @@ pub async fn generate_docker_package(
     })
 }
 
-/// Hash `raw_secret` with argon2id for storage in `flowo-server.json`.
+/// Hash `raw_secret` with argon2id for storage in `aerini-server.json`.
 ///
 /// argon2id is brute-force resistant (unlike BLAKE3, which is a fast hash).
 /// The stored value is an argon2 PHC string (~97 chars) that embeds the salt

@@ -1,6 +1,6 @@
 # Concepts
 
-This page explains the core ideas behind Flowo in plain language. If you're new to automation tools, read this before anything else — it'll make the rest of the documentation much easier to follow.
+This page explains the core ideas behind Aerini in plain language. If you're new to automation tools, read this before anything else — it'll make the rest of the documentation much easier to follow.
 
 ---
 
@@ -10,7 +10,7 @@ A workflow is a set of steps that run in a specific order. Each step does one th
 
 A recipe is a useful mental model: "fetch data from this API, transform it, then send the result to Slack." A workflow is that exact sequence, laid out visually as connected boxes on a screen.
 
-In Flowo, you build workflows on a canvas. The boxes are called **nodes**; the lines connecting them are **edges**.
+In Aerini, you build workflows on a canvas. The boxes are called **nodes**; the lines connecting them are **edges**.
 
 ---
 
@@ -75,9 +75,9 @@ If a run fails partway through, the workflow stops at the failed node (unless yo
 
 An expression is how you pass data from one node to another.
 
-Say an HTTP Request node fetches some user data from an API. The JSON response includes `{ "name": "Alice", "email": "alice@example.com" }`. You want the next node — a Slack message — to say "New user: Alice." You write `New user: {{http.output.body.name}}` in the Slack message field, and Flowo substitutes the real value when the workflow runs.
+Say an HTTP Request node fetches some user data from an API. The JSON response includes `{ "name": "Alice", "email": "alice@example.com" }`. You want the next node — a Slack message — to say "New user: Alice." You write `New user: {{http.output.body.name}}` in the Slack message field, and Aerini substitutes the real value when the workflow runs.
 
-The `{{...}}` syntax is an expression. You're telling Flowo: "go look up this value from a previous node's output and put it here."
+The `{{...}}` syntax is an expression. You're telling Aerini: "go look up this value from a previous node's output and put it here."
 
 You don't need to type paths from memory. Press `{{` inside any text field to open the expression picker, which shows every value available from upstream nodes. Click to insert.
 
@@ -89,7 +89,7 @@ Full syntax reference: [Expressions](expressions.md)
 
 A credential is a stored API key or password.
 
-Most external services require a key to identify you: OpenAI, Stripe, Slack, GitHub, etc. Instead of pasting that key directly into a node's configuration — where anyone who opens the workflow file could see it — you store it once in Flowo's credential store. Flowo encrypts it on disk.
+Most external services require a key to identify you: OpenAI, Stripe, Slack, GitHub, etc. Instead of pasting that key directly into a node's configuration — where anyone who opens the workflow file could see it — you store it once in Aerini's credential store. Aerini encrypts it on disk.
 
 When you configure a node that needs a key, you pick the credential by name from a dropdown. The actual value never appears in the UI again and is never written to the workflow file.
 
@@ -99,23 +99,23 @@ More on adding credentials and finding API keys: [Credentials](credentials.md)
 
 ## Background Run
 
-A background run is a workflow that keeps executing on its own while you use Flowo for something else, or while it's minimized to the system tray.
+A background run is a workflow that keeps executing on its own while you use Aerini for something else, or while it's minimized to the system tray.
 
 Background runs require a Schedule or Webhook trigger. Once started, a scheduler daemon takes over: it sleeps until the next scheduled time, runs the workflow, records the result, and goes back to sleep.
 
-Background runs stop when you close Flowo. If you need a workflow running 24 hours a day, seven days a week, without the desktop app open, see [Server Deployment](server-deploy.md).
+Background runs stop when you close Aerini. If you need a workflow running 24 hours a day, seven days a week, without the desktop app open, see [Server Deployment](server-deploy.md).
 
 ---
 
-## flowo-server
+## aerini-server
 
-`flowo-server` is a command-line tool (included with Flowo) that runs workflows on a Linux server — no desktop app required on the server.
+`aerini-server` is a command-line tool (included with Aerini) that runs workflows on a Linux server — no desktop app required on the server.
 
 Two modes:
 - **Serve mode** — runs one exported workflow. The desktop app's "Export for Server" button produces everything you need.
 - **API mode** — manages many workflows on one server via a REST API.
 
-You don't need `flowo-server` for everyday use on your own machine. It only comes up when you want workflows running on a remote server.
+You don't need `aerini-server` for everyday use on your own machine. It only comes up when you want workflows running on a remote server.
 
 ---
 
@@ -129,7 +129,7 @@ You can open it at any time and use the History tab to browse past runs.
 
 ## Version History
 
-Every time you save a workflow, Flowo creates a snapshot. Right-click the workflow in the sidebar → **Versions** to browse and restore any previous version.
+Every time you save a workflow, Aerini creates a snapshot. Right-click the workflow in the sidebar → **Versions** to browse and restore any previous version.
 
 Version history tracks what the workflow *looked like*. Run history tracks what the workflow *did* when it executed. These are separate.
 
@@ -149,6 +149,6 @@ No. Each workflow has exactly one trigger node. If you need the same logic to ru
 
 If a node fails and you haven't wired its `on_error` port, the workflow stops and records the failure. If you have wired `on_error`, execution follows that branch — you can route it to a Slack message, a Stop node with a custom reason, or anything else.
 
-**Does Flowo send my data anywhere?**
+**Does Aerini send my data anywhere?**
 
-No. Everything stays on your machine: workflow definitions, credentials, run history, node outputs. The only outbound network traffic is what your workflow nodes explicitly make — an HTTP request you configured, a Slack message you set up, etc. Flowo itself makes no analytics calls, no update checks, nothing.
+No. Everything stays on your machine: workflow definitions, credentials, run history, node outputs. The only outbound network traffic is what your workflow nodes explicitly make — an HTTP request you configured, a Slack message you set up, etc. Aerini itself makes no analytics calls, no update checks, nothing.

@@ -1,6 +1,6 @@
-# Flowo Server: REST API Reference
+# Aerini Server: REST API Reference
 
-This is the reference for `flowo-server` in API mode. Use it to manage workflows, trigger runs, control the scheduler, and stream live events — all programmatically.
+This is the reference for `aerini-server` in API mode. Use it to manage workflows, trigger runs, control the scheduler, and stream live events — all programmatically.
 
 **Base URL:** `http://<host>:<port>` (default port 7700)
 
@@ -9,7 +9,7 @@ This is the reference for `flowo-server` in API mode. Use it to manage workflows
 Authorization: Bearer <your-token>
 ```
 
-Set the token with `--token` or the `FLOWO_TOKEN` environment variable when starting the server.
+Set the token with `--token` or the `AERINI_TOKEN` environment variable when starting the server.
 
 **Content type:** all request and response bodies are JSON.
 
@@ -182,7 +182,7 @@ Delete a credential.
 
 ## Tokens
 
-Token management endpoints require **admin scope**. The initial token set via `--token` / `FLOWO_TOKEN` has admin scope automatically.
+Token management endpoints require **admin scope**. The initial token set via `--token` / `AERINI_TOKEN` has admin scope automatically.
 
 ### `GET /api/tokens`
 
@@ -230,7 +230,7 @@ Create a new token with specific scopes and an optional expiry.
 **Response 201**
 ```json
 {
-  "token": "flowo_...",
+  "token": "aerini_...",
   "label": "CI deploy",
   "scopes": ["read", "write"],
   "expires_in_secs": 86400,
@@ -338,7 +338,7 @@ Subscribe to a live stream of workflow and scheduler events using [Server-Sent E
 
 Server liveness check. No authentication required.
 
-**Response 200:** `{"status": "ok", "version": "0.2.0"}`
+**Response 200:** `{"status": "ok", "version": "<semver>"}`
 
 Use this in load balancers, uptime monitors, and deployment health checks.
 

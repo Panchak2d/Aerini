@@ -1,8 +1,8 @@
 # Contributor License Agreement
 
-**Flowo — Version 1.2 (Effective: 2026-07-01)**
+**Aerini — Version 1.2 (Effective: 2026-07-01)**
 
-Flowo is developed and maintained by Panchaketu Debbarma ("Maintainer"). This Contributor License Agreement ("Agreement") governs all contributions made to the Flowo project. By signing this Agreement, each contributor accepts and agrees to the following terms for their present and future contributions to the project.
+Aerini is developed and maintained by Panchaketu Debbarma ("Maintainer"). This Contributor License Agreement ("Agreement") governs all contributions made to the Aerini project. By signing this Agreement, each contributor accepts and agrees to the following terms for their present and future contributions to the project.
 
 Except for the license grants made herein, each contributor retains all right, title, and interest in their contributions.
 
@@ -12,7 +12,7 @@ Except for the license grants made herein, each contributor retains all right, t
 
 "You" means the individual or legal entity entering into this Agreement.
 
-"Project" means the software known as Flowo, currently maintained at https://github.com/Panchak2d/flowo and any successor location. The Maintainer will post a notice to the Project's primary repository, website, or other public communication channel of any change to the Project's canonical location no less than 30 days before such change takes effect.
+"Project" means the software known as Aerini, currently maintained at https://github.com/Panchak2d/aerini and any successor location. The Maintainer will post a notice to the Project's primary repository, website, or other public communication channel of any change to the Project's canonical location no less than 30 days before such change takes effect.
 
 "Contribution" means any original work of authorship — including source code, documentation, or configuration — that You intentionally submit to the Maintainer for inclusion in the Project. A submission is a Contribution only if it is accompanied by a pull request, patch, or written correspondence that explicitly identifies it as a proposed contribution to the Project's codebase or documentation. General discussion, bug reports, and feature requests unaccompanied by code or documentation do not constitute Contributions.
 
@@ -104,9 +104,9 @@ The Corporate CLA is set out in Part II of this document. Individuals making Con
 
 Where a Contribution is submitted outside the GitHub pull request flow — including by email, patch file, or any other channel — the Contribution must be accompanied by a signed statement of acceptance before it may be merged into the Project. Unsigned contributions submitted outside the GitHub pull request flow will not be accepted.
 
-The signed statement must be delivered to **flowo.automations@proton.me** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
+The signed statement must be delivered to **aerini@proton.me** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
 
-> *I, [full legal name], agree to the terms of the Flowo Contributor License Agreement, Version [version number in force at the date of signing], as published at [canonical URL of the Agreement]. I confirm that I have the legal authority to make this Contribution and to grant the licenses described in that Agreement. My GitHub username is [GitHub username]. Date of signing: [DD Month YYYY].*
+> *I, [full legal name], agree to the terms of the Aerini Contributor License Agreement, Version [version number in force at the date of signing], as published at [canonical URL of the Agreement]. I confirm that I have the legal authority to make this Contribution and to grant the licenses described in that Agreement. My GitHub username is [GitHub username]. Date of signing: [DD Month YYYY].*
 
 The Maintainer will acknowledge receipt in writing within 7 days. The Contribution will not be merged until such acknowledgement is received and the Maintainer confirms acceptance.
 
@@ -191,9 +191,9 @@ By signing this Agreement when prompted on a pull request, You confirm that You 
 
 # Part II — Corporate Contributor License Agreement
 
-**Flowo — Version 1.2 (Effective: 2026-07-01)**
+**Aerini — Version 1.2 (Effective: 2026-07-01)**
 
-This Corporate CLA governs contributions to the Flowo project made by employees or contractors of a legal entity ("Corporation"). It must be executed by an individual with actual authority to bind the Corporation — meaning a director, officer, or duly authorised representative empowered under the Corporation's own governance documents or applicable law to enter into intellectual property agreements — before any covered contribution is merged.
+This Corporate CLA governs contributions to the Aerini project made by employees or contractors of a legal entity ("Corporation"). It must be executed by an individual with actual authority to bind the Corporation — meaning a director, officer, or duly authorised representative empowered under the Corporation's own governance documents or applicable law to enter into intellectual property agreements — before any covered contribution is merged.
 
 ---
 
@@ -259,7 +259,7 @@ Contributions from individuals not on the authorised list at the time of submiss
 
 This Corporate CLA takes effect only upon written confirmation from the Maintainer following receipt of a properly executed copy.
 
-To execute this Agreement, the Corporation must send to the Maintainer at **flowo.automations@proton.me** using the subject line **Corporate CLA — [Legal Company Name]**:
+To execute this Agreement, the Corporation must send to the Maintainer at **aerini@proton.me** using the subject line **Corporate CLA — [Legal Company Name]**:
 
 - the legal name and registered address of the Corporation;
 - the full name, title, and evidence of authority of the signatory (such as a board resolution, power of attorney, or a written statement signed by a director confirming the signatory's role and authority to bind the Corporation in intellectual property matters);
@@ -296,11 +296,11 @@ Section 11 of Part I (Governing Law and Dispute Resolution) applies equally to t
 
 ## C10. Entire Agreement; Severability; No Waiver; Survival
 
-This Corporate CLA, together with Part I of the Flowo Contributor License Agreement as incorporated herein by reference, constitutes the entire agreement between the Corporation and the Maintainer with respect to intellectual property contributions to the Project and supersedes all prior understandings relating to that subject matter.
+This Corporate CLA, together with Part I of the Aerini Contributor License Agreement as incorporated herein by reference, constitutes the entire agreement between the Corporation and the Maintainer with respect to intellectual property contributions to the Project and supersedes all prior understandings relating to that subject matter.
 
 Sections 12 (Amendments; Survival), 14 (Severability), 15 (No Waiver), and 16 (Cure Period) of Part I apply equally to this Corporate CLA. The license grants in Sections C2 and C3 are irrevocable and survive any termination of this Agreement.
 
 ---
 
-*Flowo Contributor License Agreement — Version 1.2 — 2026*
-*Panchaketu Debbarma — https://github.com/Panchak2d/flowo*
+*Aerini Contributor License Agreement — Version 1.2 — 2026*
+*Panchaketu Debbarma — https://github.com/Panchak2d/aerini*

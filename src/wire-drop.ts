@@ -38,3 +38,41 @@ export function openWireDropPicker(
   };
   overlay.addEventListener("palette-closed", onClose, { once: true });
 }
+
+// Shows the command palette in input-wire-drop mode: user picks a node, which
+// is placed to the left of the dragged input port and auto-connected into it.
+export function openInputWireDropPicker(
+  _allNodes: NodeDescriptor[],
+  canvas: Canvas,
+  _canvasEl: HTMLCanvasElement,
+  onStatus: (m: string) => void,
+): void {
+  const overlay = document.getElementById("command-palette-overlay")!;
+  const inp     = document.getElementById("palette-search") as HTMLInputElement;
+  const hint    = document.getElementById("palette-hint");
+
+  if (hint) hint.textContent = "Pick a node to wire in · Esc cancel";
+
+  overlay.classList.remove("hidden");
+  inp.value = "";
+  inp.dispatchEvent(new Event("input"));
+  requestAnimationFrame(() => inp.focus());
+
+  const onPick = (e: Event) => {
+    if (!(e instanceof CustomEvent)) return;
+    const detail = e.detail as NodeDescriptor | null;
+    if (!detail) return;
+    overlay.removeEventListener("input-wire-drop-pick", onPick);
+    canvas.completeInputWireDrop(detail);
+    onStatus(`Connected ← ${detail.display_name}`);
+    if (hint) hint.textContent = "↑↓ navigate · Enter place · Esc close";
+  };
+  overlay.addEventListener("input-wire-drop-pick", onPick);
+
+  const onClose = () => {
+    overlay.removeEventListener("input-wire-drop-pick", onPick);
+    canvas._pendingInputWireDrop = null;
+    if (hint) hint.textContent = "↑↓ navigate · Enter place · Esc close";
+  };
+  overlay.addEventListener("palette-closed", onClose, { once: true });
+}

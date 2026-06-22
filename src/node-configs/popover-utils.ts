@@ -42,12 +42,18 @@ export function mkSection(title: string): HTMLElement {
   return d;
 }
 
-export function mkField(label: string, factory: () => HTMLElement, hint?: string): HTMLElement {
+export function mkField(label: string, factory: () => HTMLElement, hint?: string, required?: boolean): HTMLElement {
   const g = document.createElement("div");
   g.className = "field-group";
   const l = document.createElement("label");
   l.className = "field-label";
   l.textContent = label;
+  if (required) {
+    const star = document.createElement("span");
+    star.className = "req-star";
+    star.textContent = " *";
+    l.appendChild(star);
+  }
   g.appendChild(l);
   g.appendChild(factory());
   if (hint) {

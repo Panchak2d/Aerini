@@ -1,8 +1,8 @@
 # Desktop IPC Reference
 
-This document is for people working on the Flowo desktop app itself — the Tauri shell and the TypeScript frontend. If you're building a workflow, writing a plugin, or deploying `flowo-server`, you don't need this; see the [README](../README.md) for the right guide.
+This document is for people working on the Aerini desktop app itself — the Tauri shell and the TypeScript frontend. If you're building a workflow, writing a plugin, or deploying `aerini-server`, you don't need this; see the [README](../README.md) for the right guide.
 
-Everything here is **internal**. Unlike the [REST API](api-reference.md), which is a stable contract for `flowo-server`, these are direct function calls between the TypeScript frontend (`src/`) and the Rust shell (`src-tauri/`). Names, parameters, and return shapes can change between releases without a deprecation period — if you're scripting against Flowo, use the REST API or [embed `flowo-engine`](embedding.md) directly instead of calling these.
+Everything here is **internal**. Unlike the [REST API](api-reference.md), which is a stable contract for `aerini-server`, these are direct function calls between the TypeScript frontend (`src/`) and the Rust shell (`src-tauri/`). Names, parameters, and return shapes can change between releases without a deprecation period — if you're scripting against Aerini, use the REST API or [embed `aerini-engine`](embedding.md) directly instead of calling these.
 
 ---
 
@@ -69,7 +69,7 @@ Full behavior (encryption, key storage, etc.) is documented in [Credentials](cre
 |---|---|---|---|
 | `list_credentials` | — | `CredentialEntry[]` | Metadata only — IDs and names, never decrypted values. |
 | `save_credential` | `req: CreateCredentialRequest` | `()` | Encrypts and stores (or updates) a credential. |
-| `delete_credential` | `id: string` | `()` | Before deleting, scans all saved workflows for nodes that reference this credential ID. The deletion still proceeds — Flowo doesn't block you — but the frontend uses this to warn you which workflows will break. |
+| `delete_credential` | `id: string` | `()` | Before deleting, scans all saved workflows for nodes that reference this credential ID. The deletion still proceeds — Aerini doesn't block you — but the frontend uses this to warn you which workflows will break. |
 
 ## Scheduler
 
@@ -78,7 +78,7 @@ Backs the Background Runs sidebar — see [Background Runs](background-runs.md).
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `start_scheduled_workflow` | `workflow_id: string`, `port_override?: number`, `always_on?: boolean` | `()` | Starts the workflow's trigger loop (Schedule or Webhook). `port_override` lets the UI resolve a port conflict for Webhook triggers without editing the saved workflow. |
-| `stop_scheduled_workflow` | `workflow_id: string` | `()` | Stops one job. This is an immediate hard stop — not the graceful drain `flowo-server` does on `SIGTERM` (see [Execution Flow — graceful shutdown](execution-flow.md#10-graceful-shutdown), which is server-only). |
+| `stop_scheduled_workflow` | `workflow_id: string` | `()` | Stops one job. This is an immediate hard stop — not the graceful drain `aerini-server` does on `SIGTERM` (see [Execution Flow — graceful shutdown](execution-flow.md#10-graceful-shutdown), which is server-only). |
 | `get_scheduled_jobs` | — | `ScheduledJobRow[]` | Current state of every job, for rendering the sidebar. |
 | `set_always_on` | `workflow_id: string`, `always_on: boolean` | `()` | Persists the Always On flag; the daemon reads it on startup to auto-restart jobs. |
 | `stop_all_jobs` | — | `()` | Stops every running job. Called on app quit. |
@@ -91,16 +91,16 @@ Backs the "Export for Server" panel — see [Server Deployment](server-deploy.md
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `validate_workflow_for_export` | `workflow_id: string` | `ValidateResult` | Checks the workflow is exportable (has a Schedule or Webhook trigger) and scans it for credential references and `{{$vars.*}}` usages. |
-| `generate_server_package` | `request: ExportRequest` | path to generated zip | Builds the systemd-based export bundle (binary, `flowo-server.json`, `.env.example`, `install.sh`). |
-| `generate_docker_package` | `request: ExportRequest` | path to generated zip | Builds the Docker-based export bundle (`Dockerfile`, `docker-compose.yml`, `flowo-server.json`, `README.md`). |
+| `generate_server_package` | `request: ExportRequest` | path to generated zip | Builds the systemd-based export bundle (binary, `aerini-server.json`, `.env.example`, `install.sh`). |
+| `generate_docker_package` | `request: ExportRequest` | path to generated zip | Builds the Docker-based export bundle (`Dockerfile`, `docker-compose.yml`, `aerini-server.json`, `README.md`). |
 
 **`ValidateResult` shape:**
 
 ```ts
 {
   trigger_desc: string,        // human-readable description of the trigger, e.g. "Webhook on :3456/hook"
-  credentials: CredentialExport[],  // one entry per credential the workflow references → FLOWO_CRED_*
-  variables: string[],         // every distinct {{$vars.X}} name found anywhere in the workflow → FLOWO_VAR_*
+  credentials: CredentialExport[],  // one entry per credential the workflow references → AERINI_CRED_*
+  variables: string[],         // every distinct {{$vars.X}} name found anywhere in the workflow → AERINI_VAR_*
 }
 ```
 
@@ -143,7 +143,7 @@ Small, mostly one-off commands that don't fit a category above.
 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
-| `read_text_file` | `path: string` | `string` | Restricted to `.flowo` files — used for importing a workflow file. Rejects anything else after canonicalizing the path. |
+| `read_text_file` | `path: string` | `string` | Restricted to `.aerini` files — used for importing a workflow file. Rejects anything else after canonicalizing the path. |
 | `save_file_dialog` | `content: string`, `filename: string` | path or `null` | Native "save as" dialog, writes `content` to the chosen path. |
 | `save_export_zip` | `zip_path: string`, `filename: string` | path or `null` | Native "save as" for a previously generated export zip — copies the temp file to the chosen path and deletes the temp file. |
 | `write_temp_file` | `filename: string`, `data: string` | `string` (temp path) | Writes to a temp directory for later use by `save_export_zip` or similar. Strips path separators and collapses `..` from `filename`. |

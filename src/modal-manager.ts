@@ -41,10 +41,10 @@ export function initModals(
   // Settings persistence
   const snapCb = document.getElementById("setting-grid-snap") as HTMLInputElement;
   const fitCb  = document.getElementById("setting-autofit")   as HTMLInputElement;
-  snapCb.checked = localStorage.getItem("flowo_grid_snap") === "true";
-  fitCb.checked  = localStorage.getItem("flowo_autofit") !== "false";
-  snapCb.addEventListener("change", () => localStorage.setItem("flowo_grid_snap", String(snapCb.checked)));
-  fitCb.addEventListener("change",  () => localStorage.setItem("flowo_autofit",  String(fitCb.checked)));
+  snapCb.checked = localStorage.getItem("aerini_grid_snap") === "true";
+  fitCb.checked  = localStorage.getItem("aerini_autofit") !== "false";
+  snapCb.addEventListener("change", () => localStorage.setItem("aerini_grid_snap", String(snapCb.checked)));
+  fitCb.addEventListener("change",  () => localStorage.setItem("aerini_autofit",  String(fitCb.checked)));
 }
 
 export function showImportPreview(obj: Record<string, unknown>): void {
@@ -54,7 +54,7 @@ export function showImportPreview(obj: Record<string, unknown>): void {
   document.getElementById("import-desc")!.textContent        = String(obj.description ?? "");
   document.getElementById("import-node-count")!.textContent  = String((obj.nodes as unknown[])?.length ?? 0);
   document.getElementById("import-edge-count")!.textContent  = String((obj.edges as unknown[])?.length ?? 0);
-  document.getElementById("import-version")!.textContent     = String(obj.flowo_version ?? obj.schema_version ?? "?");
+  document.getElementById("import-version")!.textContent     = String(obj.aerini_version ?? obj.schema_version ?? "?");
 
   const reqList = document.getElementById("import-req-list")!;
   reqList.innerHTML = "";
@@ -76,7 +76,7 @@ export function showImportPreview(obj: Record<string, unknown>): void {
 }
 
 export function isGridSnapEnabled(): boolean {
-  return localStorage.getItem("flowo_grid_snap") === "true";
+  return localStorage.getItem("aerini_grid_snap") === "true";
 }
 
 function isN8nWorkflow(obj: Record<string, unknown>): boolean {
@@ -134,18 +134,18 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
   }
   const n8nConns = (n8n.connections as Record<string, unknown>) ?? {};
 
-  const nodeIdMap = new Map<string, string>(); // n8n name → flowo id
+  const nodeIdMap = new Map<string, string>(); // n8n name → aerini id
 
-  const flowoNodes = n8nNodes.map((n: Record<string, unknown>, idx: number) => {
-    const flowoId = `node_imported_${idx}`;
+  const aeriniNodes = n8nNodes.map((n: Record<string, unknown>, idx: number) => {
+    const aeriniId = `node_imported_${idx}`;
     const n8nName = String(n.name ?? `Node ${idx}`);
-    nodeIdMap.set(n8nName, flowoId);
+    nodeIdMap.set(n8nName, aeriniId);
 
     const typeId = N8N_TYPE_MAP[String(n.type ?? "")] ?? "unsupported";
     const pos = n.position as number[] | undefined;
 
     return {
-      id:           flowoId,
+      id:           aeriniId,
       node_type_id: typeId,
       node_type:    getNodeCategory(typeId),
       name:         n8nName,
@@ -160,8 +160,8 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
     };
   });
 
-  // Convert n8n connection format to Flowo edges
-  const flowoEdges: unknown[] = [];
+  // Convert n8n connection format to Aerini edges
+  const aeriniEdges: unknown[] = [];
   let edgeIdx = 0;
   for (const [fromName, conns] of Object.entries(n8nConns)) {
     const fromId = nodeIdMap.get(fromName);
@@ -173,7 +173,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
       portConns.forEach((c: Record<string, unknown>) => {
         const toId = nodeIdMap.get(String(c.node ?? ""));
         if (!toId) return;
-        flowoEdges.push({
+        aeriniEdges.push({
           id:        `edge_imported_${edgeIdx++}`,
           from_node: fromId,
           from_port: portIdx === 0 ? "output" : `out_${portIdx}`,
@@ -190,8 +190,8 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
     id:   `wf_imported_${Date.now()}`,
     name: String(n8n.name ?? "Imported from n8n"),
     description: "Imported from n8n workflow",
-    nodes: flowoNodes,
-    edges: flowoEdges,
+    nodes: aeriniNodes,
+    edges: aeriniEdges,
     metadata: { author: "imported", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: "1.0.0", tags: ["n8n-import"] },
   };
 }

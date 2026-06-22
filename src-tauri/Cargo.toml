@@ -1,18 +1,18 @@
 [package]
-name = "flowo"
-version = "0.2.0"
-edition = "2021"
+name = "aerini"
+version.workspace = true
+edition.workspace = true
 
 [lib]
-name = "flowo_lib"
+name = "aerini_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "flowo"
+name = "aerini"
 path = "src/main.rs"
 
 [dependencies]
-flowo-engine = { path = "../flowo-engine" }
+aerini-engine = { path = "../aerini-engine" }
 
 # Tauri
 tauri              = { version = "2.0", features = ["tray-icon"] }
@@ -40,7 +40,7 @@ blake3 = "1"
 # Password hashing for run_secret
 argon2 = "0.5"
 
-# Base64 decode for write_temp_file — already in workspace via flowo-engine
+# Base64 decode for write_temp_file — already in workspace via aerini-engine
 base64 = "0.22"
 
 # Structured logging — used for plugin_dir warnings in setup

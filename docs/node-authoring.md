@@ -1,6 +1,6 @@
 # Custom Node Authoring
 
-How to add a new built-in node type to Flowo's engine. This is for contributors to the Flowo codebase. If you want to ship a new node type without modifying Flowo itself, see [Plugin Authoring](plugin-authoring.md) instead.
+How to add a new built-in node type to Aerini's engine. This is for contributors to the Aerini codebase. If you want to ship a new node type without modifying Aerini itself, see [Plugin Authoring](plugin-authoring.md) instead.
 
 The surface area is small: one Rust file, one registry call, one icon entry. No other files need to change.
 
@@ -8,12 +8,12 @@ The surface area is small: one Rust file, one registry call, one icon entry. No 
 
 ## Overview
 
-Every node is a Rust struct that implements the `Node` trait from `flowo-engine/src/node.rs`. The executor dispatches to nodes through `Arc<dyn Node>`, using a registry that maps string type IDs to implementations.
+Every node is a Rust struct that implements the `Node` trait from `aerini-engine/src/node.rs`. The executor dispatches to nodes through `Arc<dyn Node>`, using a registry that maps string type IDs to implementations.
 
 Three things are required to add a node:
 
-1. Implement `Node` on a struct in `flowo-engine/src/nodes/`
-2. Register it in `register_builtins()` in `flowo-engine/src/nodes/mod.rs`
+1. Implement `Node` on a struct in `aerini-engine/src/nodes/`
+2. Register it in `register_builtins()` in `aerini-engine/src/nodes/mod.rs`
 3. Add an icon entry in `src/utils.ts` → `NODE_ICONS`
 
 ---
@@ -36,7 +36,7 @@ pub trait Node: Send + Sync {
 
 ### `type_id`
 
-A stable snake_case identifier stored in `.flowo` files as `node_type_id`. **Never change this after shipping** — saved workflows reference it by this exact string. Examples: `"http_request"`, `"ai_prompt"`, `"shell_exec"`.
+A stable snake_case identifier stored in `.aerini` files as `node_type_id`. **Never change this after shipping** — saved workflows reference it by this exact string. Examples: `"http_request"`, `"ai_prompt"`, `"shell_exec"`.
 
 ### `display_name`
 
@@ -196,7 +196,7 @@ The `code` field is shown in the Errors tab. Use UPPER_SNAKE_CASE and be specifi
 
 ## Registering the node
 
-In `flowo-engine/src/nodes/mod.rs`:
+In `aerini-engine/src/nodes/mod.rs`:
 
 1. Add a `pub mod your_node;` declaration with the other module declarations (alphabetical by convention).
 2. Call `registry.register(Arc::new(your_node::YourNode));` inside `register_builtins()`.
@@ -233,7 +233,7 @@ The key must exactly match the string returned by `type_id()`. Missing entries f
 A minimal node that reverses a string:
 
 ```rust
-// flowo-engine/src/nodes/reverse.rs
+// aerini-engine/src/nodes/reverse.rs
 
 use async_trait::async_trait;
 use serde_json::{json, Value};

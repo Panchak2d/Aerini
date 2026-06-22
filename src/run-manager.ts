@@ -30,6 +30,7 @@ export class RunManager {
   private _activeHistoryPanel: HistoryPanel | null = null;
 
   onRunStateChange: ((running: boolean) => void) | null = null;
+  onRunResult: ((success: boolean) => void) | null = null;
 
   get isRunning(): boolean { return this._isRunning; }
 
@@ -333,6 +334,7 @@ export class RunManager {
       // Save to run history
       saveRunToHistory(runId, this.currentWorkflowId, this.currentWorkflowName, result);
       this.lastResult = result;
+      this.onRunResult?.(result.success);
 
       this.buildDrawerTabs(result);
       this.populateLogs(result);
@@ -345,6 +347,7 @@ export class RunManager {
       if (!result.success) this.onToast(`Workflow failed: ${result.error ?? "Unknown error"}`, "error");
 
     } catch (e) {
+      this.onRunResult?.(false);
       const errMsg = String(e);
       content.innerHTML = `<div class="run-error-card">
         <div class="run-error-label">Execution error</div>

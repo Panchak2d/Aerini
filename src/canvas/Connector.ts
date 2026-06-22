@@ -36,6 +36,45 @@ export class Connector {
     else this.flowPhase = 0;
 
     this.drawCurve(ctx, fp.x, fp.y, tp.x, tp.y);
+
+    // Draw success/failure branch labels at wire midpoint
+    if (this.data.on_success !== null || this.data.on_failure !== null) {
+      const dx = Math.abs(tp.x - fp.x);
+      const cp = Math.max(dx * 0.55, 80);
+      const mx = bez(fp.x, fp.x + cp, tp.x - cp, tp.x, 0.5);
+      const my = bez(fp.y, fp.y, tp.y, tp.y, 0.5);
+
+      const label = this.data.on_success !== null ? "\u2713" : "\u2717";
+      const bg    = this.data.on_success !== null ? "#34d399" : "#f87171";
+
+      ctx.save();
+      ctx.font         = "bold 9px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      const tw = ctx.measureText(label).width;
+      const pw = tw + 8;
+      const ph = 14;
+      const rx = 5;
+      const bx = mx - pw / 2;
+      const by = my - ph / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(bx + rx, by);
+      ctx.lineTo(bx + pw - rx, by);
+      ctx.quadraticCurveTo(bx + pw, by, bx + pw, by + rx);
+      ctx.lineTo(bx + pw, by + ph - rx);
+      ctx.quadraticCurveTo(bx + pw, by + ph, bx + pw - rx, by + ph);
+      ctx.lineTo(bx + rx, by + ph);
+      ctx.quadraticCurveTo(bx, by + ph, bx, by + ph - rx);
+      ctx.lineTo(bx, by + rx);
+      ctx.quadraticCurveTo(bx, by, bx + rx, by);
+      ctx.closePath();
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, mx, my);
+      ctx.restore();
+    }
   }
 
   drawCurve(

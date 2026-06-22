@@ -1,8 +1,8 @@
-# Getting Started with Flowo
+# Getting Started with Aerini
 
-Flowo is a desktop app that lets you automate tasks by connecting steps together on a visual canvas — no coding required for most things. You drag boxes onto a screen, connect them like a flowchart, and press Run.
+Aerini is a desktop app that lets you automate tasks by connecting steps together on a visual canvas — no coding required for most things. You drag boxes onto a screen, connect them like a flowchart, and press Run.
 
-This guide walks you through installing Flowo, touring the interface, and building your first working automation from scratch.
+This guide walks you through installing Aerini, touring the interface, and building your first working automation from scratch.
 
 ---
 
@@ -20,14 +20,14 @@ This guide walks you through installing Flowo, touring the interface, and buildi
 
 ## Install
 
-Download the installer for your platform from the [Releases page](https://github.com/Panchak2d/flowo/releases/latest):
+Download the installer for your platform from the [Releases page](https://github.com/Panchak2d/aerini/releases/latest):
 
 | Your computer | Download this |
 |---|---|
-| Mac (M1, M2, M3, M4) | `Flowo_x.x.x_aarch64.dmg` |
-| Mac (older Intel) | `Flowo_x.x.x_x64.dmg` |
-| Windows | `Flowo_x.x.x_x64-setup.exe` |
-| Linux | `Flowo_x.x.x_amd64.AppImage` |
+| Mac (M1, M2, M3, M4) | `Aerini_x.x.x_aarch64.dmg` |
+| Mac (older Intel) | `Aerini_x.x.x_x64.dmg` |
+| Windows | `Aerini_x.x.x_x64-setup.exe` |
+| Linux | `Aerini_x.x.x_amd64.AppImage` |
 
 Not sure which Mac you have? Click the Apple menu → **About This Mac**. If it says "Apple M1" or higher, you have Apple Silicon. Intel Macs show "Intel Core."
 
@@ -39,7 +39,7 @@ Run the installer. On macOS you may see a security warning — go to **System Se
 
 ## The interface
 
-When Flowo opens you'll see three areas:
+When Aerini opens you'll see three areas:
 
 **Left sidebar** — three sections stacked vertically:
 - *Nodes* — search and browse every available node type
@@ -107,12 +107,12 @@ This tutorial fetches a sample to-do item from a free test API and delivers it t
 If you'd rather skip Slack and just see a notification pop up on your computer, jump ahead to Step 2. The tutorial note at Step 5 tells you what to do differently.
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and sign in.
-2. Click **Create New App → From scratch**. Name it something like `Flowo Bot` and pick your workspace.
+2. Click **Create New App → From scratch**. Name it something like `Aerini Bot` and pick your workspace.
 3. In the left sidebar, click **OAuth & Permissions**.
 4. Scroll to **Bot Token Scopes**, click **Add an OAuth Scope**, and add `chat:write`.
 5. Scroll back to the top, click **Install to Workspace**, and confirm.
 6. Copy the **Bot User OAuth Token** — it starts with `xoxb-`. Keep it somewhere handy.
-7. In Slack, open the channel you want the bot to post to. Type `/invite @Flowo Bot` and send.
+7. In Slack, open the channel you want the bot to post to. Type `/invite @Aerini Bot` and send.
 
 ---
 
@@ -120,7 +120,7 @@ If you'd rather skip Slack and just see a notification pop up on your computer, 
 
 Press `Space`, type `schedule`, and click **Schedule**. A node appears on the canvas.
 
-Click the node to open its configuration panel on the right side of the screen. Set:
+Double-click the node to open its configuration panel on the right side of the screen. Set:
 - **Mode:** `interval`
 - **Interval (seconds):** `3600`
 
@@ -132,7 +132,7 @@ This means the workflow will run once per hour once you schedule it. For now you
 
 Press `Space`, type `http`, and click **HTTP Request**. Then connect it to the Schedule node: drag from the Schedule node's output circle (right side) to the HTTP Request node's input circle (left side).
 
-Click the HTTP Request node to open its config:
+Double-click the HTTP Request node to open its config:
 - **Method:** `GET`
 - **URL:** `https://jsonplaceholder.typicode.com/todos/1`
 
@@ -142,11 +142,13 @@ This URL is a free testing API. It always returns the same predictable JSON — 
 
 ### Step 4 — Place and connect a Code node
 
-Press `Space`, type `code`, and click **Code (JS)**. Connect HTTP Request → Code the same way as before.
+Press `Space`, type `code`, and click **Code (JS)**.
+
+Connect HTTP Request → Code: click and hold the **Success** output circle on HTTP Request (the top-right circle, labelled "Success"), drag to the input circle on the left side of the Code node, and release. Do not drag from the Error port — that only fires when the HTTP request itself fails.
 
 > **Code (JS) requires Node.js 18 or later** installed on your computer. You can check by opening a terminal and running `node --version`. If Node.js isn't installed, grab it from [nodejs.org](https://nodejs.org) — the LTS version is fine.
 
-Click the Code node to open its config. In the **Code** field, paste:
+Double-click the Code node to open its config. In the **Code** field, paste:
 
 ```javascript
 const todo = input.body;
@@ -155,9 +157,11 @@ output({
 });
 ```
 
-`input` is automatically set to whatever the HTTP Request node produced. `input.body` is the JSON response. The script pulls out the ID, title, and completed status, then packages them as a single `message` string.
+`input` is automatically set to the full output of the directly connected upstream node — in this case, the HTTP Request node. Its shape is `{ status, body, headers }`. So `input.body` is the parsed JSON response body, `input.status` is the HTTP status code, and `input.headers` is an object of response headers.
 
-**Rename this node.** Double-click the node's title on the canvas and rename it to `code`. Short names make the next step easier.
+Alternatively, you can access any upstream node by name via the `context` object: `context["HTTP Request"].body` gives the same result and is useful when you have multiple upstream nodes.
+
+**Rename this node.** In the config panel, find the **Name** field under the NODE section and change it to `code`. Short names make the next step easier.
 
 ---
 
@@ -178,10 +182,10 @@ Now place the node: press `Space`, type `slack`, click **Slack**. Connect Code �
 
 Open the Slack node's config:
 - **Channel:** `#general` (or whichever channel you invited the bot to)
-- **Text:** `{{code.output.message}}`
+- **Text:** `{{code.output.result.message}}`
 - **API Key:** select `Slack Bot Token` from the dropdown
 
-The `{{code.output.message}}` part is an expression — it tells Flowo to insert the `message` value from the Code node's output when the workflow runs. Press `{{` in any text field to see a picker showing all available values; you can click to insert them without typing the path manually.
+The `{{code.output.result.message}}` part is an expression — it tells Aerini to insert the `message` value from the Code node's output when the workflow runs. Press `{{` in any text field to see a picker showing all available values; you can click to insert them without typing the path manually.
 
 ---
 
@@ -191,7 +195,7 @@ Press `Space`, type `notification`, click **Desktop Notification**. Connect Code
 
 Config:
 - **Title:** `Daily Todo`
-- **Body:** `{{code.output.message}}`
+- **Body:** `{{code.output.result.message}}`
 
 ---
 
@@ -207,13 +211,13 @@ If you see a Slack message appear in your channel (or a desktop notification pop
 
 ### Step 7 — Save and schedule
 
-Press `Ctrl+S`. Flowo asks for a name — something like `Hourly Todo Update` works fine.
+Press `Ctrl+S`. Aerini asks for a name — something like `Hourly Todo Update` works fine.
 
-Click the **Run in background** button in the toolbar (it looks like a play button with a clock). Flowo validates and saves the workflow, then hands it to the scheduler. The **Background Runs** section in the sidebar shows it with a pulsing green dot.
+Click the **Run in background** button in the toolbar (it looks like a play button with a clock). Aerini validates and saves the workflow, then hands it to the scheduler. The **Background Runs** section in the sidebar shows it with a pulsing green dot.
 
-The workflow now runs every hour on its own, as long as Flowo is open. If you close Flowo, the job pauses until you reopen it. For round-the-clock execution on a server, see [Server Deployment](server-deploy.md).
+The workflow now runs every hour on its own, as long as Aerini is open. If you close Aerini, the job pauses until you reopen it. For round-the-clock execution on a server, see [Server Deployment](server-deploy.md).
 
-> **Always On:** right-click the job in the Background Runs section and enable **Always On**. With this enabled, the scheduler automatically restarts the workflow if it errors or if Flowo itself restarts.
+> **Always On:** right-click the job in the Background Runs section and enable **Always On**. With this enabled, the scheduler automatically restarts the workflow if it errors or if Aerini itself restarts.
 
 ---
 
@@ -229,7 +233,7 @@ After a run, the output drawer shows five tabs:
 | **Logs** | Every log line in order. Click a line to highlight that node on the canvas. |
 | **History** | All previous runs for this workflow |
 
-**Running a single node:** right-click any node and choose **Run from here**. Flowo runs that node and everything it depends on, but skips everything downstream. Useful for testing one step without triggering side effects like sending emails.
+**Running a single node:** right-click any node and choose **Run from here**. Aerini runs that node and everything it depends on, but skips everything downstream. Useful for testing one step without triggering side effects like sending emails.
 
 ---
 
@@ -245,15 +249,15 @@ Every save creates a snapshot. To restore an earlier version:
 
 ## Where your data lives
 
-Flowo stores everything locally — no cloud, no account:
+Aerini stores everything locally — no cloud, no account:
 
 | Platform | Path |
 |---|---|
-| macOS | `~/Library/Application Support/com.flowo.app/` |
-| Windows | `%APPDATA%\com.flowo.app\` |
-| Linux | `~/.local/share/com.flowo.app/` |
+| macOS | `~/Library/Application Support/com.aerini.app/` |
+| Windows | `%APPDATA%\com.aerini.app\` |
+| Linux | `~/.local/share/com.aerini.app/` |
 
-Two SQLite database files live there: `workflows.db` (your workflows and run history) and `credentials.db` (your encrypted API keys). To fully reset Flowo, delete this entire folder.
+Two SQLite database files live there: `workflows.db` (your workflows and run history) and `credentials.db` (your encrypted API keys). To fully reset Aerini, delete this entire folder.
 
 ---
 
@@ -263,7 +267,7 @@ Two SQLite database files live there: `workflows.db` (your workflows and run his
 Click the **Errors** tab in the output drawer. It shows the exact error message and which node failed. Common causes: wrong API key, bad URL, or a network issue.
 
 **Code (JS) node says "node not found."**
-Node.js isn't installed or isn't on your PATH. Open a terminal and run `node --version`. If that fails, install Node.js from [nodejs.org](https://nodejs.org), then close and reopen Flowo.
+Node.js isn't installed or isn't on your PATH. Open a terminal and run `node --version`. If that fails, install Node.js from [nodejs.org](https://nodejs.org), then close and reopen Aerini.
 
 **Expressions show as blank in the output.**
 The expression path is wrong. Check the **Logs** tab — it lists warnings for unresolved expressions, including the path that failed. Use the expression picker (press `{{` in any text field) to browse the correct paths rather than typing them manually.
@@ -272,13 +276,13 @@ The expression path is wrong. Check the **Logs** tab — it lists warnings for u
 Renaming a node breaks any expressions that reference it by name. Use the expression picker to rebuild them with the new name.
 
 **The workflow ran once but now does nothing.**
-Check that the Background Run is still active in the sidebar. If Flowo was closed and reopened, you may need to restart the background run by clicking **Run in background** again.
+Check that the Background Run is still active in the sidebar. If Aerini was closed and reopened, you may need to restart the background run by clicking **Run in background** again.
 
 ---
 
 ## What's next
 
-- [Concepts](concepts.md) — plain-English explanations of every core idea in Flowo
+- [Concepts](concepts.md) — plain-English explanations of every core idea in Aerini
 - [Nodes Reference](nodes.md) — full documentation for all 39 built-in nodes
 - [Expressions](expressions.md) — how to wire node outputs into other fields
 - [Credentials](credentials.md) — adding and managing API keys securely

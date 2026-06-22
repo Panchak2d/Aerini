@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains example workflows importable into Flowo.
+This directory contains example workflows importable into Aerini.
 
 ## Getting_Started___Fetch___Show.zip
 
@@ -10,6 +10,6 @@ A beginner workflow demonstrating:
 
 ### How to import
 
-1. Open Flowo.
+1. Open Aerini.
 2. Click **Import** in the toolbar.
 3. Select this zip file.

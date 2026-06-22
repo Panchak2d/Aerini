@@ -1,0 +1,66 @@
+[package]
+name = "aerini-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "aerini-server"
+path = "src/main.rs"
+
+[dependencies]
+aerini-engine = { path = "../aerini-engine" }
+
+# Async
+tokio        = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util   = { version = "0.7", features = ["rt"] }
+
+# HTTP
+axum       = { version = "0.7", features = ["tokio"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# HTTP client (for control commands)
+reqwest      = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+futures-core = "0.3"
+
+# Serde
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Auth
+uuid    = { version = "1.8", features = ["v4"] }
+subtle  = "2.6"
+dashmap = "6.1"
+blake3  = "1"
+rand    = "0.8.6"
+base64  = "0.22"
+# Password hashing for run_secret (argon2 is brute-force resistant; BLAKE3 is not)
+argon2  = "0.5"
+# SHA-256 hashing for CSP header values computed in middleware.rs
+sha2    = "0.10"
+
+# SQLite (for TokenStore; SQLite already bundled via aerini-engine)
+rusqlite    = { version = "0.38", features = ["bundled"] }
+
+# Utils
+chrono      = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }

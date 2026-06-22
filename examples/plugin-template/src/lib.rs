@@ -1,6 +1,6 @@
-wit_bindgen::generate!({ world: "flowo-node" });
+wit_bindgen::generate!({ world: "aerini-node" });
 
-use exports::flowo::plugin::node::{Guest, NodeDescriptor, NodeInput, NodeOutput};
+use exports::aerini::plugin::node::{Guest, NodeDescriptor, NodeInput, NodeOutput};
 
 struct EchoPlugin;
 

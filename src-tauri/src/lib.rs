@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flowo_engine::{
+use aerini_engine::{
     db::WorkflowDb,
     node::NodeRegistry,
     nodes::register_builtins,
@@ -33,15 +33,15 @@ impl EventSink for TauriEventSink {
     }
 }
 
-/// Read a .flowo workflow file from an absolute path.
-/// Restricted to .flowo extension only.
+/// Read a .aerini workflow file from an absolute path.
+/// Restricted to .aerini extension only.
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
     let canonical = std::fs::canonicalize(&path)
         .map_err(|e| format!("Could not resolve path '{}': {}", path, e))?;
     let canonical_str = canonical.to_string_lossy();
-    if !canonical_str.ends_with(".flowo") {
-        return Err("Only .flowo files can be opened this way.".to_string());
+    if !canonical_str.ends_with(".aerini") {
+        return Err("Only .aerini files can be opened this way.".to_string());
     }
     std::fs::read_to_string(&canonical)
         .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))
@@ -57,7 +57,7 @@ async fn save_file_dialog(
     app.dialog()
         .file()
         .set_file_name(&filename)
-        .add_filter("Flowo Workflow", &["flowo"])
+        .add_filter("Aerini Workflow", &["aerini"])
         .save_file(move |path| { let _ = tx.send(path); });
 
     match rx.await {
@@ -194,7 +194,7 @@ async fn pick_wasm_file_dialog(app: tauri::AppHandle) -> Option<String> {
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
 /// G9: strips `/`, `\`, and `..` from the filename before constructing the path.
-/// The file is written to `{temp_dir}/flowo_media/{safe_filename}`.
+/// The file is written to `{temp_dir}/aerini_media/{safe_filename}`.
 #[tauri::command]
 async fn write_temp_file(filename: String, data: String) -> Result<String, String> {
     // G9: path traversal protection — strip separators and collapse ".."
@@ -210,7 +210,7 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         return Err("Invalid filename: empty after sanitisation".to_string());
     }
 
-    let dir = std::env::temp_dir().join("flowo_media");
+    let dir = std::env::temp_dir().join("aerini_media");
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
@@ -234,7 +234,7 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
     Ok(path.display().to_string())
 }
 
-/// G5: Delete files in `{temp_dir}/flowo_media/` that are older than 24 hours.
+/// G5: Delete files in `{temp_dir}/aerini_media/` that are older than 24 hours.
 /// Must be called via spawn_blocking — uses std::fs which is synchronous.
 fn cleanup_old_temp_files(dir: &std::path::Path) {
     let cutoff = std::time::SystemTime::now()
@@ -304,9 +304,9 @@ pub fn run() {
                 .unwrap_or(false);
 
             let daemon = Arc::new(SchedulerDaemon::new(
-                Arc::clone(&db) as Arc<dyn flowo_engine::scheduler::SchedulerDb>,
+                Arc::clone(&db) as Arc<dyn aerini_engine::scheduler::SchedulerDb>,
                 Arc::clone(&registry),
-                Arc::clone(&resolver) as Arc<dyn flowo_engine::executor::CredentialResolver>,
+                Arc::clone(&resolver) as Arc<dyn aerini_engine::executor::CredentialResolver>,
                 Arc::clone(&event_sink),
             ).with_parallel_execution(parallel_execution));
             daemon.start(tauri::async_runtime::handle().inner());
@@ -316,7 +316,7 @@ pub fn run() {
             app.manage(Arc::clone(&registry));
             app.manage(
                 Arc::clone(&resolver)
-                    as Arc<dyn flowo_engine::executor::CredentialResolver>
+                    as Arc<dyn aerini_engine::executor::CredentialResolver>
             );
             app.manage(Arc::clone(&daemon));
             app.manage(Arc::clone(&event_sink));
@@ -324,7 +324,7 @@ pub fn run() {
 
             // G5: async startup cleanup of temp media files older than 24h
             // spawn_blocking so the std::fs directory scan doesn't occupy a tokio thread
-            let temp_media_dir = std::env::temp_dir().join("flowo_media");
+            let temp_media_dir = std::env::temp_dir().join("aerini_media");
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || {
                     cleanup_old_temp_files(&temp_media_dir);
@@ -347,9 +347,9 @@ pub fn run() {
             });
 
             let tray_menu = tauri::menu::MenuBuilder::new(app)
-                .item(&tauri::menu::MenuItemBuilder::with_id("show", "Open Flowo").build(app)?)
+                .item(&tauri::menu::MenuItemBuilder::with_id("show", "Open Aerini").build(app)?)
                 .separator()
-                .item(&tauri::menu::MenuItemBuilder::with_id("quit", "Quit Flowo").build(app)?)
+                .item(&tauri::menu::MenuItemBuilder::with_id("quit", "Quit Aerini").build(app)?)
                 .build()?;
 
             let _tray = tauri::tray::TrayIconBuilder::new()
@@ -407,6 +407,7 @@ pub fn run() {
             commands::workflow::get_node_types,
             commands::workflow::get_setting,
             commands::workflow::set_setting,
+            commands::workflow::clear_chat_session,
             commands::workflow::save_run_record,
             commands::workflow::save_run_started,
             commands::workflow::list_run_records,
@@ -417,6 +418,7 @@ pub fn run() {
             commands::workflow::get_version,
             commands::workflow::delete_version,
             commands::credentials::list_credentials,
+            commands::credentials::get_credential_metadata,
             commands::credentials::save_credential,
             commands::credentials::delete_credential,
             // Keep original command names for IPC compatibility with frontend
@@ -437,5 +439,5 @@ pub fn run() {
             write_temp_file,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running flowo")
+        .expect("error while running aerini")
 }

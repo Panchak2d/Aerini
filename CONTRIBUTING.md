@@ -1,6 +1,6 @@
-# Contributing to Flowo
+# Contributing to Aerini
 
-Flowo is a Tauri 2.0 desktop app for building visual automation workflows.
+Aerini is a Tauri 2.0 desktop app for building visual automation workflows.
 The codebase is split into three Cargo crates and a TypeScript frontend.
 
 ---
@@ -22,13 +22,13 @@ can be merged. See [CLA.md](CLA.md) Section C8 for instructions. See
 ## Architecture
 
 ```
-flowo-engine/     — core library: Node trait, executor, scheduler, DB, 39 nodes
+aerini-engine/     — core library: Node trait, executor, scheduler, DB, 39 nodes
 src-tauri/        — Tauri shell: IPC commands, tray, app lifecycle
-flowo-server/     — headless binary for server-side workflow execution
+aerini-server/     — headless binary for server-side workflow execution
 src/              — TypeScript/Vite frontend (vanilla TS, no framework)
 ```
 
-`flowo-engine` has zero Tauri dependency. Both `src-tauri` and `flowo-server` depend on it.
+`aerini-engine` has zero Tauri dependency. Both `src-tauri` and `aerini-server` depend on it.
 The decoupling point is the `EventSink` trait — the Tauri app and the server binary implement
 it differently, but the executor and scheduler use only the trait.
 
@@ -62,11 +62,11 @@ npm run build     # production bundle → src-tauri/target/release/bundle/
 ## Adding a new node
 
 All 39 built-in nodes follow the same pattern. Copy any existing node file as a starting point
-(e.g. `flowo-engine/src/nodes/delay.rs` for a simple action node).
+(e.g. `aerini-engine/src/nodes/delay.rs` for a simple action node).
 
 ### 1 — Create the file
 
-`flowo-engine/src/nodes/your_node.rs`
+`aerini-engine/src/nodes/your_node.rs`
 
 Implement the `Node` trait:
 
@@ -115,7 +115,7 @@ impl Node for YourNode {
 
 ### 2 — Register it
 
-In `flowo-engine/src/nodes/mod.rs`, add to `register_builtins()`:
+In `aerini-engine/src/nodes/mod.rs`, add to `register_builtins()`:
 
 ```rust
 pub mod your_node;
@@ -202,10 +202,10 @@ Do not replace with `==`. Timing-safe comparison is required for secret validati
 
 ## Testing
 
-`flowo-engine` has a unit test suite for `expression.rs` (30+ tests). Run with:
+`aerini-engine` has a unit test suite for `expression.rs` (30+ tests). Run with:
 
 ```bash
-cargo test -p flowo-engine
+cargo test -p aerini-engine
 ```
 
 For new nodes, add at least one `#[cfg(test)]` block covering:
@@ -220,8 +220,8 @@ There is no end-to-end test harness yet. Manual verification steps go in your PR
 ## Opening a pull request
 
 1. Fork, branch from `main`, keep the branch focused on one change.
-2. Run `cargo clippy -p flowo-engine -p flowo-server -- -D warnings` and fix all warnings before opening.
-3. Run `cargo test -p flowo-engine` — all tests must pass.
+2. Run `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` and fix all warnings before opening.
+3. Run `cargo test -p aerini-engine` — all tests must pass.
 4. If you touch any IPC command or serde type — call it out explicitly in the PR description.
 5. If you add a node — include a short description of what it does and what credentials it needs.
 6. Keep the PR title in the form `[node] Add YourNode` / `[fix] Description` / `[refactor] Scope`.
@@ -234,9 +234,9 @@ All user data is written to the OS application data directory:
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Application Support/com.flowo.app/` |
-| Windows | `%APPDATA%\com.flowo.app\` |
-| Linux | `~/.local/share/com.flowo.app/` |
+| macOS | `~/Library/Application Support/com.aerini.app/` |
+| Windows | `%APPDATA%\com.aerini.app\` |
+| Linux | `~/.local/share/com.aerini.app/` |
 
 Delete this directory to reset all workflows, credentials, and run history during development.
 
@@ -255,13 +255,13 @@ Delete this directory to reset all workflows, credentials, and run history durin
 ### Steps
 
 ```bash
-git clone https://github.com/Panchak2d/flowo
-cd flowo
+git clone https://github.com/Panchak2d/aerini
+cd aerini
 npm install
 npm run dev
 ```
 
-`npm run dev` compiles the Rust code on the first run, which takes 2–5 minutes. After that, the Flowo window opens.
+`npm run dev` compiles the Rust code on the first run, which takes 2–5 minutes. After that, the Aerini window opens.
 
 ### Building an installer
 
@@ -273,23 +273,23 @@ The installer appears in `src-tauri/target/release/bundle/`:
 
 | Platform | File | How to install |
 |---|---|---|
-| macOS | `.dmg` in `macos/` | Open it, drag Flowo to Applications |
+| macOS | `.dmg` in `macos/` | Open it, drag Aerini to Applications |
 | Windows | `.exe` or `.msi` in `msi/` | Run the installer |
-| Linux | `.AppImage` in `appimage/` | `chmod +x Flowo*.AppImage` then run it |
+| Linux | `.AppImage` in `appimage/` | `chmod +x Aerini*.AppImage` then run it |
 
 ### Server binary only (no desktop)
 
-To build `flowo-server` without the Tauri/desktop toolchain:
+To build `aerini-server` without the Tauri/desktop toolchain:
 
 ```bash
-cargo build --release -p flowo-server
+cargo build --release -p aerini-server
 ```
 
 For a static Linux binary (recommended for server deployments):
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl -p flowo-server
+cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 ```
 
 ---

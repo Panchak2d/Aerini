@@ -1,6 +1,6 @@
 # Governance
 
-Flowo follows a **Founder Stewardship + Open Contribution** model.
+Aerini follows a **Founder Stewardship + Open Contribution** model.
 
 Anyone may contribute. Discussions are public. The project evolves through
 merit-based involvement. Long-term architectural direction remains coherent

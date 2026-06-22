@@ -1,8 +1,8 @@
 [package]
-name = "flowo-plugin-echo"
+name = "aerini-plugin-echo"
 version = "0.1.0"
 edition = "2021"
-description = "Flowo plugin template — rename and adapt to create your own node"
+description = "Aerini plugin template — rename and adapt to create your own node"
 publish = false
 
 [lib]

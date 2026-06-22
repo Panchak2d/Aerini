@@ -1,6 +1,6 @@
-# Flowo Plugin Template
+# Aerini Plugin Template
 
-A minimal starting point for writing a Flowo plugin node in Rust.
+A minimal starting point for writing a Aerini plugin node in Rust.
 
 This template implements a single **Echo** node that returns whatever you pass into the `message` parameter. Replace `EchoPlugin` with your own logic.
 
@@ -22,17 +22,17 @@ cargo build --target wasm32-wasip2 --release
 
 The compiled plugin is at:
 ```
-target/wasm32-wasip2/release/flowo_plugin_echo.wasm
+target/wasm32-wasip2/release/aerini_plugin_echo.wasm
 ```
 
 ## Install
 
-Copy the `.wasm` file to your Flowo plugin directory:
+Copy the `.wasm` file to your Aerini plugin directory:
 
 - **Desktop app:** the path stored in the `plugin_dir` key of the settings database. There is no UI for this yet — set it directly in the database or via a future settings panel.
-- **flowo-server:** the directory passed via `--plugin-dir`.
+- **aerini-server:** the directory passed via `--plugin-dir`.
 
-Restart Flowo (or the server). The new node type appears in the palette automatically.
+Restart Aerini (or the server). The new node type appears in the palette automatically.
 
 ## Customising
 

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkflowResult } from "./ipc/workflow";
 import { escapeHtml } from "./utils";
+import { showConfirm } from "./confirm";
 
 export interface HistoryPanel extends HTMLElement {
   _refresh(): void;
@@ -83,7 +84,7 @@ let _migrationDone = false;
 async function migrateFromLocalStorage(workflowId: string, _workflowName: string): Promise<void> {
   if (_migrationDone) return;
   _migrationDone = true;
-  const LS_KEY = "flowo_run_history_v1";
+  const LS_KEY = "aerini_run_history_v1";
   const raw = localStorage.getItem(LS_KEY);
   if (!raw) return;
   try {
@@ -147,6 +148,8 @@ export function renderHistoryPanel(
   clearBtn.className = "history-clear-btn";
   clearBtn.textContent = "Clear all";
   clearBtn.addEventListener("click", async () => {
+    const ok = await showConfirm("Clear all run history for this workflow? This cannot be undone.", true, "Clear");
+    if (!ok) return;
     clearBtn.textContent = "Clearing…";
     clearBtn.disabled = true;
     await clearRunRecords(workflowId).catch(() => {});
@@ -213,6 +216,8 @@ function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void)
   const item = document.createElement("div");
   const isInterrupted = record.status === "running" || record.status === "interrupted";
   item.className = `history-item ${isInterrupted ? "history-fail" : record.success ? "history-ok" : "history-fail"}`;
+  item.tabIndex = 0;
+  item.setAttribute("role", "button");
   const ranAt   = new Date(record.ran_at);
   const timeStr = ranAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const dateStr = ranAt.toLocaleDateString([], { month: "short", day: "numeric" });
@@ -225,11 +230,17 @@ function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void)
       <span class="history-dur">${isInterrupted ? "" : dur}</span>
       <button class="history-del-btn" title="Delete this run">✕</button>
     </div>
-    <div class="history-meta"><span title="${dateStr} · ${timeStr}">${relativeTime(ranAt)}</span></div>`;
+    <div class="history-meta"><span title="${dateStr} · ${timeStr}" aria-label="${dateStr} at ${timeStr}">${relativeTime(ranAt)}</span></div>`;
   item.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).classList.contains("history-del-btn")) return;
     if (isInterrupted) return;
     try { onRestoreRun(JSON.parse(record.result_json) as WorkflowResult); } catch { /* */ }
+  });
+  item.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if ((e.target as HTMLElement).classList.contains("history-del-btn")) return;
+    e.preventDefault();
+    item.click();
   });
   item.querySelector<HTMLButtonElement>(".history-del-btn")!.addEventListener("click", async (e) => {
     e.stopPropagation();

@@ -8,7 +8,7 @@ import { getNodeTypes, checkNodejsAvailable } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import {
-  buildSidebarPalette, bindSidebarSearch,
+  buildSidebarPalette, bindSidebarSearch, filterByCategory,
   initCommandPalette, openPalette,
 } from "./palette-manager";
 import { initModals } from "./modal-manager";
@@ -16,24 +16,30 @@ import { bindDropImport, bindFileInput } from "./drag-drop";
 import { bindPluginSettings } from "./plugin-settings";
 import { showPopover, closePopover, setDescriptorRegistry } from "./popover-config";
 import { listenCloseRequested } from "./ipc/events";
+import { getVersion } from "@tauri-apps/api/app";
 import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionControls, bindBgRunsFilter, activateZone, getCurrentZone } from "./sidebar-sections";
 import { isTauri } from "./utils";
+import { preloadAllIcons } from "./icon-cache";
 
 import { showConfirm } from "./confirm";
 import { injectNodejsBanner } from "./banners";
 import { showNoteEditor } from "./panels/NoteEditor";
 import { initInterpolationAutocomplete } from "./interpolation";
-import { openWireDropPicker } from "./wire-drop";
+import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
 import { renderBgJobs, renderBgJobsDebounced, updateBgRunButton } from "./panels/BgJobsPanel";
 import { updateAlwaysOnBtn } from "./always-on";
 import { bindSchedulerEvents } from "./scheduler-events";
 import { bindToolbar } from "./toolbar";
+import { ChatPanel } from "./panels/ChatPanel";
 
 // ── App bootstrap ─────────────────────────────────────────────────────────────
 
 async function init() {
-  const allNodes = await getNodeTypes().catch((): NodeDescriptor[] => []);
+  const [allNodes] = await Promise.all([
+    getNodeTypes().catch((): NodeDescriptor[] => []),
+    preloadAllIcons(),
+  ]);
   registerNodeDescriptors(allNodes);
   setDescriptorRegistry(allNodes);
 
@@ -68,6 +74,24 @@ async function init() {
     else el.textContent = "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
   }
 
+  // N-1: show zoom % briefly on scroll, then revert to normal hint
+  let _zoomHintTimer: ReturnType<typeof setTimeout> | null = null;
+  canvas.onZoomChange = (zoom) => {
+    const el = document.getElementById("status-hint"); if (!el) return;
+    el.textContent = `${Math.round(zoom * 100)}%`;
+    if (_zoomHintTimer) clearTimeout(_zoomHintTimer);
+    _zoomHintTimer = setTimeout(() => updateStatusHint(), 1500);
+  };
+
+  // N-10: persist viewport per workflow so zoom/pan survive workflow switches
+  canvas.onViewportChange = () => {
+    if (!wfManager.currentId) return;
+    localStorage.setItem(
+      `aerini_viewport_${wfManager.currentId}`,
+      JSON.stringify({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom })
+    );
+  };
+
   if (!isTauri()) document.getElementById("browser-run-notice")?.classList.remove("hidden");
 
   // WorkflowManager — pass showConfirm so it uses the modal, not window.confirm
@@ -89,6 +113,7 @@ async function init() {
     updateAlwaysOnBtn(canvas, wfManager);
     updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
+    chatPanel.onWorkflowSwitched();
     runManager.setCurrentWorkflow(
       wfManager.currentId,
       wfManager.currentName,
@@ -101,6 +126,7 @@ async function init() {
     wfManager.markUnsaved(true);
     wfManager.scheduleAutoSave();
     updateStatusHint();
+    chatPanel.refreshButtonVisibility();
     // Only sync check — no IPC call on every canvas change
     const btn = document.getElementById("btn-always-on");
     if (btn) {
@@ -112,6 +138,14 @@ async function init() {
   };
 
   const runManager = new RunManager(canvas, setStatus, toast);
+  const chatPanel  = new ChatPanel(canvas, wfManager, toast);
+
+  // N-8: update status hint when run starts/ends
+  runManager.onRunStateChange = (running) => {
+    const el = document.getElementById("status-hint"); if (!el) return;
+    if (running) el.textContent = "Workflow running\u2026 Ctrl+. to stop";
+    else updateStatusHint();
+  };
 
   // Init variable interpolation autocomplete (fires on {{ in any config field)
   initInterpolationAutocomplete(canvas);
@@ -137,7 +171,7 @@ async function init() {
       showPopover(n, canvasEl, () => {
         wfManager.markUnsaved(true);
         wfManager.scheduleAutoSave();
-      });
+      }, canvas);
     } else {
       closePopover();
     }
@@ -152,20 +186,28 @@ async function init() {
     openWireDropPicker(allNodes, canvas, canvasEl, setStatus);
   };
 
+  canvas.onInputWireDropRequest = (_toNode, _toPort, _wx, _wy) => {
+    openInputWireDropPicker(allNodes, canvas, canvasEl, setStatus);
+  };
+
   document.getElementById("canvas")!.addEventListener("mousedown", () => {
     (document.getElementById("node-search") as HTMLInputElement)?.blur();
   }, { capture: true });
 
   buildSidebarPalette(allNodes, canvas, setStatus);
   bindSidebarSearch();
+  document.querySelectorAll<HTMLElement>(".cat-chip").forEach(chip => {
+    chip.addEventListener("click", () => filterByCategory(chip.dataset.cat ?? "all"));
+  });
   initCommandPalette(allNodes, canvas, setStatus);
   initModals(allNodes, (obj) => {
     try {
-      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes } = deserialize(JSON.stringify(obj));
+      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(JSON.stringify(obj));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
       wfManager.parallelExecution  = parallelExecution;
       wfManager.maxConcurrentNodes = maxConcurrentNodes;
+      wfManager.chatSettings       = chatSettings;
       wfManager.currentId = id; wfManager.currentName = name;
       wfManager.markUnsaved(false); setTitle(name);
       document.getElementById("output-drawer")!.classList.add("hidden");
@@ -180,7 +222,7 @@ async function init() {
   bindPluginSettings(toast);
 
   const { refreshRunBtn } = bindToolbar(
-    canvas, wfManager, runManager, credPanel,
+    canvas, wfManager, runManager, credPanel, chatPanel,
     toast, updateStatusHint,
   );
 
@@ -208,6 +250,15 @@ async function init() {
   if (isTauri()) {
     checkNodejsAvailable().then(available => {
       if (!available) injectNodejsBanner(canvas);
+    }).catch(() => {});
+  }
+
+  if (isTauri()) {
+    getVersion().then(v => {
+      const verEl = document.getElementById("app-version");
+      if (verEl) verEl.textContent = v;
+      const onboardEl = document.querySelector<HTMLElement>(".onboarding-version");
+      if (onboardEl) onboardEl.textContent = `v${v}`;
     }).catch(() => {});
   }
 }

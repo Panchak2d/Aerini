@@ -1,6 +1,17 @@
 import type { Canvas } from "./canvas/Canvas";
 import { NODE_IDS, TRIGGER_NODE_IDS, DANGEROUS_NODE_IDS } from "./node-ids";
 
+export const REQUIRED_FIELDS: Record<string, string[]> = {
+  [NODE_IDS.HTTP_REQUEST]: ["url", "method"],
+  email_send:              ["to", "subject"],
+  [NODE_IDS.SHELL_EXEC]:   ["command"],
+  [NODE_IDS.CODE]:         ["code"],
+  [NODE_IDS.AI_PROMPT]:    ["prompt"],
+  [NODE_IDS.AI_AGENT]:     ["goal"],
+  [NODE_IDS.SCHEDULE]:     ["mode"],
+  database:                ["db_path", "query"],
+};
+
 export function validateWorkflow(canvas: Canvas): string[] {
   const errors: string[] = [];
   const nodes = canvas.nodes;
@@ -17,19 +28,8 @@ export function validateWorkflow(canvas: Canvas): string[] {
     errors.push("No trigger node found. Add a Manual Trigger, Webhook, or Schedule.");
   }
 
-  const REQUIRED: Record<string, string[]> = {
-    [NODE_IDS.HTTP_REQUEST]: ["url", "method"],
-    email_send:              ["to", "subject"],
-    [NODE_IDS.SHELL_EXEC]:   ["command"],
-    [NODE_IDS.CODE]:         ["code"],
-    [NODE_IDS.AI_PROMPT]:    ["prompt"],
-    [NODE_IDS.AI_AGENT]:     ["goal"],
-    [NODE_IDS.SCHEDULE]:     ["mode"],
-    database:                ["db_path", "query"],
-  };
-
   for (const node of nodes.values()) {
-    const required = REQUIRED[node.data.node_type_id];
+    const required = REQUIRED_FIELDS[node.data.node_type_id];
     if (!required) continue;
     for (const field of required) {
       const val = node.data.config[field];

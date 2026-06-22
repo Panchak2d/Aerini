@@ -31,7 +31,7 @@ const PLATFORMS: PlatformDef[] = [
       `Set Application type to <strong>Desktop app</strong>. Give it a name and click <strong>Create</strong>.`,
       `Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the dialog.`,
       `Under <strong>Authorized redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
-      `In Flowo, open <strong>Connections</strong> and add a new credential of type <strong>YouTube OAuth</strong>. Paste your Client ID and Client Secret.`,
+      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>YouTube OAuth</strong>. Paste your Client ID and Client Secret.`,
     ],
     notes: [
       "Your app starts in 'Testing' mode. Add your Google account as a test user under OAuth consent screen → Test users.",
@@ -52,7 +52,7 @@ const PLATFORMS: PlatformDef[] = [
       `Go to <strong>App settings → Basic</strong>. Note your <strong>App ID</strong> (Client ID) and <strong>App Secret</strong> (Client Secret).`,
       `Under <strong>Instagram → Settings → Valid OAuth Redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
       `Request the <strong>instagram_content_publish</strong> permission under <strong>App Review → Permissions and Features</strong>. For testing, add your Instagram account under <strong>Roles → Instagram Testers</strong>.`,
-      `In Flowo, open <strong>Connections</strong> and add a new credential of type <strong>Instagram OAuth</strong>. Paste your App ID and App Secret.`,
+      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>Instagram OAuth</strong>. Paste your App ID and App Secret.`,
     ],
     notes: [
       "Business or Creator accounts are required for content publishing. Personal accounts are not supported by the Instagram API.",
@@ -70,7 +70,7 @@ const PLATFORMS: PlatformDef[] = [
       `In the <strong>Login Kit</strong> settings, add the redirect URI exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
       `Request the <strong>video.publish</strong> scope under <strong>Content Posting API → Scopes</strong>. For sandbox testing, use the sandbox environment.`,
       `Copy your <strong>Client Key</strong> (Client ID) and <strong>Client Secret</strong> from the app's <strong>App info</strong> page.`,
-      `In Flowo, open <strong>Connections</strong> and add a new credential of type <strong>TikTok OAuth</strong>. Paste your Client Key and Client Secret.`,
+      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>TikTok OAuth</strong>. Paste your Client Key and Client Secret.`,
     ],
     notes: [
       "TikTok apps default to sandbox mode. In sandbox, posts are private and visible only to your account. Submit for review to enable public publishing.",

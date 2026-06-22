@@ -43,6 +43,6 @@ researchers who report in good faith.
 
 ## Scope
 
-In scope: the Flowo engine, server binary, Tauri desktop app, and official Docker image.
+In scope: the Aerini engine, server binary, Tauri desktop app, and official Docker image.
 
 Out of scope: third-party services integrated via nodes (Slack, Stripe, etc.).

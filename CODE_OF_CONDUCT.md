@@ -2,7 +2,7 @@
 
 ## Our standard
 
-Flowo is a technical project. We expect direct, constructive, professional
+Aerini is a technical project. We expect direct, constructive, professional
 interaction. The bar is: would you say this in a technical review at a competent
 engineering organization? If yes, it belongs here. If not, it does not.
 
@@ -28,7 +28,7 @@ engineering organization? If yes, it belongs here. If not, it does not.
 
 ## Enforcement
 
-Report issues to [flowo.automations@proton.me](mailto:flowo.automations@proton.me). Reports are handled privately.
+Report issues to [aerini@proton.me](mailto:aerini@proton.me). Reports are handled privately.
 
 Consequences range from a private warning to a permanent contribution ban,
 depending on severity and pattern of behavior.

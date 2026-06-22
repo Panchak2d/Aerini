@@ -37,7 +37,7 @@ This is a living document. Items move as priorities and capacity change.
 
 - [ ] Distributed execution across multiple machines
 - [ ] Workflow marketplace
-- [ ] SDK for embedding the Flowo engine in other applications
+- [ ] SDK for embedding the Aerini engine in other applications
 - [ ] Enterprise features (SSO, audit log, team workspaces)
 
 ---

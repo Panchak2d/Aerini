@@ -11,6 +11,35 @@ export function registerNodeDescriptors(descriptors: NodeDescriptor[]): void {
   _nodeRegistry = new Map(descriptors.map(d => [d.type_id, d]));
 }
 
+/**
+ * Per-workflow Chat Panel feature toggles (Patch 5B). Field names and defaults
+ * mirror aerini-engine::model::ChatSettings exactly — this is the wire
+ * contract for the "settings.chat" key in workflow JSON.
+ */
+export interface ChatSettings {
+  allow_attachments: boolean;
+  allow_image_responses: boolean;
+  max_message_length: number;
+  session_persistence: boolean;
+  show_branding: boolean;
+}
+
+export const DEFAULT_CHAT_SETTINGS: ChatSettings = {
+  allow_attachments: false,
+  allow_image_responses: true,
+  max_message_length: 2000,
+  session_persistence: true,
+  show_branding: true,
+};
+
+function chatSettingsEqualDefault(s: ChatSettings): boolean {
+  return s.allow_attachments === DEFAULT_CHAT_SETTINGS.allow_attachments
+      && s.allow_image_responses === DEFAULT_CHAT_SETTINGS.allow_image_responses
+      && s.max_message_length === DEFAULT_CHAT_SETTINGS.max_message_length
+      && s.session_persistence === DEFAULT_CHAT_SETTINGS.session_persistence
+      && s.show_branding === DEFAULT_CHAT_SETTINGS.show_branding;
+}
+
 export interface WorkflowDocument {
   schema_version: string;
   id: string;
@@ -29,6 +58,8 @@ export interface WorkflowDocument {
   parallel_execution?: boolean;
   /** Max concurrent node tasks when parallel_execution is true. Default: 8. */
   max_concurrent_nodes?: number;
+  /** Workflow-scoped feature settings — currently only the Chat panel toggles. */
+  settings?: { chat?: Partial<ChatSettings> };
 }
 
 export function serialize(
@@ -38,6 +69,7 @@ export function serialize(
   connectors: Map<string, Connector>,
   parallelExecution?: boolean,
   maxConcurrentNodes?: number,
+  chatSettings?: ChatSettings,
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -71,6 +103,9 @@ export function serialize(
       doc.max_concurrent_nodes = maxConcurrentNodes;
     }
   }
+  if (chatSettings && !chatSettingsEqualDefault(chatSettings)) {
+    doc.settings = { chat: chatSettings };
+  }
   return JSON.stringify(doc, null, 2);
 }
 
@@ -86,12 +121,14 @@ export function deserialize(json: string): {
   connectors: Map<string, Connector>;
   parallelExecution: boolean;
   maxConcurrentNodes: number;
+  chatSettings: ChatSettings;
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
     nodes?: unknown[]; edges?: unknown[];
     parallel_execution?: boolean;
     max_concurrent_nodes?: number;
+    settings?: { chat?: Partial<ChatSettings> };
   };
 
   const id   = doc.id   ?? `wf_${Date.now()}`;
@@ -148,5 +185,6 @@ export function deserialize(json: string): {
     connectors,
     parallelExecution: doc.parallel_execution ?? false,
     maxConcurrentNodes: doc.max_concurrent_nodes ?? 8,
+    chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
   };
 }

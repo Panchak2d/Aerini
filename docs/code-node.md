@@ -6,11 +6,11 @@ The Code node runs a JavaScript snippet you write, using your machine's Node.js 
 
 ## Requirements
 
-Node.js 18 or later must be installed and available on your PATH. It's only required if you use this node — other Flowo features don't need it.
+Node.js 18 or later must be installed and available on your PATH. It's only required if you use this node — other Aerini features don't need it.
 
-To check: open a terminal and run `node --version`. If you see `v18.x.x` or higher, you're set. If the command isn't found, install Node.js from [nodejs.org](https://nodejs.org) (the LTS version works fine), then restart Flowo.
+To check: open a terminal and run `node --version`. If you see `v18.x.x` or higher, you're set. If the command isn't found, install Node.js from [nodejs.org](https://nodejs.org) (the LTS version works fine), then restart Aerini.
 
-If Node.js isn't found when the node runs, Flowo returns a clear error message with installation instructions rather than a cryptic failure.
+If Node.js isn't found when the node runs, Aerini returns a clear error message with installation instructions rather than a cryptic failure.
 
 ---
 
@@ -18,11 +18,18 @@ If Node.js isn't found when the node runs, Flowo returns a clear error message w
 
 Two globals are available in every script:
 
-**`input`** — the output of the upstream node, automatically injected. Access its fields directly:
+**`input`** — the output of the node directly wired into this Code node. Access its fields directly:
 
 ```js
 const value = input.body.result;
 const name = input.user.name;
+```
+
+**`context`** — outputs from all upstream nodes, keyed by node name. Useful when you need data from a node that isn't directly wired in:
+
+```js
+const raw = context["HTTP Request"].body;
+const parsed = context["Transform"].result;
 ```
 
 **`output(value)`** — call this to pass a value to downstream nodes. Whatever you pass here becomes the node's output:
@@ -110,6 +117,6 @@ if (isNaN(score)) {
 
 ## Security
 
-In desktop mode, the Code node runs with your user's full permissions. This is intentional — you're running your own code on your own machine. Flowo warns you before running any workflow that contains a Code node.
+In desktop mode, the Code node runs with your user's full permissions. This is intentional — you're running your own code on your own machine. Aerini warns you before running any workflow that contains a Code node.
 
-In server mode (`flowo-server`), the Code node is disabled by default. Enable it with `--allow-code` only after reviewing every workflow that uses it. Any API token holder can then execute arbitrary JavaScript on the host. See [Security](security.md) for the full implications.
+In server mode (`aerini-server`), the Code node is disabled by default. Enable it with `--allow-code` only after reviewing every workflow that uses it. Any API token holder can then execute arbitrary JavaScript on the host. See [Security](security.md) for the full implications.

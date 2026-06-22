@@ -2,7 +2,7 @@
 ignore = [
     # RUSTSEC-2023-0071: rsa 0.9.10 Marvin Attack timing side-channel.
     # No patched version of rsa exists. This is a transitive dep via sqlx-mysql.
-    # Flowo does not use rsa directly; the MySQL auth handshake uses it internally.
+    # Aerini does not use rsa directly; the MySQL auth handshake uses it internally.
     #
     # ACCEPTED RISK — with explicit operator scope:
     # The "trusted infrastructure" assumption holds only when the operator controls
@@ -12,22 +12,26 @@ ignore = [
     # deployments). In that scenario, the attacker can measure RSA timing during the
     # TLS handshake to recover session material.
     #
-    # If you run Flowo in API mode and allow untrusted callers to configure Database
+    # If you run Aerini in API mode and allow untrusted callers to configure Database
     # node connection strings, treat this advisory as unmitigated until sqlx ships
     # a fix. See docs/security.md#known-transitive-dependency-risks for details.
     #
     # Exploiting requires: sustained measurement of many handshakes by a
     # network-adjacent attacker (high bar on WAN; realistic on LAN or same-host).
     # Track upstream: https://github.com/launchbadge/sqlx/issues/3538
+    #
+    # TODO: re-check this suppression when sqlx >= 0.9 ships with a patched `rsa`
+    # dependency, and remove this entry once sqlx-mysql no longer pulls in the
+    # vulnerable rsa version.
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2026-0097: rand unsoundness with custom logger.
     # rand 0.7.3 (transitive via phf_generator → build-time only, never in prod binary)
     # rand 0.9.2 (transitive via quinn-proto → reqwest; no patch for 0.9 series yet — 
     #             only >=0.9.3 is patched; upstream quinn has not released 0.9.3 yet)
-    # Direct dep (flowo-server rand 0.8) bumped to 0.8.6 (patched).
+    # Direct dep (aerini-server rand 0.8) bumped to 0.8.6 (patched).
     # The unsoundness requires: log+thread_rng features + custom logger + reseeding.
-    # Flowo does not install a custom log backend that calls rand.
+    # Aerini does not install a custom log backend that calls rand.
     "RUSTSEC-2026-0097",
 
     # RUSTSEC-2024-0429: glib 0.18.5 VariantStrIter unsoundness.
@@ -57,7 +61,7 @@ ignore = [
     "RUSTSEC-2025-0057",
 
     # RUSTSEC-2025-0075, -0080, -0081, -0098, -0100: unic-* unmaintained.
-    # All transitive. No direct use of these Unicode crates in Flowo.
+    # All transitive. No direct use of these Unicode crates in Aerini.
     "RUSTSEC-2025-0075",
     "RUSTSEC-2025-0080",
     "RUSTSEC-2025-0081",

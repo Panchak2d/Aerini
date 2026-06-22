@@ -2,11 +2,11 @@
 
 ## Commercial licensing
 
-The main way to support Flowo is a commercial license. It removes the AGPL-3.0 copyleft obligation: proprietary modifications permitted, no source disclosure required.
+The main way to support Aerini is a commercial license. It removes the AGPL-3.0 copyleft obligation: proprietary modifications permitted, no source disclosure required.
 
-[View pricing and license terms](https://panchak2d.github.io/flowo/pricing)
+[View pricing and license terms](https://panchak2d.github.io/aerini/pricing)
 
-Relevant if you are building a product on top of Flowo, deploying a modified version as a service, or distributing it to clients without disclosing changes.
+Relevant if you are building a product on top of Aerini, deploying a modified version as a service, or distributing it to clients without disclosing changes.
 
 ## GitHub Sponsors
 
@@ -18,4 +18,4 @@ Maintenance, bug fixes, new node types and integrations, documentation, and secu
 
 ## Open source commitment
 
-Flowo stays under AGPL-3.0 regardless of commercial success. The open source release is not going away.
+Aerini stays under AGPL-3.0 regardless of commercial success. The open source release is not going away.

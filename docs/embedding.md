@@ -1,6 +1,6 @@
-# Embedding flowo-engine
+# Embedding aerini-engine
 
-This guide is for developers who want to run Flowo workflows from inside their own
+This guide is for developers who want to run Aerini workflows from inside their own
 Rust application — instead of calling the server over HTTP or using the desktop app.
 
 If that's not what you're after, you probably want the
@@ -10,16 +10,16 @@ If that's not what you're after, you probably want the
 
 ## What "embedding" means
 
-Normally you run Flowo as a separate process — the desktop app or `flowo-server` —
+Normally you run Aerini as a separate process — the desktop app or `aerini-server` —
 and your code talks to it over HTTP. Embedding means you skip that entirely.
-`flowo-engine` becomes a library inside your application. Workflows execute in the
+`aerini-engine` becomes a library inside your application. Workflows execute in the
 same process as your code, with no network call in between.
 
 **Why you'd want this:**
 - No extra process to manage or keep running.
 - Lower latency — no HTTP roundtrip on every workflow run.
 - Full control over where credentials come from and where events go.
-- You can ship a product that runs Flowo workflows without exposing any server.
+- You can ship a product that runs Aerini workflows without exposing any server.
 
 **The tradeoff:** you have to write a little Rust glue code to wire things up. This
 guide shows you exactly what that looks like, step by step.
@@ -34,7 +34,7 @@ You need:
   about two minutes. Run `rustc --version` afterwards to confirm it worked.
 - **A Rust project.** If you don't have one, run `cargo new my-app` in a terminal.
   This creates a new folder called `my-app` with everything you need to get started.
-- **A workflow JSON file.** You can export any workflow from the Flowo desktop app
+- **A workflow JSON file.** You can export any workflow from the Aerini desktop app
   via File → Export. Save it somewhere in your project — we'll load it in the example.
 
 You don't need deep Rust knowledge. The guide explains each concept when it first
@@ -62,20 +62,20 @@ put it above any `impl CredentialResolver` block and it'll work.
 
 ---
 
-## Adding flowo-engine to your project
+## Adding aerini-engine to your project
 
 Open your project's `Cargo.toml` and add these lines under `[dependencies]`:
 
 ```toml
 [dependencies]
-flowo-engine = { git = "https://github.com/Panchak2d/flowo", tag = "v0.2.0" }
+aerini-engine = { git = "https://github.com/Panchak2d/aerini", tag = "vX.Y.Z" }
 tokio        = { version = "1", features = ["full"] }
 async-trait  = "0.1"
 serde_json   = "1"
 ```
 
-Before copying the tag above, check the
-[releases page](https://github.com/Panchak2d/flowo/releases) to see if there's a
+Replace `vX.Y.Z` with the latest release tag, then check the
+[releases page](https://github.com/Panchak2d/aerini/releases) to see if there's a
 newer version. Always pin to a specific tag — using `branch = "main"` means your
 build can break unexpectedly when the library changes.
 
@@ -92,7 +92,7 @@ from a file and runs it.
 
 ```rust
 use async_trait::async_trait;
-use flowo_engine::{
+use aerini_engine::{
     executor::{CredentialResolver, WorkflowExecutor},
     model::Workflow,
     nodes::register_builtins,
@@ -135,7 +135,7 @@ async fn main() {
 
     // Build the node registry with all built-in node types.
     let mut registry = NodeRegistry::new();
-    register_builtins(&mut registry, Path::new("./flowo_data"), None);
+    register_builtins(&mut registry, Path::new("./aerini_data"), None);
 
     // Create the executor.
     let executor = WorkflowExecutor::new(
@@ -232,7 +232,7 @@ impl EventSink for ChannelSink {
 If you don't need events at all:
 
 ```rust
-use flowo_engine::NoopEventSink;
+use aerini_engine::NoopEventSink;
 
 let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(EnvResolver))
     .with_event_sink(Arc::new(NoopEventSink));
@@ -315,7 +315,7 @@ every built-in node type.
 
 ```rust
 let mut registry = NodeRegistry::new();
-register_builtins(&mut registry, Path::new("./flowo_data"), None);
+register_builtins(&mut registry, Path::new("./aerini_data"), None);
 ```
 
 The two extra arguments to `register_builtins`:
@@ -364,7 +364,7 @@ let workflow = Workflow::from_json(&json)
 ```
 
 `from_json` automatically handles version migrations. If someone exports a workflow
-from an older version of Flowo, it gets upgraded silently before running — you don't
+from an older version of Aerini, it gets upgraded silently before running — you don't
 have to do anything.
 
 **Loading from a string** (useful when the JSON comes from a database or API):
@@ -546,13 +546,13 @@ let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(EnvResolver))
 
 **`cargo build` fails with "package not found" or a git error.**
 Make sure you have git installed and can reach GitHub. Run
-`git clone https://github.com/Panchak2d/flowo` in a terminal to verify. If the
+`git clone https://github.com/Panchak2d/aerini` in a terminal to verify. If the
 tag you specified doesn't exist yet, check the
-[releases page](https://github.com/Panchak2d/flowo/releases).
+[releases page](https://github.com/Panchak2d/aerini/releases).
 
 **`Workflow::from_json` panics with "invalid workflow JSON".**
 The most likely cause is that the JSON file is corrupted or was exported from a
-version of Flowo that introduced an incompatible format. Try re-exporting from the
+version of Aerini that introduced an incompatible format. Try re-exporting from the
 desktop app. If it still fails, print the raw JSON and look for obvious issues
 (missing braces, trailing commas, etc.).
 
@@ -583,16 +583,16 @@ we won't remove or rename anything in this list.
 
 | What | Where |
 |------|-------|
-| `Node` trait | `flowo_engine::node` |
-| `NodeRegistry` — `new()`, `register()`, `get()`, `all_descriptors()` | `flowo_engine::node` |
-| `NodeDescriptor`, `NodePorts`, `PortDefinition`, `PortPosition` | `flowo_engine::node` |
-| `WorkflowExecutor` — constructor, all `with_*()` methods, `run()` | `flowo_engine::executor` |
-| `CredentialResolver` trait | `flowo_engine::executor` |
-| `WorkflowResult` — all fields | `flowo_engine::executor` |
-| `EventSink` trait, `NoopEventSink`, `ENGINE_VERSION` | `flowo_engine` |
-| All types in `model` — `Workflow`, `WorkflowNode`, `WorkflowEdge`, `RetryPolicy`, etc. | `flowo_engine::model` |
-| `EngineError` — existing variants only (we can add new ones) | `flowo_engine::error` |
-| `NodeError` | `flowo_engine::error` |
+| `Node` trait | `aerini_engine::node` |
+| `NodeRegistry` — `new()`, `register()`, `get()`, `all_descriptors()` | `aerini_engine::node` |
+| `NodeDescriptor`, `NodePorts`, `PortDefinition`, `PortPosition` | `aerini_engine::node` |
+| `WorkflowExecutor` — constructor, all `with_*()` methods, `run()` | `aerini_engine::executor` |
+| `CredentialResolver` trait | `aerini_engine::executor` |
+| `WorkflowResult` — all fields | `aerini_engine::executor` |
+| `EventSink` trait, `NoopEventSink`, `ENGINE_VERSION` | `aerini_engine` |
+| All types in `model` — `Workflow`, `WorkflowNode`, `WorkflowEdge`, `RetryPolicy`, etc. | `aerini_engine::model` |
+| `EngineError` — existing variants only (we can add new ones) | `aerini_engine::error` |
+| `NodeError` | `aerini_engine::error` |
 
 ---
 
@@ -617,9 +617,9 @@ warning. Don't import from them directly.
 
 ## Licensing
 
-`flowo-engine` is released under **AGPL-3.0**.
+`aerini-engine` is released under **AGPL-3.0**.
 
-The important part: if you embed `flowo-engine` in an application and make that
+The important part: if you embed `aerini-engine` in an application and make that
 application available as a network service to others, AGPL-3.0 requires you to
 publish the complete source code of your application under the same license. This
 applies even if you only modified a small part of it.
@@ -629,9 +629,9 @@ stays private, your modifications stay proprietary, no source disclosure needed.
 
 You almost certainly need a commercial license if you are:
 
-- Building a SaaS or hosted product powered by Flowo
-- Shipping a modified version of Flowo to paying customers
-- Running `flowo-server` (or your own binary that embeds `flowo-engine`) as a
+- Building a SaaS or hosted product powered by Aerini
+- Shipping a modified version of Aerini to paying customers
+- Running `aerini-server` (or your own binary that embeds `aerini-engine`) as a
   service for other people
 - Subject to a legal or procurement policy that prohibits AGPL software
 
@@ -639,7 +639,7 @@ If you're building an internal tool that only your team uses and you're okay wit
 AGPL terms, you're probably fine without it — but check with your legal team if
 you're unsure.
 
-[View pricing and license terms →](https://panchak2d.github.io/flowo/pricing)
+[View pricing and license terms →](https://panchak2d.github.io/aerini/pricing)
 
 Still have questions? Open a thread in
-[GitHub Discussions](https://github.com/Panchak2d/flowo/discussions).
+[GitHub Discussions](https://github.com/Panchak2d/aerini/discussions).

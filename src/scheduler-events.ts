@@ -15,6 +15,19 @@ import { renderBgJobs, renderBgJobsDebounced, updateBgRunButton } from "./panels
 type Toast  = (msg: string, type: "success" | "error" | "info") => void;
 type Status = (msg: string) => void;
 
+// listenSchedulerStatus (ipc/events.ts) guards against double win.listen()
+// registration: the second caller gets back the existing unlisten handle
+// without its own callback ever being wired up. bindSchedulerEvents below is
+// always the first caller (registered at app init), so any other module that
+// needs scheduler-status events (e.g. ChatPanel) must subscribe here instead
+// of calling listenSchedulerStatus directly.
+const _extraSchedulerListeners = new Set<(evt: SchedulerStatusEvent) => void>();
+
+export function addSchedulerStatusListener(cb: (evt: SchedulerStatusEvent) => void): () => void {
+  _extraSchedulerListeners.add(cb);
+  return () => { _extraSchedulerListeners.delete(cb); };
+}
+
 export async function bindSchedulerEvents(
   canvas:        Canvas,
   wfManager:     WorkflowManager,
@@ -73,6 +86,10 @@ export async function bindSchedulerEvents(
           }
         }
       } catch { /* non-fatal */ }
+    }
+
+    for (const fn of _extraSchedulerListeners) {
+      try { fn(evt); } catch { /* a subscriber error must not break core scheduler UI */ }
     }
   });
 

@@ -2,19 +2,19 @@
 
 ## Philosophy
 
-Contributors to Flowo should have meaningful control over whether their work
+Contributors to Aerini should have meaningful control over whether their work
 becomes training data for AI systems. Open source availability does not imply
 automatic consent to training use.
 
-This policy is not anti-AI. Flowo itself uses AI nodes. The restriction is
+This policy is not anti-AI. Aerini itself uses AI nodes. The restriction is
 specifically about whether contributor code is used to train models — not about
-how users use Flowo.
+how users use Aerini.
 
 ---
 
 ## Permitted uses
 
-The following uses of Flowo code are explicitly permitted:
+The following uses of Aerini code are explicitly permitted:
 
 - Code completion and suggestion tools (Copilot, Cursor, etc.)
 - Local inference and retrieval-augmented generation

@@ -2,7 +2,7 @@
 
 Nodes are isolated by default — an HTTP Request node fetches data, but the next node has no idea what it returned unless you explicitly wire it in. Expressions are that wire.
 
-Write `{{node_name.output.some_field}}` in any text field, and Flowo replaces it with the actual value at runtime. The syntax looks technical, but you rarely need to type it from scratch: press `{{` in any input field to open the expression picker, which shows every available value from upstream nodes and lets you click to insert.
+Write `{{node_name.output.some_field}}` in any text field, and Aerini replaces it with the actual value at runtime. The syntax looks technical, but you rarely need to type it from scratch: press `{{` in any input field to open the expression picker, which shows every available value from upstream nodes and lets you click to insert.
 
 ---
 
@@ -14,7 +14,7 @@ The standard pattern:
 {{node_name.output.field}}
 ```
 
-- `node_name` — the node's name as shown on the canvas. Rename any node by double-clicking its title. Names are matched case-insensitively.
+- `node_name` — the node's name as shown on the canvas. Rename any node by double-clicking it to open its config panel, then editing the **Name** field. Names are matched case-insensitively.
 - `.output` — accesses the node's result object.
 - `.field` — the specific piece of data you want.
 
@@ -24,7 +24,7 @@ The standard pattern:
 Current temperature: {{weather.output.body.temperature}}°C
 ```
 
-At runtime, Flowo resolves that to `Current temperature: 21°C`.
+At runtime, Aerini resolves that to `Current temperature: 21°C`.
 
 Expressions can appear anywhere inside a string — mix them freely with literal text:
 
@@ -81,10 +81,10 @@ In the desktop app, `$env` is always disabled — expressions referencing it res
 In server mode, you must explicitly whitelist each variable name when starting the server:
 
 ```bash
-flowo-server api --allow-env-vars HOME,APP_ENV --token mytoken
+aerini-server api --allow-env-vars HOME,APP_ENV --token mytoken
 ```
 
-Variables not on that list return empty strings. Never add `FLOWO_TOKEN` or any `FLOWO_CRED_*` variable to the allowlist — a workflow could read and send your credentials to an external server.
+Variables not on that list return empty strings. Never add `AERINI_TOKEN` or any `AERINI_CRED_*` variable to the allowlist — a workflow could read and send your credentials to an external server.
 
 ---
 
@@ -181,7 +181,7 @@ Example:
 
 All expression results are converted to strings before being inserted into text fields. Objects and arrays become their JSON representation. `null` and missing values become an empty string.
 
-Fields that expect a specific type (a number field, a boolean toggle) receive the converted value back: a number field containing `{{loop.output.index}}` receives an integer, not a string. Flowo handles this conversion automatically.
+Fields that expect a specific type (a number field, a boolean toggle) receive the converted value back: a number field containing `{{loop.output.index}}` receives an integer, not a string. Aerini handles this conversion automatically.
 
 ---
 
@@ -223,7 +223,7 @@ image-{{pad_start(loop.output.index, 3, "0")}}.png
 ## Troubleshooting
 
 **A field shows up blank when the workflow runs.**
-Open the **Logs** tab in the output drawer. Flowo logs a warning for every unresolved expression, including the exact path it couldn't find. The most common cause is a typo in the node name or field path.
+Open the **Logs** tab in the output drawer. Aerini logs a warning for every unresolved expression, including the exact path it couldn't find. The most common cause is a typo in the node name or field path.
 
 **I renamed a node and now expressions break.**
 Renaming a node invalidates any expression that references it by the old name. Use the expression picker to rebuild the broken expressions with the new name.

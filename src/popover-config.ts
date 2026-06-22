@@ -1,6 +1,8 @@
 import { NODE_IDS } from "./node-ids";
+import { REQUIRED_FIELDS } from "./validation";
 import type { CanvasNode } from "./canvas/Node";
-import { listCredentials } from "./ipc/credentials";
+import type { Canvas } from "./canvas/Canvas";
+import { listCredentials, getCredentialMetadata } from "./ipc/credentials";
 import { runWorkflow } from "./ipc/workflow";
 import type { NodeDescriptor, WorkflowLogEntry } from "./ipc/workflow";
 import { escapeHtml } from "./utils";
@@ -22,6 +24,7 @@ export function setDescriptorRegistry(nodes: NodeDescriptor[]): void {
 }
 
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
+const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
 
 // ── Small inline handlers (< 50 lines each) ───────────────────────────────────
 
@@ -130,32 +133,68 @@ let _activePopover: HTMLElement | null = null;
 // Unique ID per popover instance — prevents old onOutside handlers from
 // closing a newly-opened popover when rapidly switching between nodes.
 let _activePopoverId = 0;
+// Node the currently-open popover belongs to — used on close to flag
+// missing required fields (UX-7). Cleared whenever the popover closes.
+let _activePopoverNode: CanvasNode | null = null;
+// Element focused before popover opened — restored on close (N-11)
+let _previousFocus: HTMLElement | null = null;
 
-export function closePopover(): void {
-  if (_activePopover) {
-    _activePopoverId++;           // invalidate any pending onOutside timers
+function _doValidateMissingFields(): void {
+  if (!_activePopoverNode) return;
+  const required = REQUIRED_FIELDS[_activePopoverNode.data.node_type_id] ?? [];
+  _activePopoverNode.missingRequired = required.some((f) => {
+    const v = _activePopoverNode!.data.config[f];
+    return v === undefined || String(v).trim() === "";
+  });
+}
+
+export function closePopover(animated = true): void {
+  if (!_activePopover) return;
+  _activePopoverId++;   // invalidate any pending onOutside timers
+  _doValidateMissingFields();
+  const prev = _previousFocus;
+  _previousFocus = null;
+  closeExpressionPicker();
+
+  if (!animated) {
     _activePopover.remove();
     _activePopover = null;
-    closeExpressionPicker();
+    _activePopoverNode = null;
+    prev?.focus({ preventScroll: true });
+    return;
   }
+
+  // Animate out, then remove
+  const el = _activePopover;
+  _activePopover = null;
+  _activePopoverNode = null;
+  prev?.focus({ preventScroll: true });
+  el.classList.add("popover-out");
+  setTimeout(() => el.remove(), 120);
 }
 
 export async function showPopover(
   node: CanvasNode,
   canvasEl: HTMLCanvasElement,
   onChangeFn: () => void,
+  canvas: Canvas,
 ): Promise<void> {
   // Close any existing popover immediately (no animation — prevents race conditions)
-  closePopover();
+  closePopover(false);
+  _previousFocus = document.activeElement as HTMLElement | null;
 
   const myId = ++_activePopoverId; // snapshot this popover's ID
 
   // Wrap the caller's onChange so dynamic-port nodes re-derive their port list
   // whenever any config field changes, keeping the canvas port layout in sync.
+  // A rebuild can shrink the port set (e.g. adding the first subfolder replaces
+  // the flat-mode "input" port) — prune any connector left pointing at a port
+  // that no longer exists.
   const onChange = () => {
     if (node.data.dynamic_ports) {
       node.derivePorts(node.data.config as Record<string, unknown>);
       node.rebuildPorts();
+      canvas.pruneOrphanedConnectors(node.data.id);
     }
     onChangeFn();
   };
@@ -166,7 +205,7 @@ export async function showPopover(
   if (myId !== _activePopoverId) return;
 
   // Parse schema — fall back to the ALL_NODES descriptor registry if the saved
-  // node has an empty input_schema (happens when loaded from a .flowo file that
+  // node has an empty input_schema (happens when loaded from a .aerini file that
   // was saved before the serializer included the full schema).
   const schema  = node.data.input_schema as Record<string, unknown>;
   let rawProps = (schema?.properties ?? {}) as Record<string, unknown>;
@@ -178,12 +217,47 @@ export async function showPopover(
     }
   }
   const props   = rawProps as Record<string, { type?: string; description?: string; enum?: string[]; minimum?: number; maximum?: number; }>;
+
+  // 3c: pre-fill model/base_url/provider from a saved credential's metadata,
+  // but only into fields that exist on this node and only when currently
+  // blank — never overwrite a value the user already set. For enum fields
+  // (provider), only fill if the metadata value is an actual option for THIS
+  // node's schema, since different node types use incompatible provider
+  // enums (e.g. image_gen's ["dalle3","imagen4"] vs ai_prompt's ["auto","openai",...]).
+  async function autoFillFromCredentialMetadata(credentialId: string): Promise<void> {
+    const meta = await getCredentialMetadata(credentialId).catch(() => null);
+    if (!meta) return;
+    const config = node.data.config as Record<string, unknown>;
+    let changed = false;
+
+    if (meta.model && props["model"]) {
+      if (!String(config["model"] ?? "").trim()) { config["model"] = meta.model; changed = true; }
+    }
+    if (meta.base_url && props["base_url"]) {
+      if (!String(config["base_url"] ?? "").trim()) { config["base_url"] = meta.base_url; changed = true; }
+    }
+    const providerEnum = props["provider"]?.enum;
+    if (meta.provider && providerEnum?.includes(meta.provider)) {
+      const curProvider = String(config["provider"] ?? "");
+      // providerEnum[0] is the value the field auto-defaults to on first
+      // render (see the enum field branch below) — treat that as "untouched".
+      if (!curProvider.trim() || curProvider === providerEnum[0]) {
+        config["provider"] = meta.provider; changed = true;
+      }
+    }
+
+    if (myId !== _activePopoverId) return; // popover closed/reopened while awaiting
+    if (changed) { onChange(); showPopover(node, canvasEl, onChangeFn, canvas); }
+  }
   // Keys managed by custom UI blocks — excluded from generic field rendering.
   const CUSTOM_UI_KEYS = new Set(["subfolders", "sources", "files", "folder_path", "overwrite"]);
   const cfgKeys = Object.entries(props).filter(([k]) => !CREDENTIAL_KEYS.has(k) && !CUSTOM_UI_KEYS.has(k));
 
   const pop = document.createElement("div");
   pop.className = "node-popover"; pop.id = "node-popover";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-modal", "true");
+  pop.setAttribute("aria-labelledby", "popover-title-label");
 
   // Header — name + node type subtitle
   const header = document.createElement("div");
@@ -191,6 +265,7 @@ export async function showPopover(
   const headerText = document.createElement("div");
   headerText.className = "popover-header-text";
   const titleEl = document.createElement("div");
+  titleEl.id = "popover-title-label";
   titleEl.className = "popover-title"; titleEl.textContent = node.data.name;
   const subtitleEl = document.createElement("div");
   subtitleEl.className = "popover-subtitle"; subtitleEl.textContent = node.data.node_type_id.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
@@ -253,7 +328,7 @@ export async function showPopover(
   const ext = NODE_CONFIG_EXTENSIONS[node.data.node_type_id];
   const ctx: ExtensionContext = {
     node, body, canvasEl, onChange, creds,
-    rerender: () => showPopover(node, canvasEl, onChangeFn),
+    rerender: () => showPopover(node, canvasEl, onChangeFn, canvas),
   };
 
   // Config fields
@@ -262,9 +337,17 @@ export async function showPopover(
     ext?.beforeFields?.(ctx);
 
     if (!ext?.replaceGenericFields) {
+      const requiredKeys = REQUIRED_FIELDS[node.data.node_type_id] ?? [];
       for (const [key, prop] of cfgKeys) {
         const cur = String(node.data.config[key] ?? "");
-        body.appendChild(mkField(formatLabel(key), () => {
+        const isRequired = requiredKeys.includes(key);
+        let fieldEl: HTMLElement;
+        const syncRequired = () => {
+          if (!isRequired) return;
+          const v = node.data.config[key];
+          fieldEl.classList.toggle("field-required-empty", v === undefined || String(v).trim() === "");
+        };
+        fieldEl = mkField(formatLabel(key), () => {
           // Cron expression — show preset picker above the input.
           if (key === "cron_expr") {
             const wrap = document.createElement("div");
@@ -284,14 +367,14 @@ export async function showPopover(
               btn.addEventListener("click", () => {
                 inp.value = p.value;
                 node.data.config[key] = p.value;
-                onChange();
+                onChange(); syncRequired();
               });
               presetsRow.appendChild(btn);
             });
 
             inp.value = cur;
             inp.placeholder = "e.g. 0 9 * * 1-5";
-            inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); });
+            inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); syncRequired(); });
 
             const hint = document.createElement("div");
             hint.className = "cron-hint";
@@ -304,7 +387,9 @@ export async function showPopover(
           }
 
           if (prop.enum) {
-            return mkCustomSelect(prop.enum, cur, (v) => { node.data.config[key] = v; onChange(); });
+            const effective = cur || prop.enum[0] || "";
+            if (!cur && effective) node.data.config[key] = effective;
+            return mkCustomSelect(prop.enum, effective, (v) => { node.data.config[key] = v; onChange(); syncRequired(); });
           }
 
           const isMultiline = ["body","command","prompt","system","condition",
@@ -318,14 +403,14 @@ export async function showPopover(
             ta.rows = key === "code" ? 12 : 3;
             ta.placeholder = prop.description ?? "";
             if (key === "code") ta.className = "code-editor";
-            ta.addEventListener("input", () => { node.data.config[key] = ta.value; onChange(); });
+            ta.addEventListener("input", () => { node.data.config[key] = ta.value; onChange(); syncRequired(); });
             ta.addEventListener("keydown", (e) => {
               if (e.key === "Tab") {
                 e.preventDefault();
                 const s = ta.selectionStart, en = ta.selectionEnd;
                 ta.value = ta.value.slice(0, s) + "  " + ta.value.slice(en);
                 ta.selectionStart = ta.selectionEnd = s + 2;
-                node.data.config[key] = ta.value; onChange();
+                node.data.config[key] = ta.value; onChange(); syncRequired();
               }
             });
             wrap.appendChild(ta);
@@ -345,7 +430,7 @@ export async function showPopover(
             } else {
               const hint = document.createElement("div");
               hint.className = "field-interp-hint";
-              hint.title = "Type {{ to insert data from another node\nExample: {{node_id.output}}";
+              hint.title = "Type {{ to insert data from another node\nExample: {{HTTP Request.output.body}}";
               hint.textContent = "{{ }}";
               wrap.appendChild(hint);
             }
@@ -363,7 +448,7 @@ export async function showPopover(
                   const reader = new FileReader();
                   reader.onload = () => {
                     ta.value = String(reader.result ?? "");
-                    node.data.config[key] = ta.value; onChange();
+                    node.data.config[key] = ta.value; onChange(); syncRequired();
                   };
                   reader.readAsText(file);
                 });
@@ -393,15 +478,16 @@ export async function showPopover(
               } else {
                 node.data.config[key] = v;
               }
-              onChange();
+              onChange(); syncRequired();
             });
             return inp;
           }
 
           const inp = mk<HTMLInputElement>("input");
-          inp.type = "text"; inp.value = cur; inp.placeholder = prop.description ?? "";
+          inp.type = "text"; inp.value = cur;
+          inp.placeholder = prop.description ? prop.description + " · {{ for data" : "Value or {{ for data";
           inp.autocomplete = "off"; inp.spellcheck = false;
-          inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); });
+          inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); syncRequired(); });
 
           // Only add the expression button for string-typed fields.
           // Number and enum fields don't accept {{}} expressions.
@@ -422,7 +508,9 @@ export async function showPopover(
             return wrap;
           }
           return inp;
-        }, prop.description));
+        }, prop.description, isRequired);
+        if (isRequired && (!cur || cur.trim() === "")) fieldEl.classList.add("field-required-empty");
+        body.appendChild(fieldEl);
       }
     }
   }
@@ -446,13 +534,17 @@ export async function showPopover(
     hint.className = "config-hint";
     hint.textContent = "Select a saved credential to attach to this node.";
     body.appendChild(hint);
-    body.appendChild(mkField("Use Connection", () => {
+    body.appendChild(mkField("Use Saved Credential", () => {
       const options = [{ value: "", label: "— none —" }, ...creds.map(c => ({ value: c.id, label: c.name }))];
       const cur = node.data.credentials[credKey] ?? "";
       return mkCustomSelect(options.map(o => o.label), options.find(o => o.value === cur)?.label ?? "— none —", (label) => {
         const opt = options.find(o => o.label === label);
-        if (opt?.value) node.data.credentials[credKey] = opt.value;
-        else delete node.data.credentials[credKey];
+        if (opt?.value) {
+          node.data.credentials[credKey] = opt.value;
+          void autoFillFromCredentialMetadata(opt.value);
+        } else {
+          delete node.data.credentials[credKey];
+        }
         onChange();
       });
     }));
@@ -461,6 +553,31 @@ export async function showPopover(
       warn.className = "config-hint config-hint-warn";
       warn.textContent = "No credentials saved. Click Credentials in the toolbar.";
       body.appendChild(warn);
+    }
+
+    // One-off inline key: AI nodes read api_key straight from config if no
+    // credential is selected, so this needs no backend support — see
+    // executor build_input(), which only overwrites resolved_input["api_key"]
+    // when node.credentials actually has an entry for credKey.
+    if (credKey === "api_key" && AI_NODE_IDS.has(node.data.node_type_id)) {
+      const details = document.createElement("details");
+      details.className = "cred-advanced";
+      const summary = document.createElement("summary");
+      summary.className = "cred-advanced-summary";
+      summary.textContent = "Or enter a key directly";
+      details.appendChild(summary);
+      details.appendChild(mkField("API Key (one-off)", () => {
+        const inp = mk<HTMLInputElement>("input");
+        inp.type = "password"; inp.autocomplete = "off";
+        inp.value = String((node.data.config as Record<string, unknown>)["api_key"] ?? "");
+        inp.placeholder = "sk-…";
+        inp.addEventListener("input", () => {
+          (node.data.config as Record<string, unknown>)["api_key"] = inp.value;
+          onChange();
+        });
+        return inp;
+      }, "Saved in this workflow's file, unencrypted. Ignored if a saved credential is selected above."));
+      body.appendChild(details);
     }
   }
 
@@ -482,17 +599,43 @@ export async function showPopover(
   pop.appendChild(body);
   document.body.appendChild(pop);
   _activePopover = pop;
+  _activePopoverNode = node;
 
   positionPopover(pop, node, canvasEl);
+
+  // Move focus to first focusable element inside popover (N-11)
+  const FOCUSABLE = 'input, select, textarea, button, [tabindex]:not([tabindex="-1"])';
+  setTimeout(() => {
+    if (myId !== _activePopoverId) return;
+    const first = pop.querySelector<HTMLElement>(FOCUSABLE);
+    first?.focus({ preventScroll: true });
+  }, 50);
+
+  // Focus trap — keep Tab/Shift+Tab inside popover (N-11)
+  const onFocusTrap = (e: KeyboardEvent) => {
+    if (e.key !== "Tab" || myId !== _activePopoverId) return;
+    const focusable = Array.from(pop.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(el => !el.disabled);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  document.addEventListener("keydown", onFocusTrap, true);
 
   // Close on outside click — only if this popover is still the active one.
   const onOutside = (e: MouseEvent) => {
     if (myId !== _activePopoverId) {
       document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onFocusTrap, true);
       return;
     }
     if (!pop.contains(e.target as Node)) {
       document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onFocusTrap, true);
       closePopover();
     }
   };
@@ -501,6 +644,7 @@ export async function showPopover(
   const onEsc = (e: KeyboardEvent) => {
     if (e.key === "Escape" && myId === _activePopoverId) {
       document.removeEventListener("keydown", onEsc, true);
+      document.removeEventListener("keydown", onFocusTrap, true);
       closePopover();
     }
   };

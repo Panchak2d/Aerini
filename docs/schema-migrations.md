@@ -1,6 +1,6 @@
 # Workflow Schema Migrations
 
-Every workflow file carries a `schema_version` field. When Flowo needs to change the workflow JSON format in a way that would break older files, it increments this version and ships a migration function. Old workflows are upgraded automatically the first time they're loaded by a newer Flowo version.
+Every workflow file carries a `schema_version` field. When Aerini needs to change the workflow JSON format in a way that would break older files, it increments this version and ships a migration function. Old workflows are upgraded automatically the first time they're loaded by a newer Aerini version.
 
 You never run migrations manually.
 
@@ -12,7 +12,7 @@ You never run migrations manually.
 "1.0"
 ```
 
-No migrations exist yet. The framework shipped in Flowo 0.2.x ready for future schema changes.
+No migrations exist yet. The framework shipped in Aerini 0.2.x ready for future schema changes.
 
 ---
 
@@ -34,16 +34,16 @@ The on-disk file is not modified. The migration runs in memory. The updated form
 
 | Scenario | Result |
 |---|---|
-| Load v1.0 workflow in v1.0 Flowo | OK — no migration needed |
-| Load v1.0 workflow in v1.1 Flowo | OK — migration applied in memory |
-| Load v1.1 workflow in v1.0 Flowo | Error — no downgrade path exists |
+| Load v1.0 workflow in v1.0 Aerini | OK — no migration needed |
+| Load v1.0 workflow in v1.1 Aerini | OK — migration applied in memory |
+| Load v1.1 workflow in v1.0 Aerini | Error — no downgrade path exists |
 | Load workflow with missing `schema_version` | OK — treated as v1.0 |
 
-If a workflow carries a `schema_version` this build of Flowo doesn't recognize (because it was created by a newer version), loading fails with:
+If a workflow carries a `schema_version` this build of Aerini doesn't recognize (because it was created by a newer version), loading fails with:
 
 ```
 Schema migration error: no migration path from schema_version '1.2' to '1.0'.
-This workflow was created by a newer version of Flowo. Upgrade Flowo to load it.
+This workflow was created by a newer version of Aerini. Upgrade Aerini to load it.
 ```
 
 This is intentional. Silently loading a newer format in an older build risks data corruption.
@@ -56,7 +56,7 @@ When a pull request changes the workflow JSON format in a breaking way, follow t
 
 ### Step 1 — Increment `CURRENT_VERSION`
 
-In `flowo-engine/src/migration.rs`:
+In `aerini-engine/src/migration.rs`:
 
 ```rust
 pub const CURRENT_VERSION: &str = "1.1";  // was "1.0"
@@ -133,13 +133,13 @@ New workflows created after the release will carry the new version. Existing wor
 
 ## Backup guidance
 
-Because migrations run in memory and write to disk only on save, your existing database isn't automatically modified. However, once you open a workflow in a newer Flowo version and save it, the file carries the new `schema_version` — an older Flowo build can no longer open it.
+Because migrations run in memory and write to disk only on save, your existing database isn't automatically modified. However, once you open a workflow in a newer Aerini version and save it, the file carries the new `schema_version` — an older Aerini build can no longer open it.
 
-Before upgrading Flowo in any production setup, back up:
+Before upgrading Aerini in any production setup, back up:
 
-- **Desktop (Linux):** `~/.local/share/com.flowo.app/workflows.db`
-- **Desktop (macOS):** `~/Library/Application Support/com.flowo.app/workflows.db`
-- **Server:** the `--data-dir` directory (default: `~/.flowo-server/`)
-- Any exported `.flowo` files you care about
+- **Desktop (Linux):** `~/.local/share/com.aerini.app/workflows.db`
+- **Desktop (macOS):** `~/Library/Application Support/com.aerini.app/workflows.db`
+- **Server:** the `--data-dir` directory (default: `~/.aerini-server/`)
+- Any exported `.aerini` files you care about
 
-This matters especially if you run both a desktop instance and a server on different Flowo versions.
+This matters especially if you run both a desktop instance and a server on different Aerini versions.

@@ -96,7 +96,7 @@ Listens for an incoming HTTP request and triggers the workflow when one arrives.
 | `port` | number | Port to listen on. Default `3456`. Must be ≥ 1024. |
 | `path` | string | URL path. Default `/webhook`. |
 | `method` | string | `GET`, `POST`, `PUT`, or `ANY`. |
-| `secret` | string | Optional. If set, incoming requests must include an `X-Flowo-Secret` header with this value. Comparison is timing-safe. |
+| `secret` | string | Optional. If set, incoming requests must include an `X-Aerini-Secret` header with this value. Comparison is timing-safe. |
 | `timeout_secs` | number | How long to wait for a request before timing out. Default `60`. |
 
 Output: `{ body: any, headers: object, method: string, path: string }`
@@ -410,7 +410,7 @@ Output: `{ files: array, count: number, source: "dalle3"|"imagen4" }`
 
 Each file object: `{ filename: string, data: string (base64), mime_type: "image/png" }`
 
-**DALL-E 3 note:** DALL-E 3's API only generates one image per request. When `n > 1`, Flowo makes `n` sequential API calls. If one call fails, the node returns partial results — the successfully generated images are included in the output with a warning in the Logs tab. This means `n = 4` costs 4x the API credits and takes roughly 4x the time.
+**DALL-E 3 note:** DALL-E 3's API only generates one image per request. When `n > 1`, Aerini makes `n` sequential API calls. If one call fails, the node returns partial results — the successfully generated images are included in the output with a warning in the Logs tab. This means `n = 4` costs 4x the API credits and takes roughly 4x the time.
 
 **Imagen 4 note:** Imagen 4 supports up to 4 images in a single API call. Set `n` between 1 and 4.
 
@@ -438,7 +438,7 @@ Makes an HTTP request to any URL and returns the response.
 
 Output: `{ status: number, headers: object, body: any }`
 
-URLs pointing to private IP ranges (10.x.x.x, 172.16.x.x, 192.168.x.x, 127.x.x.x, etc.) and cloud metadata endpoints (169.254.169.254) are blocked to prevent SSRF attacks. Redirects are disabled — if a URL returns a 3xx response, you receive it directly rather than Flowo following it. Response body is capped at 10 MB.
+URLs pointing to private IP ranges (10.x.x.x, 172.16.x.x, 192.168.x.x, 127.x.x.x, etc.) and cloud metadata endpoints (169.254.169.254) are blocked to prevent SSRF attacks. Redirects are disabled — if a URL returns a 3xx response, you receive it directly rather than Aerini following it. Response body is capped at 10 MB.
 
 ### Shell Command
 
@@ -467,7 +467,7 @@ Sensitive values in the logged command (passwords, API keys) are automatically r
 
 Runs a JavaScript snippet using the system `node` binary. Useful for data transformation that expressions can't handle.
 
-> **Requires Node.js 18+** on your PATH. Only needed if you use this node — not a global prerequisite for Flowo.
+> **Requires Node.js 18+** on your PATH. Only needed if you use this node — not a global prerequisite for Aerini.
 > If Node.js is not found when this node runs, you will see a clear error message.
 > Install from [nodejs.org](https://nodejs.org).
 
@@ -559,7 +559,7 @@ Read limit: 50 MB. Path traversal sequences (`..`) are rejected. In the desktop 
 
 `type_id: notification`
 
-Shows an OS desktop notification on the machine running Flowo.
+Shows an OS desktop notification on the machine running Aerini.
 
 | Parameter | Type | Notes |
 |---|---|---|
@@ -628,7 +628,7 @@ Each entry in `uploaded`: `{ filename: string, platform_id: string, url: string 
 
 Each entry in `errors`: `{ filename: string, code: string, message: string, explanation: string, action: string }` — the `explanation` and `action` fields describe exactly what went wrong and what to do about it.
 
-**OAuth flow:** on the first run, Flowo opens a browser window and prompts you to authorize the app. OAuth tokens are stored in the OS keychain and refreshed automatically. The OAuth redirect listener uses port `42069` (localhost). Subsequent runs use the stored token without prompting.
+**OAuth flow:** on the first run, Aerini opens a browser window and prompts you to authorize the app. OAuth tokens are stored in the OS keychain and refreshed automatically. The OAuth redirect listener uses port `42069` (localhost). Subsequent runs use the stored token without prompting.
 
 **Platform-specific details:**
 
@@ -675,7 +675,7 @@ SELECT * FROM users WHERE id = ?
 SELECT * FROM users WHERE id = '{{trigger.output.body.id}}'
 ```
 
-If Flowo detects single-quoted values in the query string, a warning is added to the Logs tab.
+If Aerini detects single-quoted values in the query string, a warning is added to the Logs tab.
 
 #### PostgreSQL / MySQL
 
@@ -684,7 +684,7 @@ If Flowo detects single-quoted values in the query string, a warning is added to
 | `db_type` | string | `postgres` or `mysql` |
 | `connection_url` | string | **required.** Full connection URL including credentials. Use a Credential. |
 | `operation` | string | `query` or `execute`. Default `query`. |
-| `query` | string | **required.** SQL. Use `?` placeholders. |
+| `query` | string | **required.** SQL. Use `?` placeholders. Aerini automatically rewrites `?` to PostgreSQL's native `$1, $2, ...` syntax — you do not need to use `$N` yourself. |
 | `params` | string | JSON array of positional parameters. |
 
 Connection URLs:
@@ -1005,6 +1005,6 @@ If the value is a media contract (files array with `filename`, `data`, and `mime
 
 ## Running a single node
 
-Right-click any node on the canvas and choose **Run from here**. Flowo builds a subgraph containing that node and all its upstream dependencies, then runs only that portion. Downstream nodes are not touched.
+Right-click any node on the canvas and choose **Run from here**. Aerini builds a subgraph containing that node and all its upstream dependencies, then runs only that portion. Downstream nodes are not touched.
 
 This is the fastest way to test a single node's configuration without triggering downstream side effects like sending emails or posting to Slack.

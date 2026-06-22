@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flowo_engine::scheduler::{ScheduledJobRow, SchedulerDaemon};
+use aerini_engine::scheduler::{ScheduledJobRow, SchedulerDaemon};
 
 #[tauri::command]
 pub async fn start_scheduled_workflow(
