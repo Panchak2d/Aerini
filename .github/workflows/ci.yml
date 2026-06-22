@@ -23,8 +23,15 @@ jobs:
         with:
           components: clippy
 
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - name: Install Linux system dependencies
-        run: sudo apt-get update -q && sudo apt-get install -y libdbus-1-dev
+        run: sudo apt-get update -q && sudo apt-get install -y libdbus-1-dev mold
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -40,12 +47,18 @@ jobs:
       # Build and smoke-test locally with: npm run build
       - name: Build
         run: cargo build -p aerini-engine -p aerini-server --locked
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Test
         run: cargo test -p aerini-engine --locked
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Clippy
         run: cargo clippy -p aerini-engine -p aerini-server --locked -- -D warnings
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   node-checks:
     name: Node.js dependency audit and dist staleness
