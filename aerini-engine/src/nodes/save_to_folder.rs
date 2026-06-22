@@ -174,10 +174,13 @@ async fn flat_mode(
     }
 
     if files.is_empty() {
-        return NodeOutput::success_with_logs(
-            json!({ "saved": [], "count": 0, "folder": folder_path, "skipped": 0, "errors": [] }),
-            vec!["Flat mode: files field is empty or unresolved".to_string()],
-        );
+        return NodeOutput::success(json!({
+            "saved":   [],
+            "count":   0,
+            "folder":  folder_path,
+            "skipped": 0,
+            "errors":  [{ "filename": "<no input>", "reason": "No files were saved — upstream produced no file output" }]
+        }));
     }
 
     let base = PathBuf::from(folder_path);
@@ -223,17 +226,19 @@ async fn subfolder_mode(
         let parsed = parse_source_expr(source_expr);
         let files  = extract_files_array(&parsed);
 
-        if files.is_empty() {
-            logs.push(format!("Subfolder '{}': resolved to 0 files — skipped", sf_name));
-            continue;
-        }
-
+        // Create directory before the files.is_empty() guard so that configured
+        // subfolders always exist on disk even when upstream produces no output.
         let target_dir = PathBuf::from(folder_path).join(&sf_name);
         if let Err(e) = fs::create_dir_all(&target_dir).await {
             all_results.push(Err(json!({
                 "filename": format!("<{}/...>", sf_name),
                 "reason": format!("Could not create directory: {}", e)
             })));
+            continue;
+        }
+
+        if files.is_empty() {
+            logs.push(format!("Subfolder '{}': resolved to 0 files — skipped", sf_name));
             continue;
         }
 
@@ -244,11 +249,19 @@ async fn subfolder_mode(
 
     let (ok, errors): (Vec<_>, Vec<_>) = all_results.into_iter().partition(|r| r.is_ok());
     let ok: Vec<Value>     = ok.into_iter().filter_map(|r| r.ok()).collect();
-    let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
+    let mut errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
     let (skipped_files, saved): (Vec<Value>, Vec<Value>) =
         ok.into_iter().partition(|v| v["skipped"].as_bool().unwrap_or(false));
     let count         = saved.len();
     let skipped_count = skipped_files.len();
+
+    // Surface zero-output explicitly — prevents a green checkmark when nothing was written.
+    if count == 0 && errors.is_empty() && skipped_count == 0 {
+        errors.push(json!({
+            "filename": "<no input>",
+            "reason": "No files were saved — upstream produced no file output"
+        }));
+    }
 
     NodeOutput::success_with_logs(
         json!({ "saved": saved, "count": count, "folder": folder_path, "skipped": skipped_count, "errors": errors }),

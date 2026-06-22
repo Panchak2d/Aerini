@@ -241,7 +241,11 @@ fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
 }
 
 fn credential_id_to_env_var(id: &str) -> String {
-    format!("AERINI_CRED_{}", id.to_uppercase().replace(['-', '.'], "_"))
+    let cleaned: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect();
+    format!("AERINI_CRED_{}", cleaned)
 }
 
 /// Scans the full serialized workflow JSON for `$vars.<name>` references and

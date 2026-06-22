@@ -427,6 +427,11 @@ function renderCodeOutput(out: unknown, name: string): string {
   return html;
 }
 
+// Only http(s) URLs may be used as link targets — blocks javascript:, data:, etc.
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
 function renderSocialUploadOutput(out: unknown, name: string): string {
   const obj      = (out ?? {}) as Record<string, unknown>;
   const platform = (obj.platform as string | undefined) ?? "unknown";
@@ -444,7 +449,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
          ${uploaded.map(u => `
            <div class="soc-upload-item">
              <span class="soc-upload-filename">${escapeHtml(String(u.filename ?? ""))}</span>
-             ${u.url ? `<a class="soc-upload-link" href="${escapeHtml(String(u.url))}" target="_blank" rel="noopener noreferrer">View ↗</a>` : ""}
+             ${u.url && isHttpUrl(String(u.url)) ? `<a class="soc-upload-link" href="${escapeHtml(String(u.url))}" target="_blank" rel="noopener noreferrer">View ↗</a>` : ""}
            </div>`).join("")}
        </div>`
     : "";

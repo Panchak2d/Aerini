@@ -146,7 +146,7 @@
 .settings-toggle:checked { background: var(--accent); border-color: var(--accent); }
 .settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .settings-toggle:checked::after { transform: translateX(16px); }
-.settings-number-input { width: 52px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; flex-shrink: 0; }
+.settings-number-input { flex: 0 0 52px; width: 52px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; }
 .settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); }
 .settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; }
 .settings-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }

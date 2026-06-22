@@ -265,7 +265,7 @@ function renderPaletteResults(q: string): void {
     : _allNodes;
 
   if (!paletteFiltered.length) {
-    resultsEl.innerHTML = `<div class="palette-empty">No nodes match "${q}"</div>`;
+    resultsEl.innerHTML = `<div class="palette-empty">No nodes match "${escapeHtml(q)}"</div>`;
     return;
   }
 
