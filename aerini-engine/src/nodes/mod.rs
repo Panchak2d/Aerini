@@ -34,6 +34,7 @@ pub mod stripe;
 pub mod switch;
 pub mod telegram;
 pub mod text_splitter;
+pub mod text_to_file;
 pub mod transform;
 pub mod variables;
 pub mod wait_node;
@@ -118,6 +119,7 @@ pub fn register_builtins(
     registry.register(Arc::new(stripe::StripeNode));
 
     // Data / utility
+    registry.register(Arc::new(text_to_file::TextToFileNode));
     registry.register(Arc::new(transform::TransformNode));
     registry.register(Arc::new(json_node::JsonNode));
     registry.register(Arc::new(variables::SetVariableNode { db: db.clone() }));

@@ -174,13 +174,10 @@ async fn flat_mode(
     }
 
     if files.is_empty() {
-        return NodeOutput::success(json!({
-            "saved":   [],
-            "count":   0,
-            "folder":  folder_path,
-            "skipped": 0,
-            "errors":  [{ "filename": "<no input>", "reason": "No files were saved — upstream produced no file output" }]
-        }));
+        return NodeOutput::failure(NodeError::unrecoverable(
+            "NO_FILES_RECEIVED",
+            "Save to Folder received no files. Connect a Text to File or other file-producing node to its input first.",
+        ));
     }
 
     let base = PathBuf::from(folder_path);
@@ -261,6 +258,14 @@ async fn subfolder_mode(
             "filename": "<no input>",
             "reason": "No files were saved — upstream produced no file output"
         }));
+    }
+
+    if count == 0 && !errors.is_empty() {
+        return NodeOutput::failure(NodeError::unrecoverable(
+            "SAVE_FAILED",
+            format!("Save to Folder: no files were written. First error: {}",
+                errors[0]["reason"].as_str().unwrap_or("unknown")),
+        ));
     }
 
     NodeOutput::success_with_logs(

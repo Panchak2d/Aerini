@@ -66,6 +66,14 @@ once_cell = "1"
 # libc: setrlimit() for Linux resource limits in sandbox mode
 tempfile = "3"
 
+# Text to File node — PDF/DOCX export
+# printpdf 0.9.1: VERIFIED current stable on crates.io (2026-06-24). Pulled in with
+# default features since the exact minimal feature-flag set for the builtin-font-only
+# text path used here was not independently verified — see patch notes (UNCERTAIN).
+# docx-rs 0.4.20: VERIFIED current stable on crates.io (2026-06-24).
+printpdf = "0.9.1"
+docx-rs  = "0.4.20"
+
 # Webhook node: RAII port-deregistration guard on all exit paths
 scopeguard = "1"
 [target.'cfg(target_os = "linux")'.dependencies]

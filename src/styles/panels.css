@@ -661,7 +661,8 @@
   cursor: pointer;
   transition: background 80ms, color 80ms, border-color 80ms;
 }
-.cron-preset-btn:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
+.cron-preset-btn:hover  { background: var(--blue); color: #fff; border-color: var(--blue); }
+.cron-preset-btn.active { background: rgba(77,158,255,.12); color: var(--blue); border-color: rgba(77,158,255,.4); }
 
 .cron-hint {
   font-size: 10px;
@@ -872,9 +873,9 @@
   text-align: left;
   transition: border-color 100ms, box-shadow 100ms;
 }
-.csel-trigger:hover  { border-color: var(--t3); }
-.csel-trigger:focus  { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
-.csel-trigger.open   { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
+.csel-trigger:hover         { border-color: var(--t3); }
+.csel-trigger:focus-visible { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
+.csel-trigger.open          { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
 
 .csel-label {
   flex: 1;
@@ -915,8 +916,9 @@
   cursor: pointer;
   transition: background var(--trans);
 }
-.csel-option:hover    { background: var(--bg4); }
-.csel-option.selected { color: var(--blue); background: rgba(77,158,255,.08); }
+.csel-option:hover                    { background: var(--bg4); }
+.csel-option.selected,
+.csel-option[aria-selected="true"]    { color: var(--blue); background: rgba(77,158,255,.08); }
 
 .node-popover { user-select: none; -webkit-user-select: none; }
 .node-popover input,
@@ -1457,16 +1459,20 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   background: none;
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--t3);
-  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   transition: color var(--trans), background var(--trans), border-color var(--trans);
+}
+.subfolder-del-btn:focus-visible {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(77,158,255,.15);
 }
 .subfolder-del-btn:hover {
   color: var(--red);

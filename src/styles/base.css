@@ -37,6 +37,10 @@ input:-webkit-autofill:active {
 input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
 textarea { resize: vertical; min-height: 62px; }
 
+/* datetime-local colour scheme must be explicitly set or the calendar picker
+   renders with a white background on dark-mode Tauri/WebKit. */
+input[type="datetime-local"] { color-scheme: dark; }
+
 /* [FIX-13] Inline validation warning for interval/number fields */
 .field-hint--warn { color: var(--amber, #f59e0b) !important; font-weight: 500; }
 

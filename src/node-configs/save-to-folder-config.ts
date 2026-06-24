@@ -8,7 +8,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
 
   body.appendChild(mkSection("Folder"));
 
-  // Folder picker row — cannot use mkField because it needs a custom two-column layout.
+  // Folder picker — custom two-column layout; cannot use mkField.
   const folderWrap = document.createElement("div");
   folderWrap.className = "field-group";
   const folderLabel = document.createElement("label");
@@ -18,17 +18,23 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
 
   const folderRow = document.createElement("div");
   folderRow.className = "folder-picker-row";
+  folderRow.setAttribute("role", "group");
+  folderRow.setAttribute("aria-label", "Destination folder");
 
   const folderDisplay = document.createElement("span");
   folderDisplay.className = "folder-picker-path";
   folderDisplay.textContent = (node.data.config["folder_path"] as string) || "Not set";
+  folderDisplay.setAttribute("aria-live", "polite");
 
   const pickBtn = document.createElement("button");
   pickBtn.type = "button";
   pickBtn.className = "folder-pick-btn";
   pickBtn.textContent = "Choose Folder";
+  pickBtn.setAttribute("aria-label", "Choose destination folder");
   pickBtn.addEventListener("click", async () => {
+    pickBtn.disabled = true;
     const path = await invoke<string | null>("pick_folder_dialog").catch(() => null);
+    pickBtn.disabled = false;
     if (path) {
       node.data.config["folder_path"] = path;
       folderDisplay.textContent = path;
@@ -47,7 +53,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
     chk.checked = (node.data.config["overwrite"] as boolean) !== false;
     chk.addEventListener("change", () => { node.data.config["overwrite"] = chk.checked; onChange(); });
     return chk;
-  }));
+  }, "When disabled, files with the same name are kept and the new file is skipped."));
 
   body.appendChild(mkSection("Subfolders"));
 
@@ -72,6 +78,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
       nameInp.placeholder = "Subfolder name";
       nameInp.autocomplete = "off";
       nameInp.spellcheck = false;
+      nameInp.setAttribute("aria-label", `Subfolder ${idx + 1} name`);
       nameInp.addEventListener("input", () => {
         (node.data.config["subfolders"] as SfSlot[])[idx].name = nameInp.value;
         onChange();
@@ -80,8 +87,8 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "subfolder-del-btn";
-      delBtn.textContent = "\u00d7";
-      delBtn.title = "Remove subfolder";
+      delBtn.setAttribute("aria-label", `Remove subfolder ${idx + 1}`);
+      delBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       delBtn.addEventListener("click", () => {
         (node.data.config["subfolders"] as SfSlot[]).splice(idx, 1);
         renderSfList();

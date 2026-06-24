@@ -252,6 +252,7 @@ export class RunManager {
     const drawer  = document.getElementById("output-drawer")!;
     const content = document.getElementById("output-content")!;
     drawer.classList.remove("hidden");
+    document.getElementById("btn-show-output")?.classList.add("hidden");
     // Update canvas padding so it shrinks above the drawer
     const drawerH = drawer.offsetHeight || 260;
     document.documentElement.style.setProperty("--drawer-offset", `${drawerH}px`);

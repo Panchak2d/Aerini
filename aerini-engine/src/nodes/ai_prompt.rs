@@ -47,7 +47,7 @@ impl Node for AiPromptNode {
                 "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Note: localhost/loopback addresses are blocked in server mode." },
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },
                 "temperature":    { "type": "number",  "description": "Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7" },
-                "max_tokens":     { "type": "number",  "description": "Maximum response tokens. Default 2048" },
+                "max_tokens":     { "type": "number",  "description": "Maximum response tokens. Default 2048. Higher values allow longer output but increase cost and latency. The ceiling that actually applies is set by the provider/model you select above, not by this node." },
                 "rate_limit_rpm": { "type": "number",  "description": "Max requests per minute. 0 = unlimited" }
             }
         })

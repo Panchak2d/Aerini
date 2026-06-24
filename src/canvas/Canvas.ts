@@ -748,8 +748,10 @@ export class Canvas {
           if (moves.length) this.pushUndo({ type: "move_nodes", moves });
         } else {
           const p = this.draggingNode.data.position;
-          if (p.x !== this.dragFromX || p.y !== this.dragFromY)
+          if (p.x !== this.dragFromX || p.y !== this.dragFromY) {
             this.pushUndo({ type: "move_node", nodeId: this.draggingNode.data.id, from: { x: this.dragFromX, y: this.dragFromY }, to: { ...p } });
+            this.tryWireInsert(this.draggingNode);
+          }
         }
       }
       this._multiDragFrom = null;
@@ -1105,9 +1107,21 @@ export class Canvas {
     this.connectors.set(conn.data.id, conn);
     this.pushUndo({ type: "add_edge", connector: conn });
 
+    // For text_to_file: auto-populate the content field with the upstream expression
+    // so the user does not have to type it manually after connecting.
+    const target = this.nodes.get(nodeId);
+    if (target?.data.node_type_id === "text_to_file") {
+      const fromNode = this.nodes.get(this.pendingConn.fromNode);
+      if (fromNode) {
+        const cfg = target.data.config as Record<string, unknown>;
+        if (!cfg.content) {
+          cfg.content = `{{${fromNode.data.name}.output.content}}`;
+        }
+      }
+    }
+
     // For dynamic-port target nodes: inject source expression into the config
     // slot corresponding to this port, then re-derive ports.
-    const target = this.nodes.get(nodeId);
     if (target?.data.dynamic_ports) {
       const fromNode = this.nodes.get(this.pendingConn.fromNode);
       const expr = `{{${fromNode?.data.name ?? this.pendingConn.fromNode}.output.files}}`;

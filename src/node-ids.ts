@@ -13,6 +13,7 @@ export const NODE_IDS = {
   HTTP_REQUEST:   "http_request",
   EMAIL_SEND:     "email_send",
   // Files
+  TEXT_TO_FILE:   "text_to_file",
   SHELL_EXEC:     "shell_exec",
   CODE:           "code",
   FILE:           "file",

@@ -144,6 +144,17 @@ export function bindToolbar(
     $("output-drawer").classList.add("hidden");
     document.documentElement.style.removeProperty("--drawer-offset");
     canvas.resize();
+    // Show the reopen button so the user can get output back without re-running
+    document.getElementById("btn-show-output")?.classList.remove("hidden");
+  });
+
+  document.getElementById("btn-show-output")?.addEventListener("click", () => {
+    const drawer = $("output-drawer");
+    drawer.classList.remove("hidden");
+    const drawerH = drawer.offsetHeight || 260;
+    document.documentElement.style.setProperty("--drawer-offset", `${drawerH}px`);
+    canvas.resize();
+    document.getElementById("btn-show-output")?.classList.add("hidden");
   });
   $("btn-focus-mode").addEventListener("click", () => canvas.toggleFocusMode());
 

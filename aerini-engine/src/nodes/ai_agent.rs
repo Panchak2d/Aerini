@@ -94,7 +94,7 @@ impl Node for AiAgentNode {
                 },
                 "max_tokens": {
                     "type": "number",
-                    "description": "Maximum tokens per agent response (default: 2048, max: 8192)."
+                    "description": "Maximum tokens per agent response (default: 2048). Higher values allow longer output per cycle but increase cost — total spend scales with max_iterations."
                 },
                 "temperature": {
                     "type": "number",
@@ -112,7 +112,8 @@ impl Node for AiAgentNode {
                 "iterations":    { "type": "number", "description": "Number of reasoning cycles used" },
                 "tool_calls":    { "type": "array",  "description": "List of tools the agent called" },
                 "reasoning":     { "type": "array",  "description": "Step-by-step reasoning trace" },
-                "finished":      { "type": "boolean","description": "True if agent completed goal, false if hit max_iterations" }
+                "finished":      { "type": "boolean","description": "True if agent completed goal cleanly, false if hit max_iterations or response was truncated" },
+                "truncated":     { "type": "boolean","description": "True if the provider cut off the response mid-generation (max_tokens hit). Raise max_tokens to fix." }
             }
         })
     }
@@ -168,7 +169,7 @@ impl Node for AiAgentNode {
         }
 
         let max_iterations = input.input["max_iterations"].as_u64().unwrap_or(5).min(20) as usize;
-        let max_tokens     = input.input["max_tokens"].as_u64().unwrap_or(2048).min(8192);
+        let max_tokens     = input.input["max_tokens"].as_u64().unwrap_or(2048);
         let temperature    = input.input["temperature"].as_f64().unwrap_or(0.3);
 
         let system = input.input["system"].as_str()
@@ -248,15 +249,19 @@ impl Node for AiAgentNode {
                         reasoning_trace.push(format!("[Iteration {}] {}", iterations + 1, content));
                     }
 
+                    let truncated = finish_reason == "length" || finish_reason == "max_tokens";
+
                     if let Some(calls) = assistant_message["tool_calls"].as_array() {
                         if calls.is_empty() || finish_reason == "stop" || iterations >= max_iterations {
+                            let finished = finish_reason == "stop" && !truncated && iterations < max_iterations;
                             return NodeOutput::success_with_logs(
                                 json!({
                                     "result": content,
                                     "iterations": iterations + 1,
                                     "tool_calls": tool_calls_log,
                                     "reasoning": reasoning_trace,
-                                    "finished": true
+                                    "finished": finished,
+                                    "truncated": truncated
                                 }),
                                 vec![format!("Agent completed in {} iteration(s)", iterations + 1)],
                             );
@@ -295,7 +300,8 @@ impl Node for AiAgentNode {
                                 "iterations": iterations + 1,
                                 "tool_calls": tool_calls_log,
                                 "reasoning": reasoning_trace,
-                                "finished": finished
+                                "finished": finished,
+                                "truncated": truncated
                             }),
                             vec![format!("Agent completed in {} iteration(s)", iterations + 1)],
                         );
@@ -314,7 +320,8 @@ impl Node for AiAgentNode {
                 "iterations": max_iterations,
                 "tool_calls": tool_calls_log,
                 "reasoning": reasoning_trace,
-                "finished": false
+                "finished": false,
+                "truncated": false
             }),
             vec![format!("Agent stopped after {} iterations (limit reached)", max_iterations)],
         )
@@ -419,7 +426,8 @@ async fn run_gemini_agent(
                     "iterations": iterations + 1,
                     "tool_calls": tool_calls_log,
                     "reasoning":  reasoning_trace,
-                    "finished":   finish_reason == "STOP"
+                    "finished":   finish_reason == "STOP",
+                    "truncated":  finish_reason == "MAX_TOKENS"
                 }),
                 vec![format!("Gemini agent completed in {} iteration(s)", iterations + 1)],
             );
@@ -466,7 +474,8 @@ async fn run_gemini_agent(
             "iterations": max_iterations,
             "tool_calls": tool_calls_log,
             "reasoning":  reasoning_trace,
-            "finished":   false
+            "finished":   false,
+            "truncated":  false
         }),
         vec![format!("Gemini agent stopped after {} iterations (limit reached)", max_iterations)],
     )

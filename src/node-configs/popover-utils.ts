@@ -42,26 +42,49 @@ export function mkSection(title: string): HTMLElement {
   return d;
 }
 
+let _fieldIdCounter = 0;
+
 export function mkField(label: string, factory: () => HTMLElement, hint?: string, required?: boolean): HTMLElement {
+  const fieldId = `nf-${++_fieldIdCounter}`;
+
   const g = document.createElement("div");
   g.className = "field-group";
+
   const l = document.createElement("label");
   l.className = "field-label";
+  l.htmlFor = fieldId;
   l.textContent = label;
   if (required) {
     const star = document.createElement("span");
     star.className = "req-star";
     star.textContent = " *";
+    star.setAttribute("aria-hidden", "true");
     l.appendChild(star);
+    l.setAttribute("aria-label", `${label} (required)`);
   }
   g.appendChild(l);
-  g.appendChild(factory());
+
+  const control = factory();
+
+  // Connect the label to the first focusable control inside the returned element.
+  // This makes clicking the label focus/activate the input, including checkboxes.
+  const focusable = (control.matches("input,select,textarea")
+    ? control
+    : control.querySelector<HTMLElement>("input,select,textarea"));
+  if (focusable) focusable.id = fieldId;
+
+  g.appendChild(control);
+
   if (hint) {
     const h = document.createElement("div");
     h.className = "field-hint";
+    h.id = `${fieldId}-hint`;
     h.textContent = hint;
+    // Let the input announce the hint via aria-describedby.
+    if (focusable) focusable.setAttribute("aria-describedby", `${fieldId}-hint`);
     g.appendChild(h);
   }
+
   return g;
 }
 
@@ -79,17 +102,26 @@ export const CRON_PRESETS = [
 // (shows all options as a list) rather than as a native popup. This custom
 // implementation avoids that entirely.
 
+let _cselIdCounter = 0;
+
 export function mkCustomSelect(
   options: string[],
   current: string,
   onChange: (value: string) => void,
 ): HTMLElement {
+  const id = `csel-${++_cselIdCounter}`;
+  const listId = `${id}-list`;
+
   const wrap = document.createElement("div");
   wrap.className = "csel-wrap";
 
   const trigger = document.createElement("button");
   trigger.type = "button";
   trigger.className = "csel-trigger";
+  trigger.setAttribute("role", "combobox");
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-controls", listId);
 
   const labelEl = document.createElement("span");
   labelEl.className = "csel-label";
@@ -97,6 +129,7 @@ export function mkCustomSelect(
 
   const arrow = document.createElement("span");
   arrow.className = "csel-arrow";
+  arrow.setAttribute("aria-hidden", "true");
   arrow.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>`;
 
   trigger.appendChild(labelEl);
@@ -105,43 +138,73 @@ export function mkCustomSelect(
 
   const dropdown = document.createElement("div");
   dropdown.className = "csel-dropdown hidden";
+  dropdown.id = listId;
+  dropdown.setAttribute("role", "listbox");
 
-  for (const opt of options) {
+  let activeIdx = options.indexOf(current);
+  if (activeIdx < 0) activeIdx = 0;
+
+  const optionEls: HTMLElement[] = [];
+
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i];
     const item = document.createElement("div");
     item.className = "csel-option";
+    item.id = `${id}-opt-${i}`;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", opt === current ? "true" : "false");
     if (opt === current) item.classList.add("selected");
     item.textContent = opt;
+
     item.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      labelEl.textContent = opt;
-      dropdown.querySelectorAll(".csel-option").forEach(el => el.classList.remove("selected"));
-      item.classList.add("selected");
-      onChange(opt);
+      commitSelection(i);
       closeDropdown();
+      trigger.focus();
     });
+
     dropdown.appendChild(item);
+    optionEls.push(item);
   }
 
   wrap.appendChild(dropdown);
 
   let isOpen = false;
 
+  const commitSelection = (idx: number) => {
+    const opt = options[idx];
+    if (!opt) return;
+    labelEl.textContent = opt;
+    optionEls.forEach((el, i) => {
+      el.classList.toggle("selected", i === idx);
+      el.setAttribute("aria-selected", i === idx ? "true" : "false");
+    });
+    activeIdx = idx;
+    trigger.setAttribute("aria-activedescendant", optionEls[idx].id);
+    onChange(opt);
+  };
+
   const openDropdown = () => {
     if (isOpen) return;
     isOpen = true;
     dropdown.classList.remove("hidden");
     trigger.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+
     const tr = trigger.getBoundingClientRect();
     const dropH = Math.min(options.length * 33 + 8, 200);
     const spaceBelow = window.innerHeight - tr.bottom - 6;
-    if (spaceBelow >= dropH || spaceBelow > tr.top) {
-      dropdown.style.top  = `${tr.bottom + 4}px`;
-    } else {
-      dropdown.style.top  = `${tr.top - dropH - 4}px`;
-    }
+    dropdown.style.top  = (spaceBelow >= dropH || spaceBelow > tr.top)
+      ? `${tr.bottom + 4}px`
+      : `${tr.top - dropH - 4}px`;
     dropdown.style.left  = `${tr.left}px`;
     dropdown.style.width = `${tr.width}px`;
+
+    // Scroll active option into view.
+    optionEls[activeIdx]?.scrollIntoView({ block: "nearest" });
+    trigger.setAttribute("aria-activedescendant", optionEls[activeIdx]?.id ?? "");
+
     const onOutside = (e: MouseEvent) => {
       if (!wrap.contains(e.target as Node)) {
         closeDropdown();
@@ -156,6 +219,8 @@ export function mkCustomSelect(
     isOpen = false;
     dropdown.classList.add("hidden");
     trigger.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.removeAttribute("aria-activedescendant");
   };
 
   trigger.addEventListener("click", (e) => {
@@ -164,19 +229,26 @@ export function mkCustomSelect(
   });
 
   trigger.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); isOpen ? closeDropdown() : openDropdown(); }
-    if (e.key === "Escape") closeDropdown();
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (isOpen) {
+        commitSelection(activeIdx);
+        closeDropdown();
+      } else {
+        openDropdown();
+      }
+    }
+    if (e.key === "Escape") { closeDropdown(); }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (!isOpen) openDropdown();
-      const items = [...dropdown.querySelectorAll<HTMLElement>(".csel-option")];
-      const cur   = dropdown.querySelector<HTMLElement>(".csel-option.selected");
-      const idx   = cur ? items.indexOf(cur) : -1;
-      const next  = e.key === "ArrowDown" ? items[idx + 1] : items[idx - 1];
-      if (next) {
-        next.classList.add("selected");
-        cur?.classList.remove("selected");
-        next.scrollIntoView({ block: "nearest" });
+      if (!isOpen) { openDropdown(); return; }
+      const next = e.key === "ArrowDown"
+        ? Math.min(activeIdx + 1, options.length - 1)
+        : Math.max(activeIdx - 1, 0);
+      if (next !== activeIdx) {
+        // Immediately commit on arrow key — matches native <select> behaviour.
+        commitSelection(next);
+        optionEls[next]?.scrollIntoView({ block: "nearest" });
       }
     }
   });

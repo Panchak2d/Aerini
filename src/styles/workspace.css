@@ -17,6 +17,10 @@
 .btn-toolbar:focus-visible { outline: 2px solid var(--color-action-nav); outline-offset: 2px; }
 .btn-icon-only { padding: 4px 7px; color: var(--color-text-muted); }
 .btn-icon-only:hover { color: var(--color-text-primary); background: var(--bg4); border-color: var(--bd); }
+/* Show-output reopen button — appears in toolbar after drawer is closed */
+.btn-show-output { border-color: var(--bd) !important; color: var(--color-text-primary) !important; animation: pulse-output 2s ease-in-out 3; }
+.btn-show-output:hover { background: var(--bg4) !important; border-color: var(--color-text-muted) !important; }
+@keyframes pulse-output { 0%,100% { box-shadow: none; } 50% { box-shadow: 0 0 0 3px rgba(251,191,36,.25); } }
 
 /* Tier 2 — outlined emphasis (Save, Background) */
 .btn-toolbar-secondary { border-color: var(--bd) !important; color: var(--color-text-primary) !important; }
