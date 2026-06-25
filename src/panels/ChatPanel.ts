@@ -17,6 +17,43 @@ const RESPONSE_TIMEOUT_MS = 30_000;
 
 interface ChatImageFile { filename: string; data: string; mime_type: string; }
 
+/** Outgoing user attachment — same wire shape as ChatImageFile but not image-only (Patch 7). */
+interface ChatAttachment { filename: string; data: string; mime_type: string; }
+
+// Accepted types match Patch 6 (AI Prompt static attachments UI) exactly.
+const CHAT_ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md";
+
+// file.type is unreliable for non-standard extensions (e.g. .md on Windows) — same fallback as Patch 6.
+const CHAT_ATTACHMENT_MIME_MAP: Record<string, string> = {
+  ".png":  "image/png",
+  ".jpg":  "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif":  "image/gif",
+  ".pdf":  "application/pdf",
+  ".txt":  "text/plain",
+  ".md":   "text/markdown",
+};
+
+// Same icon set as Patch 6's attachment chips (popover-config.ts) — no emoji, themeable via currentColor.
+const CHAT_ATTACHMENT_FILE_ICON = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+const CHAT_ATTACHMENT_X_ICON    = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+
+/**
+ * Hard wire-transmissibility ceiling, not a soft "file size" warning. Mirrors
+ * aerini-engine/src/nodes/webhook.rs `MAX_BODY_BYTES` (VERIFIED in source,
+ * 2026-06-25) — the local webhook server rejects any request body over this
+ * many bytes. handleSend()'s fetch() does not check response.ok, so a body
+ * that exceeds this would not error immediately; it would silently fail and
+ * surface 30s later as a misleading "No response after 30s" timeout. This is
+ * therefore enforced as a hard client-side block, not a dismissible warning
+ * (deliberate deviation from Patch 6's pattern — there, oversized attachments
+ * only bloat the saved workflow file and never fail outright).
+ */
+const CHAT_WEBHOOK_BODY_CAP_BYTES = 1_000_000;
+/** Reserve for JSON structure, session_id, and per-file filename/mime_type strings. */
+const CHAT_BODY_JSON_OVERHEAD_BYTES = 2_000;
+
 interface ChatMessage {
   id: string;
   role: "user" | "ai" | "error";
@@ -59,6 +96,8 @@ export class ChatPanel {
   private chatBtn:      HTMLButtonElement | null;
   private attachBtn:    HTMLButtonElement;
   private brandingEl:   HTMLElement | null;
+  /** Container for pending-attachment chips, inserted above .chat-input-row (Patch 7). No matching static markup in index.html — created here, mirroring the existing pattern of programmatic DOM construction elsewhere in this file (session menu, lightbox). */
+  private pendingAttachmentsEl: HTMLElement;
 
   private canvas:    Canvas;
   private wfManager: WorkflowManager;
@@ -77,6 +116,10 @@ export class ChatPanel {
   private replyPending   = false;
   private pendingTimer:  ReturnType<typeof setTimeout> | null = null;
   private lastSentText   = "";
+  /** Files attached to the next outgoing message, not yet sent (Patch 7). */
+  private pendingAttachments:  ChatAttachment[] = [];
+  /** Snapshot of what was actually sent, for the error-bubble Retry button. */
+  private lastSentAttachments: ChatAttachment[] = [];
 
   constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast) {
     this.canvas    = canvas;
@@ -94,6 +137,16 @@ export class ChatPanel {
     this.chatBtn      = document.getElementById("btn-chat") as HTMLButtonElement | null;
     this.attachBtn    = document.getElementById("chat-attach-btn") as HTMLButtonElement;
     this.brandingEl   = document.getElementById("chat-branding-footer");
+
+    // No static markup for this in index.html (Patch 7) — built and inserted here,
+    // same approach as the existing session-menu/lightbox elements in this file.
+    this.pendingAttachmentsEl = document.createElement("div");
+    this.pendingAttachmentsEl.className = "chat-pending-attachments";
+    this.pendingAttachmentsEl.style.display = "none";
+    const inputRow = this.el.querySelector(".chat-input-row");
+    if (inputRow && inputRow.parentElement) {
+      inputRow.parentElement.insertBefore(this.pendingAttachmentsEl, inputRow);
+    }
 
     this.bindStaticEvents();
 
@@ -146,10 +199,7 @@ export class ChatPanel {
   /**
    * Reads workflow-scoped Chat settings (called on every panel open — see show()).
    *
-   * Scope note: `allow_attachments` only toggles the paperclip button's
-   * visibility — there is no attach-and-send flow wired up yet (the paperclip
-   * stays non-functional either way; that's a separate feature, not part of
-   * Patch 5B). `session_persistence` is read and serialized correctly but not
+   * Scope note: `session_persistence` is read and serialized correctly but not
    * yet enforced here — persist()/loadStoreForCurrentWorkflow() always use
    * localStorage regardless of this toggle. Enforcing it requires changing
    * show()'s per-open reload pattern, which is out of this patch's listed
@@ -161,6 +211,13 @@ export class ChatPanel {
 
     this.attachBtn.style.display = settings.allow_attachments ? "" : "none";
     this.attachBtn.disabled      = !settings.allow_attachments;
+    // Settings can be toggled off while attachments are already queued (e.g. user
+    // opens Workflow Settings without closing Chat). Drop them rather than leaving
+    // an invisible queue that still gets sent on the next message.
+    if (!settings.allow_attachments && this.pendingAttachments.length > 0) {
+      this.pendingAttachments = [];
+      this.renderPendingAttachments();
+    }
 
     this.brandingEl?.classList.toggle("hidden", !settings.show_branding);
 
@@ -169,6 +226,124 @@ export class ChatPanel {
       this.inputEl.value = this.inputEl.value.slice(0, settings.max_message_length);
       this.autosizeInput();
     }
+  }
+
+  // ── Attachments (Patch 7) ────────────────────────────────────────────────
+
+  /**
+   * Remaining bytes available for attachment payload on the *next* send, after
+   * reserving room for the current message-length limit and JSON overhead.
+   * See CHAT_WEBHOOK_BODY_CAP_BYTES for why this is a hard cap, not a warning.
+   * `* 3` is a worst-case bytes-per-char estimate (covers non-ASCII text);
+   * actual usage is normally far lower for ASCII-heavy messages.
+   */
+  private attachmentBudgetBytes(): number {
+    const textReserve = this.chatSettings.max_message_length * 3;
+    return Math.max(0, CHAT_WEBHOOK_BODY_CAP_BYTES - textReserve - CHAT_BODY_JSON_OVERHEAD_BYTES);
+  }
+
+  private pendingAttachmentBytes(): number {
+    // Base64 chars map 1:1 to wire bytes (the base64 alphabet needs no JSON escaping).
+    return this.pendingAttachments.reduce((sum, a) => sum + a.data.length, 0);
+  }
+
+  private handleAttachClick(): void {
+    if (this.attachBtn.disabled) return;
+
+    const fileInput = document.createElement("input");
+    fileInput.type   = "file";
+    fileInput.accept = CHAT_ATTACHMENT_ACCEPT;
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+
+      const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+      const fallbackMime = CHAT_ATTACHMENT_MIME_MAP[ext];
+      if (!fallbackMime) {
+        this.toast(`"${file.name}" is not a supported attachment type.`, "error");
+        return;
+      }
+
+      // Estimate post-base64 size from raw bytes (base64 ≈ raw × 4/3) before reading
+      // the file at all — avoids a wasted read for a file that can't be sent anyway.
+      const estBytes = Math.ceil(file.size / 3) * 4;
+      const budget    = this.attachmentBudgetBytes();
+      const remaining = budget - this.pendingAttachmentBytes();
+      if (estBytes > remaining) {
+        this.toast(
+          `"${file.name}" is too large to attach (about ${Math.max(0, Math.floor(remaining / 1024))} KB left).`,
+          "error",
+        );
+        return;
+      }
+
+      this.attachBtn.disabled = true;
+      const reader = new FileReader();
+
+      reader.onerror = () => {
+        this.attachBtn.disabled = !this.chatSettings.allow_attachments;
+        this.toast(`Could not read "${file.name}".`, "error");
+      };
+
+      reader.onload = () => {
+        this.attachBtn.disabled = !this.chatSettings.allow_attachments;
+
+        // Guard: FileReader.result is typed string | ArrayBuffer | null; must be string here.
+        const raw = reader.result;
+        if (typeof raw !== "string") return;
+
+        // Slice after the first comma — correct way to strip "data:<mime>;base64,".
+        const b64      = raw.slice(raw.indexOf(",") + 1);
+        const mimeType = file.type || fallbackMime;
+
+        this.pendingAttachments.push({ filename: file.name, data: b64, mime_type: mimeType });
+        this.renderPendingAttachments();
+      };
+
+      reader.readAsDataURL(file);
+    });
+    fileInput.click();
+  }
+
+  private renderPendingAttachments(): void {
+    this.pendingAttachmentsEl.innerHTML = "";
+
+    if (this.pendingAttachments.length === 0) {
+      this.pendingAttachmentsEl.style.display = "none";
+      return;
+    }
+    this.pendingAttachmentsEl.style.display = "";
+
+    for (let i = 0; i < this.pendingAttachments.length; i++) {
+      const att = this.pendingAttachments[i];
+
+      const chip = document.createElement("div");
+      chip.className = "chat-attachment-chip";
+
+      const lbl = document.createElement("span");
+      lbl.className = "chat-attachment-chip-label";
+      lbl.innerHTML = CHAT_ATTACHMENT_FILE_ICON + " " + escapeHtml(att.filename);
+      chip.appendChild(lbl);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type      = "button";
+      removeBtn.className = "chat-attachment-chip-remove";
+      removeBtn.setAttribute("aria-label", "Remove " + att.filename);
+      removeBtn.innerHTML  = CHAT_ATTACHMENT_X_ICON;
+      const idx = i;
+      removeBtn.addEventListener("click", () => {
+        this.pendingAttachments.splice(idx, 1);
+        this.renderPendingAttachments();
+      });
+      chip.appendChild(removeBtn);
+      this.pendingAttachmentsEl.appendChild(chip);
+    }
+
+    const remainingKb = Math.max(0, Math.floor((this.attachmentBudgetBytes() - this.pendingAttachmentBytes()) / 1024));
+    const hint = document.createElement("span");
+    hint.className = "chat-attachment-hint" + (remainingKb < 100 ? " chat-attachment-hint--warn" : "");
+    hint.textContent = `${remainingKb} KB left`;
+    this.pendingAttachmentsEl.appendChild(hint);
   }
 
   // ── Canvas inspection ────────────────────────────────────────────────────
@@ -257,7 +432,7 @@ export class ChatPanel {
 
   // ── Sending ──────────────────────────────────────────────────────────────
 
-  private async handleSend(overrideText?: string): Promise<void> {
+  private async handleSend(overrideText?: string, overrideAttachments?: ChatAttachment[]): Promise<void> {
     const text = (overrideText ?? this.inputEl.value).trim();
     if (!text) return;
     if (text.length > this.chatSettings.max_message_length) {
@@ -270,12 +445,19 @@ export class ChatPanel {
     const webhook = this.findWebhookConfig();
     if (!webhook) { this.toast("No Webhook node found on this workflow.", "error"); return; }
 
-    this.lastSentText = text;
+    // Captured before any clear below — reassigning this.pendingAttachments to a new
+    // array (not mutating it) means this reference stays valid either way.
+    const attachments = overrideAttachments ?? this.pendingAttachments;
+
+    this.lastSentText        = text;
+    this.lastSentAttachments = attachments;
     if (!overrideText) {
       this.inputEl.value = "";
       this.autosizeInput();
       this.appendMessage({ id: crypto.randomUUID(), role: "user", text, timestamp: Date.now() });
       this.persist();
+      this.pendingAttachments = [];
+      this.renderPendingAttachments();
     }
 
     this.awaitingReply      = true;
@@ -285,11 +467,16 @@ export class ChatPanel {
     this.appendTypingBubble();
 
     const session = this.activeSession();
+    // `attachments` key only added when non-empty — keeps the wire shape unchanged
+    // for every workflow that doesn't use this feature (Rule 9 regression check).
+    const payload: Record<string, unknown> = { message: text, session_id: session.id };
+    if (attachments.length > 0) payload.attachments = attachments;
+
     try {
       await fetch(`http://127.0.0.1:${webhook.port}${webhook.path}`, {
         method:  "POST",
         headers: { "content-type": "application/json" },
-        body:    JSON.stringify({ message: text, session_id: session.id }),
+        body:    JSON.stringify(payload),
       });
     } catch {
       this.replyPending = false; // request never sent — no event will ever resolve it
@@ -578,7 +765,7 @@ export class ChatPanel {
       const retry = document.createElement("button");
       retry.className = "chat-retry-btn";
       retry.textContent = "Retry";
-      retry.addEventListener("click", () => { row.remove(); this.handleSend(this.lastSentText); });
+      retry.addEventListener("click", () => { row.remove(); this.handleSend(this.lastSentText, this.lastSentAttachments); });
       bubble.appendChild(retry);
     }
     row.appendChild(bubble);
@@ -720,6 +907,7 @@ export class ChatPanel {
     this.startBtn.addEventListener("click", () => this.handleStart());
     document.getElementById("btn-chat-clear")?.addEventListener("click", () => this.handleClear());
     this.sendBtn.addEventListener("click", () => this.handleSend());
+    this.attachBtn.addEventListener("click", () => this.handleAttachClick());
 
     document.getElementById("chat-session-btn")?.addEventListener("click", (e) => {
       e.stopPropagation();

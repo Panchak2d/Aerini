@@ -91,6 +91,15 @@
 .chat-lightbox img { max-width: 90vw; max-height: 90vh; object-fit: contain; cursor: default; }
 
 .chat-input-row { display: flex; align-items: flex-end; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--bd); flex-shrink: 0; }
+
+.chat-pending-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px 0; flex-shrink: 0; }
+.chat-attachment-chip { display: flex; align-items: center; gap: 5px; background: var(--bg3); border: 1px solid var(--bd); border-radius: var(--radius-sm); padding: 4px 6px 4px 8px; font-size: 11px; color: var(--t2); max-width: 100%; }
+.chat-attachment-chip-label { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.chat-attachment-chip-remove { display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: none; border: none; color: var(--t3); padding: 2px; border-radius: 4px; cursor: pointer; transition: color var(--trans), background var(--trans); }
+.chat-attachment-chip-remove:hover { color: var(--red); background: rgba(248,113,113,.1); }
+.chat-attachment-hint { font-size: 10px; color: var(--t3); margin-left: 2px; }
+.chat-attachment-hint--warn { color: var(--amber); }
+
 .chat-branding-footer { flex-shrink: 0; text-align: center; font-size: 10px; color: var(--t3); padding: 0 0 6px; letter-spacing: .02em; }
 .chat-attach-btn { flex-shrink: 0; background: none; border: 1px solid var(--bd); border-radius: var(--radius-sm); color: var(--t2); padding: 6px; cursor: pointer; transition: color var(--trans), border-color var(--trans); }
 .chat-attach-btn:hover:not(:disabled) { color: var(--t1); border-color: var(--t3); }

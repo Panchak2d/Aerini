@@ -245,14 +245,18 @@ impl Node for ImageGenNode {
             "gpt_image_1" | "dalle3" => {
                 let size    = cfg["size"].as_str().unwrap_or("1024x1024").to_string();
                 let quality = cfg["quality"].as_str().unwrap_or("auto").to_string();
-                gen_gpt_image(image_client(), "gpt-image-1", provider, &prompt, n, &size, &quality, &api_key).await
+                gen_gpt_image(image_client(), GptImageRequest {
+                    model: "gpt-image-1", source: provider, prompt: &prompt, n, size: &size, quality: &quality, api_key: &api_key,
+                }).await
             }
 
             // -- OpenAI GPT Image 2 ------------------------------------------
             "gpt_image_2" => {
                 let size    = cfg["size"].as_str().unwrap_or("1024x1024").to_string();
                 let quality = cfg["quality"].as_str().unwrap_or("auto").to_string();
-                gen_gpt_image(image_client(), "gpt-image-2", provider, &prompt, n, &size, &quality, &api_key).await
+                gen_gpt_image(image_client(), GptImageRequest {
+                    model: "gpt-image-2", source: provider, prompt: &prompt, n, size: &size, quality: &quality, api_key: &api_key,
+                }).await
             }
 
             // -- BFL FLUX1.1 [pro] -------------------------------------------
@@ -262,14 +266,18 @@ impl Node for ImageGenNode {
                 // flux-pro-1.1 requires width and height as multiples of 32
                 let width  = ((raw_w / 32) * 32).max(256);
                 let height = ((raw_h / 32) * 32).max(256);
-                gen_flux(image_client(), "/v1/flux-pro-1.1", "flux_pro", &prompt, n, width, height, &api_key).await
+                gen_flux(image_client(), FluxRequest {
+                    endpoint: "/v1/flux-pro-1.1", source: "flux_pro", prompt: &prompt, width, height, api_key: &api_key,
+                }, n).await
             }
 
             // -- BFL FLUX.2 [pro] --------------------------------------------
             "flux_2_pro" => {
                 let width  = cfg["width"].as_u64().unwrap_or(1024).clamp(64, 4096) as u32;
                 let height = cfg["height"].as_u64().unwrap_or(1024).clamp(64, 4096) as u32;
-                gen_flux(image_client(), "/v1/flux-2-pro", "flux_2_pro", &prompt, n, width, height, &api_key).await
+                gen_flux(image_client(), FluxRequest {
+                    endpoint: "/v1/flux-2-pro", source: "flux_2_pro", prompt: &prompt, width, height, api_key: &api_key,
+                }, n).await
             }
 
             // -- Automatic1111 / Stable Diffusion WebUI (local) ---------------
@@ -289,7 +297,9 @@ impl Node for ImageGenNode {
                 let username  = cfg["username"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
                 let password  = cfg["password"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
                 let timeout_secs = cfg["timeout_seconds"].as_u64().unwrap_or(300).clamp(10, 1800);
-                gen_a1111(image_client(), &base_url, &prompt, &neg, n, width, height, steps, cfg_scale, username, password, timeout_secs).await
+                gen_a1111(image_client(), A1111Params {
+                    base_url, prompt, negative_prompt: neg, n, width, height, steps, cfg_scale, username, password, timeout_secs,
+                }).await
             }
 
             // -- ComfyUI (local) ---------------------------------------------
@@ -457,29 +467,32 @@ async fn call_nano_banana_once(
 // Returns data[].b64_json by default; no response_format parameter needed.
 // output.source = config alias string (preserves "dalle3" for backward compat).
 
-async fn gen_gpt_image(
-    client: reqwest::Client,
-    model: &str,    // actual API model string: "gpt-image-1" or "gpt-image-2"
-    source: &str,   // config alias used for output.source (preserves "dalle3" etc.)
-    prompt: &str,
-    n: usize,
-    size: &str,
-    quality: &str,
-    api_key: &str,
-) -> NodeOutput {
+// Bundles gen_gpt_image's per-request fields -- clippy::too_many_arguments
+// (max 7) was exceeded (8 args).
+struct GptImageRequest<'a> {
+    model:   &'a str, // actual API model string: "gpt-image-1" or "gpt-image-2"
+    source:  &'a str, // config alias used for output.source (preserves "dalle3" etc.)
+    prompt:  &'a str,
+    n:       usize,
+    size:    &'a str,
+    quality: &'a str,
+    api_key: &'a str,
+}
+
+async fn gen_gpt_image(client: reqwest::Client, req: GptImageRequest<'_>) -> NodeOutput {
     let ts = Utc::now().timestamp_millis();
 
     let body = json!({
-        "model":   model,
-        "prompt":  prompt,
-        "n":       n,
-        "size":    size,
-        "quality": quality
+        "model":   req.model,
+        "prompt":  req.prompt,
+        "n":       req.n,
+        "size":    req.size,
+        "quality": req.quality
     });
 
     let resp = match client
         .post("https://api.openai.com/v1/images/generations")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {}", req.api_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -512,7 +525,7 @@ async fn gen_gpt_image(
 
     for (i, item) in data.iter().enumerate() {
         if let Some(b64) = item["b64_json"].as_str() {
-            let filename = format!("{}_{}_{}.png", source, ts, i);
+            let filename = format!("{}_{}_{}.png", req.source, ts, i);
             files.push(json!({
                 "filename":  filename,
                 "data":      strip_data_uri_prefix(b64),
@@ -532,7 +545,7 @@ async fn gen_gpt_image(
     }
 
     NodeOutput::success_with_logs(
-        json!({ "files": files, "count": files.len(), "source": source }),
+        json!({ "files": files, "count": files.len(), "source": req.source }),
         logs,
     )
 }
@@ -563,16 +576,18 @@ fn map_openai_image_error(status: u16, err: &serde_json::Map<String, Value>) -> 
 const BFL_POLL_MAX_ITERS: u32  = 240;  // 120 s at 500 ms per poll
 const BFL_POLL_INTERVAL_MS: u64 = 500;
 
-async fn gen_flux(
-    client: reqwest::Client,
-    endpoint: &str,  // "/v1/flux-pro-1.1" or "/v1/flux-2-pro"
-    source: &str,    // "flux_pro" or "flux_2_pro"
-    prompt: &str,
-    n: usize,
-    width: u32,
-    height: u32,
-    api_key: &str,
-) -> NodeOutput {
+// Bundles the per-request fields shared by gen_flux and call_flux_one --
+// clippy::too_many_arguments (max 7) was exceeded by both (8 and 9 args).
+struct FluxRequest<'a> {
+    endpoint: &'a str, // "/v1/flux-pro-1.1" or "/v1/flux-2-pro"
+    source:   &'a str, // "flux_pro" or "flux_2_pro"
+    prompt:   &'a str,
+    width:    u32,
+    height:   u32,
+    api_key:  &'a str,
+}
+
+async fn gen_flux(client: reqwest::Client, req: FluxRequest<'_>, n: usize) -> NodeOutput {
     let ts = Utc::now().timestamp_millis();
     let mut files: Vec<Value>     = Vec::new();
     let mut logs:  Vec<String>    = Vec::new();
@@ -580,13 +595,13 @@ async fn gen_flux(
     let mut last_error: Option<NodeError> = None;
 
     for i in 0..n {
-        match call_flux_one(&client, endpoint, source, prompt, width, height, api_key, ts, i).await {
+        match call_flux_one(&client, &req, ts, i).await {
             Ok(media_obj) => {
-                logs.push(format!("{} image {}/{} generated", source, i + 1, n));
+                logs.push(format!("{} image {}/{} generated", req.source, i + 1, n));
                 files.push(media_obj);
             }
             Err(e) => {
-                let msg = format!("{} image {}/{} failed: [{}] {}", source, i + 1, n, e.code, e.message);
+                let msg = format!("{} image {}/{} failed: [{}] {}", req.source, i + 1, n, e.code, e.message);
                 logs.push(msg.clone());
                 failures.push(msg);
                 let is_terminal = matches!(e.code.as_str(), "INVALID_API_KEY" | "INSUFFICIENT_CREDITS");
@@ -611,34 +626,29 @@ async fn gen_flux(
     }
 
     NodeOutput::success_with_logs(
-        json!({ "files": files, "count": files.len(), "source": source }),
+        json!({ "files": files, "count": files.len(), "source": req.source }),
         logs,
     )
 }
 
 async fn call_flux_one(
     client: &reqwest::Client,
-    endpoint: &str,
-    source: &str,
-    prompt: &str,
-    width: u32,
-    height: u32,
-    api_key: &str,
+    req: &FluxRequest<'_>,
     ts: i64,
     index: usize,
 ) -> Result<Value, NodeError> {
-    let url = format!("https://api.bfl.ai{}", endpoint);
+    let url = format!("https://api.bfl.ai{}", req.endpoint);
 
     let body = json!({
-        "prompt":        prompt,
-        "width":         width,
-        "height":        height,
+        "prompt":        req.prompt,
+        "width":         req.width,
+        "height":        req.height,
         "output_format": "png"
     });
 
     let resp = client
         .post(&url)
-        .header("x-key", api_key)
+        .header("x-key", req.api_key)
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -671,9 +681,9 @@ async fn call_flux_one(
         .ok_or_else(|| NodeError::unrecoverable("PROTOCOL_ERROR", "BFL response missing polling_url"))?
         .to_string();
 
-    let image_url = bfl_poll(client, &polling_url, api_key).await?;
+    let image_url = bfl_poll(client, &polling_url, req.api_key).await?;
     let b64       = download_to_base64(client, &image_url).await?;
-    let filename  = format!("{}_{}_{}.png", source, ts, index);
+    let filename  = format!("{}_{}_{}.png", req.source, ts, index);
 
     Ok(json!({ "filename": filename, "data": b64, "mime_type": "image/png" }))
 }
@@ -746,30 +756,33 @@ async fn bfl_poll(
 // only (RequestBuilder::timeout supersedes ClientBuilder::timeout, reqwest VERIFIED
 // behavior) -- local batch generation can legitimately exceed 120s.
 
-async fn gen_a1111(
-    client: reqwest::Client,
-    base_url: &str,
-    prompt: &str,
-    negative_prompt: &str,
-    n: usize,
-    width: u32,
-    height: u32,
-    steps: u32,
-    cfg_scale: f64,
-    username: Option<String>,
-    password: Option<String>,
-    timeout_secs: u64,
-) -> NodeOutput {
+// Bundles gen_a1111's per-request fields -- clippy::too_many_arguments
+// (max 7) was exceeded (12 args).
+struct A1111Params {
+    base_url:        String,
+    prompt:          String,
+    negative_prompt: String,
+    n:               usize,
+    width:           u32,
+    height:          u32,
+    steps:           u32,
+    cfg_scale:       f64,
+    username:        Option<String>,
+    password:        Option<String>,
+    timeout_secs:    u64,
+}
+
+async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOutput {
     // a1111 is a local-only provider -- base_url (e.g. 127.0.0.1:7860) is the
     // user's explicit trust signal for this node, so loopback/private/localhost
     // are permitted here. Link-local, cloud metadata, and RFC 6598 stay blocked
     // (check_ssrf_ip_allow_local in util.rs). Cloud providers in this file keep
     // the strict check_host_ssrf_from_url unchanged.
-    if let Err(e) = check_host_ssrf_from_url_allow_local(base_url).await {
+    if let Err(e) = check_host_ssrf_from_url_allow_local(&p.base_url).await {
         return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
     }
 
-    let parsed = match Url::parse(base_url) {
+    let parsed = match Url::parse(&p.base_url) {
         Ok(u)  => u,
         Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
             "INVALID_BASE_URL",
@@ -781,9 +794,9 @@ async fn gen_a1111(
     let url_user = parsed.username().to_string();
     let url_pass = parsed.password().map(|s| s.to_string());
 
-    let auth_user = username.filter(|s| !s.is_empty())
-        .or_else(|| if url_user.is_empty() { None } else { Some(url_user) });
-    let auth_pass = password.filter(|s| !s.is_empty()).or(url_pass);
+    let auth_user = p.username.filter(|s| !s.is_empty())
+        .or(if url_user.is_empty() { None } else { Some(url_user) });
+    let auth_pass = p.password.filter(|s| !s.is_empty()).or(url_pass);
 
     // Build endpoint URL without embedded credentials.
     let mut clean = parsed.clone();
@@ -793,18 +806,18 @@ async fn gen_a1111(
 
     let ts   = Utc::now().timestamp_millis();
     let body = json!({
-        "prompt":          prompt,
-        "negative_prompt": negative_prompt,
-        "width":           width,
-        "height":          height,
-        "steps":           steps,
-        "cfg_scale":       cfg_scale,
-        "batch_size":      n
+        "prompt":          p.prompt,
+        "negative_prompt": p.negative_prompt,
+        "width":           p.width,
+        "height":          p.height,
+        "steps":           p.steps,
+        "cfg_scale":       p.cfg_scale,
+        "batch_size":      p.n
     });
 
     let mut req = client.post(&endpoint)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(timeout_secs));
+        .timeout(std::time::Duration::from_secs(p.timeout_secs));
     if let Some(user) = auth_user {
         req = req.basic_auth(user, auth_pass);
     }
