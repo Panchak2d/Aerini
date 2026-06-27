@@ -4,6 +4,8 @@ export interface PortDefinition {
   id: string;
   label: string;
   position: "left" | "right" | "top" | "bottom";
+  /** Semantic type tag for this port (e.g. `"files"`). Optional — absent means untyped. */
+  port_type?: string;
 }
 
 export interface NodeDescriptor {

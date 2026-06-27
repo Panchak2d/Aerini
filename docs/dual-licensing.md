@@ -10,7 +10,7 @@ AGPL-3.0 is a strong copyleft license. If you run a modified version of `aerini-
 
 The commercial license removes that obligation. Companies that need to keep their modifications proprietary can buy a commercial license, and the AGPL copyleft requirement no longer applies to them.
 
-MongoDB, Qt, MariaDB, and GitLab all use this same approach. It's a standard structure for open source projects that need sustainable funding without abandoning open source access.
+MongoDB used this same AGPL-plus-commercial structure too, before relicensing its Community Server to the Server Side Public License (SSPL) in October 2018 — a stricter, non-OSI-approved license, not AGPL. Qt, MariaDB, and GitLab use similar dual-license models. It's a standard structure for open source projects that need sustainable funding without abandoning open source access.
 
 ---
 

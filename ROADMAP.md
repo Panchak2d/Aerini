@@ -4,19 +4,19 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.2 — Parallel execution and hardening (active)
+## v0.2 — Parallel execution and hardening (shipped — v0.2.0 / v0.3.0)
 
-- [ ] Parallel execution (per-workflow opt-in)
-- [ ] Global concurrent run limit (`--max-concurrent-runs`)
-- [ ] Per-workflow SSE ACL
-- [ ] Code node sandbox (filesystem restriction + subprocess restriction)
-- [ ] Pre-built binary releases for macOS, Windows, Linux
+- [x] Parallel execution (per-workflow opt-in)
+- [x] Global concurrent run limit (`--max-concurrent-runs`)
+- [x] Per-workflow SSE ACL
+- [x] Code node sandbox (filesystem restriction + subprocess restriction)
+- [x] Pre-built binary releases for macOS, Windows, Linux
 
 ---
 
 ## v0.3 — Extensibility
 
-- [ ] Plugin / custom node API
+- [x] Plugin / custom node API
 - [ ] Workflow versioning and history
 - [ ] Improved run history UI
 - [ ] More trigger types (file watch, database poll)

@@ -33,6 +33,7 @@ impl Node for StopNode {
                 id: "input".to_string(),
                 label: "In".to_string(),
                 position: PortPosition::Left,
+                port_type: None,
             }],
             outputs: vec![], // Stop has no outputs — it ends the branch
         }

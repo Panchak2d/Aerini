@@ -115,3 +115,200 @@ impl crate::node::Node for JsonNode {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use crate::node::Node;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::collections::HashMap;
+
+    fn make_input(input: Value, node_outputs: HashMap<String, Value>) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(node_outputs),
+                metadata: HashMap::new(),
+            },
+        }
+    }
+
+    // ── parse ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn parse_valid_json_string() {
+        let input = make_input(
+            json!({ "operation": "parse", "input_text": "{\"x\":1}" }),
+            HashMap::new(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!({ "x": 1 }));
+    }
+
+    #[tokio::test]
+    async fn parse_invalid_json_returns_failure() {
+        let input = make_input(
+            json!({ "operation": "parse", "input_text": "not json {{{" }),
+            HashMap::new(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "PARSE_FAILED");
+    }
+
+    // ── stringify ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stringify_serialises_context_outputs() {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "val": 7 }));
+        let input = make_input(json!({ "operation": "stringify" }), outputs);
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        let result = out.output.unwrap();
+        let s = result["result"].as_str().unwrap();
+        // Must be parseable JSON containing our key
+        let reparsed: Value = serde_json::from_str(s).unwrap();
+        assert_eq!(reparsed["n_a"]["val"], json!(7));
+    }
+
+    #[tokio::test]
+    async fn stringify_empty_context_produces_empty_object() {
+        let input = make_input(json!({ "operation": "stringify" }), HashMap::new());
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        let s = out.output.unwrap()["result"].as_str().unwrap().to_string();
+        let reparsed: Value = serde_json::from_str(&s).unwrap();
+        assert!(reparsed.as_object().unwrap().is_empty());
+    }
+
+    // ── extract ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn extract_by_pointer() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({ "name": "Bob" }));
+        let input = make_input(
+            json!({ "operation": "extract", "pointer": "/src/name" }),
+            outputs,
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!("Bob"));
+    }
+
+    #[tokio::test]
+    async fn extract_pointer_without_leading_slash_auto_fixed() {
+        let mut outputs = HashMap::new();
+        outputs.insert("x".to_string(), json!(42));
+        let input = make_input(
+            json!({ "operation": "extract", "pointer": "x" }),
+            outputs,
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!(42));
+    }
+
+    #[tokio::test]
+    async fn extract_missing_path_returns_null_not_failure() {
+        let input = make_input(
+            json!({ "operation": "extract", "pointer": "/no/such/key" }),
+            HashMap::new(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], Value::Null);
+    }
+
+    // ── merge ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn merge_combines_all_object_outputs() {
+        let mut outputs = HashMap::new();
+        outputs.insert("a".to_string(), json!({ "x": 1 }));
+        outputs.insert("b".to_string(), json!({ "y": 2 }));
+        let input = make_input(json!({ "operation": "merge" }), outputs);
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        let result = &out.output.unwrap()["result"];
+        assert_eq!(result["x"], json!(1));
+        assert_eq!(result["y"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn merge_skips_non_object_outputs() {
+        let mut outputs = HashMap::new();
+        outputs.insert("arr".to_string(), json!([1, 2, 3]));
+        outputs.insert("obj".to_string(), json!({ "k": "v" }));
+        let input = make_input(json!({ "operation": "merge" }), outputs);
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        let result = &out.output.unwrap()["result"];
+        assert_eq!(result["k"], json!("v"));
+        // Array was skipped — no numeric keys
+        assert!(result.get("0").is_none());
+    }
+
+    // ── array_get ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn array_get_returns_item_at_index() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!([10, 20, 30]));
+        let input = make_input(
+            json!({ "operation": "array_get", "index": 2 }),
+            outputs,
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!(30));
+    }
+
+    #[tokio::test]
+    async fn array_get_index_out_of_bounds_returns_null() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!([1, 2]));
+        let input = make_input(
+            json!({ "operation": "array_get", "index": 99 }),
+            outputs,
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn array_get_no_array_in_context_returns_null() {
+        let input = make_input(
+            json!({ "operation": "array_get", "index": 0 }),
+            HashMap::new(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], Value::Null);
+    }
+
+    // ── unknown operation ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_operation_returns_failure() {
+        let input = make_input(
+            json!({ "operation": "explode" }),
+            HashMap::new(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "UNKNOWN_OPERATION");
+    }
+}

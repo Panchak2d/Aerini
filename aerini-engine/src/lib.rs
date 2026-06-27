@@ -17,6 +17,7 @@
 //! | [`store`] | AES-256-GCM encrypted credential store |
 //! | [`cron`] | 5-field cron parser; `@hourly`/`@daily` macros; named weekdays/months |
 //! | [`error`] | `EngineError` (thiserror); `NodeError` |
+//! | [`provider`] | `ProviderRegistry` — AI provider metadata, auth headers, URL detection; `shared_ai_client()` |
 //!
 //! # Key design constraint — no Tauri dependency
 //!
@@ -36,6 +37,7 @@ pub mod model;
 pub mod node;
 pub mod nodes;
 pub mod plugin_loader;
+pub mod provider;
 pub mod scheduler;
 pub mod store;
 

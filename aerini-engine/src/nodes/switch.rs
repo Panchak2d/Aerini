@@ -60,18 +60,18 @@ impl Node for SwitchNode {
         // — see PLAN.md item 35. This near-term fix unblocks the majority of use cases.
         NodePorts {
             inputs: vec![PortDefinition {
-                id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left,
+                id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
             }],
             outputs: vec![
-                PortDefinition { id: "case_1".to_string(), label: "Case 1".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_2".to_string(), label: "Case 2".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_3".to_string(), label: "Case 3".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_4".to_string(), label: "Case 4".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_5".to_string(), label: "Case 5".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_6".to_string(), label: "Case 6".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_7".to_string(), label: "Case 7".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "case_8".to_string(), label: "Case 8".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "default".to_string(), label: "Default".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "case_1".to_string(), label: "Case 1".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_2".to_string(), label: "Case 2".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_3".to_string(), label: "Case 3".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_4".to_string(), label: "Case 4".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_5".to_string(), label: "Case 5".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_6".to_string(), label: "Case 6".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_7".to_string(), label: "Case 7".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_8".to_string(), label: "Case 8".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "default".to_string(), label: "Default".to_string(), position: PortPosition::Right, port_type: None },
             ],
         }
     }

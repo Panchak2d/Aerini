@@ -45,6 +45,7 @@ impl Node for ScheduleNode {
                 id: "output".to_string(),
                 label: "Triggered".to_string(),
                 position: PortPosition::Right,
+                port_type: None,
             }],
         }
     }

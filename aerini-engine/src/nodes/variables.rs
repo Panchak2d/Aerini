@@ -46,11 +46,13 @@ impl Node for SetVariableNode {
                 id: "input".to_string(),
                 label: "In".to_string(),
                 position: PortPosition::Left,
+                port_type: None,
             }],
             outputs: vec![PortDefinition {
                 id: "output".to_string(),
                 label: "Out".to_string(),
                 position: PortPosition::Right,
+                port_type: None,
             }],
         }
     }
@@ -148,11 +150,13 @@ impl Node for GetVariableNode {
                 id: "input".to_string(),
                 label: "In".to_string(),
                 position: PortPosition::Left,
+                port_type: None,
             }],
             outputs: vec![PortDefinition {
                 id: "output".to_string(),
                 label: "Out".to_string(),
                 position: PortPosition::Right,
+                port_type: None,
             }],
         }
     }
@@ -232,5 +236,157 @@ impl Node for GetVariableNode {
                 )],
             ),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_set_input(key: &str, value: Value, persist: bool) -> NodeInput {
+        NodeInput {
+            node_id: "set1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "key": key, "value": value, "persist": persist }),
+            context: ExecutionContext::default(),
+        }
+    }
+
+    fn make_get_input(key: &str, variables: HashMap<String, Value>) -> NodeInput {
+        NodeInput {
+            node_id: "get1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "key": key }),
+            context: ExecutionContext {
+                variables,
+                node_outputs: Arc::new(HashMap::new()),
+                metadata: HashMap::new(),
+            },
+        }
+    }
+
+    // ── SetVariableNode ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_returns_key_and_value_in_output() {
+        let node = SetVariableNode { db: None };
+        let out = node.execute(make_set_input("count", json!(42), false)).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data["key"], json!("count"));
+        assert_eq!(data["value"], json!(42));
+        assert_eq!(data["_variable_key"], json!("count"));
+        assert_eq!(data["_variable_value"], json!(42));
+    }
+
+    #[tokio::test]
+    async fn set_missing_key_returns_failure() {
+        let node = SetVariableNode { db: None };
+        let input = NodeInput {
+            node_id: "n".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "e".to_string(),
+            input: json!({ "value": 1 }),
+            context: ExecutionContext::default(),
+        };
+        let out = node.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_KEY");
+    }
+
+    #[tokio::test]
+    async fn set_empty_key_returns_failure() {
+        let node = SetVariableNode { db: None };
+        let out = node.execute(make_set_input("", json!(1), false)).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_KEY");
+    }
+
+    #[tokio::test]
+    async fn set_persist_true_no_db_adds_warning_log() {
+        // serve mode: db=None, persist=true — must warn in logs, not error
+        let node = SetVariableNode { db: None };
+        let out = node.execute(make_set_input("x", json!("hello"), true)).await;
+        assert!(out.success);
+        let warn = out.logs.iter().any(|l| l.contains("no effect in serve mode") || l.contains("persist"));
+        assert!(warn, "expected warning log about serve-mode persist, got: {:?}", out.logs);
+    }
+
+    #[tokio::test]
+    async fn set_null_value_allowed() {
+        let node = SetVariableNode { db: None };
+        let out = node.execute(make_set_input("k", Value::Null, false)).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["value"], Value::Null);
+    }
+
+    // ── GetVariableNode ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_reads_from_context_variables() {
+        let node = GetVariableNode { db: None };
+        let mut vars = HashMap::new();
+        vars.insert("score".to_string(), json!(100));
+        let out = node.execute(make_get_input("score", vars)).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data["value"], json!(100));
+        assert_eq!(data["found"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn get_missing_key_returns_null_found_false() {
+        let node = GetVariableNode { db: None };
+        let out = node.execute(make_get_input("absent", HashMap::new())).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data["value"], Value::Null);
+        assert_eq!(data["found"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn get_scope_isolation_different_keys() {
+        let node = GetVariableNode { db: None };
+        let mut vars = HashMap::new();
+        vars.insert("a".to_string(), json!(1));
+        vars.insert("b".to_string(), json!(2));
+        let out_a = node.execute(make_get_input("a", vars.clone())).await;
+        let out_b = node.execute(make_get_input("b", vars.clone())).await;
+        assert_eq!(out_a.output.unwrap()["value"], json!(1));
+        assert_eq!(out_b.output.unwrap()["value"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn get_overwritten_key_returns_latest() {
+        // Simulate overwrite: last write wins (HashMap semantics)
+        let node = GetVariableNode { db: None };
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), json!(99)); // "overwritten" value
+        let out = node.execute(make_get_input("x", vars)).await;
+        assert_eq!(out.output.unwrap()["value"], json!(99));
+    }
+
+    #[tokio::test]
+    async fn get_empty_key_returns_failure() {
+        let node = GetVariableNode { db: None };
+        let input = NodeInput {
+            node_id: "n".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "e".to_string(),
+            input: json!({ "key": "" }),
+            context: ExecutionContext::default(),
+        };
+        let out = node.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_KEY");
     }
 }

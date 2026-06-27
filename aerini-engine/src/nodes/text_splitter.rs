@@ -66,8 +66,8 @@ impl Node for TextSplitterNode {
 
     fn ports(&self) -> NodePorts {
         NodePorts {
-            inputs:  vec![PortDefinition { id: "input".to_string(),  label: "In".to_string(),  position: PortPosition::Left }],
-            outputs: vec![PortDefinition { id: "output".to_string(), label: "Chunks".to_string(), position: PortPosition::Right }],
+            inputs:  vec![PortDefinition { id: "input".to_string(),  label: "In".to_string(),  position: PortPosition::Left , port_type: None }],
+            outputs: vec![PortDefinition { id: "output".to_string(), label: "Chunks".to_string(), position: PortPosition::Right, port_type: None }],
         }
     }
 
@@ -201,4 +201,203 @@ fn split_by_paragraphs(text: &str, chunk_size: usize, overlap: usize) -> Vec<Str
         start += step;
     }
     chunks.into_iter().filter(|c| !c.is_empty()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use serde_json::json;
+
+    fn make_input(input: Value) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext::default(),
+        }
+    }
+
+    // ── Failure paths ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn empty_text_returns_failure() {
+        let out = TextSplitterNode.execute(make_input(json!({ "text": "" }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_TEXT");
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_text_returns_failure() {
+        let out = TextSplitterNode.execute(make_input(json!({ "text": "   " }))).await;
+        assert!(!out.success);
+    }
+
+    #[tokio::test]
+    async fn null_text_field_returns_failure() {
+        let out = TextSplitterNode.execute(make_input(json!({ "text": null }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_TEXT");
+    }
+
+    // ── chars mode ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn chars_mode_chunk_size_respected() {
+        let text = "a".repeat(250);
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "chars",
+            "chunk_size": 100,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        let chunks = data["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), 3); // 250/100 = 3 chunks (100, 100, 50)
+        assert!(chunks[0].as_str().unwrap().len() <= 100);
+    }
+
+    #[tokio::test]
+    async fn chars_mode_overlap_produces_more_chunks() {
+        let text = "a".repeat(300);
+        let no_overlap_out = TextSplitterNode.execute(make_input(json!({
+            "text": text.clone(),
+            "mode": "chars",
+            "chunk_size": 100,
+            "overlap": 0
+        }))).await;
+        let overlap_out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "chars",
+            "chunk_size": 100,
+            "overlap": 50
+        }))).await;
+        assert!(no_overlap_out.success && overlap_out.success);
+        let no_ov_count = no_overlap_out.output.unwrap()["chunks"].as_array().unwrap().len();
+        let ov_count    = overlap_out.output.unwrap()["chunks"].as_array().unwrap().len();
+        assert!(ov_count > no_ov_count, "overlap should produce more chunks");
+    }
+
+    #[tokio::test]
+    async fn single_word_shorter_than_chunk_size_produces_one_chunk() {
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": "hello",
+            "mode": "chars",
+            "chunk_size": 1000,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        let chunks = data["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].as_str().unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn utf8_multibyte_not_split_mid_char() {
+        // Each '€' is 3 UTF-8 bytes; chunk_size is in chars, not bytes.
+        let text = "€".repeat(10); // 10 chars, 30 bytes
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "chars",
+            "chunk_size": 3,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let chunks = out.output.unwrap();
+        for chunk in chunks["chunks"].as_array().unwrap() {
+            let s = chunk.as_str().unwrap();
+            // Every chunk must be valid UTF-8 (no mid-byte cut)
+            // and consist only of '€' characters
+            assert!(s.chars().all(|c| c == '€'), "chunk contains non-€: {:?}", s);
+        }
+    }
+
+    // ── words mode ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn words_mode_splits_correctly() {
+        let text = "one two three four five six";
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "words",
+            "chunk_size": 3,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        let chunks = data["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].as_str().unwrap(), "one two three");
+        assert_eq!(chunks[1].as_str().unwrap(), "four five six");
+    }
+
+    // ── sentences mode ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sentences_mode_splits_on_punctuation() {
+        let text = "Hello. World! How are you?";
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "sentences",
+            "chunk_size": 1,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
+        assert_eq!(chunks.len(), 3);
+    }
+
+    // ── paragraphs mode ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn paragraphs_mode_splits_on_blank_lines() {
+        let text = "Para one.\n\nPara two.\n\nPara three.";
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text,
+            "mode": "paragraphs",
+            "chunk_size": 1,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].as_str().unwrap(), "Para one.");
+    }
+
+    // ── metadata ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn output_includes_metadata_fields() {
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": "abc def",
+            "mode": "chars",
+            "chunk_size": 3,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert!(data["total_chunks"].as_u64().unwrap() > 0);
+        assert_eq!(data["total_chars"].as_u64().unwrap(), 7);
+        assert_eq!(data["mode"].as_str().unwrap(), "chars");
+    }
+
+    // ── split_by_chars unit tests ───────────────────────────────────────────
+
+    #[test]
+    fn split_by_chars_zero_chunk_size_returns_whole() {
+        let chunks = split_by_chars("hello world", 0, 0);
+        assert_eq!(chunks, vec!["hello world"]);
+    }
+
+    #[test]
+    fn split_by_words_zero_chunk_size_returns_whole() {
+        let chunks = split_by_words("a b c", 0, 0);
+        assert_eq!(chunks, vec!["a b c"]);
+    }
 }

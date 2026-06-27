@@ -29,9 +29,12 @@ use crate::model::{NodeInput, NodeOutput, Workflow};
 use crate::node::{Node, NodeRegistry};
 use crate::EventSink;
 
+mod config;
 mod sequential;
 mod loop_executor;
 mod parallel;
+
+use config::WorkflowExecutorConfig;
 
 // ── Execution result ──────────────────────────────────────────────────────────
 
@@ -90,36 +93,7 @@ pub trait CredentialResolver: Send + Sync + 'static {
 pub struct WorkflowExecutor {
     pub(super) registry:            Arc<NodeRegistry>,
     pub(super) credential_resolver: Arc<dyn CredentialResolver>,
-    // Optional: when None, node-status events are dropped silently.
-    pub(super) event_sink:          Option<Arc<dyn EventSink>>,
-    // Optional: when None, {{$env.VAR}} expressions resolve to "" with a warning.
-    pub(super) env_allowlist:       Option<Arc<std::collections::HashSet<String>>>,
-    // Optional: when set, FileNode restricts all paths to this directory tree.
-    pub(super) file_sandbox_dir:    Option<Arc<std::path::PathBuf>>,
-    // When true, ShellExecNode returns SHELL_DISABLED immediately without executing.
-    pub(super) shell_exec_disabled: bool,
-    // When true, CodeNode returns CODE_DISABLED immediately without executing.
-    pub(super) code_exec_disabled:  bool,
-    // When true, DatabaseNode returns DATABASE_DISABLED immediately without connecting.
-    pub(super) database_exec_disabled: bool,
-    // When true, input schema violations fail the node. When false (default), they log a warning.
-    pub(super) strict_schema_validation: bool,
-    // When true, independent branches execute concurrently via tokio tasks. Default: false.
-    pub(super) parallel_execution: bool,
-    // Maximum simultaneous node tasks when parallel_execution is true. Default: 8.
-    pub(super) max_concurrent_nodes: usize,
-    // When set, the executor checks this token between nodes and short-circuits retry backoff sleeps.
-    pub(super) cancel_token: Option<CancellationToken>,
-    // Server-level ceiling applied to every workflow regardless of per-workflow max_duration_secs.
-    pub(super) server_max_duration_secs: Option<u64>,
-    // When true, nodes gated on admin scope (e.g. allow_raw_sql) are unlocked.
-    pub(super) caller_is_admin: bool,
-    // When true, Code (JS) nodes run with module import restrictions and OS resource limits.
-    // Only meaningful when code_exec_disabled is false.
-    pub(super) code_sandbox_enabled: bool,
-    // When set, overrides the default 512 MB RLIMIT_AS cap for Code (JS) node subprocesses.
-    // Linux only; ignored on macOS and Windows.
-    pub(super) code_max_memory_mb: Option<u64>,
+    pub(super) config:              WorkflowExecutorConfig,
 }
 
 impl WorkflowExecutor {
@@ -131,26 +105,26 @@ impl WorkflowExecutor {
         registry:            Arc<NodeRegistry>,
         credential_resolver: Arc<dyn CredentialResolver>,
     ) -> Self {
-        Self { registry, credential_resolver, event_sink: None, env_allowlist: None, file_sandbox_dir: None, shell_exec_disabled: false, code_exec_disabled: false, database_exec_disabled: false, strict_schema_validation: false, parallel_execution: false, max_concurrent_nodes: 8, cancel_token: None, server_max_duration_secs: None, caller_is_admin: false, code_sandbox_enabled: false, code_max_memory_mb: None }
+        Self { registry, credential_resolver, config: WorkflowExecutorConfig::default() }
     }
 
     /// Restrict `{{$env.VAR}}` expressions to the listed variable names.
     /// Call with an empty vec to allow no env vars. Omit entirely to disable $env.
     pub fn with_env_allowlist(mut self, vars: Vec<String>) -> Self {
-        self.env_allowlist = Some(Arc::new(vars.into_iter().collect()));
+        self.config = self.config.with_env_allowlist(vars);
         self
     }
 
     /// Attach an event sink. Fluent builder — allows optional chaining.
     pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
-        self.event_sink = Some(sink);
+        self.config = self.config.with_event_sink(sink);
         self
     }
 
     /// Restrict FileNode to paths within `dir`. Required in server/API mode to
     /// prevent authenticated users from reading arbitrary filesystem paths.
     pub fn with_file_sandbox_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.file_sandbox_dir = Some(Arc::new(dir));
+        self.config = self.config.with_file_sandbox_dir(dir);
         self
     }
 
@@ -158,7 +132,7 @@ impl WorkflowExecutor {
     /// SHELL_DISABLED error immediately without spawning a subprocess.
     /// Recommended for API mode deployments where arbitrary shell access is undesirable.
     pub fn with_shell_disabled(mut self, disabled: bool) -> Self {
-        self.shell_exec_disabled = disabled;
+        self.config = self.config.with_shell_disabled(disabled);
         self
     }
 
@@ -166,7 +140,7 @@ impl WorkflowExecutor {
     /// CODE_DISABLED error immediately without spawning a Node.js process.
     /// Recommended for API mode deployments where arbitrary JS execution is undesirable.
     pub fn with_code_disabled(mut self, disabled: bool) -> Self {
-        self.code_exec_disabled = disabled;
+        self.config = self.config.with_code_disabled(disabled);
         self
     }
 
@@ -175,7 +149,7 @@ impl WorkflowExecutor {
     /// Recommended for multi-tenant API deployments due to RUSTSEC-2023-0071
     /// (RSA Marvin timing side-channel in sqlx-mysql) and SSRF surface reduction.
     pub fn with_database_disabled(mut self, disabled: bool) -> Self {
-        self.database_exec_disabled = disabled;
+        self.config = self.config.with_database_disabled(disabled);
         self
     }
 
@@ -183,7 +157,7 @@ impl WorkflowExecutor {
     /// node to fail immediately (SCHEMA_VIOLATION). When false (default), violations are
     /// logged as warnings and execution continues — safe upgrade path for existing workflows.
     pub fn with_strict_schema_validation(mut self, strict: bool) -> Self {
-        self.strict_schema_validation = strict;
+        self.config = self.config.with_strict_schema_validation(strict);
         self
     }
 
@@ -192,21 +166,21 @@ impl WorkflowExecutor {
     /// concurrently via tokio tasks instead of sequentially. Default: false.
     /// The sequential path is unchanged when this is false.
     pub fn with_parallel_execution(mut self, enabled: bool) -> Self {
-        self.parallel_execution = enabled;
+        self.config = self.config.with_parallel_execution(enabled);
         self
     }
 
     /// Maximum number of node tasks running simultaneously in parallel mode.
     /// Values below 1 are clamped to 1. Default: 8.
     pub fn with_max_concurrent_nodes(mut self, limit: usize) -> Self {
-        self.max_concurrent_nodes = limit.max(1);
+        self.config = self.config.with_max_concurrent_nodes(limit);
         self
     }
 
     /// Attach a cancellation token. When cancelled, the executor stops between
     /// nodes and short-circuits retry backoff sleeps. No-op if never cancelled.
     pub fn with_cancel_token(mut self, t: CancellationToken) -> Self {
-        self.cancel_token = Some(t);
+        self.config = self.config.with_cancel_token(t);
         self
     }
 
@@ -215,14 +189,14 @@ impl WorkflowExecutor {
     /// When only this ceiling is set it applies to every workflow run by this executor.
     /// Values below 10 are clamped to 10; values above 86400 are clamped to 86400.
     pub fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
-        self.server_max_duration_secs = secs.map(|s| s.clamp(10, 86400));
+        self.config = self.config.with_server_max_duration_secs(secs);
         self
     }
 
     /// Grant admin-level node permissions (e.g. `allow_raw_sql`) to this executor.
     /// Should be set to `true` only when the caller holds the `admin` API scope.
     pub fn with_caller_is_admin(mut self, is_admin: bool) -> Self {
-        self.caller_is_admin = is_admin;
+        self.config = self.config.with_caller_is_admin(is_admin);
         self
     }
 
@@ -236,19 +210,19 @@ impl WorkflowExecutor {
     /// Desktop mode (sandbox = false): full Node.js stdlib available as documented.
     /// Server mode with --allow-code: sandbox defaults to true; admin may disable.
     pub fn with_code_sandbox(mut self, enabled: bool) -> Self {
-        self.code_sandbox_enabled = enabled;
+        self.config = self.config.with_code_sandbox(enabled);
         self
     }
 
     /// Override the default 512 MB memory cap for Code (JS) node subprocesses.
     /// Only effective on Linux with --code-sandbox active; no-op on macOS/Windows.
     pub fn with_code_max_memory_mb(mut self, mb: Option<u64>) -> Self {
-        self.code_max_memory_mb = mb;
+        self.config = self.config.with_code_max_memory_mb(mb);
         self
     }
 
     pub(super) fn emit_node_status(&self, workflow_id: &str, node_id: &str, status: &str) {
-        if let Some(ref sink) = self.event_sink {
+        if let Some(ref sink) = self.config.event_sink {
             sink.emit("node-status", serde_json::json!({
                 "workflow_id": workflow_id,
                 "node_id":     node_id,
@@ -307,7 +281,7 @@ impl WorkflowExecutor {
             return None;
         }
 
-        if self.strict_schema_validation {
+        if self.config.strict_schema_validation {
             let reason = errors.join("; ");
             Some(crate::model::NodeOutput::failure(
                 crate::error::NodeError::unrecoverable(
@@ -343,7 +317,7 @@ impl WorkflowExecutor {
         workflow: Arc<Workflow>,
         initial_variables: HashMap<String, Value>,
     ) -> Result<WorkflowResult, EngineError> {
-        let limit_secs = match (workflow.max_duration_secs, self.server_max_duration_secs) {
+        let limit_secs = match (workflow.max_duration_secs, self.config.server_max_duration_secs) {
             (Some(wf), Some(srv)) => Some(wf.min(srv).clamp(10, 86400)),
             (Some(wf), None)      => Some(wf.clamp(10, 86400)),
             (None,     Some(srv)) => Some(srv),  // already clamped in builder
@@ -456,7 +430,7 @@ impl WorkflowExecutor {
         }
 
         let (mut resolved_input, expr_warnings) =
-            crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.env_allowlist.as_deref());
+            crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.config.env_allowlist.as_deref());
 
         if !node_def.credentials.is_empty() {
             if let Some(obj) = resolved_input.as_object_mut() {
@@ -482,36 +456,36 @@ impl WorkflowExecutor {
             input:        resolved_input,
             context:      {
                 let mut ctx = ctx;
-                if let Some(ref sandbox) = self.file_sandbox_dir {
+                if let Some(ref sandbox) = self.config.file_sandbox_dir {
                     ctx.metadata.insert(
                         "__file_sandbox_dir".to_string(),
                         Value::String(sandbox.to_string_lossy().to_string()),
                     );
                 }
-                if self.shell_exec_disabled {
+                if self.config.shell_exec_disabled {
                     ctx.metadata.insert("__shell_disabled".to_string(), Value::Bool(true));
                 }
-                if self.code_exec_disabled {
+                if self.config.code_exec_disabled {
                     ctx.metadata.insert("__code_disabled".to_string(), Value::Bool(true));
                 }
-                if self.database_exec_disabled {
+                if self.config.database_exec_disabled {
                     ctx.metadata.insert("__database_disabled".to_string(), Value::Bool(true));
                 }
-                if self.code_sandbox_enabled {
+                if self.config.code_sandbox_enabled {
                     ctx.metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
                     // Expose the --allow-env-vars allowlist so the Code node can
                     // re-inject approved vars after env_clear() in sandbox mode.
-                    if let Some(ref allowlist) = self.env_allowlist {
+                    if let Some(ref allowlist) = self.config.env_allowlist {
                         let vars: Vec<Value> = allowlist.iter()
                             .map(|s| Value::String(s.clone()))
                             .collect();
                         ctx.metadata.insert("__allowed_env_vars".to_string(), Value::Array(vars));
                     }
                 }
-                if let Some(mb) = self.code_max_memory_mb {
+                if let Some(mb) = self.config.code_max_memory_mb {
                     ctx.metadata.insert("__code_max_memory_mb".to_string(), Value::Number(mb.into()));
                 }
-                ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.caller_is_admin));
+                ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.config.caller_is_admin));
 
                 // Build name-keyed output map so Code node JS can use context["Node Name"].field
                 // instead of context["node_1234_5"] (internal IDs are not user-visible).
@@ -572,7 +546,7 @@ impl WorkflowExecutor {
                     Some(node_id), LogLevel::Warn,
                     format!("Node '{}' retry {}/{}", node_id, attempt, max_attempts),
                 );
-                if let Some(ref token) = self.cancel_token {
+                if let Some(ref token) = self.config.cancel_token {
                     tokio::select! {
                         _ = sleep(Duration::from_millis(backoff_ms)) => {}
                         _ = token.cancelled() => {

@@ -59,7 +59,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
 
   const sfHint = document.createElement("div");
   sfHint.className = "config-hint";
-  sfHint.textContent = "Each subfolder becomes an input port. Connect an upstream node to each port.";
+  sfHint.textContent = "Each subfolder becomes an input port. Connect a node that produces a files array (AI Image, Collect Files, S3 Storage).";
   body.appendChild(sfHint);
 
   const sfListEl = document.createElement("div");

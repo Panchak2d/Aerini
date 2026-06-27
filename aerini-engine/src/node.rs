@@ -122,6 +122,15 @@ pub struct PortDefinition {
     pub label: String,
     /// Position hint for the canvas renderer.
     pub position: PortPosition,
+    /// Optional semantic type tag for this port (e.g. `"files"`).
+    ///
+    /// Canvas uses this to validate connections at wire-draw time and to
+    /// choose the correct auto-injected expression. When absent (`None`),
+    /// no type constraint is enforced and the generic `.output` expression
+    /// is used as the fallback. Serialised as `null` when absent — existing
+    /// saved workflows without this field deserialise cleanly via `default`.
+    #[serde(default)]
+    pub port_type: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -143,14 +152,16 @@ impl Default for NodePorts {
     fn default() -> Self {
         Self {
             inputs: vec![PortDefinition {
-                id: "input".to_string(),
-                label: "In".to_string(),
-                position: PortPosition::Left,
+                id:        "input".to_string(),
+                label:     "In".to_string(),
+                position:  PortPosition::Left,
+                port_type: None,
             }],
             outputs: vec![PortDefinition {
-                id: "output".to_string(),
-                label: "Out".to_string(),
-                position: PortPosition::Right,
+                id:        "output".to_string(),
+                label:     "Out".to_string(),
+                position:  PortPosition::Right,
+                port_type: None,
             }],
         }
     }

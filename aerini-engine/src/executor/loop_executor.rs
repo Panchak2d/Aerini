@@ -114,7 +114,7 @@ impl WorkflowExecutor {
 
         for iteration in 0..=MAX_LOOP_ITERATIONS {
             // Cancel check — exits the loop immediately between iterations.
-            if self.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+            if self.config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
                 return Err("Run cancelled by user".to_string());
             }
 
@@ -230,7 +230,7 @@ impl WorkflowExecutor {
                 // In non-strict mode, log a warning to the execution log and continue.
                 let schema_errors = Self::validate_node_input(&body_def.input_schema, &body_input.input);
                 if !schema_errors.is_empty() {
-                    if self.strict_schema_validation {
+                    if self.config.strict_schema_validation {
                         let reason = schema_errors.join("; ");
                         let fail_output = crate::model::NodeOutput::failure(
                             crate::error::NodeError::unrecoverable(

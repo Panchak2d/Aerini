@@ -36,17 +36,20 @@ impl Node for IfConditionNode {
                 id: "input".to_string(),
                 label: "In".to_string(),
                 position: PortPosition::Left,
+                port_type: None,
             }],
             outputs: vec![
                 PortDefinition {
                     id: "on_true".to_string(),
                     label: "True".to_string(),
                     position: PortPosition::Right,
+                    port_type: None,
                 },
                 PortDefinition {
                     id: "on_false".to_string(),
                     label: "False".to_string(),
                     position: PortPosition::Right,
+                    port_type: None,
                 },
             ],
         }

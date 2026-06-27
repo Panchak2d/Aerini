@@ -34,7 +34,7 @@ interface types {
         type-id: string,
         /// Display name shown in the UI palette.
         display-name: string,
-        /// Category for palette grouping: "trigger", "action", "ai", "logic", "utility", "other"
+        /// Category for palette grouping: "action", "ai", "logic", "utility"
         category: string,
         /// Short description shown in the UI.
         description: string,

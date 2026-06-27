@@ -144,7 +144,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             for source in sources {
                 let id    = source["id"].as_str().unwrap_or("input").to_string();
                 let label = source["name"].as_str().unwrap_or("Source").to_string();
-                inputs.push(PortDefinition { id, label, position: PortPosition::Left });
+                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()) });
             }
         }
     }
@@ -152,18 +152,20 @@ pub fn derive_ports(config: &Value) -> NodePorts {
     // Always show at least 1 input port (PLAN: "Minimum 1 input port always shown")
     if inputs.is_empty() {
         inputs.push(PortDefinition {
-            id:       "input".to_string(),
-            label:    "Source".to_string(),
-            position: PortPosition::Left,
+            id:        "input".to_string(),
+            label:     "Source".to_string(),
+            position:  PortPosition::Left,
+            port_type: Some("files".to_string()),
         });
     }
 
     NodePorts {
         inputs,
         outputs: vec![PortDefinition {
-            id:       "output".to_string(),
-            label:    "Out".to_string(),
-            position: PortPosition::Right,
+            id:        "output".to_string(),
+            label:     "Out".to_string(),
+            position:  PortPosition::Right,
+            port_type: None,
         }],
     }
 }
@@ -220,3 +222,198 @@ fn deduplicate_filename(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use serde_json::json;
+
+    fn make_input(sources_json: Value) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "sources": sources_json }),
+            context: ExecutionContext::default(),
+        }
+    }
+
+    fn file(name: &str) -> Value {
+        json!({ "filename": name, "data": "abc", "mime_type": "text/plain" })
+    }
+
+    fn media_contract(files: Vec<Value>) -> String {
+        serde_json::to_string(&json!({ "files": files, "count": files.len() })).unwrap()
+    }
+
+    fn bare_array(files: Vec<Value>) -> String {
+        serde_json::to_string(&Value::Array(files)).unwrap()
+    }
+
+    // ── No sources configured ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn no_sources_returns_empty_files() {
+        let input = NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({}), // no "sources" key
+            context: ExecutionContext::default(),
+        };
+        let out = CollectFilesNode.execute(input).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data["count"], json!(0));
+        assert_eq!(data["files"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_sources_array_returns_empty_files() {
+        let out = CollectFilesNode.execute(make_input(json!([]))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["count"], json!(0));
+    }
+
+    // ── Media contract shape ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn single_source_media_contract_shape() {
+        let contract = media_contract(vec![file("a.txt"), file("b.txt")]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "Source 1", "source_expr": contract }
+        ]))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data["count"], json!(2));
+    }
+
+    // ── Bare array shape ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn single_source_bare_array_shape() {
+        let arr = bare_array(vec![file("x.txt")]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "S1", "source_expr": arr }
+        ]))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["count"], json!(1));
+    }
+
+    // ── Accumulate across multiple sources ─────────────────────────────────
+
+    #[tokio::test]
+    async fn two_sources_files_accumulated() {
+        let c1 = media_contract(vec![file("p.txt")]);
+        let c2 = media_contract(vec![file("q.txt"), file("r.txt")]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "A", "source_expr": c1 },
+            { "id": "s2", "name": "B", "source_expr": c2 }
+        ]))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["count"], json!(3));
+    }
+
+    // ── Filename deduplication ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn duplicate_filename_gets_suffix() {
+        let c1 = media_contract(vec![file("dup.txt")]);
+        let c2 = media_contract(vec![file("dup.txt")]); // same name
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "A", "source_expr": c1 },
+            { "id": "s2", "name": "B", "source_expr": c2 }
+        ]))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        let files = data["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        let names: Vec<&str> = files.iter()
+            .map(|f| f["filename"].as_str().unwrap())
+            .collect();
+        assert!(names[0] != names[1], "filenames should differ after dedup: {:?}", names);
+    }
+
+    // ── Empty source_expr skipped ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn source_with_empty_expr_skipped() {
+        let c = media_contract(vec![file("ok.txt")]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "empty", "name": "Empty", "source_expr": "" },
+            { "id": "good",  "name": "Good",  "source_expr": c }
+        ]))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["count"], json!(1));
+    }
+
+    // ── parse_source_expr unit tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_source_expr_object() {
+        let v = parse_source_expr("{\"files\":[]}");
+        assert!(v.is_object());
+    }
+
+    #[test]
+    fn parse_source_expr_array() {
+        let v = parse_source_expr("[1,2,3]");
+        assert!(v.is_array());
+    }
+
+    #[test]
+    fn parse_source_expr_non_json_returns_null() {
+        let v = parse_source_expr("{{not.json}}");
+        assert!(v.is_null());
+    }
+
+    // ── deduplicate_filename unit tests ─────────────────────────────────────
+
+    #[test]
+    fn dedup_filename_no_collision() {
+        let seen = std::collections::HashSet::new();
+        let result = deduplicate_filename("file.txt", 1, &seen);
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn dedup_filename_with_extension() {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert("file.txt".to_string());
+        let result = deduplicate_filename("file.txt", 1, &seen);
+        assert_eq!(result, "file_1.txt");
+    }
+
+    #[test]
+    fn dedup_filename_no_extension() {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert("README".to_string());
+        let result = deduplicate_filename("README", 2, &seen);
+        assert_eq!(result, "README_2");
+    }
+
+    // ── derive_ports ────────────────────────────────────────────────────────
+
+    #[test]
+    fn derive_ports_no_config_gives_one_input() {
+        let ports = derive_ports(&Value::Null);
+        assert_eq!(ports.inputs.len(), 1);
+        assert_eq!(ports.inputs[0].id, "input");
+    }
+
+    #[test]
+    fn derive_ports_with_sources_gives_matching_inputs() {
+        let cfg = json!({ "sources": [
+            { "id": "s1", "name": "Source A" },
+            { "id": "s2", "name": "Source B" }
+        ]});
+        let ports = derive_ports(&cfg);
+        assert_eq!(ports.inputs.len(), 2);
+        assert_eq!(ports.inputs[0].id, "s1");
+        assert_eq!(ports.inputs[1].id, "s2");
+    }
+}

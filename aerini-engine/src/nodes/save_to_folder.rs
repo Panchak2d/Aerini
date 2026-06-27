@@ -284,25 +284,27 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             for sf in subfolders {
                 let id    = sf["id"].as_str().unwrap_or("input").to_string();
                 let label = sf["name"].as_str().unwrap_or("Subfolder").to_string();
-                inputs.push(PortDefinition { id, label, position: PortPosition::Left });
+                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()) });
             }
         }
     }
 
     if inputs.is_empty() {
         inputs.push(PortDefinition {
-            id:       "input".to_string(),
-            label:    "In".to_string(),
-            position: PortPosition::Left,
+            id:        "input".to_string(),
+            label:     "In".to_string(),
+            position:  PortPosition::Left,
+            port_type: Some("files".to_string()),
         });
     }
 
     NodePorts {
         inputs,
         outputs: vec![PortDefinition {
-            id:       "output".to_string(),
-            label:    "Out".to_string(),
-            position: PortPosition::Right,
+            id:        "output".to_string(),
+            label:     "Out".to_string(),
+            position:  PortPosition::Right,
+            port_type: None,
         }],
     }
 }
@@ -491,3 +493,159 @@ fn extract_config_files(val: &Value) -> Vec<Value> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    // "Hello World" → SGVsbG8gV29ybGQ=
+    // "AAA"         → QUFB
+    // "BBB"         → QkJC
+    // "good"        → Z29vZA==
+    // "img-data"    → aW1nLWRhdGE=
+
+    fn file_entry(name: &str, b64: &str) -> Value {
+        json!({ "filename": name, "data": b64 })
+    }
+
+    // ── flat_mode ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flat_mode_single_file_success() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = json!({
+            "files": [file_entry("hello.txt", "SGVsbG8gV29ybGQ=")]
+        });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        assert!(out.success, "expected success: {:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!(o["count"], 1);
+        assert_eq!(o["errors"].as_array().unwrap().len(), 0);
+        assert!(dir.path().join("hello.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn flat_mode_multiple_files_success() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = json!({
+            "files": [
+                file_entry("a.txt", "QUFB"),
+                file_entry("b.txt", "QkJC"),
+            ]
+        });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        assert!(out.success, "{:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!(o["count"], 2);
+        assert!(dir.path().join("a.txt").exists());
+        assert!(dir.path().join("b.txt").exists());
+    }
+
+    // P2 regression: empty files array must surface NO_FILES_RECEIVED, not succeed silently.
+    #[tokio::test]
+    async fn flat_mode_empty_files_array_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = json!({ "files": [] });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        assert!(!out.success, "expected failure for zero files");
+        assert_eq!(out.error.unwrap().code, "NO_FILES_RECEIVED");
+    }
+
+    // P2 regression: missing target directory must be created, not error.
+    #[tokio::test]
+    async fn flat_mode_missing_dir_is_created_by_create_dir_all() {
+        let base = TempDir::new().unwrap();
+        let new_dir = base.path().join("nonexistent_sub").join("deeper");
+        let path = new_dir.to_str().unwrap();
+        assert!(!new_dir.exists(), "pre-condition: dir must not exist");
+        let cfg = json!({
+            "files": [file_entry("out.txt", "Z29vZA==")]
+        });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        assert!(out.success, "{:?}", out.error);
+        assert!(new_dir.exists(), "create_dir_all must have created the directory");
+        assert!(new_dir.join("out.txt").exists());
+    }
+
+    // One file with missing data field must error; the other must still be written.
+    #[tokio::test]
+    async fn flat_mode_partial_failure_accumulates_errors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = json!({
+            "files": [
+                file_entry("good.txt", "Z29vZA=="),
+                json!({ "filename": "bad.txt" }),  // missing data → write_single_file returns Err
+            ]
+        });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        // build_output always returns success for flat_mode; errors live in output JSON.
+        assert!(out.success, "flat_mode must not panic on partial failure");
+        let o = out.output.unwrap();
+        assert_eq!(o["count"], 1, "one file should succeed");
+        assert_eq!(
+            o["errors"].as_array().unwrap().len(),
+            1,
+            "one error entry expected"
+        );
+        assert!(dir.path().join("good.txt").exists(), "good file must be written");
+        assert!(!dir.path().join("bad.txt").exists(), "bad file must not be created");
+    }
+
+    // ── subfolder_mode ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subfolder_mode_success() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        // source_expr must be a JSON string starting with '[' or '{' for parse_source_expr.
+        let source_expr = serde_json::to_string(&json!([
+            { "filename": "img.txt", "data": "aW1nLWRhdGE=" }
+        ]))
+        .unwrap();
+        let subfolders = vec![json!({
+            "id":          "sf1",
+            "name":        "images",
+            "source_expr": source_expr,
+        })];
+        let out = subfolder_mode(&subfolders, path, "", true).await;
+        assert!(out.success, "{:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!(o["count"], 1);
+        assert!(dir.path().join("images").join("img.txt").exists());
+    }
+
+    // P2 ordering regression: create_dir_all must fire BEFORE the files.is_empty() guard.
+    // When source_expr resolves to an empty array, the subfolder directory must still
+    // exist on disk even though no files are written.
+    #[tokio::test]
+    async fn subfolder_mode_dir_created_before_empty_check() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        // "[]" is a valid non-empty source_expr that resolves to zero files.
+        let source_expr = serde_json::to_string(&json!([])).unwrap();
+        let subfolders = vec![json!({
+            "id":          "sf1",
+            "name":        "empty_sub",
+            "source_expr": source_expr,
+        })];
+        let out = subfolder_mode(&subfolders, path, "", true).await;
+        // NodeOutput may be failure (SAVE_FAILED: no files written) — that is expected.
+        // The critical assertion is that the directory was created before the guard fired.
+        let subdir = dir.path().join("empty_sub");
+        assert!(
+            subdir.exists(),
+            "directory must be created even when source resolves to 0 files (P2 ordering fix)"
+        );
+        // Confirm the output surfaces the zero-file condition rather than silently succeeding.
+        assert!(
+            !out.success || out.output.as_ref().map(|o| o["count"] == 0).unwrap_or(false),
+            "zero files must not produce a silent success with count > 0"
+        );
+    }
+}

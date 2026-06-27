@@ -122,13 +122,14 @@ export class CanvasNode {
 
     if (slots.length > 0) {
       this.data.ports.inputs = slots.map(s => ({
-        id:       s.id,
-        label:    s.name,
-        position: "left" as const,
+        id:        s.id,
+        label:     s.name,
+        position:  "left" as const,
+        port_type: "files" as const,
       }));
     } else {
       // No slots configured yet — show a single placeholder input
-      this.data.ports.inputs = [{ id: "input", label: "In", position: "left" as const }];
+      this.data.ports.inputs = [{ id: "input", label: "In", position: "left" as const, port_type: "files" as const }];
     }
 
     // Ensure at least one output port exists

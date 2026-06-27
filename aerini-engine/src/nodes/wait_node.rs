@@ -70,11 +70,11 @@ impl Node for WaitNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![
-                PortDefinition { id: "input".to_string(),     label: "In".to_string(),       position: PortPosition::Left  },
+                PortDefinition { id: "input".to_string(),     label: "In".to_string(),       position: PortPosition::Left,  port_type: None },
             ],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),    label: "Done".to_string(),     position: PortPosition::Right },
-                PortDefinition { id: "timed_out".to_string(), label: "Timed out".to_string(),position: PortPosition::Right },
+                PortDefinition { id: "output".to_string(),    label: "Done".to_string(),     position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "timed_out".to_string(), label: "Timed out".to_string(),position: PortPosition::Right, port_type: None },
             ],
         }
     }

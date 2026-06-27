@@ -361,3 +361,152 @@ mod export {
         Ok(buf.into_inner())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use serde_json::json;
+
+    fn make_input(input: Value) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext::default(),
+        }
+    }
+
+    // ── Base64 correctness ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn hello_encodes_to_correct_base64() {
+        // "Hello" → SGVsbG8= (RFC 4648, confirmed)
+        let out = TextToFileNode.execute(make_input(json!({ "content": "Hello" }))).await;
+        assert!(out.success);
+        let files = out.output.unwrap()["files"].as_array().unwrap().clone();
+        assert_eq!(files[0]["data"], json!("SGVsbG8="));
+    }
+
+    #[tokio::test]
+    async fn base64_roundtrip_arbitrary_text() {
+        let content = "The quick brown fox jumps over the lazy dog.";
+        let out = TextToFileNode.execute(make_input(json!({ "content": content }))).await;
+        assert!(out.success);
+        let b64 = out.output.unwrap()["files"][0]["data"].as_str().unwrap().to_string();
+        let decoded = BASE64.decode(&b64).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), content);
+    }
+
+    // ── Failure path ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn empty_content_returns_unrecoverable_error() {
+        let out = TextToFileNode.execute(make_input(json!({ "content": "" }))).await;
+        assert!(!out.success);
+        let err = out.error.unwrap();
+        assert_eq!(err.code, "MISSING_CONTENT");
+        assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn missing_content_field_returns_error() {
+        let out = TextToFileNode.execute(make_input(json!({ "filename": "test.txt" }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_CONTENT");
+    }
+
+    #[tokio::test]
+    async fn null_content_returns_error() {
+        let out = TextToFileNode.execute(make_input(json!({ "content": null }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "MISSING_CONTENT");
+    }
+
+    // ── Defaults ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn default_filename_is_output_txt() {
+        let out = TextToFileNode.execute(make_input(json!({ "content": "x" }))).await;
+        assert!(out.success);
+        let fname = out.output.unwrap()["files"][0]["filename"].as_str().unwrap().to_string();
+        assert_eq!(fname, "output.txt");
+    }
+
+    #[tokio::test]
+    async fn default_mime_type_is_text_plain() {
+        let out = TextToFileNode.execute(make_input(json!({ "content": "x" }))).await;
+        assert!(out.success);
+        let mime = out.output.unwrap()["files"][0]["mime_type"].as_str().unwrap().to_string();
+        assert_eq!(mime, "text/plain");
+    }
+
+    // ── Explicit overrides ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn explicit_filename_used() {
+        let out = TextToFileNode.execute(make_input(json!({
+            "content": "x",
+            "filename": "report.csv"
+        }))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["files"][0]["filename"], json!("report.csv"));
+    }
+
+    #[tokio::test]
+    async fn explicit_mime_type_used() {
+        let out = TextToFileNode.execute(make_input(json!({
+            "content": "x",
+            "mime_type": "text/csv"
+        }))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["files"][0]["mime_type"], json!("text/csv"));
+    }
+
+    // ── Format field ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn explicit_format_sets_default_filename_extension() {
+        // No explicit filename given — format=md → output.md
+        let out = TextToFileNode.execute(make_input(json!({
+            "content": "# heading",
+            "format": "md"
+        }))).await;
+        assert!(out.success);
+        let fname = out.output.unwrap()["files"][0]["filename"].as_str().unwrap().to_string();
+        assert_eq!(fname, "output.md");
+    }
+
+    #[tokio::test]
+    async fn format_inferred_from_filename_extension() {
+        // filename=notes.csv, no explicit format → format inferred as "csv"
+        let out = TextToFileNode.execute(make_input(json!({
+            "content": "a,b,c",
+            "filename": "notes.csv"
+        }))).await;
+        assert!(out.success);
+        // mime_type defaults to text/plain (csv uses passthrough); data is base64 of text
+        let data = out.output.unwrap();
+        let b64 = data["files"][0]["data"].as_str().unwrap();
+        let decoded = String::from_utf8(BASE64.decode(b64).unwrap()).unwrap();
+        assert_eq!(decoded, "a,b,c");
+    }
+
+    // ── Output structure ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn output_files_array_has_exactly_one_entry() {
+        let out = TextToFileNode.execute(make_input(json!({ "content": "hello" }))).await;
+        assert!(out.success);
+        let files = out.output.unwrap()["files"].as_array().unwrap().clone();
+        assert_eq!(files.len(), 1);
+        // All required keys present
+        assert!(files[0].get("filename").is_some());
+        assert!(files[0].get("data").is_some());
+        assert!(files[0].get("mime_type").is_some());
+    }
+}

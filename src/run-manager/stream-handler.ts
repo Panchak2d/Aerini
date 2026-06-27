@@ -1,16 +1,17 @@
-import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, type WorkflowResult } from "./ipc/workflow";
-import { TRIGGER_NODE_IDS } from "./node-ids";
-import { serialize } from "./canvas/CanvasSerializer";
-import type { Canvas } from "./canvas/Canvas";
+import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, type WorkflowResult } from "../ipc/workflow";
+import { TRIGGER_NODE_IDS } from "../node-ids";
+import { serialize } from "../canvas/CanvasSerializer";
+import type { Canvas } from "../canvas/Canvas";
 import {
   renderSummaryTab, renderResultsTab, renderErrorsTab,
   renderLogsView, renderDebugView,
   syntaxHighlight, extractPreview,
   wireCopyButtons,
-} from "./output-renderer";
-import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel } from "./run-history";
-import { setWorkflowRunning } from "./workflow-manager";
-import { isTauri, escapeHtml } from "./utils";
+} from "../output-renderer";
+import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel } from "../run-history";
+import { setWorkflowRunning } from "../workflow-manager";
+import { isTauri, escapeHtml } from "../utils";
+import { RunStateMachine } from "./state-machine";
 
 // Hard timeout for the entire workflow run. Prevents the UI from being
 // stuck forever if the backend hangs (e.g. Schedule node, hung child process).
@@ -20,19 +21,13 @@ export class RunManager {
   private canvas: Canvas;
   private onStatus: (msg: string) => void;
   private onToast:  (msg: string, type: "success" | "error" | "info") => void;
-  private lastResult: WorkflowResult | null = null;
-  private _isRunning = false;
-  private _cancelRequested = false;
-  private currentWorkflowName        = "Untitled";
-  private currentWorkflowId          = "";
-  private currentParallelExecution   = false;
-  private currentMaxConcurrentNodes  = 8;
+  private state = new RunStateMachine();
   private _activeHistoryPanel: HistoryPanel | null = null;
 
   onRunStateChange: ((running: boolean) => void) | null = null;
   onRunResult: ((success: boolean) => void) | null = null;
 
-  get isRunning(): boolean { return this._isRunning; }
+  get isRunning(): boolean { return this.state.isRunning; }
 
   // Called from app.ts whenever a workflow is loaded onto the canvas —
   // either via handleLoad, handleNew, or any other navigation event.
@@ -40,10 +35,7 @@ export class RunManager {
   // routes correctly and showResultFromScheduler saves history under
   // the right workflow ID.
   setCurrentWorkflow(id: string, name: string, parallelExecution = false, maxConcurrentNodes = 8): void {
-    this.currentWorkflowId         = id;
-    this.currentWorkflowName       = name;
-    this.currentParallelExecution  = parallelExecution;
-    this.currentMaxConcurrentNodes = maxConcurrentNodes;
+    this.state.setCurrentWorkflow(id, name, parallelExecution, maxConcurrentNodes);
   }
 
   // Called from app.ts's global listenNodeStatus subscription.
@@ -51,7 +43,7 @@ export class RunManager {
   // currently loaded on the canvas. This makes scheduler-triggered runs animate
   // exactly like manual runs — the subscription is permanent, not per-run.
   onNodeStatusEvent(workflowId: string, nodeId: string, status: string): void {
-    if (workflowId !== this.currentWorkflowId) return;
+    if (workflowId !== this.state.currentWorkflowId) return;
     this.canvas.setNodeStatus(nodeId, status === "skipped" ? "idle" : status as "idle" | "running" | "success" | "error");
   }
 
@@ -67,8 +59,9 @@ export class RunManager {
 
   // Reveal the drawer and scroll to a specific node's output tab
   revealNodeOutput(nodeId: string, nodeName: string): void {
-    if (!this.lastResult) return;
-    const out = this.lastResult.node_outputs[nodeId];
+    const lastResult = this.state.lastResult;
+    if (!lastResult) return;
+    const out = lastResult.node_outputs[nodeId];
     if (out === undefined) return;
     const drawer = document.getElementById("output-drawer")!;
     drawer.classList.remove("hidden");
@@ -85,8 +78,9 @@ export class RunManager {
 
   // Show error details in the drawer when user clicks a failed node
   showNodeErrorDetail(nodeId: string, nodeName: string): void {
-    if (!this.lastResult) return;
-    const errorLogs = this.lastResult.logs.filter(
+    const lastResult = this.state.lastResult;
+    if (!lastResult) return;
+    const errorLogs = lastResult.logs.filter(
       l => l.node_id === nodeId && l.level === "error"
     );
     if (!errorLogs.length) return;
@@ -95,8 +89,8 @@ export class RunManager {
     const content = document.getElementById("output-content")!;
     drawer.classList.remove("hidden");
 
-    const nodeOutput = this.lastResult.node_outputs[nodeId];
-    const inputContext = this.lastResult.node_outputs; // best proxy for what node received
+    const nodeOutput = lastResult.node_outputs[nodeId];
+    const inputContext = lastResult.node_outputs; // best proxy for what node received
 
     content.innerHTML = `
       <div class="error-detail-card">
@@ -136,7 +130,7 @@ export class RunManager {
   // Saves to history and opens the full output panel (Summary + node tabs + Logs + History).
   showResultFromScheduler(workflowName: string, result: WorkflowResult): void {
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    saveRunToHistory(runId, this.currentWorkflowId, workflowName, result);
+    saveRunToHistory(runId, this.state.currentWorkflowId, workflowName, result);
 
     // Always paint the final node states onto the canvas — this is what makes
     // nodes turn green/red after a scheduled run, matching the manual run UX.
@@ -209,7 +203,7 @@ export class RunManager {
     this.setActiveTab(historyTab);
     tabsEl.appendChild(historyTab);
 
-    const panel = renderHistoryPanel(this.currentWorkflowId, (result: WorkflowResult) => {
+    const panel = renderHistoryPanel(this.state.currentWorkflowId, (result: WorkflowResult) => {
       this._activeHistoryPanel = null;
       this.buildDrawerTabsFromResult(result);
     });
@@ -219,21 +213,20 @@ export class RunManager {
 
   // Force-reset the run button. Called externally (e.g. on handleNew, or Stop click).
   forceReset(): void {
-    if (!this._isRunning) return;
-    this._cancelRequested = true;
+    if (!this.state.isRunning) return;
+    this.state.requestCancel();
     this.canvas.resetAllStatus();
     cancelRun().catch(() => {}); // fire-and-forget; no-op if idle
     const panelBtn = document.getElementById("btn-run-panel") as HTMLButtonElement | null;
     if (panelBtn) { panelBtn.disabled = false; panelBtn.textContent = "Run Workflow"; }
-    this._isRunning = false;
+    this.state.stop();
     this.onRunStateChange?.(false);
     this.onStatus("Run cancelled");
   }
 
   async handleRun(currentId: string, currentName: string): Promise<void> {
-    this.currentWorkflowName = currentName;
-    this.currentWorkflowId   = currentId;
-    if (this._isRunning) {
+    this.state.setWorkflowIdentity(currentId, currentName);
+    if (this.state.isRunning) {
       this.onToast("A workflow is already running. Wait for it to finish.", "info");
       return;
     }
@@ -243,7 +236,7 @@ export class RunManager {
     }
 
     const panelBtn = document.getElementById("btn-run-panel") as HTMLButtonElement | null;
-    this._isRunning = true;
+    this.state.start();
     this.onRunStateChange?.(true);
     setWorkflowRunning(currentId, true);   // mark in sidebar
     if (panelBtn) { panelBtn.disabled = true; panelBtn.textContent = "Running…"; }
@@ -274,7 +267,7 @@ export class RunManager {
     }
 
     const json = serialize(currentId, currentName, this.canvas.nodes, this.canvas.connectors,
-      this.currentParallelExecution, this.currentMaxConcurrentNodes);
+      this.state.currentParallelExecution, this.state.currentMaxConcurrentNodes);
 
     if (!isTauri()) {
       content.innerHTML = `<div class="run-notice">
@@ -296,7 +289,7 @@ export class RunManager {
       // Generate the run id up front so a "running" record can be written
       // before execution starts (crash mid-run still leaves a trace).
       const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      saveRunStarted(runId, this.currentWorkflowId, this.currentWorkflowName);
+      saveRunStarted(runId, this.state.currentWorkflowId, this.state.currentWorkflowName);
 
       // Race the workflow against a hard timeout so the UI never gets permanently stuck
       const timeoutPromise = new Promise<never>((_, reject) =>
@@ -310,8 +303,7 @@ export class RunManager {
 
       // If the user cancelled while we were awaiting, discard the result silently.
       // forceReset() already reset the UI — no toast, no history entry, no drawer rebuild.
-      if (this._cancelRequested) {
-        this._cancelRequested = false;
+      if (this.state.consumeCancelRequest()) {
         return;
       }
 
@@ -333,8 +325,8 @@ export class RunManager {
       }
 
       // Save to run history
-      saveRunToHistory(runId, this.currentWorkflowId, this.currentWorkflowName, result);
-      this.lastResult = result;
+      saveRunToHistory(runId, this.state.currentWorkflowId, this.state.currentWorkflowName, result);
+      this.state.setLastResult(result);
       this.onRunResult?.(result.success);
 
       this.buildDrawerTabs(result);
@@ -373,8 +365,7 @@ export class RunManager {
   async handleRunSingleNode(targetNodeId: string, currentId: string, currentName: string): Promise<void> {
     if (!isTauri()) { this.onStatus("Run requires the desktop app"); return; }
 
-    this.currentWorkflowId   = currentId;
-    this.currentWorkflowName = currentName;
+    this.state.setWorkflowIdentity(currentId, currentName);
 
     // Walk connectors backwards to collect all ancestor nodes
     const allNodes       = this.canvas.nodes;
@@ -401,7 +392,7 @@ export class RunManager {
     }
 
     const json = serialize(`${currentId}_sub`, `${currentName} (node test)`, subNodes, subConns,
-      this.currentParallelExecution, this.currentMaxConcurrentNodes);
+      this.state.currentParallelExecution, this.state.currentMaxConcurrentNodes);
     this.onStatus(`Running "${allNodes.get(targetNodeId)?.data.name ?? targetNodeId}"…`);
 
     // Open drawer
@@ -424,7 +415,7 @@ export class RunManager {
         const f = result.logs.find((l) => l.level === "error" && l.node_id);
         if (f?.node_id) this.canvas.setNodeStatus(f.node_id, "error");
       }
-      this.lastResult = result;
+      this.state.setLastResult(result);
       this.buildDrawerTabs(result);
       this.onStatus(result.success ? "Node run complete" : "Node run failed");
     } catch (e) {
@@ -494,7 +485,7 @@ export class RunManager {
     historyTab.addEventListener("click", () => {
       this.setActiveTab(historyTab);
       content.innerHTML = "";
-      const panel = renderHistoryPanel(this.currentWorkflowId, (result: WorkflowResult) => {
+      const panel = renderHistoryPanel(this.state.currentWorkflowId, (result: WorkflowResult) => {
         this._activeHistoryPanel = null;
         this.buildDrawerTabsFromResult(result);
       });
@@ -625,9 +616,9 @@ export class RunManager {
   }
 
   private resetBtns(p: HTMLButtonElement | null): void {
-    this._isRunning = false;
+    this.state.stop();
     this.onRunStateChange?.(false);
-    setWorkflowRunning(this.currentWorkflowId, false);
+    setWorkflowRunning(this.state.currentWorkflowId, false);
     if (p) { p.disabled = false; p.textContent = "Run Workflow"; }
   }
 
@@ -636,7 +627,7 @@ export class RunManager {
   // We set --drawer-offset on :root so #canvas-area shrinks above it,
   // then call canvas.resize() so the canvas element updates its pixel size.
 
-  static showDrawer(canvas: import("./canvas/Canvas").Canvas): void {
+  static showDrawer(canvas: import("../canvas/Canvas").Canvas): void {
     const drawer = document.getElementById("output-drawer")!;
     if (!drawer.classList.contains("hidden")) return; // already visible
     drawer.classList.remove("hidden");
@@ -651,14 +642,14 @@ export class RunManager {
     setTimeout(() => active.classList.remove("tab-flash"), 1500);
   }
 
-  static hideDrawer(canvas: import("./canvas/Canvas").Canvas): void {
+  static hideDrawer(canvas: import("../canvas/Canvas").Canvas): void {
     const drawer = document.getElementById("output-drawer")!;
     drawer.classList.add("hidden");
     document.documentElement.style.removeProperty("--drawer-offset");
     canvas.resize();
   }
 
-  static updateDrawerOffset(canvas: import("./canvas/Canvas").Canvas): void {
+  static updateDrawerOffset(canvas: import("../canvas/Canvas").Canvas): void {
     const drawer = document.getElementById("output-drawer");
     if (!drawer || drawer.classList.contains("hidden")) {
       document.documentElement.style.removeProperty("--drawer-offset");

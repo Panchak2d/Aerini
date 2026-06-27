@@ -37,6 +37,7 @@ impl Node for ManualTriggerNode {
                 id: "output".to_string(),
                 label: "Start".to_string(),
                 position: PortPosition::Right,
+                port_type: None,
             }],
         }
     }

@@ -193,7 +193,9 @@ When all items are processed, the `done` port fires with `all_results` populated
 
 The full array is not included in per-iteration output to avoid memory overhead on large arrays. Downstream nodes that need the full array should reference the loop node's context directly rather than the per-iteration `item` output.
 
-Arrays over 10,000 items are rejected. For larger datasets, split into batches using Collect Files or multiple HTTP requests with pagination.
+**Array size limit: 10,000 items.** If the resolved array exceeds this, the loop node fails immediately with error code `ARRAY_TOO_LARGE` before any body node runs — no items are processed, and no partial results are produced. The error message is: `Array has N items — maximum is 10,000 per loop. Split your data into smaller batches.`
+
+To process more than 10,000 items, paginate at the source: fetch items in pages of ≤10,000 via the HTTP node's pagination config (or a Loop-over-pages pattern), then run a nested loop over each page's items.
 
 ### Merge
 

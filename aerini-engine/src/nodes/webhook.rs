@@ -116,8 +116,8 @@ impl Node for WebhookNode {
         NodePorts {
             inputs: vec![],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),   label: "Triggered".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(),     position: PortPosition::Right },
+                PortDefinition { id: "output".to_string(),   label: "Triggered".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(),     position: PortPosition::Right, port_type: None },
             ],
         }
     }
@@ -515,5 +515,40 @@ mod tests {
         let out = WebhookNode.execute(input).await;
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "INVALID_PORT");
+    }
+
+    /// A port already held by another Webhook node in ACTIVE_PORTS must return
+    /// PORT_IN_USE immediately — no bind attempt, no hang, no panic.
+    ///
+    /// Tests the global port-registry guard added to prevent opaque BIND_ERR
+    /// messages when two concurrent workflows share the same port number.
+    ///
+    /// NOTE — handle_request secret/signature validation:
+    /// `handle_request` takes `hyper::Request<Incoming>`, which can only be
+    /// obtained from hyper's server accept loop and cannot be constructed in a
+    /// unit test without binding a real port. Testing the BLAKE3 constant-time
+    /// secret check, path/method guards, and timestamp replay-window logic
+    /// therefore requires an integration test that spins up a real local
+    /// listener. That is deferred to a separate integration test suite.
+    ///
+    /// PLAN DISCREPANCY (flagged, not fixed):
+    /// PLAN §P20 lists HMAC-SHA256/SHA1 tests. The actual code uses BLAKE3 for
+    /// constant-time shared-secret comparison (`x-webhook-secret` header), not
+    /// HMAC. The plan was written before implementation. Tests above and below
+    /// cover the real implementation.
+    #[tokio::test]
+    async fn port_already_held_in_registry_returns_port_in_use() {
+        // Port 59_901 — high ephemeral range, unlikely to be held by any real listener.
+        // We insert it directly into the global registry to simulate a concurrent
+        // Webhook node having claimed it, without needing to actually bind the socket.
+        const TEST_PORT: u16 = 59_901;
+        ACTIVE_PORTS.insert(TEST_PORT);
+        let input = make_input("n1", TEST_PORT as u64, "/hook", HashMap::new());
+        let out = WebhookNode.execute(input).await;
+        // Manual cleanup: execute() returns early on PORT_IN_USE before the
+        // scopeguard that would normally remove the entry is created.
+        ACTIVE_PORTS.remove(&TEST_PORT);
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "PORT_IN_USE");
     }
 }

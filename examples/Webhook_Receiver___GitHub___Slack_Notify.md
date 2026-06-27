@@ -31,7 +31,7 @@ Accepts a GitHub webhook, checks the event type, and posts to Slack on push even
 
 ## Notes
 
-- The Webhook node generates a secret token. Configure it in GitHub's webhook settings under **Secret**
-  so Aerini can verify the signature. See `docs/security.md` for details.
+- The Webhook node's **Secret** field checks the value you set here against a shared-secret header Aerini expects on incoming requests — it does **not** implement GitHub's own HMAC-SHA256 signature scheme (`X-Hub-Signature-256`). GitHub's "Secret" setting on the webhook itself only produces that HMAC signature; it does not send the secret as a plain header, so the two can't be wired together directly. Configuring the same value in both places does not make Aerini verify GitHub's signature.
+  For real protection on GitHub (or any HMAC-signing) webhooks, verify `X-Hub-Signature-256` in a downstream **Code** node — see `docs/security.md` §6 for the pattern and exact header details.
 - To receive webhooks on a local machine, use cloudflared or ngrok to expose the port.
   See `docs/webhooks-public.md`.

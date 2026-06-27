@@ -144,7 +144,7 @@ pub(super) async fn run_inner_parallel(
         }
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(executor.max_concurrent_nodes));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(executor.config.max_concurrent_nodes));
 
     let mut active_nodes: HashSet<String> = graph.entry_nodes.iter().cloned().collect();
     let mut completed:    HashSet<String> = HashSet::new();
@@ -159,7 +159,7 @@ pub(super) async fn run_inner_parallel(
         // Cancel check — highest priority; drains in-flight tasks and returns Err.
         // Runs before the abort check so a cancelled loop node (which sets abort=true)
         // is correctly surfaced as ExecutionCancelled, not as a workflow failure.
-        if executor.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+        if executor.config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
             for id in active_nodes.iter() {
                 if !in_flight.contains(id) && !completed.contains(id) {
                     executor.emit_node_status(&workflow.id, id, "skipped");
@@ -331,7 +331,7 @@ pub(super) async fn run_inner_parallel(
                         &resolved_input.input,
                     );
                     if !schema_errors.is_empty() {
-                        if exec.strict_schema_validation {
+                        if exec.config.strict_schema_validation {
                             let reason  = schema_errors.join("; ");
                             let err_msg = format!(
                                 "Input schema validation failed for node '{}': {}",

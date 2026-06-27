@@ -110,11 +110,11 @@ impl Node for CodeNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![
-                PortDefinition { id: "input".to_string(),    label: "In".to_string(),    position: PortPosition::Left  },
+                PortDefinition { id: "input".to_string(),    label: "In".to_string(),    position: PortPosition::Left  , port_type: None },
             ],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),   label: "Out".to_string(),   position: PortPosition::Right },
-                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "output".to_string(),   label: "Out".to_string(),   position: PortPosition::Right , port_type: None },
+                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right, port_type: None },
             ],
         }
     }

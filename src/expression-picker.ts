@@ -215,7 +215,7 @@ function insertAtCursor(
   const newCursor = start + text.length;
   el.selectionStart = newCursor;
   el.selectionEnd   = newCursor;
-  // Fire input event so popover-config.ts onChange handler picks up the new value
+  // Fire input event so popover/field-renderer.ts onChange handler picks up the new value
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.focus();
 }

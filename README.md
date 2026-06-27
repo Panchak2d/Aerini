@@ -31,6 +31,8 @@ Aerini is a local-first tool for individuals and small setups. For workflows tha
 | [Background Runs](docs/background-runs.md) | Schedules, webhook triggers, run history |
 | [Server Deployment](docs/server-deploy.md) | Running workflows 24/7 on a Linux server |
 | [Security](docs/security.md) | Encryption, dangerous nodes, SSRF protection, server hardening |
+| [Widget Embedding](docs/widget-embedding.md) | Dropping the chat widget into a web page, token scoping, security tradeoffs |
+| [Local Models](docs/local-models.md) | Using Ollama and other OpenAI-compatible local servers with AI Prompt |
 
 Developer guides:
 
@@ -140,7 +142,7 @@ For enterprise or volume licensing: see [CONTACT.md](CONTACT.md)
 
 ## Privacy
 
-Aerini collects no telemetry, analytics, usage data, or crash reports. No network requests are made by the app or server beyond what you explicitly configure in your workflows. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
+Aerini collects no telemetry, analytics, usage data, or crash reports. Beyond what you explicitly configure in your workflows, the only outbound connection Aerini's own UI makes is loading the Inter font from Google Fonts over HTTPS — see [Security §1](docs/security.md#1-desktop-security-model) for details. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
 
 ## Contributing
 

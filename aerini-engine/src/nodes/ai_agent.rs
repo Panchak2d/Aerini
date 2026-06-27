@@ -1,29 +1,10 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-
-// Shared agent HTTP client — reuses the AI connection pool.
-// AiAgentNode makes multiple sequential calls per execution (ReAct loop),
-// so connection reuse is especially valuable here.
-static AGENT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn shared_agent_client() -> reqwest::Client {
-    AGENT_CLIENT.get_or_init(|| {
-        // Redirects disabled: check_host_ssrf_from_url validates the initial URL only.
-        // A server at an allowed URL could redirect to an internal address and bypass
-        // the SSRF check. Matches the same policy used in http.rs and ai_prompt.rs.
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .pool_max_idle_per_host(20)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Failed to build shared agent HTTP client")
-    }).clone()
-}
+use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment};
 
 /// AI Agent node — autonomous ReAct loop (Reason → Act → Observe).
 ///
@@ -121,11 +102,15 @@ impl Node for AiAgentNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![
-                PortDefinition { id: "input".to_string(),    label: "In".to_string(),    position: PortPosition::Left },
+                PortDefinition { id: "input".to_string(),       label: "In".to_string(),    position: PortPosition::Left, port_type: None },
+                // Runtime files — wired from image_gen, collect_files, text_to_file, etc.
+                // Merged with config["attachments"] (static design-time files) before the first
+                // agent message is built. Same merge/classify pattern as ai_prompt.rs.
+                PortDefinition { id: "attachments".to_string(), label: "Files".to_string(), position: PortPosition::Left, port_type: Some("files".to_string()) },
             ],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),   label: "Done".to_string(),  position: PortPosition::Right },
-                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right },
+                PortDefinition { id: "output".to_string(),   label: "Done".to_string(),  position: PortPosition::Right , port_type: None },
+                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right, port_type: None },
             ],
         }
     }
@@ -137,8 +122,14 @@ impl Node for AiAgentNode {
         };
 
         let provider_str = input.input["provider"].as_str().unwrap_or("auto");
-        let is_anthropic = provider_str == "anthropic";
-        let is_gemini    = provider_str == "gemini";
+        let user_url_raw = input.input["base_url"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("");
+        let provider_id: &str = if provider_str == "auto" {
+            crate::provider::ProviderRegistry::detect_from_url(user_url_raw)
+        } else {
+            provider_str
+        };
+        let is_anthropic = provider_id == "anthropic";
+        let is_gemini    = provider_id == "gemini";
 
         let default_model = if is_anthropic {
             "claude-opus-4-5"
@@ -151,18 +142,7 @@ impl Node for AiAgentNode {
         let model   = input.input["model"].as_str().unwrap_or(default_model).to_string();
         let api_key = input.input["api_key"].as_str().unwrap_or("").to_string();
 
-        let base_url = input.input["base_url"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(if is_anthropic {
-                "https://api.anthropic.com"
-            } else if is_gemini {
-                "https://generativelanguage.googleapis.com/v1beta"
-            } else {
-                "https://api.openai.com/v1"
-            })
-            .trim_end_matches('/')
-            .to_string();
+        let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
         if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
@@ -172,7 +152,7 @@ impl Node for AiAgentNode {
         let max_tokens     = input.input["max_tokens"].as_u64().unwrap_or(2048);
         let temperature    = input.input["temperature"].as_f64().unwrap_or(0.3);
 
-        let system = input.input["system"].as_str()
+        let mut system = input.input["system"].as_str()
             .unwrap_or("You are a helpful AI agent. Complete the given goal step by step. When you have finished, provide a clear final answer.")
             .to_string();
 
@@ -183,7 +163,24 @@ impl Node for AiAgentNode {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        let client = shared_agent_client();
+        let client = crate::provider::shared_ai_client();
+
+        // Attachment handling — same merge/classify pattern as ai_prompt.rs.
+        // Two sources:
+        //   1. config["attachments"]      — static files added at design time.
+        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
+        //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
+        let static_atts: Vec<Value> = input.input["attachments"].as_array().cloned().unwrap_or_default();
+        let port_atts: Vec<Value>   = extract_port_attachments(&input.input["attachments_expr"]);
+        let mut attachments_raw = static_atts;
+        attachments_raw.extend(port_atts);
+        let pa = process_attachments(&attachments_raw);
+        let image_attachments   = pa.images;
+        let doc_attachments     = pa.docs;
+        let attachment_warnings = pa.logs;
+        if !pa.warning.is_empty() {
+            system.push_str(&pa.warning);
+        }
 
         let user_content = if context_str.is_empty() {
             goal.clone()
@@ -196,15 +193,53 @@ impl Node for AiAgentNode {
             return run_gemini_agent(
                 client, base_url, api_key, model, system,
                 user_content, tools, max_iterations, max_tokens, temperature,
+                image_attachments, doc_attachments, attachment_warnings,
             ).await;
         }
 
         let mut messages: Vec<Value> = Vec::new();
-        let mut reasoning_trace: Vec<String> = Vec::new();
+        // Attachment warnings surface here so they appear in every output's reasoning trace
+        // without needing to thread them through every return point in the loop.
+        let mut reasoning_trace: Vec<String> = attachment_warnings
+            .into_iter()
+            .map(|w| format!("[Attachment Warning] {}", w))
+            .collect();
         let mut tool_calls_log: Vec<Value> = Vec::new();
         let mut iterations = 0;
 
-        messages.push(json!({ "role": "user", "content": user_content }));
+        // Build the first user message. When attachments are present, the content
+        // must use each provider's multimodal block format. When absent, a plain
+        // string is used — identical to the pre-attachment-era shape.
+        let first_content: Value = if is_anthropic {
+            if image_attachments.is_empty() && doc_attachments.is_empty() {
+                json!(user_content)
+            } else {
+                let mut blocks: Vec<Value> = Vec::new();
+                for (mime, data) in &image_attachments {
+                    blocks.push(json!({ "type": "image", "source": { "type": "base64", "media_type": mime, "data": data } }));
+                }
+                for (mime, data, _filename) in &doc_attachments {
+                    blocks.push(json!({ "type": "document", "source": { "type": "base64", "media_type": mime, "data": data } }));
+                }
+                blocks.push(json!({ "type": "text", "text": user_content }));
+                json!(blocks)
+            }
+        } else {
+            // OpenAI-compatible: image_url + file blocks
+            if image_attachments.is_empty() && doc_attachments.is_empty() {
+                json!(user_content)
+            } else {
+                let mut blocks: Vec<Value> = vec![json!({ "type": "text", "text": user_content })];
+                for (mime, data) in &image_attachments {
+                    blocks.push(json!({ "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", mime, data) } }));
+                }
+                for (mime, data, filename) in &doc_attachments {
+                    blocks.push(json!({ "type": "file", "file": { "filename": filename, "file_data": format!("data:{};base64,{}", mime, data) } }));
+                }
+                json!(blocks)
+            }
+        };
+        messages.push(json!({ "role": "user", "content": first_content }));
 
         loop {
             if iterations >= max_iterations {
@@ -352,6 +387,9 @@ async fn run_gemini_agent(
     max_iterations: usize,
     max_tokens: u64,
     temperature: f64,
+    image_attachments: Vec<ImageAttachment>,
+    doc_attachments: Vec<DocAttachment>,
+    attachment_warnings: Vec<String>,
 ) -> NodeOutput {
     if api_key.is_empty() {
         return NodeOutput::failure(NodeError::unrecoverable(
@@ -360,11 +398,21 @@ async fn run_gemini_agent(
         ));
     }
 
+    let mut first_parts: Vec<Value> = vec![json!({ "text": user_content })];
+    for (mime, data) in &image_attachments {
+        first_parts.push(json!({ "inline_data": { "mime_type": mime, "data": data } }));
+    }
+    for (mime, data, _filename) in &doc_attachments {
+        first_parts.push(json!({ "inline_data": { "mime_type": mime, "data": data } }));
+    }
     let mut contents: Vec<Value> = vec![
-        json!({ "role": "user", "parts": [{ "text": user_content }] }),
+        json!({ "role": "user", "parts": first_parts }),
     ];
-    let mut reasoning_trace: Vec<String> = Vec::new();
-    let mut tool_calls_log: Vec<Value>   = Vec::new();
+    let mut reasoning_trace: Vec<String> = attachment_warnings
+        .into_iter()
+        .map(|w| format!("[Attachment Warning] {}", w))
+        .collect();
+    let mut tool_calls_log: Vec<Value> = Vec::new();
     let mut iterations = 0;
 
     loop {
@@ -519,10 +567,15 @@ async fn call_gemini_agent(
         body["tools"] = json!([{ "functionDeclarations": tools }]);
     }
 
-    let response = client
-        .post(&endpoint)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", api_key)
+    let record = crate::provider::ProviderRegistry::global()
+        .get("gemini")
+        .expect("gemini always registered");
+    // registry-managed: auth header (P14d)
+    let response = crate::provider::ProviderRegistry::apply_auth(
+        record,
+        client.post(&endpoint).header("Content-Type", "application/json"),
+        api_key,
+    )
         .json(&body)
         .send()
         .await
@@ -569,14 +622,16 @@ async fn call_openai_agent(
         body["tool_choice"] = json!("auto");
     }
 
-    let mut req = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
-    }
+    let record = crate::provider::ProviderRegistry::global()
+        .get("openai")
+        .expect("openai always registered");
+    // registry-managed: auth header (P14d)
+    let req = crate::provider::ProviderRegistry::apply_auth(
+        record,
+        client.post(format!("{}/chat/completions", base_url))
+            .header("Content-Type", "application/json"),
+        api_key,
+    ).json(&body);
 
     let response = req.send().await.map_err(|e| e.to_string())?;
     let json: Value = response.json().await.map_err(|e| e.to_string())?;
@@ -619,15 +674,16 @@ async fn call_anthropic_agent(
         "max_tokens": max_tokens
     });
 
-    let mut req = client
-        .post(format!("{}/v1/messages", base_url))
-        .header("Content-Type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .json(&body);
-
-    if !api_key.is_empty() {
-        req = req.header("x-api-key", api_key);
-    }
+    let record = crate::provider::ProviderRegistry::global()
+        .get("anthropic")
+        .expect("anthropic always registered");
+    // registry-managed: auth header (P14d)
+    let req = crate::provider::ProviderRegistry::apply_auth(
+        record,
+        client.post(format!("{}/v1/messages", base_url))
+            .header("Content-Type", "application/json"),
+        api_key,
+    ).json(&body);
 
     let response = req.send().await.map_err(|e| e.to_string())?;
     let json: Value = response.json().await.map_err(|e| e.to_string())?;

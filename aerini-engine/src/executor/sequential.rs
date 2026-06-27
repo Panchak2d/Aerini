@@ -19,7 +19,7 @@ impl WorkflowExecutor {
         workflow: Arc<Workflow>,
         initial_variables: HashMap<String, Value>,
     ) -> Result<WorkflowResult, EngineError> {
-        if self.parallel_execution {
+        if self.config.parallel_execution {
             let executor_arc = Arc::new(self.clone());
             return run_inner_parallel(executor_arc, workflow, initial_variables).await;
         }
@@ -65,7 +65,7 @@ impl WorkflowExecutor {
 
         for node_id in &graph.topo_order {
             // Cancel check — runs between every node; skips all remaining active nodes on cancel.
-            if self.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+            if self.config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
                 {
                     let mut s = state.write().await;
                     for id in &active_nodes { s.mark_skipped(id); }
@@ -150,7 +150,7 @@ impl WorkflowExecutor {
                     Err(err_msg) => {
                         // If a loop node was cancelled, propagate as ExecutionCancelled
                         // rather than treating as a workflow failure.
-                        if self.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+                        if self.config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
                             return Err(EngineError::ExecutionCancelled);
                         }
                         let fail_output = NodeOutput::failure(

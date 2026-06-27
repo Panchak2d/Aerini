@@ -1,69 +1,27 @@
-import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, NODE_HEADER, PORT_RADIUS, roundedRect, wrapText } from "./Node";
-import { Connector, PendingConnector, newConnectorId } from "./Connector";
+import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, PORT_RADIUS, roundedRect } from "./Node";
+import { Connector, newConnectorId } from "./Connector";
 import { serialize } from "./CanvasSerializer";
 import { NODE_IDS } from "../node-ids";
 import type { NodeDescriptor } from "../ipc/workflow";
-
-type MoveEntry = { nodeId: string; from: { x: number; y: number }; to: { x: number; y: number } };
-
-type UndoAction =
-  | { type: "add_node";    node: CanvasNode }
-  | { type: "delete_node"; node: CanvasNode; connectors: Connector[] }
-  | { type: "add_edge";    connector: Connector }
-  | { type: "delete_edge"; connector: Connector }
-  | { type: "split_edge";  removed: Connector; added1: Connector; added2: Connector; node: CanvasNode }
-  | { type: "move_node";   nodeId: string; from: { x: number; y: number }; to: { x: number; y: number } }
-  | { type: "move_nodes";  moves: MoveEntry[] }
-  | { type: "cut_edges";   connectors: Connector[] };
+import { UndoManager } from "./UndoManager";
+import type { UndoAction } from "./UndoManager";
+import { Minimap } from "./Minimap";
+import { SnapEngine } from "./SnapEngine";
+import { ContextMenu } from "./ContextMenu";
+import { InputHandler } from "./InputHandler";
 
 export class Canvas {
-  private el:  HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
+  // Internal canvas element and rendering context (accessed by sub-modules)
+  el:  HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
   private dpr = 1;
 
   nodes:      Map<string, CanvasNode> = new Map();
   connectors: Map<string, Connector>  = new Map();
 
   panX = 0; panY = 0; zoom = 1;
-  private readonly MIN_ZOOM = 0.05;
-  private readonly MAX_ZOOM = 4;
-
-  private isPanning   = false;
-  private panStartX   = 0; private panStartY  = 0;
-  private panOriginX  = 0; private panOriginY = 0;
-
-  private draggingNode: CanvasNode | null = null;
-  private dragOffX = 0; private dragOffY = 0;
-  private dragFromX = 0; private dragFromY = 0;
-  private didDrag = false;
-
-  private pendingConn: PendingConnector | null = null;
-  private reconnEdge: { conn: Connector; fromEnd?: boolean } | null = null;
-
-  private isCutting = false;
-  private cutPath: { x: number; y: number }[] = [];
-
-  private isBoxSel = false; // Shift+drag only
-  private bx0 = 0; private by0 = 0; private bx1 = 0; private by1 = 0;
-
-  private snapGuides: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
-
-  selectedNodes: Set<string> = new Set();
-  selectedNode:  CanvasNode | null = null;
-  selectedConn:  Connector  | null = null;
-
-  private shiftHeld = false;
-
-  private undoStack: UndoAction[] = [];
-  private redoStack: UndoAction[] = [];
-
-  private mm:    HTMLCanvasElement | null = null;
-  private mmCtx: CanvasRenderingContext2D | null = null;
-  private readonly MM_W = 160;
-  private readonly MM_H = 100;
-  // Cached minimap world bounds for click-to-pan
-  private _mmBounds: { mnX: number; mnY: number; s: number } | null = null;
-  private _mmDragging = false;
+  readonly MIN_ZOOM = 0.05;
+  readonly MAX_ZOOM = 4;
 
   pendingInsert: NodeDescriptor | null = null;
   insertGhost:   { x: number; y: number } | null = null;
@@ -75,10 +33,9 @@ export class Canvas {
   _pendingPresetConfig: Record<string, unknown> | undefined = undefined;
   _pendingPresetName:   string | undefined = undefined;
 
-  private _multiDragFrom: Map<string, { x: number; y: number }> | null = null;
-
-  private lastPinchDist = 0;
-  private isPinching    = false;
+  selectedNodes: Set<string> = new Set();
+  selectedNode:  CanvasNode | null = null;
+  selectedConn:  Connector  | null = null;
 
   private emptyEl: HTMLElement | null = null;
 
@@ -92,30 +49,29 @@ export class Canvas {
   onRunNode:        ((nodeId: string) => void) | null = null;
   onZoomChange:     ((zoom: number) => void) | null = null;
   onViewportChange: (() => void) | null = null;
+  /** Called when a connection is made between potentially incompatible ports. Non-blocking. */
+  onWarn:           ((msg: string) => void) | null = null;
 
   private lastTs = 0;
 
-  // Stored so they can be removed in destroy()
-  private readonly _winMoveH = (e: MouseEvent)    => this.onWinMove(e);
-  private readonly _winUpH   = (e: MouseEvent)    => this.onWinUp(e);
-  private readonly _keyH     = (e: KeyboardEvent) => this.onKey(e);
-  private readonly _keyUpH   = (e: KeyboardEvent) => { if (e.key === "Shift") { this.shiftHeld = false; this.el.classList.remove("shift-held"); } };
-  private readonly _mmUpH    = () => { this._mmDragging = false; };
+  // Sub-modules — not private so peers can cross-reference via canvas ref
+  input:   InputHandler;
+  undoMgr: UndoManager;
+  minimap: Minimap;
+  snap:    SnapEngine;
+  ctxMenu: ContextMenu;
 
   constructor(canvasEl: HTMLCanvasElement) {
     this.el  = canvasEl;
     this.ctx = canvasEl.getContext("2d")!;
 
     const mmEl = document.getElementById("minimap-canvas") as HTMLCanvasElement | null;
-    if (mmEl) {
-      this.mm = mmEl;
-      this.mmCtx = mmEl.getContext("2d")!;
-      // Click-to-pan: clicking the minimap centers the viewport on that world point
-      mmEl.style.pointerEvents = "all";
-      mmEl.addEventListener("mousedown", (e) => this.onMinimapDown(e));
-      mmEl.addEventListener("mousemove", (e) => this.onMinimapMove(e));
-      window.addEventListener("mouseup", this._mmUpH);
-    }
+
+    this.undoMgr = new UndoManager(this);
+    this.minimap = new Minimap(this, mmEl);
+    this.snap    = new SnapEngine(this);
+    this.ctxMenu = new ContextMenu(this);
+    this.input   = new InputHandler(this);
 
     this.emptyEl = document.getElementById("canvas-empty-state");
     this.resize();
@@ -128,24 +84,19 @@ export class Canvas {
   resize() {
     this.dpr = window.devicePixelRatio || 1;
     const r  = this.el.getBoundingClientRect();
-    // Only update the internal pixel buffer — do NOT set style.width/style.height.
-    // Those CSS properties override width:100%;height:100% and freeze the canvas
-    // at the size it had when resize() was first called (e.g. at a small window size).
-    // CSS handles the display dimensions; we only control the pixel density here.
     this.el.width  = Math.round(r.width  * this.dpr);
     this.el.height = Math.round(r.height * this.dpr);
-    // Center pan on first load
     if (this.panX === 0 && this.panY === 0) {
       this.panX = r.width  / 2;
       this.panY = r.height / 2;
     }
   }
 
-  private s2w(sx: number, sy: number) {
+  s2w(sx: number, sy: number) {
     return { x: (sx - this.panX) / this.zoom, y: (sy - this.panY) / this.zoom };
   }
 
-  private evSX(e: MouseEvent) {
+  evSX(e: MouseEvent) {
     const r = this.el.getBoundingClientRect();
     return { sx: e.clientX - r.left, sy: e.clientY - r.top };
   }
@@ -164,6 +115,7 @@ export class Canvas {
     const W   = this.el.width  / dpr;
     const H   = this.el.height / dpr;
     const ctx = this.ctx;
+    const ih  = this.input;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
@@ -171,14 +123,14 @@ export class Canvas {
 
     // Draw connectors
     for (const c of this.connectors.values()) {
-      c.highlighted = this.isCutting && this.edgeCrossesPath(c);
+      c.highlighted = ih.isCutting && this.edgeCrossesPath(c);
       c.draw(ctx, this.nodes, dt);
     }
-    if (this.pendingConn) this.pendingConn.draw(ctx);
+    if (ih.pendingConn) ih.pendingConn.draw(ctx);
 
     // Port snap ring
-    if (this.pendingConn) {
-      const snap = this.nearestIn(this.pendingConn.toX, this.pendingConn.toY, this.pendingConn.fromNode);
+    if (ih.pendingConn) {
+      const snap = this.nearestIn(ih.pendingConn.toX, ih.pendingConn.toY, ih.pendingConn.fromNode);
       if (snap) {
         ctx.save();
         ctx.beginPath();
@@ -193,9 +145,9 @@ export class Canvas {
         ctx.restore();
       }
 
-      // Source port glow — shows which port the wire is dragging from
-      const srcNode = this.nodes.get(this.pendingConn.fromNode);
-      const srcPort = srcNode?.ports.find(p => p.id === this.pendingConn!.fromPort);
+      // Source port glow
+      const srcNode = this.nodes.get(ih.pendingConn.fromNode);
+      const srcPort = srcNode?.ports.find(p => p.id === ih.pendingConn!.fromPort);
       if (srcPort) {
         ctx.save();
         ctx.beginPath();
@@ -218,7 +170,6 @@ export class Canvas {
     for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts);
 
     // ── G12: output port connection-count badges ───────────────────────────
-    // Count outgoing connections per (nodeId, portId).
     const outCount = new Map<string, number>();
     for (const c of this.connectors.values()) {
       const key = `${c.data.from_node}:${c.data.from_port}`;
@@ -267,10 +218,10 @@ export class Canvas {
     }
 
     // Box select rect
-    if (this.isBoxSel) {
+    if (ih.isBoxSel) {
       ctx.save();
-      const bx = Math.min(this.bx0, this.bx1), by = Math.min(this.by0, this.by1);
-      const bw = Math.abs(this.bx1 - this.bx0), bh = Math.abs(this.by1 - this.by0);
+      const bx = Math.min(ih.bx0, ih.bx1), by = Math.min(ih.by0, ih.by1);
+      const bw = Math.abs(ih.bx1 - ih.bx0), bh = Math.abs(ih.by1 - ih.by0);
       ctx.fillStyle   = "rgba(77,158,255,0.06)";
       ctx.strokeStyle = "#4d9eff";
       ctx.lineWidth   = 1.5 / this.zoom;
@@ -280,11 +231,11 @@ export class Canvas {
     }
 
     // Cut path
-    if (this.isCutting && this.cutPath.length > 1) {
+    if (ih.isCutting && ih.cutPath.length > 1) {
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(this.cutPath[0].x, this.cutPath[0].y);
-      for (let i = 1; i < this.cutPath.length; i++) ctx.lineTo(this.cutPath[i].x, this.cutPath[i].y);
+      ctx.moveTo(ih.cutPath[0].x, ih.cutPath[0].y);
+      for (let i = 1; i < ih.cutPath.length; i++) ctx.lineTo(ih.cutPath[i].x, ih.cutPath[i].y);
       ctx.strokeStyle = "#f87171";
       ctx.lineWidth   = 2 / this.zoom;
       ctx.setLineDash([5 / this.zoom, 3 / this.zoom]);
@@ -293,11 +244,11 @@ export class Canvas {
     }
 
     // Snap guides
-    if (this.snapGuides.length && this.draggingNode) {
+    if (this.snap.snapGuides.length && ih.draggingNode) {
       ctx.save();
       ctx.strokeStyle = "#4d9eff66";
       ctx.lineWidth   = 1 / this.zoom;
-      for (const g of this.snapGuides) {
+      for (const g of this.snap.snapGuides) {
         ctx.beginPath();
         ctx.moveTo(g.x1, g.y1);
         ctx.lineTo(g.x2, g.y2);
@@ -311,13 +262,10 @@ export class Canvas {
       this.emptyEl.style.display = this.nodes.size === 0 ? "flex" : "none";
     }
 
-    this.drawMinimap(W, H);
+    this.minimap.draw(W, H);
   }
 
   // Screen-space tooltip for a hovered node whose name is truncated (UX-1).
-  // Called last in draw() so it renders above nodes/badges/connectors.
-  // Uses CSS-pixel coordinates (not world space) so the box stays a fixed
-  // size on screen regardless of zoom level.
   private drawNodeTooltips(): void {
     const ctx = this.ctx;
     const dpr = this.dpr;
@@ -369,89 +317,40 @@ export class Canvas {
     }
   }
 
-  // ── Minimap ───────────────────────────────────────────────────────────────
+  // ── Events ────────────────────────────────────────────────────────────────
 
-  private drawMinimap(vW: number, vH: number) {
-    if (!this.mm || !this.mmCtx) return;
-    const mc = this.mmCtx;
-    mc.clearRect(0, 0, this.MM_W, this.MM_H);
-    if (this.nodes.size === 0) return;
-
-    let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
-    for (const n of this.nodes.values()) {
-      mnX = Math.min(mnX, n.data.position.x - 30);
-      mnY = Math.min(mnY, n.data.position.y - 30);
-      mxX = Math.max(mxX, n.data.position.x + NODE_WIDTH + 30);
-      mxY = Math.max(mxY, n.data.position.y + n.height + 30);
-    }
-    const ww = mxX - mnX || 1, wh = mxY - mnY || 1;
-    const s  = Math.min(this.MM_W / ww, this.MM_H / wh);
-    // Cache bounds so minimap click handlers can convert mm coords → world coords
-    this._mmBounds = { mnX, mnY, s };
-    const tx = (x: number) => (x - mnX) * s;
-    const ty = (y: number) => (y - mnY) * s;
-
-    mc.strokeStyle = "#ffffff10"; mc.lineWidth = 1;
-    for (const c of this.connectors.values()) {
-      const fn = this.nodes.get(c.data.from_node), tn = this.nodes.get(c.data.to_node);
-      if (!fn || !tn) continue;
-      const fp = fn.ports.find(p => p.id === c.data.from_port), tp = tn.ports.find(p => p.id === c.data.to_port);
-      if (!fp || !tp) continue;
-      mc.beginPath(); mc.moveTo(tx(fp.x), ty(fp.y)); mc.lineTo(tx(tp.x), ty(tp.y)); mc.stroke();
-    }
-    for (const n of this.nodes.values()) {
-      mc.fillStyle = n.selected ? "#4d9eff44" : n.status === "error" ? "#f8717133" : "#21262d";
-      mc.fillRect(tx(n.data.position.x), ty(n.data.position.y), Math.max(NODE_WIDTH * s, 3), Math.max(n.height * s, 2));
-    }
-    const vpX = (-this.panX) / this.zoom, vpY = (-this.panY) / this.zoom;
-    mc.strokeStyle = "rgba(77,158,255,0.6)"; mc.lineWidth = 1.5;
-    mc.strokeRect(tx(vpX), ty(vpY), (vW / this.zoom) * s, (vH / this.zoom) * s);
+  private bind() {
+    const ro = new ResizeObserver(() => this.resize());
+    ro.observe(this.el);
+    const ih = this.input;
+    this.el.addEventListener("mousedown",   (e) => ih.onDown(e));
+    this.el.addEventListener("mousemove",   (e) => ih.onMove(e));
+    this.el.addEventListener("mouseup",     (e) => ih.onUp(e));
+    this.el.addEventListener("mouseleave",  ()  => ih.onLeave());
+    window.addEventListener("mousemove",    ih._winMoveH);
+    window.addEventListener("mouseup",      ih._winUpH);
+    this.el.addEventListener("wheel",       (e) => ih.onWheel(e), { passive: false });
+    this.el.addEventListener("dblclick",    (e) => ih.onDbl(e));
+    this.el.addEventListener("contextmenu", (e) => { e.preventDefault(); ih.onRightClick(e); });
+    this.el.addEventListener("touchstart",  (e) => ih.onTouchStart(e), { passive: false });
+    this.el.addEventListener("touchmove",   (e) => ih.onTouchMove(e),  { passive: false });
+    this.el.addEventListener("touchend",    ()  => ih.onTouchEnd());
+    window.addEventListener("keydown", ih._keyH);
+    window.addEventListener("keyup",   ih._keyUpH);
   }
 
-  // ── Minimap interaction ───────────────────────────────────────────────────
-
-  private mmClickToPan(e: MouseEvent): void {
-    if (!this.mm || !this._mmBounds) return;
-    const r = this.mm.getBoundingClientRect();
-    const mx = e.clientX - r.left;
-    const my = e.clientY - r.top;
-    const { mnX, mnY, s } = this._mmBounds;
-    // Convert minimap pixel → world coord
-    const wx = mx / s + mnX;
-    const wy = my / s + mnY;
-    this.centerOn(wx, wy);
-  }
-
-  private onMinimapDown(e: MouseEvent): void {
-    e.preventDefault();
-    e.stopPropagation();
-    this._mmDragging = true;
-    this.mmClickToPan(e);
-  }
-
-  private onMinimapMove(e: MouseEvent): void {
-    if (!this._mmDragging) return;
-    e.preventDefault();
-    this.mmClickToPan(e);
-  }
-
-  // ── Snap ──────────────────────────────────────────────────────────────────
-
-  private computeSnap(moving: CanvasNode) {
-    this.snapGuides = [];
-    const SNAP = 8, mx = moving.data.position.x, my = moving.data.position.y, mw = NODE_WIDTH, mh = moving.height;
-    for (const n of this.nodes.values()) {
-      if (n.data.id === moving.data.id) continue;
-      const nx = n.data.position.x, ny = n.data.position.y, nh = n.height;
-      for (const [a, b] of [[mx, nx], [mx, nx + NODE_WIDTH - mw], [mx + mw / 2, nx + NODE_WIDTH / 2]] as [number, number][]) {
-        if (Math.abs(a - b) < SNAP) this.snapGuides.push({ x1: b, y1: Math.min(my, ny) - 20, x2: b, y2: Math.max(my + mh, ny + nh) + 20 });
-      }
-    }
+  destroy() {
+    const ih = this.input;
+    window.removeEventListener("mousemove", ih._winMoveH);
+    window.removeEventListener("mouseup",   ih._winUpH);
+    window.removeEventListener("mouseup",   this.minimap._mmUpH);
+    window.removeEventListener("keydown",   ih._keyH);
+    window.removeEventListener("keyup",     ih._keyUpH);
   }
 
   // ── Port snap ─────────────────────────────────────────────────────────────
 
-  private nearestIn(wx: number, wy: number, excludeId?: string) {
+  nearestIn(wx: number, wy: number, excludeId?: string) {
     const SNAP = 56; let best: { x: number; y: number; nodeId: string; portId: string } | null = null; let bestD = SNAP;
     for (const n of this.nodes.values()) {
       if (n.data.id === excludeId) continue;
@@ -464,7 +363,7 @@ export class Canvas {
     return best;
   }
 
-  // ── Wire-drop insert (called for NEW nodes AND after DRAGGING existing ones) ──
+  // ── Wire-drop insert ──────────────────────────────────────────────────────
 
   tryWireInsert(node: CanvasNode): boolean {
     node.rebuildPorts();
@@ -496,507 +395,6 @@ export class Canvas {
     return false;
   }
 
-  // ── Events ────────────────────────────────────────────────────────────────
-
-  private bind() {
-    // ResizeObserver fires on ANY size change of the canvas element:
-    // window maximize/restore, panel open/close, drawer show/hide.
-    // This replaces the old window 'resize' listener which missed grid reflows.
-    const ro = new ResizeObserver(() => this.resize());
-    ro.observe(this.el);
-    this.el.addEventListener("mousedown",  (e) => this.onDown(e));
-    this.el.addEventListener("mousemove",  (e) => this.onMove(e));
-    this.el.addEventListener("mouseup",    (e) => this.onUp(e));
-    this.el.addEventListener("mouseleave", ()  => this.onLeave());
-    window.addEventListener("mousemove",   this._winMoveH);
-    window.addEventListener("mouseup",     this._winUpH);
-    this.el.addEventListener("wheel",      (e) => this.onWheel(e), { passive: false });
-    this.el.addEventListener("dblclick",   (e) => this.onDbl(e));
-    this.el.addEventListener("contextmenu",(e) => { e.preventDefault(); this.onRightClick(e); });
-    this.el.addEventListener("touchstart", (e) => this.onTouchStart(e), { passive: false });
-    this.el.addEventListener("touchmove",  (e) => this.onTouchMove(e),  { passive: false });
-    this.el.addEventListener("touchend",   ()  => this.onTouchEnd());
-    window.addEventListener("keydown", this._keyH);
-    window.addEventListener("keyup",   this._keyUpH);
-  }
-
-  destroy() {
-    window.removeEventListener("mousemove", this._winMoveH);
-    window.removeEventListener("mouseup",   this._winUpH);
-    window.removeEventListener("mouseup",   this._mmUpH);
-    window.removeEventListener("keydown",   this._keyH);
-    window.removeEventListener("keyup",     this._keyUpH);
-  }
-
-  private onKey(e: KeyboardEvent) {
-    const inInput = document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement;
-    if (e.key === "Shift") { this.shiftHeld = true; this.el.classList.add("shift-held"); }
-    if (inInput) return;
-
-    if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); this.undo(); }
-    if ((e.metaKey || e.ctrlKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); this.redo(); }
-    if ((e.metaKey || e.ctrlKey) && e.key === "d") { e.preventDefault(); this.dupSelected(); }
-    if ((e.metaKey || e.ctrlKey) && e.key === "a") {
-      e.preventDefault();
-      for (const n of this.nodes.values()) { n.selected = true; this.selectedNodes.add(n.data.id); }
-    }
-    if (e.key === "Delete" || e.key === "Backspace") this.deleteSelected();
-    if (e.key === "f" || e.key === "F") this.toggleFocusMode();
-    if ((e.code === "Space" && !e.altKey && !e.ctrlKey && !e.metaKey) || ((e.metaKey || e.ctrlKey) && e.key === "k")) {
-      e.preventDefault(); this.onPaletteRequest?.();
-    }
-    if (e.key === "Escape") {
-      this.pendingConn = null; this.isCutting = false; this.cutPath = [];
-      this.pendingInsert = null; this.insertGhost = null;
-      this._pendingInputWireDrop = null;
-      this.clearSelection(); this.el.style.cursor = "default";
-    }
-  }
-
-  private onDown(e: MouseEvent) {
-    e.preventDefault();
-    const { sx, sy } = this.evSX(e);
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-
-    if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; this.el.style.cursor = "crosshair"; return; }
-    if (e.button === 1) { this.startPan(sx, sy); return; }
-    if (e.button !== 0) return;
-
-    // Grab existing connector — input end (to_port) or output end (from_port) — to reroute or disconnect
-    for (const conn of this.connectors.values()) {
-      const tn = this.nodes.get(conn.data.to_node); if (!tn) continue;
-      const tp = tn.ports.find(p => p.id === conn.data.to_port); if (!tp) continue;
-      const fn = this.nodes.get(conn.data.from_node); if (!fn) continue;
-      const fp = fn.ports.find(p => p.id === conn.data.from_port); if (!fp) continue;
-
-      // Input-end grab: grab near the destination input port, wire floats from source
-      if (Math.hypot(wx - tp.x, wy - tp.y) < PORT_RADIUS + 8) {
-        this.reconnEdge = { conn }; this.connectors.delete(conn.data.id);
-        this.clearDynamicPortExpr(conn);
-        this.pendingConn = new PendingConnector(conn.data.from_node, conn.data.from_port, fp.x, fp.y);
-        this.pendingConn.toX = wx; this.pendingConn.toY = wy;
-        this.el.style.cursor = "crosshair"; return;
-      }
-      // Output-end grab: grab near the source output port, wire floats from source
-      if (Math.hypot(wx - fp.x, wy - fp.y) < PORT_RADIUS + 8) {
-        this.connectors.delete(conn.data.id);
-        this.clearDynamicPortExpr(conn);
-        this.reconnEdge = { conn, fromEnd: true };
-        this.pendingConn = new PendingConnector(conn.data.from_node, conn.data.from_port, fp.x, fp.y);
-        this.pendingConn.toX = wx; this.pendingConn.toY = wy;
-        this.el.style.cursor = "crosshair"; return;
-      }
-    }
-
-    // Output port → new connector
-    for (const node of this.nodes.values()) {
-      const p = node.portAtPoint(wx, wy);
-      if (p && !p.isInput) { this.pendingConn = new PendingConnector(node.data.id, p.id, p.x, p.y); this.el.style.cursor = "crosshair"; return; }
-      if (p && p.isInput) {
-        this._pendingInputWireDrop = { toNode: node.data.id, toPort: p.id, wx: p.x, wy: p.y };
-        this.onInputWireDropRequest?.(node.data.id, p.id, p.x, p.y);
-        return;
-      }
-    }
-
-    // Node drag
-    const arr = Array.from(this.nodes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const n = arr[i];
-      if (!n.containsPoint(wx, wy)) continue;
-      if (!e.shiftKey && !this.selectedNodes.has(n.data.id)) this.clearSelection();
-      this.selectNode(n);
-      this.onNodeClicked?.(n);  // single-click: reveal output/error without opening config
-      this.draggingNode = n;
-      this.dragOffX = wx - n.data.position.x; this.dragOffY = wy - n.data.position.y;
-      this.dragFromX = n.data.position.x; this.dragFromY = n.data.position.y;
-      if (this.selectedNodes.size > 1) {
-        this._multiDragFrom = new Map();
-        for (const id of this.selectedNodes) {
-          const mn = this.nodes.get(id);
-          if (mn) this._multiDragFrom.set(id, { ...mn.data.position });
-        }
-      } else {
-        this._multiDragFrom = null;
-      }
-      this.didDrag = false; this.el.style.cursor = "grab"; return;
-    }
-
-    // Wire click
-    for (const conn of this.connectors.values()) { if (conn.containsPoint(wx, wy, this.nodes, 8 / this.zoom)) { this.selectConn(conn); return; } }
-
-    // Empty space: Shift = box-select, plain = pan + deselect
-    if (e.shiftKey) {
-      this.isBoxSel = true; this.bx0 = wx; this.by0 = wy; this.bx1 = wx; this.by1 = wy;
-      this.el.style.cursor = "crosshair";
-    } else {
-      this.clearSelection();
-      this.startPan(sx, sy);
-    }
-  }
-
-  private startPan(sx: number, sy: number) {
-    this.isPanning = true; this.panStartX = sx; this.panStartY = sy;
-    this.panOriginX = this.panX; this.panOriginY = this.panY;
-    this.el.style.cursor = "grabbing";
-  }
-
-  private onMove(e: MouseEvent) { const { sx, sy } = this.evSX(e); this._move(e, sx, sy); }
-  private onWinMove(e: MouseEvent) {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.isCutting && !this.isBoxSel) return;
-    const r = this.el.getBoundingClientRect(); this._move(e, e.clientX - r.left, e.clientY - r.top);
-  }
-
-  private _move(_e: MouseEvent, sx: number, sy: number) {
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-    if (this.pendingInsert) this.insertGhost = { x: wx, y: wy };
-
-    if (this.isPanning) { this.panX = this.panOriginX + (sx - this.panStartX); this.panY = this.panOriginY + (sy - this.panStartY); this.el.style.cursor = "grabbing"; return; }
-    if (this.isCutting) { this.cutPath.push({ x: wx, y: wy }); return; }
-
-    if (this.draggingNode) {
-      this.didDrag = true;
-      let nx = wx - this.dragOffX, ny = wy - this.dragOffY;
-      if (localStorage.getItem("aerini_grid_snap") === "true") {
-        const G = 20;
-        nx = Math.round(nx / G) * G;
-        ny = Math.round(ny / G) * G;
-      }
-      if (this.selectedNodes.size > 1 && this.selectedNodes.has(this.draggingNode.data.id)) {
-        const dx = nx - this.draggingNode.data.position.x, dy = ny - this.draggingNode.data.position.y;
-        for (const id of this.selectedNodes) { const n = this.nodes.get(id); if (n) { n.data.position.x += dx; n.data.position.y += dy; n.updatePortPositions(); } }
-      } else {
-        this.draggingNode.data.position.x = nx; this.draggingNode.data.position.y = ny;
-        this.draggingNode.updatePortPositions(); this.computeSnap(this.draggingNode);
-      }
-      this.onCanvasChanged?.(); this.el.style.cursor = "grabbing"; return;
-    }
-
-    if (this.pendingConn) {
-      const snap = this.nearestIn(wx, wy, this.pendingConn.fromNode);
-      this.pendingConn.toX = snap ? snap.x : wx; this.pendingConn.toY = snap ? snap.y : wy; return;
-    }
-
-    if (this.isBoxSel) {
-      this.bx1 = wx; this.by1 = wy;
-      const x1 = Math.min(this.bx0, wx), y1 = Math.min(this.by0, wy), x2 = Math.max(this.bx0, wx), y2 = Math.max(this.by0, wy);
-      for (const n of this.nodes.values()) {
-        const ins = n.data.position.x >= x1 && n.data.position.x <= x2 && n.data.position.y >= y1 && n.data.position.y <= y2;
-        n.selected = ins; if (ins) this.selectedNodes.add(n.data.id); else this.selectedNodes.delete(n.data.id);
-      }
-      return;
-    }
-
-    let any = false;
-    for (const n of this.nodes.values()) {
-      n.hovered = n.containsPoint(wx, wy);
-      if (n.hovered) { any = true; this.el.style.cursor = n.portAtPoint(wx, wy) ? "crosshair" : "grab"; }
-    }
-    if (!any) this.el.style.cursor = this.shiftHeld ? "crosshair" : "default";
-  }
-
-  private onUp(e: MouseEvent) { const { sx, sy } = this.evSX(e); this._up(e, sx, sy); }
-  private onWinUp(e: MouseEvent) {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.isCutting && !this.isBoxSel) return;
-    const r = this.el.getBoundingClientRect(); this._up(e, e.clientX - r.left, e.clientY - r.top);
-  }
-
-  private _up(_e: MouseEvent, sx: number, sy: number) {
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-
-    if (this.pendingInsert && sx >= 0 && sy >= 0) {
-      this.placeNode(this.pendingInsert, sx, sy);
-      this.pendingInsert = null; this.insertGhost = null; this.el.style.cursor = "default"; return;
-    }
-    this.pendingInsert = null; this.insertGhost = null;
-
-    if (this.isPanning) { this.isPanning = false; this.el.style.cursor = "default"; this.onViewportChange?.(); return; }
-
-    if (this.isCutting) {
-      const cut = this.doCut();
-      if (cut.length) { this.pushUndo({ type: "cut_edges", connectors: cut }); this.onCanvasChanged?.(); }
-      this.isCutting = false; this.cutPath = []; this.el.style.cursor = "default"; return;
-    }
-
-    if (this.pendingConn) {
-      const snap = this.nearestIn(wx, wy, this.pendingConn.fromNode);
-      if (snap) {
-        this.finishConn(snap.nodeId, snap.portId);
-      } else if (this.reconnEdge) {
-        // Either end dropped on empty space = disconnect (Ctrl+Z to undo)
-        this.pushUndo({ type: "delete_edge", connector: this.reconnEdge.conn });
-        this.onCanvasChanged?.();
-      } else {
-        // Wire dropped on empty canvas → open node picker with wire context
-        const { fromNode, fromPort } = this.pendingConn;
-        this._pendingWireDrop = { fromNode, fromPort, wx, wy };
-        this.onWireDropRequest?.(fromNode, fromPort, wx, wy);
-      }
-      this.reconnEdge = null; this.pendingConn = null; this.el.style.cursor = "default"; return;
-    }
-
-    if (this.draggingNode) {
-      this.snapGuides = [];
-      if (this.didDrag) {
-        if (this.selectedNodes.size > 1 && this._multiDragFrom) {
-          const moves: MoveEntry[] = [];
-          for (const [id, from] of this._multiDragFrom) {
-            const mn = this.nodes.get(id);
-            if (mn && (mn.data.position.x !== from.x || mn.data.position.y !== from.y))
-              moves.push({ nodeId: id, from, to: { ...mn.data.position } });
-          }
-          if (moves.length) this.pushUndo({ type: "move_nodes", moves });
-        } else {
-          const p = this.draggingNode.data.position;
-          if (p.x !== this.dragFromX || p.y !== this.dragFromY) {
-            this.pushUndo({ type: "move_node", nodeId: this.draggingNode.data.id, from: { x: this.dragFromX, y: this.dragFromY }, to: { ...p } });
-            this.tryWireInsert(this.draggingNode);
-          }
-        }
-      }
-      this._multiDragFrom = null;
-      this.draggingNode = null; this.el.style.cursor = "default"; return;
-    }
-
-    if (this.isBoxSel) { this.isBoxSel = false; this.el.style.cursor = this.shiftHeld ? "crosshair" : "default"; }
-  }
-
-  private onLeave() {
-    if (!this.isPanning && !this.draggingNode && !this.isCutting)
-      for (const n of this.nodes.values()) n.hovered = false;
-  }
-
-  // Right-click: node context menu, wire delete, or deselect
-  private onRightClick(e: MouseEvent) {
-    const { sx, sy } = this.evSX(e);
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-
-    // Right-click on a node → context menu
-    const arr = Array.from(this.nodes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const n = arr[i];
-      if (n.containsPoint(wx, wy)) {
-        if (!this.selectedNodes.has(n.data.id)) {
-          this.clearSelection();
-          this.selectNode(n);
-        }
-        this.showNodeContextMenu(e.clientX, e.clientY, n);
-        return;
-      }
-    }
-
-    // Right-click on a wire → delete it
-    for (const [id, conn] of this.connectors) {
-      if (conn.containsPoint(wx, wy, this.nodes, 8 / this.zoom)) {
-        this.connectors.delete(id);
-        this.clearDynamicPortExpr(conn);
-        this.pushUndo({ type: "delete_edge", connector: conn });
-        this.onCanvasChanged?.(); return;
-      }
-    }
-
-    // Right-click on empty canvas → deselect
-    this.clearSelection();
-  }
-
-  private showNodeContextMenu(cx: number, cy: number, node: CanvasNode): void {
-    // Remove any existing menu
-    document.getElementById("canvas-ctx-menu")?.remove();
-
-    const isMultiSelect = this.selectedNodes.size > 1;
-
-    const menu = document.createElement("div");
-    menu.id = "canvas-ctx-menu";
-    menu.className = "ctx-menu";
-    menu.setAttribute("role", "menu");
-
-    const addItem = (label: string, icon: string, danger: boolean, action: () => void) => {
-      const item = document.createElement("button");
-      item.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
-      item.setAttribute("role", "menuitem");
-      item.innerHTML = `<span class="ctx-menu-icon">${icon}</span><span>${label}</span>`;
-      item.addEventListener("mousedown", (e) => { e.preventDefault(); menu.remove(); action(); });
-      menu.appendChild(item);
-    };
-
-    const addSep = () => {
-      const s = document.createElement("div");
-      s.className = "ctx-menu-sep";
-      menu.appendChild(s);
-    };
-
-    // Duplicate
-    addItem(
-      isMultiSelect ? `Duplicate (${this.selectedNodes.size})` : "Duplicate",
-      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
-      false,
-      () => { this.dupSelected(); this.onCanvasChanged?.(); }
-    );
-
-    // Rename — only for single selection
-    if (!isMultiSelect) {
-      addItem(
-        "Rename",
-        `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
-        false,
-        () => this.startInlineRename(node)
-      );
-    }
-
-    // Disable / Enable
-    addItem(
-      node.disabled ? "Enable" : "Disable",
-      node.disabled
-        ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`
-        : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
-      false,
-      () => {
-        const ids = isMultiSelect ? [...this.selectedNodes] : [node.data.id];
-        for (const id of ids) {
-          const n = this.nodes.get(id);
-          if (n) n.disabled = !n.disabled;
-        }
-        this.onCanvasChanged?.();
-      }
-    );
-
-    // Run node — only for single selection, not trigger-less nodes
-    if (!isMultiSelect) {
-      addItem(
-        "Run from here",
-        `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
-        false,
-        () => { this.onRunNode?.(node.data.id); }
-      );
-    }
-
-    addSep();
-
-    // Delete
-    addItem(
-      isMultiSelect ? `Delete (${this.selectedNodes.size})` : "Delete",
-      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
-      true,
-      () => { this.deleteSelected(); }
-    );
-
-    // Position the menu
-    document.body.appendChild(menu);
-    const mw = menu.offsetWidth || 180;
-    const mh = menu.offsetHeight || 160;
-    const left = cx + mw > window.innerWidth  - 8 ? cx - mw : cx;
-    const top  = cy + mh > window.innerHeight - 8 ? cy - mh : cy;
-    menu.style.left = `${left}px`;
-    menu.style.top  = `${top}px`;
-
-    // Close on any outside click
-    const dismiss = (ev: MouseEvent) => {
-      if (!menu.contains(ev.target as Node)) {
-        menu.remove();
-        document.removeEventListener("mousedown", dismiss, true);
-      }
-    };
-    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
-  }
-
-  private startInlineRename(node: CanvasNode): void {
-    document.getElementById("canvas-rename-input")?.remove();
-
-    const r = this.el.getBoundingClientRect();
-    const sx = node.data.position.x * this.zoom + this.panX + r.left;
-    const sy = node.data.position.y * this.zoom + this.panY + r.top;
-    const sw = NODE_WIDTH * this.zoom;
-    const sh = NODE_HEADER * this.zoom;
-
-    const inp = document.createElement("input");
-    inp.id = "canvas-rename-input";
-    inp.type = "text";
-    inp.value = node.data.name;
-    inp.className = "canvas-rename-input";
-    inp.style.cssText = `position:fixed;left:${sx + 30 * this.zoom}px;top:${sy + sh / 2 - 11}px;width:${Math.max(sw - 50 * this.zoom, 80)}px;`;
-    document.body.appendChild(inp);
-    inp.focus(); inp.select();
-
-    const commit = () => {
-      const v = inp.value.trim();
-      if (v) { node.data.name = v; this.onCanvasChanged?.(); }
-      inp.remove();
-    };
-    inp.addEventListener("blur", commit);
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter")  { e.preventDefault(); commit(); }
-      if (e.key === "Escape") { inp.remove(); }
-    });
-  }
-
-  // ── Zoom / Touch ──────────────────────────────────────────────────────────
-
-  private onWheel(e: WheelEvent) {
-    e.preventDefault();
-    const r = this.el.getBoundingClientRect();
-    const sx = e.clientX - r.left, sy = e.clientY - r.top;
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-    const isPinch = e.ctrlKey;
-    const factor  = e.deltaY > 0 ? (isPinch ? 0.95 : 0.90) : (isPinch ? 1 / 0.95 : 1 / 0.90);
-    const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * factor));
-    this.panX = sx - wx * nz; this.panY = sy - wy * nz; this.zoom = nz;
-    this.onZoomChange?.(this.zoom);
-    this.onViewportChange?.();
-  }
-
-  private onTouchStart(e: TouchEvent) {
-    if (e.touches.length === 2) {
-      e.preventDefault(); this.isPinching = true;
-      this.lastPinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-    } else if (e.touches.length === 1) {
-      const r = this.el.getBoundingClientRect();
-      this.startPan(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top);
-    }
-  }
-
-  private onTouchMove(e: TouchEvent) {
-    e.preventDefault();
-    if (e.touches.length === 2 && this.isPinching) {
-      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      const r    = this.el.getBoundingClientRect();
-      const cx   = ((e.touches[0].clientX + e.touches[1].clientX) / 2) - r.left;
-      const cy   = ((e.touches[0].clientY + e.touches[1].clientY) / 2) - r.top;
-      const { x: wx, y: wy } = this.s2w(cx, cy);
-      const f  = dist / this.lastPinchDist;
-      const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * f));
-      this.panX = cx - wx * nz; this.panY = cy - wy * nz; this.zoom = nz;
-      this.lastPinchDist = dist;
-      this.onZoomChange?.(this.zoom);
-      this.onViewportChange?.();
-    } else if (e.touches.length === 1 && this.isPanning) {
-      const r  = this.el.getBoundingClientRect();
-      const sx = e.touches[0].clientX - r.left, sy = e.touches[0].clientY - r.top;
-      this.panX = this.panOriginX + (sx - this.panStartX);
-      this.panY = this.panOriginY + (sy - this.panStartY);
-    }
-  }
-
-  private onTouchEnd() { this.isPinching = false; this.isPanning = false; }
-
-  private onDbl(e: MouseEvent) {
-    const { sx, sy } = this.evSX(e);
-    const { x: wx, y: wy } = this.s2w(sx, sy);
-    for (const n of this.nodes.values()) {
-      if (n.containsPoint(wx, wy)) {
-        // Always open config popover on double-click
-        this.selectNode(n);
-        this.openNodeConfig(n);
-        return;
-      }
-    }
-    // Double-click on empty canvas: close panel if open, else open palette
-    if (document.body.classList.contains("panel-open")) {
-      this.onPanelClose?.();
-    } else {
-      this.onPaletteRequest?.();
-    }
-  }
-
   // ── Cut ───────────────────────────────────────────────────────────────────
 
   private edgeCrossesPath(c: Connector): boolean {
@@ -1005,29 +403,21 @@ export class Canvas {
     const cp = Math.max(Math.abs(tp.x - fp.x) * 0.55, 80);
     const pts: { x: number; y: number }[] = [];
     for (let t = 0; t <= 1; t += 0.04) pts.push({ x: bz(fp.x, fp.x + cp, tp.x - cp, tp.x, t), y: bz(fp.y, fp.y, tp.y, tp.y, t) });
-    for (let i = 0; i < this.cutPath.length - 1; i++) {
-      const ca = this.cutPath[i], cb = this.cutPath[i + 1];
+    const cutPath = this.input.cutPath;
+    for (let i = 0; i < cutPath.length - 1; i++) {
+      const ca = cutPath[i], cb = cutPath[i + 1];
       for (let j = 0; j < pts.length - 1; j++) if (segsX(pts[j], pts[j + 1], ca, cb)) return true;
     }
     return false;
   }
 
-  private doCut(): Connector[] {
+  doCut(): Connector[] {
     const out: Connector[] = [];
     for (const [id, c] of this.connectors) if (this.edgeCrossesPath(c)) { out.push(c); this.connectors.delete(id); }
     for (const c of out) this.clearDynamicPortExpr(c);
     return out;
   }
 
-  /**
-   * Removes connectors pointing at ports that no longer exist on a node —
-   * e.g. when a save_to_folder/collect_files node's port set shrinks because
-   * a subfolder/source slot was added (which replaces the single flat-mode
-   * "input" port with slot-based ports). Call after any rebuildPorts() that
-   * may have changed which ports exist.
-   * Self-contained (does not call clearDynamicPortExpr/derivePorts/rebuildPorts)
-   * so it is safe to call unconditionally without re-entrancy.
-   */
   pruneOrphanedConnectors(nodeId: string): void {
     const node = this.nodes.get(nodeId);
     if (!node) return;
@@ -1044,15 +434,18 @@ export class Canvas {
     }
   }
 
-  // ── Connector ─────────────────────────────────────────────────────────────
+  // ── Connector logic ───────────────────────────────────────────────────────
 
-  /**
-   * Clears the source_expr for the config slot corresponding to conn.to_port
-   * on the target node, then re-derives and rebuilds that node's ports.
-   * No-op if target node is absent or not a dynamic-port node.
-   */
-  private clearDynamicPortExpr(conn: Connector): void {
+  clearDynamicPortExpr(conn: Connector): void {
     const target = this.nodes.get(conn.data.to_node);
+    if (target?.data.node_type_id === NODE_IDS.AI_PROMPT && conn.data.to_port === "attachments") {
+      (target.data.config as Record<string, unknown>).attachments_expr = "";
+      return;
+    }
+    if (target?.data.node_type_id === NODE_IDS.IMAGE_GEN && conn.data.to_port === "reference_images") {
+      (target.data.config as Record<string, unknown>).reference_images_expr = "";
+      return;
+    }
     if (!target?.data.dynamic_ports) return;
     const config = target.data.config as Record<string, unknown>;
     type Slot = { id: string; source_expr?: string };
@@ -1070,20 +463,38 @@ export class Canvas {
     target.rebuildPorts();
   }
 
-  /**
-   * Injects source_expr into the config slot of conn.to_port on the target
-   * node, using the current display name of conn.from_node. Then re-derives
-   * and rebuilds that node's ports.
-   * No-op if target is absent, not a dynamic-port node, or source is absent.
-   */
-  private injectDynamicPortExpr(conn: Connector): void {
+  private sourceHasFilesOutput(schema: Record<string, unknown> | null | undefined): boolean {
+    if (!schema) return false;
+    const props = schema.properties as Record<string, unknown> | undefined;
+    return props != null && "files" in props;
+  }
+
+  injectDynamicPortExpr(conn: Connector): void {
     const target = this.nodes.get(conn.data.to_node);
+    if (target?.data.node_type_id === NODE_IDS.AI_PROMPT && conn.data.to_port === "attachments") {
+      const fromNode = this.nodes.get(conn.data.from_node);
+      if (!fromNode) return;
+      const expr = this.sourceHasFilesOutput(fromNode.data.output_schema)
+        ? `{{${fromNode.data.name}.output.files}}`
+        : `{{${fromNode.data.name}.output}}`;
+      (target.data.config as Record<string, unknown>).attachments_expr = expr;
+      return;
+    }
+    if (target?.data.node_type_id === NODE_IDS.IMAGE_GEN && conn.data.to_port === "reference_images") {
+      const fromNode = this.nodes.get(conn.data.from_node);
+      if (!fromNode) return;
+      const expr = this.sourceHasFilesOutput(fromNode.data.output_schema)
+        ? `{{${fromNode.data.name}.output.files}}`
+        : `{{${fromNode.data.name}.output}}`;
+      (target.data.config as Record<string, unknown>).reference_images_expr = expr;
+      return;
+    }
     if (!target?.data.dynamic_ports) return;
     const fromNode = this.nodes.get(conn.data.from_node);
-    // If source node is not in the map (e.g. not yet restored during undo),
-    // skip rather than writing a stale node-ID expression.
     if (!fromNode) return;
-    const expr = `{{${fromNode.data.name}.output.files}}`;
+    const expr = this.sourceHasFilesOutput(fromNode.data.output_schema)
+      ? `{{${fromNode.data.name}.output.files}}`
+      : `{{${fromNode.data.name}.output}}`;
     const config = target.data.config as Record<string, unknown>;
     type Slot = { id: string; source_expr?: string };
     const slots = [
@@ -1100,18 +511,16 @@ export class Canvas {
     target.rebuildPorts();
   }
 
-  private finishConn(nodeId: string, portId: string) {
-    if (!this.pendingConn) return;
+  finishConn(nodeId: string, portId: string) {
+    if (!this.input.pendingConn) return;
     if (Array.from(this.connectors.values()).some(c => c.data.to_node === nodeId && c.data.to_port === portId)) return;
-    const conn = new Connector({ id: newConnectorId(), from_node: this.pendingConn.fromNode, from_port: this.pendingConn.fromPort, to_node: nodeId, to_port: portId, condition: null, on_success: null, on_failure: null });
+    const conn = new Connector({ id: newConnectorId(), from_node: this.input.pendingConn.fromNode, from_port: this.input.pendingConn.fromPort, to_node: nodeId, to_port: portId, condition: null, on_success: null, on_failure: null });
     this.connectors.set(conn.data.id, conn);
     this.pushUndo({ type: "add_edge", connector: conn });
 
-    // For text_to_file: auto-populate the content field with the upstream expression
-    // so the user does not have to type it manually after connecting.
     const target = this.nodes.get(nodeId);
     if (target?.data.node_type_id === "text_to_file") {
-      const fromNode = this.nodes.get(this.pendingConn.fromNode);
+      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
       if (fromNode) {
         const cfg = target.data.config as Record<string, unknown>;
         if (!cfg.content) {
@@ -1120,11 +529,49 @@ export class Canvas {
       }
     }
 
-    // For dynamic-port target nodes: inject source expression into the config
-    // slot corresponding to this port, then re-derive ports.
+    if (target?.data.node_type_id === NODE_IDS.AI_PROMPT && portId === "attachments") {
+      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      if (fromNode) {
+        const hasFiles = this.sourceHasFilesOutput(fromNode.data.output_schema);
+        const expr = hasFiles
+          ? `{{${fromNode.data.name}.output.files}}`
+          : `{{${fromNode.data.name}.output}}`;
+        (target.data.config as Record<string, unknown>).attachments_expr = expr;
+        if (!hasFiles) {
+          this.onWarn?.(
+            'The "Files" port expects a files array. The connected node may not produce one — expression set to {{…output}}, update if needed.'
+          );
+        }
+      }
+    }
+
+    if (target?.data.node_type_id === NODE_IDS.IMAGE_GEN && portId === "reference_images") {
+      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      if (fromNode) {
+        const hasFiles = this.sourceHasFilesOutput(fromNode.data.output_schema);
+        const expr = hasFiles
+          ? `{{${fromNode.data.name}.output.files}}`
+          : `{{${fromNode.data.name}.output}}`;
+        (target.data.config as Record<string, unknown>).reference_images_expr = expr;
+        if (!hasFiles) {
+          this.onWarn?.(
+            'The "Reference Images" port expects a files array. The connected node may not produce one — expression set to {{…output}}, update if needed.'
+          );
+        }
+      }
+    }
+
     if (target?.data.dynamic_ports) {
-      const fromNode = this.nodes.get(this.pendingConn.fromNode);
-      const expr = `{{${fromNode?.data.name ?? this.pendingConn.fromNode}.output.files}}`;
+      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      const nodeName = fromNode?.data.name ?? this.input.pendingConn.fromNode;
+      const hasFiles = fromNode != null && this.sourceHasFilesOutput(fromNode.data.output_schema);
+      const expr     = hasFiles ? `{{${nodeName}.output.files}}` : `{{${nodeName}.output}}`;
+      const toPortDef = target.data.ports.inputs.find(p => p.id === portId);
+      if (toPortDef?.port_type === "files" && !hasFiles) {
+        this.onWarn?.(
+          "This port expects a files array. The connected node may not produce one — expression set to {{…output}}, update if needed."
+        );
+      }
       const config = target.data.config as Record<string, unknown>;
       type Slot = { id: string; source_expr?: string };
       const slots = [
@@ -1147,7 +594,6 @@ export class Canvas {
   // ── Selection ─────────────────────────────────────────────────────────────
 
   selectNode(n: CanvasNode) { n.selected = true; this.selectedNodes.add(n.data.id); this.selectedNode = n; }
-  // Call this only when the user explicitly wants to open the config (double-click)
   openNodeConfig(n: CanvasNode) { this.onNodeSelected?.(n); }
   selectConn(c: Connector)  { this.clearSelection(); c.selected = true; this.selectedConn = c; }
 
@@ -1165,7 +611,6 @@ export class Canvas {
       for (const [cid, c] of this.connectors) if (c.data.from_node === id || c.data.to_node === id) { dc.push(c); this.connectors.delete(cid); }
     }
     if (this.selectedConn && !dc.includes(this.selectedConn)) { dc.push(this.selectedConn); this.connectors.delete(this.selectedConn.data.id); }
-    // Clear source_expr for dynamic-port targets still alive after node deletions
     for (const c of dc) this.clearDynamicPortExpr(c);
     for (const n of dn) this.pushUndo({ type: "delete_node", node: n, connectors: dc });
     if (!dn.length && dc.length) for (const c of dc) this.pushUndo({ type: "delete_edge", connector: c });
@@ -1174,142 +619,11 @@ export class Canvas {
 
   // ── Undo ──────────────────────────────────────────────────────────────────
 
-  private pushUndo(a: UndoAction) { this.undoStack.push(a); if (this.undoStack.length > 100) this.undoStack.shift(); this.redoStack = []; }
+  pushUndo(a: UndoAction) { this.undoMgr.push(a); }
+  undo() { this.undoMgr.undo(); }
+  redo() { this.undoMgr.redo(); }
 
-  undo() {
-    const a = this.undoStack.pop(); if (!a) return;
-    this.redoStack.push(a);
-    switch (a.type) {
-      case "add_node":
-        this.nodes.delete(a.node.data.id);
-        break;
-      case "delete_node":
-        // Restore node first so injectDynamicPortExpr can resolve it as a source
-        this.nodes.set(a.node.data.id, a.node);
-        for (const c of a.connectors) {
-          this.connectors.set(c.data.id, c);
-          this.injectDynamicPortExpr(c);
-        }
-        break;
-      case "add_edge":
-        this.connectors.delete(a.connector.data.id);
-        this.clearDynamicPortExpr(a.connector);
-        break;
-      case "delete_edge":
-        this.connectors.set(a.connector.data.id, a.connector);
-        this.injectDynamicPortExpr(a.connector);
-        break;
-      case "move_node":
-        { const n = this.nodes.get(a.nodeId); if (n) { n.data.position = { ...a.from }; n.updatePortPositions(); } }
-        break;
-      case "move_nodes":
-        for (const m of a.moves) { const n = this.nodes.get(m.nodeId); if (n) { n.data.position = { ...m.from }; n.updatePortPositions(); } }
-        break;
-      case "cut_edges":
-        for (const c of a.connectors) {
-          this.connectors.set(c.data.id, c);
-          this.injectDynamicPortExpr(c);
-        }
-        break;
-      case "split_edge":
-        // Reverse: remove added1, added2, middle node; restore original edge
-        this.connectors.delete(a.added1.data.id);
-        this.connectors.delete(a.added2.data.id);
-        this.clearDynamicPortExpr(a.added2); // added2 lands on original target
-        this.nodes.delete(a.node.data.id);
-        this.connectors.set(a.removed.data.id, a.removed);
-        this.injectDynamicPortExpr(a.removed);
-        break;
-    }
-    this.onCanvasChanged?.();
-  }
-
-  redo() {
-    const a = this.redoStack.pop(); if (!a) return;
-    this.undoStack.push(a);
-    switch (a.type) {
-      case "add_node":
-        this.nodes.set(a.node.data.id, a.node);
-        break;
-      case "delete_node":
-        this.nodes.delete(a.node.data.id);
-        for (const c of a.connectors) {
-          this.clearDynamicPortExpr(c);
-          this.connectors.delete(c.data.id);
-        }
-        break;
-      case "add_edge":
-        this.connectors.set(a.connector.data.id, a.connector);
-        this.injectDynamicPortExpr(a.connector);
-        break;
-      case "delete_edge":
-        this.connectors.delete(a.connector.data.id);
-        this.clearDynamicPortExpr(a.connector);
-        break;
-      case "move_node":
-        { const n = this.nodes.get(a.nodeId); if (n) { n.data.position = { ...a.to }; n.updatePortPositions(); } }
-        break;
-      case "move_nodes":
-        for (const m of a.moves) { const n = this.nodes.get(m.nodeId); if (n) { n.data.position = { ...m.to }; n.updatePortPositions(); } }
-        break;
-      case "cut_edges":
-        for (const c of a.connectors) {
-          this.clearDynamicPortExpr(c);
-          this.connectors.delete(c.data.id);
-        }
-        break;
-      case "split_edge":
-        // Re-apply: remove original edge, add middle node and two new edges
-        this.clearDynamicPortExpr(a.removed);
-        this.connectors.delete(a.removed.data.id);
-        this.nodes.set(a.node.data.id, a.node);
-        this.connectors.set(a.added1.data.id, a.added1);
-        this.connectors.set(a.added2.data.id, a.added2);
-        this.injectDynamicPortExpr(a.added2); // added2 lands on original target
-        break;
-    }
-    this.onCanvasChanged?.();
-  }
-
-  // node.height assumes port-row layout, which undershoots for notes (their
-  // real height depends on wrapped text length, computed in drawNote()).
-  // Mirrors that formula so overlap checks measure notes accurately.
-  private effectiveHeight(node: CanvasNode): number {
-    if (node.data.node_type_id !== NODE_IDS.NOTE) return node.height;
-    const text = String(node.data.config["text"] ?? "Double-click to edit");
-    this.ctx.font = "12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    const lines = wrapText(this.ctx, text, NODE_WIDTH - 24);
-    return Math.max(60, 28 + lines.length * 18);
-  }
-
-  // True if a box of the given size at (x, y) would overlap any existing node.
-  private overlapsExisting(x: number, y: number, h: number, excludeId?: string): boolean {
-    for (const n of this.nodes.values()) {
-      if (n.data.id === excludeId) continue;
-      const nx = n.data.position.x, ny = n.data.position.y;
-      if (x < nx + NODE_WIDTH && x + NODE_WIDTH > nx && y < ny + this.effectiveHeight(n) && y + h > ny) return true;
-    }
-    return false;
-  }
-
-  // Nudges a freshly created node straight down until it clears existing
-  // nodes, or gives up after MAX_NUDGE_TRIES (best-effort on dense canvases).
-  private avoidOverlap(node: CanvasNode): void {
-    const GAP = 30;
-    const MAX_NUDGE_TRIES = 30;
-    const h = this.effectiveHeight(node);
-    const x = node.data.position.x;
-    let y = node.data.position.y;
-    let tries = 0;
-    while (this.overlapsExisting(x, y, h, node.data.id) && tries < MAX_NUDGE_TRIES) {
-      y += h + GAP;
-      tries++;
-    }
-    if (tries > 0) {
-      node.data.position = { x, y };
-      node.updatePortPositions();
-    }
-  }
+  // ── Placement ─────────────────────────────────────────────────────────────
 
   dupSelected() {
     const ids = this.selectedNodes.size > 0 ? [...this.selectedNodes] : this.selectedNode ? [this.selectedNode.data.id] : [];
@@ -1318,7 +632,7 @@ export class Canvas {
     for (const id of ids) {
       const orig = this.nodes.get(id); if (!orig) continue;
       const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
-      this.avoidOverlap(copy);
+      this.snap.avoidOverlap(copy);
       this.nodes.set(copy.data.id, copy); this.pushUndo({ type: "add_node", node: copy }); news.push(copy);
     }
     this.clearSelection(); for (const n of news) this.selectNode(n); this.onCanvasChanged?.();
@@ -1329,8 +643,6 @@ export class Canvas {
     document.getElementById("sidebar")?.classList.toggle("focus-hidden", this.focusMode);
     document.getElementById("right-panel")?.classList.toggle("focus-hidden", this.focusMode);
     document.body.classList.toggle("focus-mode", this.focusMode);
-    // ResizeObserver on the canvas element handles the resize automatically
-    // when the CSS grid columns change width. No manual setTimeout needed.
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -1341,7 +653,6 @@ export class Canvas {
     const atCenter = Math.abs(sx - r.width / 2) < 30 && Math.abs(sy - r.height / 2) < 30;
     let px = x - NODE_WIDTH / 2, py = y - 20;
 
-    // Auto-offset when placing multiple nodes at center
     if (atCenter && this.nodes.size > 0) {
       let maxX = -1e9, avgY = 0, cnt = 0;
       for (const n of this.nodes.values()) { if (n.data.position.x > maxX) maxX = n.data.position.x; avgY += n.data.position.y; cnt++; }
@@ -1351,7 +662,6 @@ export class Canvas {
     const node = createNodeFromDescriptor(desc, px, py);
     this.nodes.set(node.data.id, node);
     this.pushUndo({ type: "add_node", node });
-    // Apply preset config if set by palette-manager
     if (this._pendingPresetConfig) {
       Object.assign(node.data.config, this._pendingPresetConfig);
       this._pendingPresetConfig = undefined;
@@ -1360,7 +670,7 @@ export class Canvas {
       node.data.name = this._pendingPresetName;
       this._pendingPresetName = undefined;
     }
-    this.avoidOverlap(node);
+    this.snap.avoidOverlap(node);
     this.tryWireInsert(node);
     this.onCanvasChanged?.();
     this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
@@ -1391,32 +701,25 @@ export class Canvas {
     this.panY = r.height / 2 - ((mnY + mxY) / 2) * this.zoom;
   }
 
-  // Called by app.ts after the user picks a node from the wire-drop palette
   completeWireDrop(desc: NodeDescriptor): void {
     const drop = this._pendingWireDrop;
     if (!drop) return;
     this._pendingWireDrop = null;
 
-    // Safety: desc must have at least one input port to connect to
     if (!desc.ports.inputs.length) return;
 
-    // Place the node directly at the world-coordinate drop point.
-    // Do NOT use placeNode() here — it calls centerOn() which pans the
-    // viewport away from where the user just dropped the wire.
     const px = drop.wx - NODE_WIDTH / 2;
     const py = drop.wy - 20;
     const node = createNodeFromDescriptor(desc, px, py);
 
-    // Apply any pending preset config (set by palette-manager on drag)
     if (this._pendingPresetConfig) { Object.assign(node.data.config, this._pendingPresetConfig); this._pendingPresetConfig = undefined; }
     if (this._pendingPresetName)   { node.data.name = this._pendingPresetName; this._pendingPresetName = undefined; }
 
-    this.avoidOverlap(node);
+    this.snap.avoidOverlap(node);
     this.nodes.set(node.data.id, node);
     this.pushUndo({ type: "add_node", node });
     this.onCanvasChanged?.();
 
-    // Auto-connect using the descriptor's first input port id (authoritative)
     const inputPortId = desc.ports.inputs[0].id;
     const conn = new Connector({
       id: newConnectorId(),
@@ -1429,20 +732,18 @@ export class Canvas {
     this.onCanvasChanged?.();
   }
 
-  // Called by app.ts after the user picks a node from the input-wire-drop palette
   completeInputWireDrop(desc: NodeDescriptor): void {
     const drop = this._pendingInputWireDrop;
     if (!drop) return;
     this._pendingInputWireDrop = null;
 
-    // Safety: desc must have at least one output port to connect from
     if (!desc.ports.outputs.length) return;
 
-    const px = drop.wx - NODE_WIDTH * 1.5; // place to the left of dragged node
+    const px = drop.wx - NODE_WIDTH * 1.5;
     const py = drop.wy - 20;
     const node = createNodeFromDescriptor(desc, px, py);
 
-    this.avoidOverlap(node);
+    this.snap.avoidOverlap(node);
     this.nodes.set(node.data.id, node);
     this.pushUndo({ type: "add_node", node });
     this.onCanvasChanged?.();

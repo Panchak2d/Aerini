@@ -9,7 +9,7 @@ This guide covers Aerini's security model end to end — what it protects you fr
 If you just want to know the essentials before reading further:
 
 - Credentials are encrypted with AES-256-GCM. The encryption key is stored in your OS keychain (not in the same file as the credentials).
-- Workflows, run history, and credentials never leave your machine in desktop mode. Aerini makes no telemetry calls or outbound connections beyond what your workflow nodes explicitly do.
+- Workflows, run history, and credentials never leave your machine in desktop mode. Aerini makes no telemetry calls, analytics calls, or update pings. The one fixed exception: the desktop UI loads the Inter typeface from Google Fonts over HTTPS at startup. Beyond that, the only outbound connections are what your workflow nodes explicitly do.
 - Shell Command and Code (JS) nodes can execute arbitrary code on your machine. Aerini warns you before running a workflow containing them.
 - The HTTP node blocks requests to internal/private IP addresses to prevent SSRF attacks — but this protection has a known DNS-timing gap that only an egress firewall can fully close.
 - Server deployments need additional hardening. There's a checklist at the end of [Server Deployment](server-deploy.md).
@@ -28,6 +28,8 @@ If you just want to know the essentials before reading further:
 8. [AI Agent nodes — prompt injection](#8-ai-agent-nodes--prompt-injection)
 9. [Backup and recovery](#9-backup-and-recovery)
 10. [What Aerini cannot protect you from](#10-what-aerini-cannot-protect-you-from)
+11. [If / Condition node — expression injection](#11-if--condition-node--expression-injection)
+12. [Known transitive dependency risks](#12-known-transitive-dependency-risks)
 
 ---
 
@@ -47,6 +49,8 @@ The desktop app is designed for a single user on their own machine. Its security
 - Node outputs
 
 The only outbound traffic is from your workflow nodes — HTTP requests, Slack messages, and similar actions you explicitly configured. Aerini itself has no telemetry, no analytics, no update pings, and no license checks.
+
+**Exception: the Inter font.** The desktop UI's stylesheet (`src/styles/main.css`) imports the Inter typeface from Google Fonts (`fonts.googleapis.com`) over HTTPS when the UI loads. This is a fixed, code-level exception — it fires regardless of which workflows you run, sends only a font request (no workflow data, credentials, or identifying information), and is not configurable. It's the only built-in outbound connection beyond what your workflow nodes themselves make.
 
 **A note on dev mode:** running `npm run dev` without Tauri opens Aerini in your browser. In that mode, execution is fully disabled — the Run button does nothing. No credentials, scheduling, Code (JS), or Shell Command nodes are available. This mode is for frontend development only.
 
@@ -310,7 +314,35 @@ These are real limitations, not gaps that will be fixed later. Understanding the
 
 ---
 
-## 11. Known transitive dependency risks
+## 11. If / Condition node — expression injection
+
+The **If / Condition** node evaluates a condition string such as `{{input.status}} == ok` or `{{count}} < 100`. All `{{...}}` expressions are resolved by the executor before the node runs — the node receives the fully substituted string and parses it.
+
+**The risk:** `evaluate()` finds the first comparison operator it encounters by scanning left to right through the resolved string. If user-controlled data is substituted into the **left side** of the condition and that data itself contains a comparison operator, the parser splits at the injected operator rather than the intended one.
+
+**Concrete example:**
+
+```
+Condition field:   {{webhook.body.role}} != admin
+Attacker provides: role = "admin != admin"
+Resolved string:   admin != admin != admin
+```
+
+`evaluate()` finds `!=` at position 5, splits there: `lhs = "admin"`, `rhs = "admin != admin"`. String compare: `"admin" != "admin != admin"` → `true`. The gate passes even though the attacker's role value contains `admin`.
+
+**Recommended mitigations:**
+
+1. **Never let untrusted data control the comparison operator.** The operator should always be hard-coded in the condition field (e.g. `== ok`), not come from a `{{...}}` expression.
+
+2. **Put user-controlled data on the left side only, against a hard-coded expected value on the right.** `{{input.role}} == admin` is safer than `{{input.role}} {{input.op}} {{input.expected}}`.
+
+3. **For authorization decisions, use a Code node** that applies strict equality against a safelisted set of allowed values, rather than the If / Condition evaluator.
+
+4. **Do not use the If / Condition node as a security gate on untrusted workflow input** in server mode without sanitizing the input first. The evaluator is designed for workflow control flow, not for enforcing security policies on attacker-controlled strings.
+
+---
+
+## 12. Known transitive dependency risks
 
 ### RUSTSEC-2023-0071 — RSA Marvin Attack (MySQL / sqlx)
 

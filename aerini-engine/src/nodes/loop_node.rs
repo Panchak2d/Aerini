@@ -66,11 +66,11 @@ impl Node for LoopNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![PortDefinition {
-                id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left,
+                id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
             }],
             outputs: vec![
-                PortDefinition { id: "loop_body".to_string(), label: "Each Item".to_string(), position: PortPosition::Right },
-                PortDefinition { id: "done".to_string(),      label: "Done".to_string(),      position: PortPosition::Right },
+                PortDefinition { id: "loop_body".to_string(), label: "Each Item".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "done".to_string(),      label: "Done".to_string(),      position: PortPosition::Right, port_type: None },
             ],
         }
     }
