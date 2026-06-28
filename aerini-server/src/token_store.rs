@@ -12,7 +12,7 @@
 //! An `admin`-scoped token satisfies any scope check.
 
 use chrono::Utc;
-use rand::RngCore;
+use rand::TryRng;
 use base64::Engine;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ impl TokenStore {
         // 32 bytes from OsRng → 256 bits of entropy, URL-safe base64 encoded.
         // Replaces UUID v4 which had only 122 bits due to fixed version/variant bits.
         let mut raw_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut raw_bytes);
+        rand::rngs::SysRng.try_fill_bytes(&mut raw_bytes).expect("OS RNG failure");
         let raw      = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
         let token_id = Uuid::new_v4().to_string();
         let hash     = hash_token(&self.key, &raw);

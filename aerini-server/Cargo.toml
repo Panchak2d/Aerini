@@ -16,7 +16,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util   = { version = "0.7", features = ["rt"] }
 
 # HTTP
-axum       = { version = "0.7", features = ["tokio"] }
+axum       = { version = "0.8", features = ["tokio"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # HTTP client (for control commands)
@@ -35,7 +35,7 @@ uuid    = { version = "1.8", features = ["v4"] }
 subtle  = "2.6"
 dashmap = "6.1"
 blake3  = "1"
-rand    = "0.8.6"
+rand    = "0.10"
 base64  = "0.22"
 # Password hashing for run_secret (argon2 is brute-force resistant; BLAKE3 is not)
 argon2  = "0.5"
@@ -54,7 +54,7 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

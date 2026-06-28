@@ -106,7 +106,7 @@ pub fn router(state: StatusState) -> Router {
         .route("/api/logs",      get(api_logs))
         .route("/api/run",       post(api_run))
         .route("/api/runs",      get(api_runs))
-        .route("/api/runs/:id",  get(api_run_detail))
+        .route("/api/runs/{id}",  get(api_run_detail))
         .layer(axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(middleware::from_fn(crate::middleware::status_security_headers))
         .layer(cors)

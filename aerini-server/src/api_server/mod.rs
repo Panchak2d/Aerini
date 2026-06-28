@@ -55,7 +55,7 @@ use std::{
 };
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Semaphore};
-use rand::RngCore;
+use rand::TryRng;
 
 use crate::event_bridge::BroadcastEventSink;
 use crate::token_store::TokenStore;
@@ -204,7 +204,7 @@ fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
         key
     } else {
         let mut key = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
+        rand::rngs::SysRng.try_fill_bytes(&mut key).expect("OS RNG failure");
         std::fs::write(path, key).unwrap_or_else(|e| {
             tracing::error!("FATAL: Cannot write token key file {:?}: {}", path, e);
             std::process::exit(1);
@@ -302,7 +302,7 @@ pub async fn run(cfg: ServerConfig) {
         None => {
             if token_store.is_empty() {
                 let mut raw_bytes = [0u8; 32];
-                rand::rngs::OsRng.fill_bytes(&mut raw_bytes);
+                rand::rngs::SysRng.try_fill_bytes(&mut raw_bytes).expect("OS RNG failure");
                 let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
                 eprintln!();
                 eprintln!("┌──────────────────────────────────────────────────────────┐");
@@ -454,18 +454,18 @@ pub async fn run(cfg: ServerConfig) {
 
     let protected = Router::new()
         .route("/api/workflows",           get(routes::workflows::list_workflows).post(routes::workflows::save_workflow))
-        .route("/api/workflows/:id",       get(routes::workflows::get_workflow).delete(routes::workflows::delete_workflow))
-        .route("/api/workflows/:id/run",   post(routes::workflows::run_workflow))
+        .route("/api/workflows/{id}",       get(routes::workflows::get_workflow).delete(routes::workflows::delete_workflow))
+        .route("/api/workflows/{id}/run",   post(routes::workflows::run_workflow))
         .route("/api/scheduler",           get(routes::scheduler::list_scheduler))
-        .route("/api/scheduler/:id/start", post(routes::scheduler::start_job))
-        .route("/api/scheduler/:id/stop",  post(routes::scheduler::stop_job))
+        .route("/api/scheduler/{id}/start", post(routes::scheduler::start_job))
+        .route("/api/scheduler/{id}/stop",  post(routes::scheduler::stop_job))
         .route("/api/credentials",         get(routes::credentials::list_creds).post(routes::credentials::save_cred))
-        .route("/api/credentials/:id",     delete(routes::credentials::delete_cred))
+        .route("/api/credentials/{id}",     delete(routes::credentials::delete_cred))
         .route("/api/events",              get(routes::workflows::sse_events))
         .route("/api/tokens",              get(routes::tokens::list_tokens_handler).post(routes::tokens::create_token_handler))
-        .route("/api/tokens/:id",          delete(routes::tokens::revoke_token_handler))
-        .route("/api/tokens/:id/workflows",             get(routes::tokens::list_token_workflows_handler))
-        .route("/api/tokens/:id/workflows/:wf_id",      post(routes::tokens::grant_token_workflow_handler).delete(routes::tokens::revoke_token_workflow_handler))
+        .route("/api/tokens/{id}",          delete(routes::tokens::revoke_token_handler))
+        .route("/api/tokens/{id}/workflows",             get(routes::tokens::list_token_workflows_handler))
+        .route("/api/tokens/{id}/workflows/{wf_id}",      post(routes::tokens::grant_token_workflow_handler).delete(routes::tokens::revoke_token_workflow_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     let extra_origins: std::sync::Arc<Vec<Vec<u8>>> = std::sync::Arc::new(
@@ -504,7 +504,7 @@ pub async fn run(cfg: ServerConfig) {
         // header, and a third-party page embedding the widget cannot hold
         // a server admin/write token.
         .route("/aerini-widget.js", get(routes::widget::serve_widget_js))
-        .route("/api/widget/:workflow_id/trigger", post(routes::widget::trigger_widget))
+        .route("/api/widget/{workflow_id}/trigger", post(routes::widget::trigger_widget))
         .merge(protected)
         .with_state(state)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
