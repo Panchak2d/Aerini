@@ -8,6 +8,10 @@ updates:
     labels:
       - "dependencies"
       - "rust"
+    groups:
+      wasmtime:
+        patterns:
+          - "wasmtime*"
 
   # Node.js / npm dependencies (root package.json)
   - package-ecosystem: "npm"
