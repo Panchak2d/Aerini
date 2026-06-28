@@ -67,12 +67,28 @@ once_cell = "1"
 tempfile = "3"
 
 # Text to File node — PDF/DOCX export
-# printpdf 0.9.1: VERIFIED current stable on crates.io (2026-06-24). Pulled in with
-# default features since the exact minimal feature-flag set for the builtin-font-only
-# text path used here was not independently verified — see patch notes (UNCERTAIN).
-# docx-rs 0.4.20: VERIFIED current stable on crates.io (2026-06-24).
-printpdf = "0.9.1"
-docx-rs  = "0.4.20"
+# pdf-writer 0.15.0: VERIFIED current stable (2026-06-28, fetched the published
+# .crate's own Cargo.toml from static.crates.io). License MIT OR Apache-2.0.
+# Runtime deps are exactly 4 tiny, long-standing crates: bitflags, itoa, memchr,
+# ryu — no lopdf, no kuchiki, no azul-*, no bincode, no hyphenation.
+#
+# Replaces printpdf (see PATCH NOTES / git history for the prior dependency).
+# printpdf 0.9.1 (its only published version) hard-pins `lopdf = "0.39.0"`
+# (non-optional — pulled regardless of feature flags), which carries
+# RUSTSEC-2026-0187 (stack overflow via deeply nested PDF *objects*, triggered
+# by lopdf::Document::load parsing an untrusted file). printpdf has no newer
+# release that bumps this, and Cargo's [patch] table can't force a fix in
+# either — a patch must still satisfy the dependent's own version requirement
+# or Cargo silently drops it (rust-lang/cargo#8690), and lopdf 0.42.0 (the
+# fixed version) doesn't satisfy printpdf's `^0.39.0`.
+#
+# pdf-writer is a pure *writer* — it has no PDF parser at all, so it cannot
+# have a "parsing untrusted input" vulnerability class by construction, not
+# just "currently unreachable in our usage." This is a real fix, not a risk
+# acceptance: see git history for the now-removed .cargo/audit.toml ignore
+# entries this replaced.
+pdf-writer = "0.15.0"
+docx-rs    = "0.4.20"
 
 # Webhook node: RAII port-deregistration guard on all exit paths
 scopeguard = "1"
