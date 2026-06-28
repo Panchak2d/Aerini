@@ -2,7 +2,7 @@
 # Images are pinned to SHA-256 digests to prevent supply-chain tag overwrites.
 # To update: docker pull <image>, then docker inspect --format='{{index .RepoDigests 0}}' <image>
 # Dependabot (.github/dependabot.yml) will keep digests current automatically.
-FROM rust:1-slim@sha256:a818c23087b65be495e78fa329d577481e7700748bb2d1f28658b6bce3c7b931 AS builder
+FROM rust:1-slim@sha256:6abf73f05806f36362d0ff2722f2250c6153398831edd0455e0e0baa1f78ecc7 AS builder
 
 WORKDIR /app
 
