@@ -128,15 +128,16 @@ impl Node for TextToFileNode {
 // ---------------------------------------------------------------------------
 // PDF / DOCX export
 //
-// API usage verified against docs.rs for printpdf 0.9.1 and docx-rs 0.4.20
-// (struct/method signatures fetched directly, 2026-06-24) and against the
-// printpdf project's own README example for the exact Op sequence. Neither
-// crate could be compiled in this session (no Rust toolchain available in
-// this environment) — mark UNCERTAIN at the build/runtime level until
+// API usage verified against pdf-writer 0.15.0's actual published source
+// (downloaded from static.crates.io and inspected directly, 2026-06-28 —
+// every method signature below was read out of src/*.rs, not assumed from
+// docs) and against docx-rs 0.4.20 (docs.rs, 2026-06-24). Neither crate could
+// be compiled in this session (no Rust toolchain available in this
+// environment) — mark UNCERTAIN at the build/runtime level until
 // `cargo check` is run; the API *shapes* used below are VERIFIED, not guessed.
 // ---------------------------------------------------------------------------
 mod export {
-    use printpdf::*;
+    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
     use docx_rs::{BreakType, Docx, Paragraph, Run};
     use std::io::Cursor;
 
@@ -145,9 +146,9 @@ mod export {
     const MM_TO_PT: f64 = 2.834_645_669;
 
     /// Heuristic average glyph advance width for Helvetica, as a fraction of font
-    /// size. printpdf's exact per-glyph metrics were not exercised in this patch;
-    /// this approximation deliberately errs toward wrapping a line a little early
-    /// rather than overflowing the page margin.
+    /// size. Real per-glyph AFM metrics for the standard 14 fonts were not
+    /// exercised in this patch; this approximation deliberately errs toward
+    /// wrapping a line a little early rather than overflowing the page margin.
     const AVG_CHAR_WIDTH_FACTOR: f64 = 0.56;
 
     fn wrap_line(line: &str, max_width_pt: f64, font_size_pt: f64) -> Vec<String> {
@@ -196,13 +197,59 @@ mod export {
 
     /// Removes literal `**` / `*` markers without rendering inline bold/italic.
     /// Builtin PDF fonts model bold/italic as separate font variants (e.g.
-    /// HelveticaBold), not a per-run style toggle within one line of text, and
+    /// Helvetica-Bold), not a per-run style toggle within one line of text, and
     /// tracking the text cursor correctly across mixed-style runs on a single
-    /// line was not verified against printpdf 0.9.1's real positioning
-    /// behavior — so this exporter styles per *line* only (headings). The DOCX
-    /// exporter below does support true inline bold/italic.
+    /// line is real added complexity this exporter doesn't need yet — so it
+    /// styles per *line* only (headings). The DOCX exporter below does support
+    /// true inline bold/italic.
     fn strip_emphasis_markers(s: &str) -> String {
         s.replace("**", "").replace('*', "")
+    }
+
+    /// Encodes text for the standard, non-embedded Type1 fonts under
+    /// /Encoding /WinAnsiEncoding. WinAnsi == Windows-1252: identical to
+    /// ASCII for 0x20-0x7E and to Latin-1 for 0xA0-0xFF; the only quirk is
+    /// 0x80-0x9F, which Latin-1 reserves for C1 controls but WinAnsi instead
+    /// uses for punctuation AI-generated markdown commonly produces (smart
+    /// quotes, en/em dash, ellipsis). Those are mapped explicitly below;
+    /// anything outside Latin-1 (CJK, emoji, etc.) becomes '?' — the same
+    /// pre-existing limit any non-embedded standard font has (only 256
+    /// glyphs, no Unicode coverage), not a new regression from this patch.
+    fn encode_winansi(s: &str) -> Vec<u8> {
+        s.chars()
+            .map(|c| match c {
+                '\u{20}'..='\u{7E}' => c as u8,
+                '\u{20AC}' => 0x80, // €
+                '\u{201A}' => 0x82, // ‚
+                '\u{0192}' => 0x83, // ƒ
+                '\u{201E}' => 0x84, // „
+                '\u{2026}' => 0x85, // …
+                '\u{2020}' => 0x86, // †
+                '\u{2021}' => 0x87, // ‡
+                '\u{02C6}' => 0x88, // ˆ
+                '\u{2030}' => 0x89, // ‰
+                '\u{0160}' => 0x8A, // Š
+                '\u{2039}' => 0x8B, // ‹
+                '\u{0152}' => 0x8C, // Œ
+                '\u{017D}' => 0x8E, // Ž
+                '\u{2018}' => 0x91, // '
+                '\u{2019}' => 0x92, // '
+                '\u{201C}' => 0x93, // "
+                '\u{201D}' => 0x94, // "
+                '\u{2022}' => 0x95, // •
+                '\u{2013}' => 0x96, // –
+                '\u{2014}' => 0x97, // —
+                '\u{02DC}' => 0x98, // ˜
+                '\u{2122}' => 0x99, // ™
+                '\u{0161}' => 0x9A, // š
+                '\u{203A}' => 0x9B, // ›
+                '\u{0153}' => 0x9C, // œ
+                '\u{017E}' => 0x9E, // ž
+                '\u{0178}' => 0x9F, // Ÿ
+                '\u{00A0}'..='\u{00FF}' => c as u8, // Latin-1 supplement
+                _ => b'?',
+            })
+            .collect()
     }
 
     /// Renders plain text (with #/##/### heading lines) to a PDF using only the
@@ -215,56 +262,108 @@ mod export {
         let usable_width_pt = (PAGE_W_MM - 2.0 * MARGIN_MM) * MM_TO_PT;
         let top_y_mm = PAGE_H_MM - MARGIN_MM;
         let bottom_y_mm = MARGIN_MM;
+        let page_w_pt = (PAGE_W_MM * MM_TO_PT) as f32;
+        let page_h_pt = (PAGE_H_MM * MM_TO_PT) as f32;
 
         const BODY_SIZE_PT: f64 = 11.0;
         const BODY_LINE_HEIGHT_MM: f64 = 5.5;
         const HEADING_SIZE_PT: [f64; 4] = [0.0, 18.0, 15.0, 13.0];
         const HEADING_LINE_HEIGHT_MM: [f64; 4] = [0.0, 9.0, 7.5, 6.5];
 
-        let mut pages: Vec<PdfPage> = Vec::new();
-        let mut ops: Vec<Op> = Vec::new();
+        // Sequential PDF indirect-object id allocator. Object count isn't known
+        // up front (page breaks happen as lines are laid out below), so ids for
+        // pages/content streams are handed out lazily as each page is opened.
+        let mut next_id: i32 = 0;
+        macro_rules! alloc_ref {
+            () => {{
+                next_id += 1;
+                Ref::new(next_id)
+            }};
+        }
+
+        let catalog_id = alloc_ref!();
+        let page_tree_id = alloc_ref!();
+        let font_regular_id = alloc_ref!();
+        let font_bold_id = alloc_ref!();
+        let font_regular_name = Name(b"F1");
+        let font_bold_name = Name(b"F2");
+
+        let mut finished_pages: Vec<(Ref, Ref, Content)> = Vec::new();
+        let mut page_id = alloc_ref!();
+        let mut content_id = alloc_ref!();
+        let mut page_content = Content::new();
         let mut cursor_y_mm = top_y_mm;
 
         for raw_line in content.split('\n') {
             let (level, text) = classify_line(raw_line);
-            let (font, size_pt, line_h_mm) = if level > 0 {
-                (BuiltinFont::HelveticaBold, HEADING_SIZE_PT[level], HEADING_LINE_HEIGHT_MM[level])
+            let (font_name, size_pt, line_h_mm) = if level > 0 {
+                (font_bold_name, HEADING_SIZE_PT[level], HEADING_LINE_HEIGHT_MM[level])
             } else {
-                (BuiltinFont::Helvetica, BODY_SIZE_PT, BODY_LINE_HEIGHT_MM)
+                (font_regular_name, BODY_SIZE_PT, BODY_LINE_HEIGHT_MM)
             };
 
             let wrapped = wrap_line(&text, usable_width_pt, size_pt);
 
             for line_text in wrapped {
                 if cursor_y_mm - line_h_mm < bottom_y_mm {
-                    pages.push(PdfPage::new(Mm(PAGE_W_MM as f32), Mm(PAGE_H_MM as f32), std::mem::take(&mut ops)));
+                    finished_pages.push((page_id, content_id, page_content));
+                    page_id = alloc_ref!();
+                    content_id = alloc_ref!();
+                    page_content = Content::new();
                     cursor_y_mm = top_y_mm;
                 }
                 if !line_text.is_empty() {
-                    // Each line gets its own BT/ET block so that the first Td is
-                    // absolute from page origin (BT resets the text matrix to identity).
-                    ops.push(Op::StartTextSection);
-                    ops.push(Op::SetFont {
-                        font: PdfFontHandle::Builtin(font),
-                        size: Pt(size_pt as f32),
-                    });
-                    ops.push(Op::SetTextCursor {
-                        pos: Point { x: Mm(MARGIN_MM as f32).into(), y: Mm(cursor_y_mm as f32).into() },
-                    });
-                    ops.push(Op::ShowText {
-                        items: vec![TextItem::Text(line_text)],
-                    });
-                    ops.push(Op::EndTextSection);
+                    let x_pt = (MARGIN_MM * MM_TO_PT) as f32;
+                    let y_pt = (cursor_y_mm * MM_TO_PT) as f32;
+                    let bytes = encode_winansi(&line_text);
+                    // Each line gets its own BT/ET block so that `next_line`'s
+                    // move is absolute from the page origin: BT resets the
+                    // text line matrix to identity (verified against
+                    // pdf-writer's own examples/hello.rs, which uses this
+                    // exact single-line-per-block pattern for its first line).
+                    page_content.begin_text();
+                    page_content.set_font(font_name, size_pt as f32);
+                    page_content.next_line(x_pt, y_pt);
+                    page_content.show(Str(&bytes));
+                    page_content.end_text();
                 }
                 cursor_y_mm -= line_h_mm;
             }
         }
-        pages.push(PdfPage::new(Mm(PAGE_W_MM as f32), Mm(PAGE_H_MM as f32), ops));
+        finished_pages.push((page_id, content_id, page_content));
 
-        let mut doc = PdfDocument::new("Aerini Export");
-        doc.with_pages(pages);
-        let mut warnings = Vec::new();
-        doc.save(&PdfSaveOptions::default(), &mut warnings)
+        let mut pdf = Pdf::new();
+        pdf.catalog(catalog_id).pages(page_tree_id);
+
+        let page_refs: Vec<Ref> = finished_pages.iter().map(|(pid, _, _)| *pid).collect();
+        pdf.pages(page_tree_id)
+            .kids(page_refs.iter().copied())
+            .count(page_refs.len() as i32);
+
+        pdf.type1_font(font_regular_id)
+            .base_font(Name(b"Helvetica"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        pdf.type1_font(font_bold_id)
+            .base_font(Name(b"Helvetica-Bold"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+
+        for (page_id, content_id, _) in &finished_pages {
+            let mut page = pdf.page(*page_id);
+            page.media_box(Rect::new(0.0, 0.0, page_w_pt, page_h_pt));
+            page.parent(page_tree_id);
+            page.contents(*content_id);
+            page.resources()
+                .fonts()
+                .pair(font_regular_name, font_regular_id)
+                .pair(font_bold_name, font_bold_id);
+            page.finish();
+        }
+
+        for (_, content_id, page_content) in finished_pages {
+            pdf.stream(content_id, &page_content.finish());
+        }
+
+        pdf.finish()
     }
 
     /// Splits `line` on `**bold**` / `*italic*` markers into styled runs.
