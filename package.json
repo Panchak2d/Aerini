@@ -15,7 +15,7 @@
     "@types/node": "^20.0.0",
     "husky": "^9.1.7",
     "typescript": "^6.0.3",
-    "vite": "^6.4.2"
+    "vite": "^8.1.0"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
