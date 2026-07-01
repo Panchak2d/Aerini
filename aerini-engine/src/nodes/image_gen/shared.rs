@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 
 use crate::error::NodeError;
-use crate::nodes::util::check_host_ssrf_from_url;
+use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 pub(super) fn network_err(e: reqwest::Error) -> NodeError {
     let recoverable = e.is_timeout() || e.is_connect();
@@ -38,7 +38,7 @@ pub(super) fn mime_to_ext(mime: &str) -> &'static str {
 pub(super) async fn download_to_base64(client: &reqwest::Client, url: &str) -> Result<String, NodeError> {
     // Validates URL host is not RFC-1918/loopback -- a spoofed API could return
     // an internal address (e.g. AWS metadata) to exfiltrate infrastructure data.
-    check_host_ssrf_from_url(url).await.map_err(|e| {
+    check_host_ssrf_from_url(url, SsrfPolicy::Strict).await.map_err(|e| {
         NodeError::unrecoverable("SSRF_BLOCKED", e)
     })?;
     let bytes = client

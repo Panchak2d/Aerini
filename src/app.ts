@@ -1,7 +1,6 @@
 import { Canvas } from "./canvas/Canvas";
 import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
 import { closePanel } from "./panels/NodeConfigPanel";
-import { CredentialPanel } from "./panels/CredentialPanel";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
 import { getNodeTypes, checkNodejsAvailable } from "./ipc/workflow";
@@ -19,27 +18,43 @@ import { listenCloseRequested } from "./ipc/events";
 import { getVersion } from "@tauri-apps/api/app";
 import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionControls, bindBgRunsFilter, activateZone, getCurrentZone } from "./sidebar-sections";
 import { isTauri } from "./utils";
+import { invoke } from "@tauri-apps/api/core";
 import { preloadAllIcons } from "./icon-cache";
 
 import { showConfirm } from "./confirm";
 import { injectNodejsBanner } from "./banners";
-import { showNoteEditor } from "./panels/NoteEditor";
 import { initInterpolationAutocomplete } from "./interpolation";
 import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
-import { renderBgJobs, renderBgJobsDebounced, updateBgRunButton } from "./panels/BgJobsPanel";
 import { updateAlwaysOnBtn } from "./always-on";
 import { bindSchedulerEvents } from "./scheduler-events";
 import { bindToolbar } from "./toolbar";
-import { ChatPanel } from "./panels/ChatPanel";
+import { initTooltips } from "./tooltip-manager";
+import { loadBgPanel, getBgPanelIfLoaded } from "./bg-panel-loader";
+import type { ChatPanel as ChatPanelType } from "./panels/ChatPanel";
 
 // ── App bootstrap ─────────────────────────────────────────────────────────────
 
 async function init() {
-  const [allNodes] = await Promise.all([
-    getNodeTypes().catch((): NodeDescriptor[] => []),
-    preloadAllIcons(),
-  ]);
+  preloadAllIcons(); // fire-and-forget: canvas falls back to accent letter until bitmaps ready
+  initTooltips();
+
+  // Restore the active sidebar zone synchronously, before any await below.
+  // index.html ships #zone-nodes as the hardcoded default `active` zone; this
+  // call corrects it to the last-used zone (e.g. "bgruns" if a background job
+  // was running last session). It must run before the getNodeTypes() IPC
+  // round-trip — otherwise the static default stays visibly active until
+  // that call resolves, producing a flash of the wrong zone on startup. That
+  // window is negligible under `vite dev`'s HMR server but long enough to be
+  // visible in a production/Tauri cold start.
+  initSidebarSections();
+
+  // Lazy BgJobsPanel — deferred after first paint (Part A, P30)
+  function _deferBgPanel(fn: () => void): void {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 200 });
+    else setTimeout(fn, 0);
+  }
+  const allNodes = await getNodeTypes().catch((): NodeDescriptor[] => []);
   registerNodeDescriptors(allNodes);
   setDescriptorRegistry(allNodes);
 
@@ -47,7 +62,15 @@ async function init() {
   const canvas     = new Canvas(canvasEl);
   // Expose canvas on the DOM element so popover positioning can access zoom/pan
   (canvasEl as unknown as Record<string, unknown>).__canvas = canvas;
-  const credPanel   = new CredentialPanel();
+
+  // Window is created hidden (tauri.conf.json) to avoid a flash of the desktop
+  // showing through before content paints. Reveal it only once the browser has
+  // actually drawn the first real frame (two rAFs = layout + paint committed).
+  if (isTauri()) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      invoke("show_main_window").catch(console.error);
+    }));
+  }
 
   function toast(msg: string, type: "success" | "error" | "info" = "info") {
     const colors = { success: "var(--green)", error: "var(--red)", info: "var(--blue)" };
@@ -92,7 +115,13 @@ async function init() {
     );
   };
 
-  if (!isTauri()) document.getElementById("browser-run-notice")?.classList.remove("hidden");
+  if (!isTauri()) {
+    document.getElementById("browser-run-notice")?.classList.remove("hidden");
+    setTimeout(() => {
+      const ann = document.getElementById("a11y-announcer");
+      if (ann) ann.textContent = "Browser mode. Execution requires the Tauri desktop app. Workflow builder works fully here.";
+    }, 300);
+  }
 
   // WorkflowManager — pass showConfirm so it uses the modal, not window.confirm
   const wfManager = new WorkflowManager(canvas, {
@@ -111,7 +140,7 @@ async function init() {
   wfManager.onNavigate = () => {
     if (getCurrentZone() === "workflows") activateZone("nodes");
     updateAlwaysOnBtn(canvas, wfManager);
-    updateBgRunButton(wfManager.currentId);
+    getBgPanelIfLoaded()?.updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
     chatPanel.onWorkflowSwitched();
     runManager.setCurrentWorkflow(
@@ -138,7 +167,29 @@ async function init() {
   };
 
   const runManager = new RunManager(canvas, setStatus, toast);
-  const chatPanel  = new ChatPanel(canvas, wfManager, toast);
+
+  // Lazy ChatPanel proxy — defers loading marked + DOMPurify until first use.
+  // btn-chat is `hidden` by default in HTML, so no-op refreshButtonVisibility()
+  // is safe until the module loads and sets correct visibility on first toggle.
+  let _chatPanelPromise: Promise<ChatPanelType> | null = null;
+  let _chatPanelInst:    ChatPanelType | null = null;
+
+  function _loadChat() {
+    if (!_chatPanelPromise) {
+      _chatPanelPromise = import("./panels/ChatPanel").then(({ ChatPanel: CP }) => {
+        _chatPanelInst = new CP(canvas, wfManager, toast);
+        _chatPanelInst.refreshButtonVisibility();
+        return _chatPanelInst;
+      });
+    }
+    return _chatPanelPromise;
+  }
+
+  const chatPanel = {
+    toggle()                  { _loadChat().then(p => p.toggle()); },
+    refreshButtonVisibility() { _chatPanelInst?.refreshButtonVisibility(); },
+    onWorkflowSwitched()      { _chatPanelInst?.onWorkflowSwitched(); },
+  };
 
   // N-8: update status hint when run starts/ends
   runManager.onRunStateChange = (running) => {
@@ -162,10 +213,10 @@ async function init() {
     if (n) {
       // Note nodes get inline canvas editing instead of the popover
       if (n.data.node_type_id === NODE_IDS.NOTE) {
-        showNoteEditor(n, canvasEl, () => {
+        import("./panels/NoteEditor").then(m => m.showNoteEditor(n, canvasEl, () => {
           wfManager.markUnsaved(true);
           wfManager.scheduleAutoSave();
-        });
+        }));
         return;
       }
       showPopover(n, canvasEl, () => {
@@ -224,21 +275,28 @@ async function init() {
   bindPluginSettings(toast);
 
   const { refreshRunBtn } = bindToolbar(
-    canvas, wfManager, runManager, credPanel, chatPanel,
+    canvas, wfManager, runManager, chatPanel,
     toast, updateStatusHint,
   );
 
   await wfManager.refreshWorkflowList();
 
-  initSidebarSections();
   bindSectionSearchToggles();
   bindWorkflowSectionControls((sortMode) => wfManager.setSortMode(sortMode));
-  bindBgRunsFilter((status, query) => renderBgJobs(wfManager, runManager, status, query, toast));
+  bindBgRunsFilter((status, query) =>
+    loadBgPanel().then(m => m.renderBgJobs(wfManager, runManager, status, query, toast))
+  );
 
-  onBgJobsChanged(() => {
-    renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
-    updateBgRunButton(wfManager.currentId);
-    refreshRunBtn();
+  // Defer BgJobsPanel listener registration — after first paint
+  _deferBgPanel(() => {
+    loadBgPanel().then(m => {
+      m.renderBgJobs(wfManager, runManager, "all", "", toast);
+      onBgJobsChanged(() => {
+        m.renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
+        getBgPanelIfLoaded()?.updateBgRunButton(wfManager.currentId);
+        refreshRunBtn();
+      });
+    });
   });
 
   await bindSchedulerEvents(canvas, wfManager, runManager, toast, setStatus, refreshRunBtn);
@@ -265,4 +323,7 @@ async function init() {
   }
 }
 
-init().catch(console.error);
+init().catch((e) => {
+  console.error(e);
+  if (isTauri()) invoke("show_main_window").catch(console.error);
+});

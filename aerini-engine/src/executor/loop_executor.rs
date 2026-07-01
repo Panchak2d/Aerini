@@ -653,4 +653,117 @@ mod tests {
             all_results.len(), all_results
         );
     }
+
+    // ── P23: loop_executor.rs tests ───────────────────────────────────────────
+
+    // Max iterations enforced: LoopNode hard-caps at 10,000 items (ARRAY_TOO_LARGE).
+    // NOTE: LoopNode has no configurable max_iterations field — the limit is hardcoded
+    // at 10,000 items in LoopNode.execute() and 10,001 iterations in execute_loop_node.
+    // This test exercises the accessible cap: 10,001-item array → ARRAY_TOO_LARGE.
+    // The error propagates as success=false in WorkflowResult (not Err from run()).
+    #[tokio::test]
+    async fn loop_max_iterations_enforced_via_array_size_cap() {
+        let items: Vec<serde_json::Value> = (0u32..10_001).map(|i| serde_json::json!(i)).collect();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": items }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        // No body node — loop fails on first LoopNode call before any body runs.
+
+        let workflow = loop_workflow_with_bodies(vec![]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(!result.success, "oversized array must cause workflow failure");
+        let err = result.error.expect("error field must be populated");
+        assert!(
+            err.contains("10,000") || err.contains("ARRAY_TOO_LARGE"),
+            "error must reference the array size limit; got: {}", err
+        );
+    }
+
+    // Break condition true on iteration 1: single-item array → LoopNode emits the
+    // item on iteration 0 (done:false), body runs once, then on iteration 1
+    // LoopNode sees current_index >= total and emits done:true.
+    // Exactly 1 body execution → all_results.len() == 1.
+    #[tokio::test]
+    async fn loop_break_condition_true_on_iteration_1_single_item() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": ["only"] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FixedOutputNode {
+            tid: "body_single_test",
+            out: serde_json::json!({ "ran": true }),
+        }));
+
+        let workflow = loop_workflow_with_bodies(vec![("body_single_test", false)]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let loop_out = result.node_outputs.get("loop_node").unwrap();
+        let all_results = loop_out["all_results"].as_array().unwrap();
+        assert_eq!(
+            all_results.len(), 1,
+            "single-item array must produce exactly 1 result; break fires on iteration 1"
+        );
+        assert_eq!(all_results[0], serde_json::json!({ "ran": true }));
+    }
+
+    // Output accumulation: all per-iteration outputs present in final result, in order.
+    // Uses a CounterNode whose output increments each call so ordering is verifiable.
+    #[tokio::test]
+    async fn loop_output_accumulation_all_iterations_present_in_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CounterNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl crate::node::Node for CounterNode {
+            fn type_id(&self)        -> &'static str { "counter_loop_test" }
+            fn display_name(&self)   -> &'static str { "Counter" }
+            fn node_type(&self)      -> crate::model::NodeType { crate::model::NodeType::Utility }
+            fn version(&self)        -> &'static str { "1.0" }
+            fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+                let n = self.counter.fetch_add(1, Ordering::SeqCst);
+                crate::model::NodeOutput::success(serde_json::json!({ "seq": n }))
+            }
+        }
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": ["a", "b", "c"] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(CounterNode { counter: counter.clone() }));
+
+        let workflow = loop_workflow_with_bodies(vec![("counter_loop_test", false)]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let loop_out = result.node_outputs.get("loop_node").unwrap();
+        let all_results = loop_out["all_results"].as_array().unwrap();
+
+        assert_eq!(all_results.len(), 3, "3-item array must produce 3 accumulated results");
+        // CounterNode increments per call: seq 0, 1, 2 — order must be preserved.
+        assert_eq!(all_results[0]["seq"], 0, "iteration 0 output must be seq=0");
+        assert_eq!(all_results[1]["seq"], 1, "iteration 1 output must be seq=1");
+        assert_eq!(all_results[2]["seq"], 2, "iteration 2 output must be seq=2");
+    }
 }

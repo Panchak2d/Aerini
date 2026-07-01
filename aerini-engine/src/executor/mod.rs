@@ -598,6 +598,7 @@ mod tests {
     use crate::node::{Node, NodeRegistry};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     struct NoopCredentials;
     #[async_trait::async_trait]
@@ -973,6 +974,212 @@ mod tests {
             "__direct_input was {:?} — expected {{\"ping\":\"pong\"}}. \
              This means the executor's find_map fix is not working.",
             val
+        );
+    }
+
+    // ── P23 node stubs ────────────────────────────────────────────────────────
+
+    // Fires the supplied CancellationToken on execute(), then returns success.
+    // Used to simulate mid-run cancellation: place upstream of another node so
+    // the sequential cancel check fires before the downstream node starts.
+    struct CancellingNode { token: CancellationToken }
+    #[async_trait::async_trait]
+    impl Node for CancellingNode {
+        fn type_id(&self)        -> &'static str { "cancelling_test" }
+        fn display_name(&self)   -> &'static str { "Cancelling Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            self.token.cancel();
+            crate::model::NodeOutput::success(serde_json::json!({}))
+        }
+    }
+
+    // Always returns a failure. Used to test cascading failure routing.
+    struct FailingNode;
+    #[async_trait::async_trait]
+    impl Node for FailingNode {
+        fn type_id(&self)        -> &'static str { "failing_test" }
+        fn display_name(&self)   -> &'static str { "Failing Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::failure(
+                crate::error::NodeError::unrecoverable("TEST_FAIL", "intentional test failure"),
+            )
+        }
+    }
+
+    // Returns NodeOutput::success(Value::Null). Used to verify that null output
+    // does not panic downstream nodes or the executor.
+    struct NullValueNode;
+    #[async_trait::async_trait]
+    impl Node for NullValueNode {
+        fn type_id(&self)        -> &'static str { "null_value_test" }
+        fn display_name(&self)   -> &'static str { "Null Value Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::success(serde_json::Value::Null)
+        }
+    }
+
+    // Builds a two-node workflow: up_type → down_type, with fixed IDs "n_up"/"n_down".
+    fn two_node_typed_workflow(up_type: &str, down_type: &str) -> Workflow {
+        use crate::model::WorkflowEdge;
+        let up = WorkflowNode {
+            id: "n_up".to_string(),
+            node_type_id: up_type.to_string(),
+            node_type: NodeType::Utility,
+            name: "Upstream".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let down = WorkflowNode {
+            id: "n_down".to_string(),
+            node_type_id: down_type.to_string(),
+            node_type: NodeType::Utility,
+            name: "Downstream".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let edge = WorkflowEdge {
+            id: "e1".to_string(),
+            from_node: "n_up".to_string(),
+            from_port: "output".to_string(),
+            to_node: "n_down".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        };
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_two_typed".to_string(),
+            name: "Two Node Typed".to_string(),
+            description: String::new(),
+            nodes: vec![up, down],
+            edges: vec![edge],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    // ── P23: executor/mod.rs tests ────────────────────────────────────────────
+
+    // Cancel token fired mid-run: executor stops between nodes and returns
+    // Err(ExecutionCancelled). CancellingNode fires the token on execute();
+    // the sequential cancel check then trips before InstantNode starts.
+    #[tokio::test]
+    async fn cancel_token_mid_run_stops_execution() {
+        let token = CancellationToken::new();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(CancellingNode { token: token.clone() }));
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+            .with_cancel_token(token);
+
+        let workflow = two_node_typed_workflow("cancelling_test", "instant_test");
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await;
+
+        assert!(
+            matches!(result, Err(EngineError::ExecutionCancelled)),
+            "expected ExecutionCancelled; got {:?}", result
+        );
+    }
+
+    // Cascading failure: failing node A has no on_error route → workflow returns
+    // success=false with the error surfaced. Downstream node B is never activated
+    // and must not appear in node_outputs.
+    #[tokio::test]
+    async fn cascading_failure_downstream_skipped_error_surfaced() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(FailingNode));
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        // n_up = FailingNode, n_down = InstantNode (never reached)
+        let workflow = two_node_typed_workflow("failing_test", "instant_test");
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await;
+
+        // run() returns Ok even on workflow failure — Err only for engine errors.
+        assert!(result.is_ok(), "run() must not return Err for a node failure");
+        let r = result.unwrap();
+        assert!(!r.success, "workflow must not be marked successful");
+        assert!(r.error.is_some(), "error field must be populated");
+        assert!(
+            !r.node_outputs.contains_key("n_down"),
+            "downstream node must not appear in node_outputs when upstream failed with no on_error"
+        );
+    }
+
+    // max_concurrent_nodes(0): config.validate() clamps to 1. Workflow runs
+    // without panic, confirming clamping happens before execution.
+    #[tokio::test]
+    async fn max_concurrent_nodes_zero_clamped_to_one_no_panic() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+            .with_max_concurrent_nodes(0);
+
+        assert_eq!(
+            executor.config.max_concurrent_nodes, 1,
+            "with_max_concurrent_nodes(0) must clamp to 1 via validate()"
+        );
+
+        let result = executor
+            .run(Arc::new(single_node_workflow("instant_test", None)), HashMap::new())
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+    }
+
+    // Node returns NodeOutput::success(Value::Null): downstream node receives null
+    // in context, executor does not panic, workflow succeeds end-to-end.
+    // node_outputs entry for the null-output node is Value::Null.
+    #[tokio::test]
+    async fn null_output_value_does_not_panic_downstream_receives_null() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(NullValueNode));
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        // NullValueNode → InstantNode; downstream must handle null context without panic.
+        let workflow = two_node_typed_workflow("null_value_test", "instant_test");
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await;
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(r.success, "workflow must succeed; got error: {:?}", r.error);
+        assert_eq!(
+            r.node_outputs.get("n_up"),
+            Some(&serde_json::Value::Null),
+            "null-output node must store Value::Null in node_outputs"
         );
     }
 

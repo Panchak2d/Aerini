@@ -18,14 +18,23 @@ export const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
 const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
 
 // DEVIATION (Patch 19): the plan's field-renderer.ts spec lists a fifth
-// sub-function, renderBoolField(). No prop.type === "boolean" branch exists
-// in the current if/else chain being split here — boolean-typed config
-// fields (e.g. email_send's "html") fall through to the default text-input
-// branch today. Adding a real checkbox branch would change what renders for
-// those fields, which violates this patch's "zero behavior change" rule
-// (and Rule 25 — no unused abstraction, since an unwired renderBoolField
-// would never be called). Left as-is; flagged in MANIFEST and in the plan
-// under PATCH 19 for a future patch to address deliberately.
+// sub-function, renderBoolField(). No prop.type === "boolean" branch existed
+// in the original if/else chain — boolean-typed config fields fell through to
+// the text-input branch. renderBoolField was added in patch 26b (mini-patch
+// after P26) once confirmed that "persist" on the variables nodes reaches
+// renderConfigFieldsLoop and benefits from a real checkbox. renderArrayField
+// remains absent: all array-type input props are in CUSTOM_UI_KEYS (lifecycle.ts)
+// and never reach this loop — adding it would be dead code (Rule 25).
+
+// DEVIATION (Patch 26): The plan's FieldRenderer type specifies 4 parameters
+// (key, prop, node, onChange). Actual sub-renderers need more parameters
+// (cur, canvasEl, syncRequired). Forcing 4-param signatures would require
+// changing sub-renderer call sites, which is a behavior change. The dispatch
+// table covers the prop.type-keyed subset of the chain: "number" and "boolean"
+// have dedicated renderers. renderTextField is the explicit fallback because
+// it requires cur+canvasEl which are not in the type-keyed subset.
+// renderArrayField is absent: all array-type input props are excluded by
+// CUSTOM_UI_KEYS in lifecycle.ts and never reach this path (Rule 25).
 
 // ── Label formatter ───────────────────────────────────────────────────────────
 
@@ -48,11 +57,9 @@ function formatLabel(key: string): string {
     .replace(/\bSmtp\b/g, "SMTP").replace(/\bApi\b/g, "API");
 }
 
-// ── Per-field dispatch ────────────────────────────────────────────────────────
-// Replaces the original if/else chain: cron key → enum prop → multiline key
-// list → numeric type → default text. Order matters and is preserved exactly
-// (a key in the multiline list always renders as a textarea regardless of
-// prop.type, etc.) — re-ordering would be a behavior change.
+// ── Per-field sub-renderers ───────────────────────────────────────────────────
+// These are the named functions for each field type. Each is also the target
+// of the FIELD_RENDERERS dispatch table below (where applicable).
 
 function renderTextField(
   key: string, prop: PropSchema, cur: string,
@@ -117,6 +124,30 @@ function renderNumberField(
     onChange(); syncRequired();
   });
   return inp;
+}
+
+function renderBoolField(
+  key: string, _prop: PropSchema,
+  node: CanvasNode, onChange: () => void, syncRequired: () => void,
+): HTMLElement {
+  const wrap = document.createElement("label");
+  wrap.className = "field-bool-wrap";
+
+  const cb = mk<HTMLInputElement>("input");
+  cb.type = "checkbox";
+  cb.className = "field-bool-checkbox";
+  // Treat any truthy stored value as checked. Rust serializes booleans as
+  // true/false; stored strings "true"/"1" are also accepted for robustness.
+  const stored = node.data.config[key];
+  cb.checked = stored === true || stored === "true" || stored === 1 || stored === "1";
+
+  cb.addEventListener("change", () => {
+    node.data.config[key] = cb.checked;
+    onChange(); syncRequired();
+  });
+
+  wrap.appendChild(cb);
+  return wrap;
 }
 
 // Cron expression — show preset picker above the input. Not part of the
@@ -238,6 +269,41 @@ function renderMultilineField(
   return wrap;
 }
 
+// ── Dispatch table ────────────────────────────────────────────────────────────
+// Keyed by prop.type. Only covers the type-keyed subset of the dispatch chain:
+// the cron / enum / multiline guards run before this table is consulted.
+// renderTextField is the fallback and is not in the table because it requires
+// extra parameters (cur, canvasEl) not available in this narrower signature.
+//
+// renderArrayField is intentionally absent: no array-type input fields reach
+// renderConfigFieldsLoop — all array props in node schemas are in CUSTOM_UI_KEYS
+// and filtered out in lifecycle.ts before the field loop runs. Adding it would
+// be dead code (Rule 25).
+type FieldTypeRenderer = (
+  key: string, prop: PropSchema,
+  node: CanvasNode, onChange: () => void, syncRequired: () => void,
+) => HTMLElement;
+
+const FIELD_RENDERERS: Partial<Record<string, FieldTypeRenderer>> = {
+  number:  renderNumberField,
+  boolean: renderBoolField,
+};
+
+/** Render one config field. Checks: cron key → enum → multiline key → type
+ *  dispatch table → text fallback. Order is load-bearing — do not reorder. */
+function renderField(
+  key: string, prop: PropSchema, cur: string,
+  node: CanvasNode, canvasEl: HTMLCanvasElement,
+  onChange: () => void, syncRequired: () => void,
+): HTMLElement {
+  if (key === "cron_expr") return renderCronField(key, cur, node, onChange, syncRequired);
+  if (prop.enum)            return renderEnumField(key, prop, cur, node, onChange, syncRequired);
+  if (MULTILINE_KEYS.includes(key)) return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
+  const typeRenderer = FIELD_RENDERERS[prop.type ?? ""];
+  if (typeRenderer) return typeRenderer(key, prop, node, onChange, syncRequired);
+  return renderTextField(key, prop, cur, node, canvasEl, onChange, syncRequired);
+}
+
 /** Renders the generic "Configuration" field loop for a node's config schema.
  *  Appends one field-group element per key, in order, to ctx.body. */
 export function renderConfigFieldsLoop(
@@ -257,21 +323,12 @@ export function renderConfigFieldsLoop(
       fieldEl.classList.toggle("field-required-empty", v === undefined || String(v).trim() === "");
     };
 
-    fieldEl = mkField(formatLabel(key), () => {
-      if (key === "cron_expr") {
-        return renderCronField(key, cur, node, onChange, syncRequired);
-      }
-      if (prop.enum) {
-        return renderEnumField(key, prop, cur, node, onChange, syncRequired);
-      }
-      if (MULTILINE_KEYS.includes(key)) {
-        return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
-      }
-      if (prop.type === "number") {
-        return renderNumberField(key, prop, node, onChange, syncRequired);
-      }
-      return renderTextField(key, prop, cur, node, canvasEl, onChange, syncRequired);
-    }, prop.description, isRequired);
+    fieldEl = mkField(
+      formatLabel(key),
+      () => renderField(key, prop, cur, node, canvasEl, onChange, syncRequired),
+      prop.description,
+      isRequired,
+    );
 
     if (isRequired && (!cur || cur.trim() === "")) fieldEl.classList.add("field-required-empty");
     body.appendChild(fieldEl);

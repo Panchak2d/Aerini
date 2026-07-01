@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::check_host_ssrf_from_url;
+use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 use super::shared::{network_err, download_to_base64};
 
@@ -137,7 +137,7 @@ async fn bfl_poll(
 ) -> Result<String, NodeError> {
     // Validate the polling URL before using it. A compromised or MITM'd API
     // response could supply an internal address (e.g. cloud metadata endpoint).
-    check_host_ssrf_from_url(polling_url).await.map_err(|e| {
+    check_host_ssrf_from_url(polling_url, SsrfPolicy::Strict).await.map_err(|e| {
         NodeError::unrecoverable("SSRF_BLOCKED", e)
     })?;
 

@@ -67,7 +67,7 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
         url::Host::Ipv4(ip)  => url::Host::Ipv4(*ip),
         url::Host::Ipv6(ip)  => url::Host::Ipv6(*ip),
     };
-    crate::nodes::util::check_host_ssrf(ssrf_host_ref, smtp_port).await
+    crate::nodes::util::check_host_ssrf(ssrf_host_ref, smtp_port, crate::nodes::util::SsrfPolicy::Strict).await
         .map_err(|e| NodeError::unrecoverable("SSRF_BLOCKED", &e))?;
 
     let from_str = cfg["from"].as_str().filter(|s| !s.is_empty())

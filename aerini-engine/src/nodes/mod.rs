@@ -68,23 +68,21 @@ pub fn register_builtins(
     data_dir: &std::path::Path,
     db: Option<Arc<WorkflowDb>>,
 ) {
-    // Triggers
+    // ── Triggers ─────────────────────────────────────────────────────────
     registry.register(Arc::new(manual_trigger::ManualTriggerNode));
     registry.register(Arc::new(webhook::WebhookNode));
     registry.register(Arc::new(schedule::ScheduleNode));
 
-    // Logic
+    // ── Logic ────────────────────────────────────────────────────────────
     registry.register(Arc::new(if_condition::IfConditionNode));
     registry.register(Arc::new(switch::SwitchNode));
     registry.register(Arc::new(loop_node::LoopNode));
     registry.register(Arc::new(stop::StopNode));
     registry.register(Arc::new(merge::MergeNode));
-
-    // Flow control
     registry.register(Arc::new(delay::DelayNode));
     registry.register(Arc::new(wait_node::WaitNode));
 
-    // AI
+    // ── AI ───────────────────────────────────────────────────────────────
     registry.register(Arc::new(ai_prompt::AiPromptNode));
     registry.register(Arc::new(ai_agent::AiAgentNode));
     registry.register(Arc::new(ai_memory::AiMemoryNode::new(
@@ -93,22 +91,23 @@ pub fn register_builtins(
     registry.register(Arc::new(text_splitter::TextSplitterNode));
     registry.register(Arc::new(image_gen::ImageGenNode));
 
-    // Logic (fan-in)
+    // ── Files ────────────────────────────────────────────────────────────
     registry.register(Arc::new(collect_files::CollectFilesNode));
 
-    // Actions
+    // ── Utility / Files / Integrations (mixed -- category noted inline
+    //    only where it diverges from this block's Utility default) ───────
     registry.register(Arc::new(http::HttpRequestNode));
     registry.register(Arc::new(shell::ShellExecNode));
     registry.register(Arc::new(code_node::CodeNode));
     registry.register(Arc::new(email::EmailNode));
-    registry.register(Arc::new(file::FileNode));
+    registry.register(Arc::new(file::FileNode));                    // Files
     registry.register(Arc::new(notification::NotificationNode));
-    registry.register(Arc::new(save_to_folder::SaveToFolderNode));
-    registry.register(Arc::new(social_upload::SocialUploadNode));
+    registry.register(Arc::new(save_to_folder::SaveToFolderNode));  // Files
+    registry.register(Arc::new(social_upload::SocialUploadNode));   // Integrations
     registry.register(Arc::new(database::DatabaseNode));
-    registry.register(Arc::new(s3::S3Node));
+    registry.register(Arc::new(s3::S3Node));                        // Files
 
-    // Integrations
+    // ── Integrations ─────────────────────────────────────────────────────
     registry.register(Arc::new(slack::SlackNode));
     registry.register(Arc::new(discord::DiscordNode));
     registry.register(Arc::new(github::GitHubNode));
@@ -118,8 +117,8 @@ pub fn register_builtins(
     registry.register(Arc::new(sendgrid::SendGridNode));
     registry.register(Arc::new(stripe::StripeNode));
 
-    // Data / utility
-    registry.register(Arc::new(text_to_file::TextToFileNode));
+    // ── Utility ──────────────────────────────────────────────────────────
+    registry.register(Arc::new(text_to_file::TextToFileNode));      // Files
     registry.register(Arc::new(transform::TransformNode));
     registry.register(Arc::new(json_node::JsonNode));
     registry.register(Arc::new(variables::SetVariableNode { db: db.clone() }));

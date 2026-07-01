@@ -103,7 +103,7 @@ impl Node for ImageGenNode {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["prompt", "provider", "api_key"],
+            "required": ["prompt", "provider"],
             "properties": {
                 "prompt": {
                     "type": "string",

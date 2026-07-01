@@ -256,7 +256,7 @@ fn redact_url_credentials(cmd: &str) -> String {
         });
 
         if at_before_delim {
-            let a = at_pos.unwrap();
+            let a = at_pos.expect("at_pos is Some: at_before_delim guard requires at_pos.is_some()");
             let before_at = &after[..a];
             if let Some(colon) = before_at.find(':') {
                 let user = &before_at[..colon];

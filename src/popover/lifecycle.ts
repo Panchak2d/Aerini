@@ -190,7 +190,8 @@ export async function showPopover(
   headerText.appendChild(titleEl); headerText.appendChild(subtitleEl);
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => closePopover());
 
   const testBtn = document.createElement("button");
@@ -223,6 +224,7 @@ export async function showPopover(
     wrap.className = "popover-search-wrap";
     const si = document.createElement("input") as HTMLInputElement;
     si.type = "text"; si.placeholder = "Search fields…"; si.className = "popover-search";
+    si.setAttribute("aria-label", "Search configuration fields");
     si.addEventListener("input", () => {
       const q = si.value.toLowerCase();
       body.querySelectorAll<HTMLElement>(".field-group").forEach(fg => {

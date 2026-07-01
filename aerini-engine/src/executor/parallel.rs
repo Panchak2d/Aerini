@@ -564,3 +564,165 @@ pub(super) async fn run_inner_parallel(
         validation_errors,
     })
 }
+
+// ── P23: parallel executor tests ──────────────────────────────────────────────
+//
+// These tests run with parallel_execution = true to exercise the JoinSet-based
+// concurrent path. They use the same real WorkflowExecutor as integration tests,
+// but with in-process mock nodes so no real I/O occurs.
+#[cfg(test)]
+mod tests {
+    use super::super::{CredentialResolver, WorkflowExecutor};
+    use crate::migration::CURRENT_VERSION;
+    use crate::model::{NodeInput, NodeOutput, NodeType, Workflow, WorkflowEdge, WorkflowNode};
+    use crate::node::{Node, NodeRegistry};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct NoopCreds;
+    #[async_trait::async_trait]
+    impl CredentialResolver for NoopCreds {
+        async fn resolve(&self, _: &str) -> Option<String> { None }
+    }
+
+    struct InstantNode;
+    #[async_trait::async_trait]
+    impl Node for InstantNode {
+        fn type_id(&self)        -> &'static str { "parallel_instant_test" }
+        fn display_name(&self)   -> &'static str { "Instant" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: NodeInput) -> NodeOutput {
+            NodeOutput::success(serde_json::json!({}))
+        }
+    }
+
+    struct FailingNode;
+    #[async_trait::async_trait]
+    impl Node for FailingNode {
+        fn type_id(&self)        -> &'static str { "parallel_failing_test" }
+        fn display_name(&self)   -> &'static str { "Failing" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: NodeInput) -> NodeOutput {
+            NodeOutput::failure(
+                crate::error::NodeError::unrecoverable("PARALLEL_FAIL", "parallel test failure"),
+            )
+        }
+    }
+
+    fn make_node(id: &str, type_id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.to_string(),
+            node_type_id: type_id.to_string(),
+            node_type: NodeType::Utility,
+            name: id.to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        }
+    }
+
+    fn make_edge(from: &str, to: &str) -> WorkflowEdge {
+        WorkflowEdge {
+            id: format!("e_{}_to_{}", from, to),
+            from_node: from.to_string(),
+            from_port: "output".to_string(),
+            to_node: to.to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        }
+    }
+
+    // All nodes complete: three independent (no-edge) entry nodes run in parallel.
+    // Every node must appear in node_outputs when all succeed.
+    #[tokio::test]
+    async fn parallel_all_nodes_complete_every_result_present() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .with_parallel_execution(true)
+            .with_max_concurrent_nodes(4);
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_parallel_all".to_string(),
+            name: "Parallel All".to_string(),
+            description: String::new(),
+            nodes: vec![
+                make_node("n_a", "parallel_instant_test"),
+                make_node("n_b", "parallel_instant_test"),
+                make_node("n_c", "parallel_instant_test"),
+            ],
+            // No edges — all three are independent entry nodes.
+            edges: vec![],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: true,
+            max_concurrent_nodes: Some(4),
+            settings: Default::default(),
+        };
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+        assert!(result.success, "all instant nodes must succeed; got: {:?}", result.error);
+        assert!(result.node_outputs.contains_key("n_a"), "n_a must be in node_outputs");
+        assert!(result.node_outputs.contains_key("n_b"), "n_b must be in node_outputs");
+        assert!(result.node_outputs.contains_key("n_c"), "n_c must be in node_outputs");
+    }
+
+    // One node errors: failure is captured in WorkflowResult, no panic.
+    // Topology: FailingNode (entry) → InstantNode.
+    // FailingNode has no on_error route → abort → success=false with error message.
+    // InstantNode (downstream) was never activated → must not appear in node_outputs.
+    #[tokio::test]
+    async fn parallel_one_node_errors_failure_captured_no_panic() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(FailingNode));
+        registry.register(Arc::new(InstantNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .with_parallel_execution(true);
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_parallel_fail".to_string(),
+            name: "Parallel Fail".to_string(),
+            description: String::new(),
+            nodes: vec![
+                make_node("n_fail", "parallel_failing_test"),
+                make_node("n_after", "parallel_instant_test"),
+            ],
+            edges: vec![make_edge("n_fail", "n_after")],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: true,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await;
+
+        assert!(result.is_ok(), "run() must not return Err for a node failure");
+        let r = result.unwrap();
+        assert!(!r.success, "workflow must be marked failed");
+        assert!(r.error.is_some(), "error must be captured in WorkflowResult");
+        // n_after was never activated (n_fail had no on_error edge).
+        assert!(
+            !r.node_outputs.contains_key("n_after"),
+            "downstream node must not appear in node_outputs when upstream failed without routing"
+        );
+    }
+}

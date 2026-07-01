@@ -38,6 +38,7 @@ export class Canvas {
   selectedConn:  Connector  | null = null;
 
   private emptyEl: HTMLElement | null = null;
+  private wasEmpty: boolean | null = null;
 
   onPaletteRequest: (() => void) | null = null;
   onWireDropRequest: ((fromNode: string, fromPort: string, wx: number, wy: number) => void) | null = null;
@@ -259,7 +260,13 @@ export class Canvas {
 
     // Empty state
     if (this.emptyEl) {
-      this.emptyEl.style.display = this.nodes.size === 0 ? "flex" : "none";
+      const isEmpty = this.nodes.size === 0;
+      this.emptyEl.style.display = isEmpty ? "flex" : "none";
+      if (this.wasEmpty !== null && !this.wasEmpty && isEmpty) {
+        const ann = document.getElementById("a11y-announcer");
+        if (ann) ann.textContent = "Canvas is empty. Add nodes from the sidebar to build your workflow.";
+      }
+      this.wasEmpty = isEmpty;
     }
 
     this.minimap.draw(W, H);

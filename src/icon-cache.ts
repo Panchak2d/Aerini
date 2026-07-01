@@ -77,5 +77,5 @@ export async function preloadAllIcons(): Promise<void> {
 export function getIconSvg(typeId: string): string {
   const inner = NODE_SVG_INNER[typeId];
   if (!inner) return "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;flex-shrink:0">${inner}</svg>`;
+  return `<svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 }

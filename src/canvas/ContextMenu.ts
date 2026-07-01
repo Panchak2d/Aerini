@@ -116,7 +116,9 @@ export class ContextMenu {
     inp.type = "text";
     inp.value = node.data.name;
     inp.className = "canvas-rename-input";
-    inp.style.cssText = `position:fixed;left:${sx + 30 * c.zoom}px;top:${sy + sh / 2 - 11}px;width:${Math.max(sw - 50 * c.zoom, 80)}px;`;
+    inp.style.left = `${sx + 30 * c.zoom}px`;
+    inp.style.top = `${sy + sh / 2 - 11}px`;
+    inp.style.width = `${Math.max(sw - 50 * c.zoom, 80)}px`;
     document.body.appendChild(inp);
     inp.focus(); inp.select();
 

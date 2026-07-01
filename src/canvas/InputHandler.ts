@@ -1,5 +1,5 @@
 import type { Canvas } from "./Canvas";
-import { CanvasNode, PORT_RADIUS } from "./Node";
+import { CanvasNode, PORT_RADIUS, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 
@@ -48,6 +48,24 @@ export class InputHandler {
     if (inInput) return;
 
     const c = this.canvas;
+
+    // ── Canvas-focused node navigation (H1) ────────────────────────────────
+    // Only active when the canvas element itself has focus (role="application")
+    const canvasFocused = document.activeElement === c.el;
+    if (canvasFocused) {
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        this._navigateNodes(e.key);
+        return;
+      }
+      if (e.key === "Enter" && c.selectedNode) {
+        e.preventDefault();
+        c.openNodeConfig(c.selectedNode);
+        return;
+      }
+    }
+    // ── End canvas navigation ───────────────────────────────────────────────
+
     if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); c.undo(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); c.redo(); }
     if ((e.metaKey || e.ctrlKey) && e.key === "d") { e.preventDefault(); c.dupSelected(); }
@@ -65,6 +83,56 @@ export class InputHandler {
       c.pendingInsert = null; c.insertGhost = null;
       c._pendingInputWireDrop = null;
       c.clearSelection(); c.el.style.cursor = "default";
+    }
+  }
+
+  /** Navigate to the nearest node in the given arrow direction. */
+  private _navigateNodes(key: string): void {
+    const c = this.canvas;
+    const nodes = Array.from(c.nodes.values());
+    if (!nodes.length) return;
+
+    if (!c.selectedNode) {
+      // No current selection — pick first node in insertion order
+      const first = nodes[0];
+      c.clearSelection();
+      c.selectNode(first);
+      c.centerOn(first.data.position.x + NODE_WIDTH / 2, first.data.position.y + first.height / 2);
+      return;
+    }
+
+    const cur = c.selectedNode;
+    const cx = cur.data.position.x + NODE_WIDTH / 2;
+    const cy = cur.data.position.y + cur.height / 2;
+
+    let best: CanvasNode | null = null;
+    let bestDist = Infinity;
+
+    for (const n of nodes) {
+      if (n === cur) continue;
+      const nx = n.data.position.x + NODE_WIDTH / 2;
+      const ny = n.data.position.y + n.height / 2;
+      const dx = nx - cx;
+      const dy = ny - cy;
+
+      // Each arrow direction requires the candidate to be meaningfully in that direction.
+      // A small 10px threshold avoids selecting nodes that are almost exactly aligned.
+      const inDir =
+        key === "ArrowRight" ? dx > 10 :
+        key === "ArrowLeft"  ? dx < -10 :
+        key === "ArrowDown"  ? dy > 10 :
+        /* ArrowUp */           dy < -10;
+
+      if (!inDir) continue;
+
+      const dist = Math.hypot(dx, dy);
+      if (dist < bestDist) { bestDist = dist; best = n; }
+    }
+
+    if (best) {
+      c.clearSelection();
+      c.selectNode(best);
+      c.centerOn(best.data.position.x + NODE_WIDTH / 2, best.data.position.y + best.height / 2);
     }
   }
 

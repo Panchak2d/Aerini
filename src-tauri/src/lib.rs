@@ -47,6 +47,15 @@ fn read_text_file(path: String) -> Result<String, String> {
         .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))
 }
 
+/// Called by the frontend once it has painted its first real frame.
+/// Window is created hidden (see tauri.conf.json) to avoid a flash of the
+/// desktop showing through before content is ready.
+#[tauri::command]
+fn show_main_window(window: tauri::Window) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn save_file_dialog(
     app:      tauri::AppHandle,
@@ -145,7 +154,7 @@ async fn check_nodejs_available() -> bool {
 /// Cancel the currently running manual workflow, if any. No-op when idle.
 #[tauri::command]
 fn cancel_run(active_run: tauri::State<'_, Arc<ActiveRunToken>>) {
-    if let Some(ref token) = *active_run.0.lock().unwrap() {
+    if let Some(ref token) = *active_run.0.lock().expect("ActiveRunToken lock poisoned") {
         token.cancel();
     }
 }
@@ -335,6 +344,16 @@ pub fn run() {
             let main_window = app.get_webview_window("main")
                 .expect("main webview window must exist at setup time");
             let main_window_clone = main_window.clone();
+            // Safety net: if the frontend never calls show_main_window (e.g. a JS
+            // error before it reaches that point), don't leave the app permanently
+            // invisible to the user.
+            let fallback_window = main_window.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if !fallback_window.is_visible().unwrap_or(true) {
+                    let _ = fallback_window.show();
+                }
+            });
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -390,6 +409,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            show_main_window,
             read_text_file,
             save_file_dialog,
             save_export_zip,

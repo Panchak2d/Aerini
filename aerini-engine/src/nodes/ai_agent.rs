@@ -144,7 +144,7 @@ impl Node for AiAgentNode {
 
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
-        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url).await {
+        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url, crate::nodes::util::SsrfPolicy::Strict).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
 

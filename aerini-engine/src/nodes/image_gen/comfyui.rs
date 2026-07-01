@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::check_host_ssrf_from_url_allow_local;
+use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 use super::shared::network_err;
 
@@ -28,7 +28,7 @@ pub(super) async fn gen_comfyui(
     // ComfyUI is local-only, same rationale as gen_a1111 above. Single check
     // on base_url covers /prompt, /history, and /view (all derive from the
     // same host).
-    if let Err(e) = check_host_ssrf_from_url_allow_local(base_url).await {
+    if let Err(e) = check_host_ssrf_from_url(base_url, SsrfPolicy::AllowLocal).await {
         return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
     }
 

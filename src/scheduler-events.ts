@@ -10,7 +10,7 @@ import { getBgJobs, updateBgJobStoreFromEvent, hydrateBgJobsFromScheduler } from
 import { saveRunToHistory } from "./run-history";
 import { isTauri } from "./utils";
 import { activateZone, getCurrentZone } from "./sidebar-sections";
-import { renderBgJobs, renderBgJobsDebounced, updateBgRunButton } from "./panels/BgJobsPanel";
+import { loadBgPanel } from "./bg-panel-loader";
 
 type Toast  = (msg: string, type: "success" | "error" | "info") => void;
 type Status = (msg: string) => void;
@@ -44,10 +44,11 @@ export async function bindSchedulerEvents(
   // this session. Prevents re-switching on every restart.
   const _bgZoneActivated = new Set<string>();
 
-  await listenSchedulerStatus((evt: SchedulerStatusEvent) => {
+  await listenSchedulerStatus(async (evt: SchedulerStatusEvent) => {
     updateBgJobStoreFromEvent(evt);
-    renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
-    updateBgRunButton(wfManager.currentId);
+    const bgPanel = await loadBgPanel();
+    bgPanel.renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
+    bgPanel.updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
 
     if (evt.status === "running" && evt.workflow_id === wfManager.currentId) {
@@ -104,9 +105,10 @@ export async function bindSchedulerEvents(
   if (isTauri()) {
     requestSchedulerState().catch(() => {});
 
-    getScheduledJobs().then(rows => {
+    getScheduledJobs().then(async rows => {
       hydrateBgJobsFromScheduler(rows);
-      renderBgJobs(wfManager, runManager, "all", "", toast);
+      const bgPanel = await loadBgPanel();
+      bgPanel.renderBgJobs(wfManager, runManager, "all", "", toast);
       const activeCount = rows.filter(r => r.status === "active").length;
       if (activeCount > 0) {
         const label = activeCount === 1

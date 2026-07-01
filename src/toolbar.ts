@@ -1,23 +1,25 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
-import type { CredentialPanel } from "./panels/CredentialPanel";
-import type { ChatPanel } from "./panels/ChatPanel";
 import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
-import { showVersionPanel } from "./panels/VersionPanel";
-import { showExportServerPanel } from "./export-server-panel";
 import { switchTab, openPanel, closePanel } from "./panels/NodeConfigPanel";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
-import { updateBgRunButton, renderBgJobs } from "./panels/BgJobsPanel";
 import { bindWfSettings } from "./wf-settings";
 import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
 import { bindDrawerResize, bindPanelResize } from "./resize";
+import { loadBgPanel } from "./bg-panel-loader";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
+
+export interface IChatPanel {
+  toggle(): void;
+  refreshButtonVisibility(): void;
+  onWorkflowSwitched(): void;
+}
 
 export interface ToolbarResult {
   refreshRunBtn:     () => void;
@@ -28,8 +30,7 @@ export function bindToolbar(
   canvas:           Canvas,
   wfManager:        WorkflowManager,
   runManager:       RunManager,
-  credPanel:        CredentialPanel,
-  chatPanel:        ChatPanel,
+  chatPanel:        IChatPanel,
   toast:            Toast,
   updateStatusHint: () => void,
 ): ToolbarResult {
@@ -92,7 +93,10 @@ export function bindToolbar(
       runManager.forceReset();
     } else if (schedulerRunning) {
       stopScheduledWorkflow(wfManager.currentId)
-        .then(() => { refreshRunBtn(); updateBgRunButton(wfManager.currentId); })
+        .then(() => {
+          refreshRunBtn();
+          loadBgPanel().then(m => m.updateBgRunButton(wfManager.currentId));
+        })
         .catch(e => toast(`Could not stop: ${e}`, "error"));
     } else {
       runWithValidation();
@@ -101,7 +105,9 @@ export function bindToolbar(
 
   $("btn-save").addEventListener("click",    () => wfManager.handleSave());
   bindAlwaysOnToggle(wfManager, toast);
-  $("btn-versions").addEventListener("click", () => showVersionPanel(wfManager, toast));
+  $("btn-versions").addEventListener("click", () =>
+    import("./panels/VersionPanel").then(m => m.showVersionPanel(wfManager, toast))
+  );
   bindWfSettings(wfManager);
 
   $("btn-run-now")?.addEventListener("click", () => { closeAllDropdowns(); runWithValidation(); });
@@ -110,7 +116,10 @@ export function bindToolbar(
     const menu   = $("run-dropdown-menu");
     const isOpen = menu.classList.contains("open");
     closeAllDropdowns();
-    if (!isOpen) menu.classList.add("open");
+    if (!isOpen) {
+      menu.classList.add("open");
+      $("btn-run-chevron").setAttribute("aria-expanded", "true");
+    }
   });
   $("btn-bg-run")?.addEventListener("click", async () => {
     closeAllDropdowns();
@@ -130,15 +139,28 @@ export function bindToolbar(
     const menu   = $("export-dropdown-menu");
     const isOpen = menu.classList.contains("open");
     closeAllDropdowns();
-    if (!isOpen) menu.classList.add("open");
+    if (!isOpen) {
+      menu.classList.add("open");
+      $("btn-export").setAttribute("aria-expanded", "true");
+    }
   });
   $("btn-export-aerini")?.addEventListener("click", () => { closeAllDropdowns(); wfManager.handleExport(); });
-  $("btn-export-server")?.addEventListener("click", () => { closeAllDropdowns(); showExportServerPanel(wfManager.currentId, toast); });
+  $("btn-export-server")?.addEventListener("click", () => { closeAllDropdowns(); import("./export-server-panel").then(m => m.showExportServerPanel(wfManager.currentId, toast)); });
 
   document.addEventListener("click", () => closeAllDropdowns());
 
   $("btn-new-workflow").addEventListener("click", () => wfManager.handleNew());
-  $("btn-credentials").addEventListener("click",  () => credPanel.show());
+  let _credPanel: { show(): void } | null = null;
+  let _credLoading = false;
+  $("btn-credentials").addEventListener("click", () => {
+    if (_credPanel)   { _credPanel.show(); return; }
+    if (_credLoading) return;
+    _credLoading = true;
+    import("./panels/CredentialPanel").then(({ CredentialPanel }) => {
+      _credPanel = new CredentialPanel();
+      _credPanel.show();
+    });
+  });
   $("btn-chat")?.addEventListener("click", () => chatPanel.toggle());
   $("btn-close-drawer").addEventListener("click", () => {
     $("output-drawer").classList.add("hidden");
@@ -260,8 +282,17 @@ export function bindToolbar(
   bindDrawerResize();
   bindPanelResize();
 
-  // Sidebar: navigate to bg-runs on bg-run click in workflow list
-  renderBgJobs(wfManager, runManager, "all", "", toast);
+  // Defer BgJobsPanel init — runs after first paint, invisible to the user
+  const _deferBgPanel = (fn: () => void) =>
+    typeof requestIdleCallback === "function"
+      ? requestIdleCallback(fn, { timeout: 200 })
+      : setTimeout(fn, 0);
+
+  _deferBgPanel(() => {
+    loadBgPanel().then(m =>
+      m.renderBgJobs(wfManager, runManager, "all", "", toast)
+    );
+  });
 
   // Trigger initial always-on button state
   updateAlwaysOnBtn(canvas, wfManager);
@@ -273,4 +304,6 @@ export function bindToolbar(
 
 function closeAllDropdowns(): void {
   document.querySelectorAll(".toolbar-dropdown-menu").forEach(m => m.classList.remove("open"));
+  document.getElementById("btn-run-chevron")?.setAttribute("aria-expanded", "false");
+  document.getElementById("btn-export")?.setAttribute("aria-expanded", "false");
 }

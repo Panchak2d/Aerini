@@ -97,7 +97,8 @@ function showInterpolationDropdown(
   if (!paths.length) { dd.classList.add("hidden"); return; }
 
   const rect = anchor.getBoundingClientRect();
-  dd.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.bottom + 2}px;z-index:600;max-height:180px;overflow-y:auto;`;
+  dd.style.left = `${rect.left}px`;
+  dd.style.top = `${rect.bottom + 2}px`;
   dd.className = "interp-dropdown";
   dd.innerHTML = "";
 

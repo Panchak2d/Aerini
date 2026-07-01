@@ -60,4 +60,19 @@ input[type="datetime-local"] { color-scheme: dark; }
 
 .hidden { display: none !important; }
 
+/* Screen-reader-only: visually hidden but announced by AT (P31).
+   position:fixed (not absolute) so it is removed from grid flow entirely —
+   body is display:grid and absolutely-positioned grid children can still be
+   placed in the grid area in WebKit, producing a visible 1px block. */
+.sr-only {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .toast { position: fixed; bottom: 34px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; padding: 8px 16px; border-radius: 8px; z-index: 1000; max-width: 400px; text-align: center; pointer-events: none; transition: opacity 280ms; color: #000; box-shadow: 0 6px 20px rgba(0,0,0,.4); }

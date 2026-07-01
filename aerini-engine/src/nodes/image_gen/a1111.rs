@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::check_host_ssrf_from_url_allow_local;
+use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 use super::shared::{network_err, strip_data_uri_prefix};
 
@@ -38,9 +38,9 @@ pub(super) async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOu
     // a1111 is a local-only provider -- base_url (e.g. 127.0.0.1:7860) is the
     // user's explicit trust signal for this node, so loopback/private/localhost
     // are permitted here. Link-local, cloud metadata, and RFC 6598 stay blocked
-    // (check_ssrf_ip_allow_local in util.rs). Cloud providers in this file keep
-    // the strict check_host_ssrf_from_url unchanged.
-    if let Err(e) = check_host_ssrf_from_url_allow_local(&p.base_url).await {
+    // (SsrfPolicy::AllowLocal in util.rs). Cloud providers in this file keep
+    // the strict (SsrfPolicy::Strict) check_host_ssrf_from_url unchanged.
+    if let Err(e) = check_host_ssrf_from_url(&p.base_url, SsrfPolicy::AllowLocal).await {
         return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
     }
 

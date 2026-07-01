@@ -168,7 +168,7 @@ fn rewrite_pg_placeholders(query: &str) -> String {
             if ch == '\'' {
                 // `''` is an escaped quote inside a string literal — stay in string.
                 if chars.peek() == Some(&'\'') {
-                    out.push(chars.next().unwrap());
+                    out.push(chars.next().expect("chars.peek() confirmed Some — next() will not return None"));
                 } else {
                     in_string = false;
                 }

@@ -16,8 +16,91 @@ export function initSidebarSections(): void {
   applySavedWidth();
   bindActivityBar();
   bindResizeHandle();
+  resetTransientState();
   const savedZone = lsGet<string>(LS_ZONE, "workflows");
   switchZone(savedZone, false);
+}
+
+/**
+ * Resets every piece of DOM state that user interaction can mutate at runtime
+ * but that the HTML source-of-truth never re-asserts.
+ *
+ * Safe to call unconditionally — every operation is idempotent:
+ * adding "hidden" to an already-hidden element, removing a class that is not
+ * present, removing a non-existent element, and writing a style to its current
+ * value are all no-ops.
+ *
+ * Issues addressed:
+ *   1. Search bars — hidden class stripped by toggle, stays stripped through
+ *      a hot bundle reload. The visible result is a blank styled input in the
+ *      sidebar (the originally reported bug).
+ *   2. Stale input values — bar is hidden but typed text remains; the workflow
+ *      list is filtered with no visible indication why.
+ *   3. Orphaned dropdowns — sort/filter dropdowns are appended to document.body
+ *      and removed only by their own dismiss listener. If that listener is lost
+ *      the element is stuck: visible, interactive, and broken.
+ *   4. Sort button stale state — data-sort and active class persist; visual
+ *      says "Z → A" while WorkflowManager.sortMode has reset to "updated_desc".
+ *   5. Filter button stale state — same mismatch for bg runs data-filter/active.
+ *   6. Resize handle dragging class — added on mousedown, removed on mouseup.
+ *      If a reload fires mid-drag the mouseup handler is gone; "dragging" stays.
+ *   7. Body transition stuck — set to "none" on resize mousedown, cleared on
+ *      mouseup for the same reason. A stuck "none" silently kills all CSS
+ *      transitions app-wide until the next full page load.
+ */
+function resetTransientState(): void {
+  // 1 + 2 — Search bars and stale input values
+  const searches = [
+    { bar: "wf-search-bar", btn: "btn-wf-search-toggle", input: "wf-search" },
+    { bar: "bg-search-bar", btn: "btn-bg-search-toggle", input: "bg-search" },
+  ] as const;
+
+  for (const ids of searches) {
+    document.getElementById(ids.bar)?.classList.add("hidden");
+    document.getElementById(ids.btn)?.classList.remove("active");
+    const inp = document.getElementById(ids.input) as HTMLInputElement | null;
+    if (inp && inp.value !== "") {
+      inp.value = "";
+      // If the input listener is already bound this re-fires the filter with an
+      // empty query, immediately showing all items. If not yet bound the value
+      // is "" so the listener starts from a clean state.
+      inp.dispatchEvent(new Event("input"));
+    }
+  }
+
+  // Workflow list items are hidden via inline style.display — reset them
+  // directly so the list is not silently filtered after the input is cleared.
+  document.querySelectorAll<HTMLElement>(".workflow-item").forEach(el => {
+    el.style.display = "";
+  });
+
+  // 3 — Orphaned dropdowns
+  document.getElementById("sort-dropdown")?.remove();
+  document.getElementById("filter-dropdown")?.remove();
+
+  // 4 — Sort button: WorkflowManager.sortMode resets to "updated_desc" on
+  // module re-evaluation, so the button must match.
+  const sortBtn = document.getElementById("btn-wf-sort");
+  if (sortBtn) {
+    sortBtn.dataset.sort = "updated_desc";
+    sortBtn.classList.remove("active");
+  }
+
+  // 5 — Filter button: same logic for bg runs filter.
+  const filterBtn = document.getElementById("btn-bg-filter");
+  if (filterBtn) {
+    filterBtn.dataset.filter = "all";
+    filterBtn.classList.remove("active");
+  }
+
+  // 6 — Resize handle dragging class
+  document.getElementById("sidebar-resize-handle")?.classList.remove("dragging");
+
+  // 7 — Body transition: only clear the specific value we set; do not touch
+  // any transition the rest of the app may have intentionally placed.
+  if (document.body.style.transition === "none") {
+    document.body.style.transition = "";
+  }
 }
 
 function applySavedWidth(): void {
@@ -66,15 +149,23 @@ function switchZone(key: string, animate: boolean): void {
   _current = key;
 
   document.querySelectorAll<HTMLElement>(".activity-btn[data-zone]").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.zone === key);
+    const active = btn.dataset.zone === key;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
   });
 
+  // Deactivate by querying the DOM's actual .active state, not the tracked
+  // `prev` variable — `prev` is only used to decide whether the outgoing
+  // zone animates out. If `prev` is ever stale (e.g. a zone is marked
+  // active in the static HTML before this module's first switchZone call
+  // runs), relying on `prev` alone would leave that zone's `active` class
+  // never cleared, producing two simultaneously visible zones.
   document.querySelectorAll<HTMLElement>(".sidebar-zone").forEach(zone => {
     const zk = zone.id.replace("zone-", "");
     if (zk === key) {
       zone.classList.remove("leaving");
       zone.classList.add("active");
-    } else if (zk === prev && animate) {
+    } else if (zone.classList.contains("active") && zk === prev && animate) {
       zone.classList.remove("active");
       zone.classList.add("leaving");
       setTimeout(() => zone.classList.remove("leaving"), 160);
@@ -135,6 +226,7 @@ function bindSearchToggle(btnId: string, barId: string, inputId: string): void {
   btn.addEventListener("click", () => {
     const hidden = bar.classList.toggle("hidden");
     btn.classList.toggle("active", !hidden);
+    btn.setAttribute("aria-expanded", String(!hidden));
     if (!hidden) input.focus();
     else { input.value = ""; input.dispatchEvent(new Event("input")); }
   });
@@ -169,7 +261,8 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
     const dd = document.createElement("div");
     dd.id = "sort-dropdown";
     dd.className = "filter-dropdown";
-    dd.style.cssText = `top:${rect.bottom + 4}px;left:${rect.left}px;`;
+    dd.style.top = `${rect.bottom + 4}px`;
+    dd.style.left = `${rect.left}px`;
 
     SORT_OPTIONS.forEach(opt => {
       const btn = document.createElement("button");
@@ -224,7 +317,8 @@ export function bindBgRunsFilter(onFilter: (status: string, query: string) => vo
     const dd = document.createElement("div");
     dd.id = "filter-dropdown";
     dd.className = "filter-dropdown";
-    dd.style.cssText = `top:${rect.bottom + 4}px;left:${rect.left}px;`;
+    dd.style.top = `${rect.bottom + 4}px`;
+    dd.style.left = `${rect.left}px`;
 
     FILTER_OPTIONS.forEach(opt => {
       const btn = document.createElement("button");

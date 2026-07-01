@@ -25,7 +25,7 @@
 .config-hint      { font-size:11px; color:var(--t3); margin-bottom:8px; line-height:1.5; }
 .config-hint-warn { color:var(--amber); }
 
-.field-hint       { font-size:10px; color:var(--t3); margin-top:3px; line-height:1.4; }
+.field-hint       { font-size:10px; color:var(--t2); margin-top:3px; line-height:1.4; }
 
 /* [Patch 6 follow-up] renderAiAttachments() in popover-config.ts references these
    classes but Patch 6 only shipped the .ts file — no CSS was ever added for them.
@@ -491,6 +491,7 @@
 /* ── NOTE EDITOR ────────────────────────────────────────────────────────────── */
 
 #note-inline-editor {
+  position: fixed;
   background: var(--bg2);
   border: 1px solid var(--blue);
   border-radius: 8px;
@@ -540,12 +541,15 @@
 /* ── INTERPOLATION DROPDOWN ─────────────────────────────────────────────────── */
 
 .interp-dropdown {
+  position: fixed;
+  z-index: 600;
   background: var(--bg2);
   border: 1px solid var(--bd);
   border-radius: 8px;
   box-shadow: 0 12px 36px rgba(0,0,0,.5);
   min-width: 240px;
   max-width: 360px;
+  max-height: 180px;
   overflow-y: auto;
   padding: 4px;
   font-size: 12px;

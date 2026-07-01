@@ -396,18 +396,18 @@ function showPresetTooltip(
   if (dot)  dot.className = `tpt-dot dot-${data.nodeType}`;
   if (name) name.textContent = data.label;
   if (cfg)  cfg.innerHTML = buildConfigLines(data.config);
-  tip.style.display = "block";
+  tip.classList.remove("hidden");
   repositionTooltip(e);
 }
 
 function hidePresetTooltip(): void {
   const tip = document.getElementById("template-preview-tooltip");
-  if (tip) tip.style.display = "none";
+  if (tip) tip.classList.add("hidden");
 }
 
 function repositionTooltip(e: MouseEvent): void {
   const tip = document.getElementById("template-preview-tooltip");
-  if (!tip || tip.style.display === "none") return;
+  if (!tip || tip.classList.contains("hidden")) return;
   const sidebar = document.getElementById("sidebar");
   const sw = sidebar ? sidebar.getBoundingClientRect().right : 300;
   const tw = tip.offsetWidth || 180;
@@ -498,7 +498,7 @@ function showNodeInfoTooltip(e: MouseEvent, desc: NodeDescriptor): void {
         .map(p => p.label);
       ports.textContent = labels.length ? `Outputs: ${labels.join(" · ")}` : "";
     }
-    tip.style.display = "block";
+    tip.classList.remove("hidden");
     repositionNodeInfoTooltip(e);
   }, 500);
 }
@@ -506,12 +506,12 @@ function showNodeInfoTooltip(e: MouseEvent, desc: NodeDescriptor): void {
 function hideNodeInfoTooltip(): void {
   if (_nitTimer) { clearTimeout(_nitTimer); _nitTimer = null; }
   const tip = document.getElementById("node-info-tooltip");
-  if (tip) tip.style.display = "none";
+  if (tip) tip.classList.add("hidden");
 }
 
 function repositionNodeInfoTooltip(e: MouseEvent): void {
   const tip = document.getElementById("node-info-tooltip");
-  if (!tip || tip.style.display === "none") return;
+  if (!tip || tip.classList.contains("hidden")) return;
   const sidebar = document.getElementById("sidebar");
   const sw  = sidebar ? sidebar.getBoundingClientRect().right : 300;
   const tw  = tip.offsetWidth  || 220;

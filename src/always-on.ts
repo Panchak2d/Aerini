@@ -4,6 +4,7 @@ import type { ScheduledJobRow } from "./ipc/workflow";
 import { getScheduledJobs, setAlwaysOn, startScheduledWorkflow } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { TRIGGER_NODE_IDS } from "./node-ids";
+import { hideTooltipFor } from "./tooltip-manager";
 
 type Toast = (msg: string, type: "success" | "error" | "info") => void;
 
@@ -23,7 +24,10 @@ export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManag
   }
 
   btn.classList.remove("hidden");
-  if (wrap) wrap.removeAttribute("data-tooltip");
+  if (wrap) {
+    wrap.removeAttribute("data-tooltip");
+    hideTooltipFor(wrap);
+  }
 
   let alwaysOn = false;
   if (isTauri()) {

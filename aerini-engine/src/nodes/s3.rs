@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use crate::nodes::util::check_host_ssrf_from_url;
+use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 pub struct S3Node;
 
@@ -193,7 +193,7 @@ async fn build_client(cfg: &Value) -> Result<(Client, String), String> {
                 if provider == "r2" { "https://ACCOUNT_ID.r2.cloudflarestorage.com" } else { "http://host:9000" }
             ))?;
 
-        check_host_ssrf_from_url(endpoint).await
+        check_host_ssrf_from_url(endpoint, SsrfPolicy::Strict).await
             .map_err(|e| format!("SSRF check failed for {} endpoint: {}", provider, e))?;
 
         config_builder = config_builder

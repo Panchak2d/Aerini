@@ -209,7 +209,7 @@ export class ChatPanel {
   applyToggles(settings: ChatSettings): void {
     this.chatSettings = settings;
 
-    this.attachBtn.style.display = settings.allow_attachments ? "" : "none";
+    this.attachBtn.classList.toggle("hidden", !settings.allow_attachments);
     this.attachBtn.disabled      = !settings.allow_attachments;
     // Settings can be toggled off while attachments are already queued (e.g. user
     // opens Workflow Settings without closing Chat). Drop them rather than leaving

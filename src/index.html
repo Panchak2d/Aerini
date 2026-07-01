@@ -13,9 +13,9 @@
   <aside id="sidebar">
 
     <!-- Activity bar: narrow icon strip on left edge -->
-    <div id="activity-bar">
+    <div id="activity-bar" role="tablist" aria-label="Sidebar sections" aria-orientation="vertical">
       <div class="activity-top">
-        <div class="activity-logo">
+        <div class="activity-logo" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
             <rect x="1" y="1" width="6" height="6" rx="1.5" fill="#34d399"/>
             <rect x="11" y="1" width="6" height="6" rx="1.5" fill="#34d399" opacity="0.5"/>
@@ -26,20 +26,20 @@
             <line x1="14" y1="7" x2="14" y2="11" stroke="#34d399" stroke-width="1.5" opacity="0.5"/>
           </svg>
         </div>
-        <button class="activity-btn active" data-zone="nodes" title="Nodes" data-tooltip="Nodes" aria-label="Nodes">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button id="tab-nodes" class="activity-btn active" role="tab" aria-selected="true" aria-controls="zone-nodes" data-zone="nodes" title="Nodes" data-tooltip="Nodes" aria-label="Nodes">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="3" width="7" height="7" rx="1.2"/><rect x="14" y="3" width="7" height="7" rx="1.2"/>
             <rect x="3" y="14" width="7" height="7" rx="1.2"/><rect x="14" y="14" width="7" height="7" rx="1.2"/>
           </svg>
         </button>
-        <button class="activity-btn" data-zone="workflows" title="Workflows" data-tooltip="Workflows" aria-label="Workflows">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <button id="tab-workflows" class="activity-btn" role="tab" aria-selected="false" aria-controls="zone-workflows" data-zone="workflows" title="Workflows" data-tooltip="Workflows" aria-label="Workflows">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
           </svg>
           <span class="activity-badge" id="wf-count"></span>
         </button>
-        <button class="activity-btn" data-zone="bgruns" title="Background Runs" data-tooltip="Background Runs" aria-label="Background Runs">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button id="tab-bgruns" class="activity-btn" role="tab" aria-selected="false" aria-controls="zone-bgruns" data-zone="bgruns" title="Background Runs" data-tooltip="Background Runs" aria-label="Background Runs">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="9"/>
             <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/>
           </svg>
@@ -65,12 +65,12 @@
     <div id="sidebar-panel">
 
       <!-- NODES zone -->
-      <div class="sidebar-zone active" id="zone-nodes">
+      <div class="sidebar-zone active" id="zone-nodes" role="tabpanel" aria-labelledby="tab-nodes">
         <div class="zone-header">
           <span class="zone-title">Nodes</span>
         </div>
         <div class="zone-search">
-          <input id="node-search" type="text" placeholder="Search nodes…" autocomplete="off" spellcheck="false" />
+          <input id="node-search" type="text" placeholder="Search nodes…" aria-label="Search nodes" autocomplete="off" spellcheck="false" />
         </div>
         <div id="category-chips" class="category-chips">
           <button class="cat-chip active" data-cat="all">All</button>
@@ -83,40 +83,40 @@
       </div>
 
       <!-- WORKFLOWS zone -->
-      <div class="sidebar-zone" id="zone-workflows">
+      <div class="sidebar-zone" id="zone-workflows" role="tabpanel" aria-labelledby="tab-workflows">
         <div class="zone-header">
           <span class="zone-title">Workflows</span>
           <div class="zone-header-actions">
-            <button class="zone-action-btn" id="btn-wf-search-toggle" title="Search">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <button class="zone-action-btn" id="btn-wf-search-toggle" title="Search workflows" aria-label="Search workflows" aria-expanded="false">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
             </button>
-            <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" data-sort="updated_desc">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
+            <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" aria-label="Sort workflows" data-sort="updated_desc">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
             </button>
           </div>
         </div>
         <div class="zone-search hidden" id="wf-search-bar">
-          <input id="wf-search" type="text" placeholder="Filter workflows…" autocomplete="off" spellcheck="false" />
+          <input id="wf-search" type="text" placeholder="Filter workflows…" aria-label="Filter workflows" autocomplete="off" spellcheck="false" />
         </div>
         <div id="workflow-list" class="workflow-scroll"></div>
 
       </div>
 
       <!-- BACKGROUND RUNS zone -->
-      <div class="sidebar-zone" id="zone-bgruns">
+      <div class="sidebar-zone" id="zone-bgruns" role="tabpanel" aria-labelledby="tab-bgruns">
         <div class="zone-header">
           <span class="zone-title">Background Runs</span>
           <div class="zone-header-actions">
-            <button class="zone-action-btn" id="btn-bg-search-toggle" title="Search">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <button class="zone-action-btn" id="btn-bg-search-toggle" title="Search runs" aria-label="Search background runs" aria-expanded="false">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
             </button>
-            <button class="zone-action-btn" id="btn-bg-filter" title="Filter: All" data-filter="all">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            <button class="zone-action-btn" id="btn-bg-filter" title="Filter: All" aria-label="Filter background runs" data-filter="all">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
             </button>
           </div>
         </div>
         <div class="zone-search hidden" id="bg-search-bar">
-          <input id="bg-search" type="text" placeholder="Filter runs…" autocomplete="off" spellcheck="false" />
+          <input id="bg-search" type="text" placeholder="Filter runs…" aria-label="Filter background runs" autocomplete="off" spellcheck="false" />
         </div>
         <div id="bg-jobs-list" class="bg-jobs-list"></div>
       </div>
@@ -130,17 +130,17 @@
 
   <!-- ── Canvas ── -->
   <main id="canvas-area">
-    <div id="toolbar">
+    <div id="toolbar" role="toolbar" aria-label="Workflow toolbar">
       <span id="workflow-name-label" class="workflow-title" title="Double-click to rename">Untitled</span>
       <span class="unsaved-dot" id="unsaved-dot"></span>
       <span class="workflow-rename-hint" id="workflow-rename-hint" title="Double-click the name to rename" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
       <div class="toolbar-spacer"></div>
       <div class="toolbar-actions">
         <div class="toolbar-dropdown-wrap" id="export-dropdown-wrap">
-          <button id="btn-export" class="btn-toolbar btn-toolbar-dropdown" title="Export workflow">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <button id="btn-export" class="btn-toolbar btn-toolbar-dropdown" title="Export workflow" aria-haspopup="menu" aria-expanded="false">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export
-            <svg class="dropdown-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+            <svg class="dropdown-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="toolbar-dropdown-menu" id="export-dropdown-menu">
             <button class="toolbar-dropdown-item" id="btn-export-aerini">
@@ -193,8 +193,8 @@
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Run
           </button>
-          <button id="btn-run-chevron" class="btn-toolbar btn-run btn-run-chevron" title="More run options">
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+          <button id="btn-run-chevron" class="btn-toolbar btn-run btn-run-chevron" title="More run options" aria-label="More run options" aria-haspopup="menu" aria-expanded="false">
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="toolbar-dropdown-menu toolbar-dropdown-menu-right" id="run-dropdown-menu">
             <button class="toolbar-dropdown-item" id="btn-run-now">
@@ -218,7 +218,7 @@
 
     <canvas id="canvas" tabindex="0" role="application" aria-label="Workflow canvas"></canvas>
 
-    <div id="canvas-empty-state">
+  <div id="canvas-empty-state">
       <div class="empty-state-box">
         <svg class="empty-state-icon" width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
           <rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
@@ -277,7 +277,7 @@
     </div>
     <div id="tab-run" class="tab-body active">
       <div class="run-section">
-        <div id="browser-run-notice" class="browser-notice hidden">
+        <div id="browser-run-notice" class="browser-notice hidden" aria-live="polite" aria-atomic="true">
           <strong>Browser mode</strong>
           Execution requires the Tauri desktop app. Workflow builder works fully here.
         </div>
@@ -337,7 +337,7 @@
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">
-      <button class="chat-attach-btn" id="chat-attach-btn" style="display:none" title="Attach file" disabled>
+      <button class="chat-attach-btn hidden" id="chat-attach-btn" title="Attach file" disabled>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
       </button>
       <textarea id="chat-input" class="chat-input" placeholder="Type a message…" rows="1" disabled></textarea>
@@ -635,7 +635,7 @@
   </div>
 
   <!-- ── Preset template preview tooltip (Patch 4) ── -->
-  <div id="template-preview-tooltip" class="template-preview-tooltip" style="display:none">
+  <div id="template-preview-tooltip" class="template-preview-tooltip hidden">
     <div class="tpt-node-box">
       <span class="tpt-dot"></span>
       <span class="tpt-name"></span>
@@ -644,7 +644,7 @@
   </div>
 
   <!-- ── Node info tooltip — shown on palette item hover ── -->
-  <div id="node-info-tooltip" class="node-info-tooltip" style="display:none">
+  <div id="node-info-tooltip" class="node-info-tooltip hidden">
     <div class="nit-header">
       <span class="nit-dot"></span>
       <span class="nit-name"></span>
@@ -652,6 +652,9 @@
     <p class="nit-desc"></p>
     <div class="nit-ports"></div>
   </div>
+
+  <!-- ── Persistent ARIA live-region announcer (P31) ── -->
+  <div id="a11y-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
   <input type="file" id="file-input" accept=".aerini,.json" hidden />
   <script type="module" src="./app.ts"></script>

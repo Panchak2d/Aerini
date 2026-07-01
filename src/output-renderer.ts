@@ -306,16 +306,26 @@ async function renderMediaBatch(
 // Typed output dispatch — sync paths only; media_batch bypasses this
 // ---------------------------------------------------------------------------
 
+// DEVIATION (Patch 26): The plan specifies a CONTENT_RENDERERS Map keyed by
+// abstract content-type strings ("markdown", "code", "image", etc.). No such
+// content-type detection logic exists in the current codebase — dispatch has
+// always been on node typeId (NODE_IDS constants). Introducing a content-type
+// detection layer would add new logic, violating "zero behavior change".
+// The Map is keyed on NODE_IDS exactly mirroring the prior switch statement.
+
+type ContentRenderer = (out: unknown, name: string) => string;
+
+const CONTENT_RENDERERS = new Map<string, ContentRenderer>([
+  [NODE_IDS.HTTP_REQUEST,  renderHttpOutput],
+  [NODE_IDS.AI_PROMPT,     renderAiOutput],
+  [NODE_IDS.AI_AGENT,      renderAiOutput],
+  [NODE_IDS.OUTPUT,        renderOutputNodeResult],
+  [NODE_IDS.SOCIAL_UPLOAD, renderSocialUploadOutput],
+  [NODE_IDS.CODE,          renderCodeOutput],
+]);
+
 function renderTypedOutput(typeId: string, out: unknown, nodeName: string): string {
-  switch (typeId) {
-    case NODE_IDS.HTTP_REQUEST: return renderHttpOutput(out, nodeName);
-    case NODE_IDS.AI_PROMPT:
-    case NODE_IDS.AI_AGENT:    return renderAiOutput(out, nodeName);
-    case NODE_IDS.OUTPUT:         return renderOutputNodeResult(out, nodeName);
-    case NODE_IDS.SOCIAL_UPLOAD:  return renderSocialUploadOutput(out, nodeName);
-    case NODE_IDS.CODE:            return renderCodeOutput(out, nodeName);
-    default:            return renderGenericOutput(out, nodeName);
-  }
+  return (CONTENT_RENDERERS.get(typeId) ?? renderGenericOutput)(out, nodeName);
 }
 
 function renderHttpOutput(out: unknown, name: string): string {
@@ -510,53 +520,69 @@ function renderGenericOutput(out: unknown, name: string): string {
     </details>`;
 }
 
-function previewForNode(typeId: string, out: unknown): string {
-  const obj = out as Record<string, unknown>;
-  switch (typeId) {
-    case NODE_IDS.HTTP_REQUEST: {
-      // Rust outputs: { status, body, headers }
-      const status = obj?.status ?? obj?.status_code;
-      const body   = obj?.body ?? obj?.content;
-      const preview = body !== null && body !== undefined
-        ? (typeof body === "string" ? body.slice(0, 50) : JSON.stringify(body).slice(0, 50))
-        : "";
-      return status ? `HTTP ${status}${preview ? ` · ${preview}` : ""}` : extractPreview(out);
-    }
-    case NODE_IDS.AI_PROMPT:
-    case NODE_IDS.AI_AGENT: {
-      const content = obj?.content ?? obj?.text ?? obj?.result;
-      return typeof content === "string" ? content.slice(0, 60) : extractPreview(out);
-    }
-    case NODE_IDS.OUTPUT: {
-      const label   = typeof obj?.label === "string" ? obj.label : "";
-      // media_batch: show file count instead of trying to preview base64 data
-      if (obj?.output_type === "media_batch") {
-        const bv    = obj?.value as Record<string, unknown> | undefined;
-        const count = typeof bv?.count === "number"
-          ? bv.count
-          : (bv?.files as unknown[] | undefined)?.length ?? 0;
-        const suffix = `${count} file${count !== 1 ? "s" : ""}`;
-        return label ? `${label}: ${suffix}` : suffix;
-      }
-      const value = obj?.value;
-      if (value === null || value === undefined) return label || "null";
-      const str = typeof value === "string" ? value : JSON.stringify(value);
-      return label ? `${label}: ${str.slice(0, 40)}` : str.slice(0, 60);
-    }
-    case NODE_IDS.SCHEDULE:
-    case NODE_IDS.MANUAL_TRIGGER:
-    case NODE_IDS.WEBHOOK: {
-      const triggeredAt = obj?.triggered_at as string | undefined;
-      const mode = obj?.mode as string | undefined;
-      if (triggeredAt) {
-        const t = new Date(triggeredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        return mode ? `${mode} · triggered ${t}` : `triggered ${t}`;
-      }
-      return extractPreview(out);
-    }
-    default:
-      return extractPreview(out);
+// ── Preview renderers — one per node type that needs custom summary text ─────
+// Called by renderSummaryTab to produce the one-line preview in each node row.
+// Each function receives the raw node output and returns a short string.
+// Fallback for unknown types: extractPreview().
+
+type PreviewRenderer = (out: unknown) => string;
+
+function previewHttpOutput(out: unknown): string {
+  const obj    = out as Record<string, unknown>;
+  const status = obj?.status ?? obj?.status_code;
+  const body   = obj?.body ?? obj?.content;
+  const preview = body !== null && body !== undefined
+    ? (typeof body === "string" ? body.slice(0, 50) : JSON.stringify(body).slice(0, 50))
+    : "";
+  return status ? `HTTP ${status}${preview ? ` · ${preview}` : ""}` : extractPreview(out);
+}
+
+function previewAiOutput(out: unknown): string {
+  const obj     = out as Record<string, unknown>;
+  const content = obj?.content ?? obj?.text ?? obj?.result;
+  return typeof content === "string" ? content.slice(0, 60) : extractPreview(out);
+}
+
+function previewOutputNode(out: unknown): string {
+  const obj   = out as Record<string, unknown>;
+  const label = typeof obj?.label === "string" ? obj.label : "";
+  if (obj?.output_type === "media_batch") {
+    const bv    = obj?.value as Record<string, unknown> | undefined;
+    const count = typeof bv?.count === "number"
+      ? bv.count
+      : (bv?.files as unknown[] | undefined)?.length ?? 0;
+    const suffix = `${count} file${count !== 1 ? "s" : ""}`;
+    return label ? `${label}: ${suffix}` : suffix;
   }
+  const value = obj?.value;
+  if (value === null || value === undefined) return label || "null";
+  const str = typeof value === "string" ? value : JSON.stringify(value);
+  return label ? `${label}: ${str.slice(0, 40)}` : str.slice(0, 60);
+}
+
+function previewTriggerOutput(out: unknown): string {
+  const obj         = out as Record<string, unknown>;
+  const triggeredAt = obj?.triggered_at as string | undefined;
+  const mode        = obj?.mode as string | undefined;
+  if (triggeredAt) {
+    const t = new Date(triggeredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return mode ? `${mode} · triggered ${t}` : `triggered ${t}`;
+  }
+  return extractPreview(out);
+}
+
+const PREVIEW_RENDERERS = new Map<string, PreviewRenderer>([
+  [NODE_IDS.HTTP_REQUEST,    previewHttpOutput],
+  [NODE_IDS.AI_PROMPT,       previewAiOutput],
+  [NODE_IDS.AI_AGENT,        previewAiOutput],
+  [NODE_IDS.OUTPUT,          previewOutputNode],
+  [NODE_IDS.SCHEDULE,        previewTriggerOutput],
+  [NODE_IDS.MANUAL_TRIGGER,  previewTriggerOutput],
+  [NODE_IDS.WEBHOOK,         previewTriggerOutput],
+]);
+
+function previewForNode(typeId: string, out: unknown): string {
+  return (PREVIEW_RENDERERS.get(typeId) ?? extractPreview)(out);
 }
 
 function errorSuggestion(message: string, typeId: string): string {

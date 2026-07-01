@@ -72,8 +72,8 @@ impl Node for GoogleSheetsNode {
                 };
 
                 let url = {
-                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").unwrap();
-                    u.path_segments_mut().unwrap()
+                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").expect("hardcoded valid https URL");
+                    u.path_segments_mut().expect("https URL is never cannot-be-a-base")
                         .push(&spreadsheet_id)
                         .push("values")
                         .push(&format!("{}:append", range));
@@ -118,8 +118,8 @@ impl Node for GoogleSheetsNode {
             }
             "get_values" => {
                 let url = {
-                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").unwrap();
-                    u.path_segments_mut().unwrap()
+                    let mut u = url::Url::parse("https://sheets.googleapis.com/v4/spreadsheets/").expect("hardcoded valid https URL");
+                    u.path_segments_mut().expect("https URL is never cannot-be-a-base")
                         .push(&spreadsheet_id)
                         .push("values")
                         .push(&range);

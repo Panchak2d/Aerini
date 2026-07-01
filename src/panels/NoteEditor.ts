@@ -21,13 +21,18 @@ export function showNoteEditor(
 
   const wrap = document.createElement("div");
   wrap.id = "note-inline-editor";
-  wrap.style.cssText = `position:fixed;left:${sx}px;top:${sy}px;width:${sw}px;min-height:${sh}px;z-index:450;`;
+  wrap.style.left = `${sx}px`;
+  wrap.style.top = `${sy}px`;
+  wrap.style.width = `${sw}px`;
+  wrap.style.minHeight = `${sh}px`;
 
   const ta = document.createElement("textarea");
   ta.className = "note-inline-textarea";
   ta.value = String(node.data.config["text"] ?? "");
   ta.placeholder = "Write a note…";
-  ta.style.cssText = `width:100%;min-height:${sh}px;resize:both;`;
+  ta.style.width = "100%";
+  ta.style.minHeight = `${sh}px`;
+  ta.style.resize = "both";
 
   ta.addEventListener("input", () => {
     node.data.config["text"] = ta.value;

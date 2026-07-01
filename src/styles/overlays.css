@@ -92,6 +92,7 @@
   font-family: monospace;
   flex-shrink: 0;
 }
+.icon-svg { display: block; flex-shrink: 0; }
 .palette-result-name { font-size: 13px; color: var(--t1); font-weight: 500; }
 .palette-result-cat  { font-size: 11px; color: var(--t3); }
 .palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; }
@@ -409,17 +410,11 @@
 
 /* ── TOOLTIPS ───────────────────────────────────────────────────────────────── */
 
-/* Lightweight CSS-only tooltip. No JS required.                               */
-/* Usage: <button data-tooltip="Label" data-tooltip-side="right">              */
-[data-tooltip] {
-  position: relative;
-}
-[data-tooltip]::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  left: calc(100% + 8px);
-  top: 50%;
-  transform: translateY(-50%);
+/* JS-driven ARIA tooltip (P31 — WCAG 1.4.13).                                */
+/* Rendered by tooltip-manager.ts into a single reused div[role="tooltip"].   */
+/* Hoverable (criterion 2), Escape-dismissible (criterion 1), persistent.     */
+.aria-tooltip {
+  position: fixed;
   background: var(--color-surface-3);
   color: var(--color-text-primary);
   border: 1px solid var(--color-border);
@@ -428,21 +423,13 @@
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 120ms ease 200ms;
+  pointer-events: auto;
   z-index: 9999;
   box-shadow: 0 2px 8px rgba(0,0,0,.4);
+  max-width: 300px;
+  word-break: break-word;
 }
-[data-tooltip]:hover::after,
-[data-tooltip]:focus-visible::after {
-  opacity: 1;
-}
-/* Side variant for items that sit at the right edge */
-[data-tooltip][data-tooltip-side="left"]::after {
-  left: auto;
-  right: calc(100% + 8px);
-}
+.aria-tooltip[hidden] { display: none; }
 
 .drawer-tab.tab-flash {
   color: var(--color-action-run) !important;
@@ -470,10 +457,6 @@
   /* Explicitly kill the pulse animation — 0.01ms still fires; remove it entirely */
   [class*="pulse"] {
     animation: none !important;
-  }
-  /* Suppress tooltip transition so it appears instantly */
-  [data-tooltip]::after {
-    transition: none;
   }
 }
 

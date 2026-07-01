@@ -183,7 +183,7 @@ pub async fn run_workflow(
     let workflow = Workflow::from_json(&workflow_json).map_err(|e| e.to_string())?;
 
     let token = CancellationToken::new();
-    *active_run.0.lock().unwrap() = Some(token.clone());
+    *active_run.0.lock().expect("ActiveRunToken lock poisoned") = Some(token.clone());
 
     let executor = WorkflowExecutor::new(
         Arc::clone(&*registry),
@@ -198,7 +198,7 @@ pub async fn run_workflow(
     let result = executor.run(Arc::new(workflow), initial_variables).await;
 
     // Clear stored token regardless of outcome.
-    *active_run.0.lock().unwrap() = None;
+    *active_run.0.lock().expect("ActiveRunToken lock poisoned") = None;
 
     match result {
         Ok(r) => Ok(r),

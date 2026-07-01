@@ -761,4 +761,72 @@ mod tests {
         assert_eq!(out_miss, "");
         assert!(!warns_miss.is_empty(), "missing field must warn");
     }
+
+    // ── P23: expression/resolver.rs tests ─────────────────────────────────────
+
+    // Undefined node reference: {{nonexistent.output.value}} → empty string + warning,
+    // no panic. Verifies the "no node named" branch in resolve_expression.
+    #[test]
+    fn undefined_node_reference_returns_empty_with_warning_no_panic() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let (out, warns) = resolve_string("{{nonexistent.output.value}}", &wf, &ctx, None);
+        assert_eq!(out, "", "undefined node must resolve to empty string");
+        assert!(!warns.is_empty(), "must emit a warning for undefined node");
+        assert!(
+            warns.iter().any(|w| w.contains("nonexistent")),
+            "warning must name the missing node; got: {:?}", warns
+        );
+    }
+
+    // Deep null path: {{Step.output.a.b.c}} where intermediate key b is absent.
+    // traverse_path returns None → empty string + warning, no panic.
+    #[test]
+    fn deep_null_path_intermediate_absent_returns_empty_no_panic() {
+        let wf = make_workflow(vec![("n1", "Step")]);
+        // "a" exists but has no "b" key → path a.b.c is not traversable.
+        let ctx = make_ctx(vec![("n1", json!({ "a": {} }))], vec![]);
+        let (out, warns) = resolve_string("{{Step.output.a.b.c}}", &wf, &ctx, None);
+        assert_eq!(out, "", "absent intermediate key must resolve to empty string");
+        assert!(!warns.is_empty(), "must warn about missing path");
+    }
+
+    // Expression inside array element: mixed static + {{...}} values in an array
+    // all resolve correctly via resolve_all_strings.
+    #[test]
+    fn expression_inside_array_element_resolves_correctly() {
+        let wf = make_workflow(vec![("n1", "Step")]);
+        let ctx = make_ctx(vec![("n1", json!({ "val": "hello" }))], vec![]);
+        let input = json!(["static", "{{Step.output.val}}", 42, true]);
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        assert_eq!(out[0], "static", "static string must be preserved");
+        assert_eq!(out[1], "hello",  "expression in array element must resolve");
+        assert_eq!(out[2], 42,       "non-string number must be preserved");
+        assert_eq!(out[3], true,     "non-string bool must be preserved");
+        assert!(warns.is_empty());
+    }
+
+    // resolve_all_strings on a deeply nested object: all leaf strings resolved,
+    // non-string values preserved, structure unchanged.
+    #[test]
+    fn resolve_all_strings_deeply_nested_structure_preserved() {
+        let wf = make_workflow(vec![("n1", "Step")]);
+        let ctx = make_ctx(vec![("n1", json!({ "result": "world" }))], vec![]);
+        let input = json!({
+            "a": {
+                "b": {
+                    "c": "hello {{Step.output.result}}",
+                    "d": 99
+                }
+            },
+            "e": [1, "{{Step.output.result}}", true]
+        });
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        assert_eq!(out["a"]["b"]["c"], "hello world", "nested string must resolve");
+        assert_eq!(out["a"]["b"]["d"], 99,            "non-string number must survive");
+        assert_eq!(out["e"][0], 1,                    "array non-string must survive");
+        assert_eq!(out["e"][1], "world",              "array expression must resolve");
+        assert_eq!(out["e"][2], true,                 "array bool must survive");
+        assert!(warns.is_empty());
+    }
 }

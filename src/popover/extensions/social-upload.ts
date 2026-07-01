@@ -1,5 +1,4 @@
 import { mkSection, type ExtensionContext } from "../../node-configs/popover-utils";
-import { showSocialSetupGuide } from "../../panels/SocialSetupGuide";
 
 export function renderSocialUploadFields(ctx: ExtensionContext): void {
   ctx.body.appendChild(mkSection("Platform Setup"));
@@ -19,7 +18,7 @@ export function renderSocialUploadFields(ctx: ExtensionContext): void {
     const p = validPlatforms.includes(platform as typeof validPlatforms[number])
       ? (platform as typeof validPlatforms[number])
       : "youtube";
-    showSocialSetupGuide(p);
+    import("../../panels/SocialSetupGuide").then(m => m.showSocialSetupGuide(p));
   });
   ctx.body.appendChild(btn);
 }

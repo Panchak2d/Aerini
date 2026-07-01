@@ -59,7 +59,7 @@ async fn check_ssrf(raw_url: &str) -> Result<(), String> {
     };
 
     let port = parsed.port_or_known_default().unwrap_or(443);
-    crate::nodes::util::check_host_ssrf(host, port).await
+    crate::nodes::util::check_host_ssrf(host, port, crate::nodes::util::SsrfPolicy::Strict).await
 }
 
 fn redact_url_for_log(raw_url: &str) -> String {

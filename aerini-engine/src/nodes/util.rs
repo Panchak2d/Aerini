@@ -30,7 +30,7 @@ pub fn scrub_url_in_error(s: &str) -> String {
         };
 
         if at_before_delim {
-            let a = at_pos.unwrap();
+            let a = at_pos.expect("at_pos is Some: at_before_delim guard requires at_pos.is_some()");
             let before_at = &after[..a];
             if let Some(colon) = before_at.find(':') {
                 let user = &before_at[..colon];
@@ -94,32 +94,44 @@ pub fn traverse_dotpath(data: &Value, path: &str) -> Value {
     current.clone()
 }
 
-/// Validate a resolved IP against the SSRF block list.
+/// Policy for SSRF host/IP validation.
 ///
-/// Rejects: loopback, RFC 1918 private, link-local, broadcast, documentation,
-/// unspecified, multicast, RFC 6598 shared address space (100.64.0.0/10),
-/// IPv4-mapped IPv6 addresses, and the Azure IMDS endpoint (168.63.129.16)
-/// which is not RFC 1918 but must be explicitly blocked.
+/// `Strict` blocks loopback, RFC 1918 private, and IPv6 unique-local ranges.
+/// `AllowLocal` additionally permits those ranges -- only appropriate for a
+/// node whose entire purpose is reaching a server on the user's own machine
+/// or LAN, where the configured address is itself the user's explicit trust
+/// signal (e.g. a1111/comfyui in `image_gen.rs`). Do not use `AllowLocal` for
+/// general-purpose URL fields where the target could come from an untrusted
+/// source the caller doesn't control.
 ///
-/// Called for both IP-literal URLs and post-DNS domain resolution.
-pub fn check_ssrf_ip(ip: std::net::IpAddr) -> Result<(), String> {
-    check_ssrf_ip_impl(ip, false)
+/// Azure IMDS, link-local (including the 169.254.169.254 cloud metadata
+/// address), RFC 6598 shared address space, broadcast, documentation,
+/// unspecified, and multicast all remain blocked unconditionally under either
+/// policy -- none of those are legitimate targets for a self-hosted local
+/// server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SsrfPolicy {
+    Strict,
+    AllowLocal,
 }
 
-/// Same as [`check_ssrf_ip`] but additionally permits loopback, RFC 1918
-/// private (10/8, 172.16/12, 192.168/16), and IPv6 unique-local (fc00::/7)
-/// addresses. Azure IMDS, link-local (including the 169.254.169.254 cloud
-/// metadata address), RFC 6598 shared address space, broadcast, documentation,
-/// unspecified, and multicast all remain blocked unconditionally -- none of
-/// those are legitimate targets for a self-hosted local server.
+impl SsrfPolicy {
+    fn allow_local(self) -> bool {
+        matches!(self, SsrfPolicy::AllowLocal)
+    }
+}
+
+/// Validate a resolved IP against the SSRF block list per `policy`.
 ///
-/// Only call this for a node whose entire purpose is reaching a server on the
-/// user's own machine or LAN, where the configured address is itself the
-/// user's explicit trust signal (e.g. a1111/comfyui in `image_gen.rs`). Do not
-/// use this for general-purpose URL fields where the target could come from an
-/// untrusted source the caller doesn't control.
-pub fn check_ssrf_ip_allow_local(ip: std::net::IpAddr) -> Result<(), String> {
-    check_ssrf_ip_impl(ip, true)
+/// Rejects (always, both policies): link-local, broadcast, documentation,
+/// unspecified, multicast, RFC 6598 shared address space (100.64.0.0/10),
+/// IPv4-mapped IPv6 addresses, and the Azure IMDS endpoint (168.63.129.16).
+/// Under `Strict`, also rejects loopback and RFC 1918 private addresses;
+/// `AllowLocal` permits those.
+///
+/// Called for both IP-literal URLs and post-DNS domain resolution.
+pub fn check_ssrf_ip(ip: std::net::IpAddr, policy: SsrfPolicy) -> Result<(), String> {
+    check_ssrf_ip_impl(ip, policy.allow_local())
 }
 
 fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), String> {
@@ -191,17 +203,8 @@ fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), Str
 /// **Required mitigation:** configure a network-level egress firewall to block
 /// outbound TCP connections to private IP ranges (RFC 1918, link-local, loopback).
 /// The application-layer SSRF check alone does not provide a complete boundary.
-pub async fn check_host_ssrf(host: url::Host<&str>, port: u16) -> Result<(), String> {
-    check_host_ssrf_impl(host, port, false).await
-}
-
-/// Same as [`check_host_ssrf`] but delegates to [`check_ssrf_ip_allow_local`]
-/// and permits the literal `localhost` / `*.localhost` domain names. The
-/// `metadata.google.internal` literal remains blocked unconditionally -- it is
-/// never a legitimate target for a self-hosted local server. See
-/// [`check_ssrf_ip_allow_local`] for the full rationale and scope restriction.
-pub async fn check_host_ssrf_allow_local(host: url::Host<&str>, port: u16) -> Result<(), String> {
-    check_host_ssrf_impl(host, port, true).await
+pub async fn check_host_ssrf(host: url::Host<&str>, port: u16, policy: SsrfPolicy) -> Result<(), String> {
+    check_host_ssrf_impl(host, port, policy.allow_local()).await
 }
 
 async fn check_host_ssrf_impl(
@@ -212,12 +215,12 @@ async fn check_host_ssrf_impl(
     match host {
         url::Host::Ipv4(ip) => {
             let addr = std::net::IpAddr::V4(ip);
-            if allow_local { check_ssrf_ip_allow_local(addr) } else { check_ssrf_ip(addr) }
+            check_ssrf_ip_impl(addr, allow_local)
         }
 
         url::Host::Ipv6(ip) => {
             let addr = std::net::IpAddr::V6(ip);
-            if allow_local { check_ssrf_ip_allow_local(addr) } else { check_ssrf_ip(addr) }
+            check_ssrf_ip_impl(addr, allow_local)
         }
 
         url::Host::Domain(domain) => {
@@ -233,7 +236,7 @@ async fn check_host_ssrf_impl(
             let mut resolved_any = false;
             for addr in addrs {
                 resolved_any = true;
-                if allow_local { check_ssrf_ip_allow_local(addr.ip())?; } else { check_ssrf_ip(addr.ip())?; }
+                check_ssrf_ip_impl(addr.ip(), allow_local)?;
             }
             if !resolved_any {
                 return Err(format!("DNS resolution returned no addresses for '{}'", domain));
@@ -249,24 +252,15 @@ async fn check_host_ssrf_impl(
 /// host and port, then delegates to `check_host_ssrf`. Blocks loopback, private,
 /// link-local, Azure IMDS, and all other non-public IP ranges.
 ///
-/// **Note:** this check intentionally blocks `localhost` and loopback addresses,
-/// which means self-hosted inference servers (e.g. Ollama at
-/// `http://localhost:11434/v1`) will be rejected. This is the correct security
-/// boundary for any node whose target URL could come from an untrusted source
-/// the caller doesn't fully control. For a node whose only purpose is reaching
-/// a local server the user explicitly configures (e.g. a1111/comfyui in
-/// `image_gen.rs`), use [`check_host_ssrf_from_url_allow_local`] instead.
-pub async fn check_host_ssrf_from_url(raw_url: &str) -> Result<(), String> {
-    check_host_ssrf_from_url_impl(raw_url, false).await
-}
-
-/// Same as [`check_host_ssrf_from_url`] but permits loopback, RFC 1918 private,
-/// IPv6 unique-local, and the literal `localhost` domain. See
-/// [`check_ssrf_ip_allow_local`] for the full rationale and scope restriction --
-/// only use this where the configured URL is itself the user's explicit,
-/// node-scoped trust signal for a known local-only service.
-pub async fn check_host_ssrf_from_url_allow_local(raw_url: &str) -> Result<(), String> {
-    check_host_ssrf_from_url_impl(raw_url, true).await
+/// **Note:** this check intentionally blocks `localhost` and loopback addresses
+/// under `SsrfPolicy::Strict`, which means self-hosted inference servers (e.g.
+/// Ollama at `http://localhost:11434/v1`) will be rejected. This is the
+/// correct security boundary for any node whose target URL could come from an
+/// untrusted source the caller doesn't fully control. For a node whose only
+/// purpose is reaching a local server the user explicitly configures (e.g.
+/// a1111/comfyui in `image_gen.rs`), pass `SsrfPolicy::AllowLocal` instead.
+pub async fn check_host_ssrf_from_url(raw_url: &str, policy: SsrfPolicy) -> Result<(), String> {
+    check_host_ssrf_from_url_impl(raw_url, policy.allow_local()).await
 }
 
 async fn check_host_ssrf_from_url_impl(raw_url: &str, allow_local: bool) -> Result<(), String> {
@@ -284,15 +278,17 @@ async fn check_host_ssrf_from_url_impl(raw_url: &str, allow_local: bool) -> Resu
     };
 
     let port = parsed.port_or_known_default().unwrap_or(443);
-    if allow_local { check_host_ssrf_allow_local(host, port).await } else { check_host_ssrf(host, port).await }
+    check_host_ssrf_impl(host, port, allow_local).await
 }
 
 /// SSRF protection for database connection URLs (postgres, mysql, redis).
 ///
 /// Parses `raw_url`, extracts the host and port, and delegates to
-/// `check_host_ssrf`. Port fallbacks: postgres → 5432, mysql → 3306,
-/// redis/rediss → 6379. The url crate does not know these as special
-/// schemes and returns `None` from `port()` when no port is specified.
+/// `check_host_ssrf` under `SsrfPolicy::Strict` (database connections never
+/// permit local/private targets via this fn). Port fallbacks: postgres →
+/// 5432, mysql → 3306, redis/rediss → 6379. The url crate does not know these
+/// as special schemes and returns `None` from `port()` when no port is
+/// specified.
 pub async fn check_db_url_ssrf(raw_url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(raw_url)
         .map_err(|e| format!("Invalid connection URL: {}", e))?;
@@ -309,7 +305,7 @@ pub async fn check_db_url_ssrf(raw_url: &str) -> Result<(), String> {
         _                         => 0,
     });
 
-    check_host_ssrf(host, port).await
+    check_host_ssrf_impl(host, port, false).await
 }
 
 /// Maps a reqwest network error to a `NodeOutput`, classifying timeout and
@@ -325,44 +321,44 @@ pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
 
 #[cfg(test)]
 mod ssrf_tests {
-    use super::check_ssrf_ip;
+    use super::{check_ssrf_ip, SsrfPolicy};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
     fn v6(s: &str) -> IpAddr { IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()) }
 
     #[test]
-    fn loopback_blocked()          { assert!(check_ssrf_ip(v4(127, 0, 0, 1)).is_err()); }
+    fn loopback_blocked()          { assert!(check_ssrf_ip(v4(127, 0, 0, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn rfc1918_10_blocked()        { assert!(check_ssrf_ip(v4(10, 0, 0, 1)).is_err()); }
+    fn rfc1918_10_blocked()        { assert!(check_ssrf_ip(v4(10, 0, 0, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn rfc1918_172_blocked()       { assert!(check_ssrf_ip(v4(172, 16, 0, 1)).is_err()); }
+    fn rfc1918_172_blocked()       { assert!(check_ssrf_ip(v4(172, 16, 0, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn rfc1918_192_blocked()       { assert!(check_ssrf_ip(v4(192, 168, 1, 1)).is_err()); }
+    fn rfc1918_192_blocked()       { assert!(check_ssrf_ip(v4(192, 168, 1, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn link_local_169_blocked()    { assert!(check_ssrf_ip(v4(169, 254, 0, 1)).is_err()); }
+    fn link_local_169_blocked()    { assert!(check_ssrf_ip(v4(169, 254, 0, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn azure_imds_blocked()        { assert!(check_ssrf_ip(v4(168, 63, 129, 16)).is_err()); }
+    fn azure_imds_blocked()        { assert!(check_ssrf_ip(v4(168, 63, 129, 16), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn public_ip_allowed()         { assert!(check_ssrf_ip(v4(8, 8, 8, 8)).is_ok()); }
+    fn public_ip_allowed()         { assert!(check_ssrf_ip(v4(8, 8, 8, 8), SsrfPolicy::Strict).is_ok()); }
     #[test]
-    fn another_public_allowed()    { assert!(check_ssrf_ip(v4(93, 184, 216, 34)).is_ok()); }
+    fn another_public_allowed()    { assert!(check_ssrf_ip(v4(93, 184, 216, 34), SsrfPolicy::Strict).is_ok()); }
     #[test]
-    fn ipv6_loopback_blocked()     { assert!(check_ssrf_ip(v6("::1")).is_err()); }
+    fn ipv6_loopback_blocked()     { assert!(check_ssrf_ip(v6("::1"), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn ipv6_unique_local_blocked() { assert!(check_ssrf_ip(v6("fc00::1")).is_err()); }
+    fn ipv6_unique_local_blocked() { assert!(check_ssrf_ip(v6("fc00::1"), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn ipv6_link_local_blocked()   { assert!(check_ssrf_ip(v6("fe80::1")).is_err()); }
+    fn ipv6_link_local_blocked()   { assert!(check_ssrf_ip(v6("fe80::1"), SsrfPolicy::Strict).is_err()); }
     #[test]
     fn ipv4_mapped_private_blocked() {
         // ::ffff:10.0.0.1 — IPv4-mapped IPv6, must be caught as private
-        assert!(check_ssrf_ip(v6("::ffff:10.0.0.1")).is_err());
+        assert!(check_ssrf_ip(v6("::ffff:10.0.0.1"), SsrfPolicy::Strict).is_err());
     }
 }
 
 #[cfg(test)]
 mod ssrf_allow_local_tests {
-    use super::check_ssrf_ip_allow_local;
+    use super::{check_ssrf_ip, SsrfPolicy};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
@@ -370,71 +366,71 @@ mod ssrf_allow_local_tests {
 
     // Previously-blocked ranges that must now be permitted for local providers.
     #[test]
-    fn loopback_now_allowed()       { assert!(check_ssrf_ip_allow_local(v4(127, 0, 0, 1)).is_ok()); }
+    fn loopback_now_allowed()       { assert!(check_ssrf_ip(v4(127, 0, 0, 1), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
-    fn rfc1918_10_now_allowed()     { assert!(check_ssrf_ip_allow_local(v4(10, 0, 0, 1)).is_ok()); }
+    fn rfc1918_10_now_allowed()     { assert!(check_ssrf_ip(v4(10, 0, 0, 1), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
-    fn rfc1918_172_now_allowed()    { assert!(check_ssrf_ip_allow_local(v4(172, 16, 0, 1)).is_ok()); }
+    fn rfc1918_172_now_allowed()    { assert!(check_ssrf_ip(v4(172, 16, 0, 1), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
-    fn rfc1918_192_now_allowed()    { assert!(check_ssrf_ip_allow_local(v4(192, 168, 1, 1)).is_ok()); }
+    fn rfc1918_192_now_allowed()    { assert!(check_ssrf_ip(v4(192, 168, 1, 1), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
-    fn ipv6_loopback_now_allowed()  { assert!(check_ssrf_ip_allow_local(v6("::1")).is_ok()); }
+    fn ipv6_loopback_now_allowed()  { assert!(check_ssrf_ip(v6("::1"), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
-    fn ipv6_unique_local_now_allowed() { assert!(check_ssrf_ip_allow_local(v6("fc00::1")).is_ok()); }
+    fn ipv6_unique_local_now_allowed() { assert!(check_ssrf_ip(v6("fc00::1"), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]
     fn ipv4_mapped_private_now_allowed() {
-        assert!(check_ssrf_ip_allow_local(v6("::ffff:10.0.0.1")).is_ok());
+        assert!(check_ssrf_ip(v6("::ffff:10.0.0.1"), SsrfPolicy::AllowLocal).is_ok());
     }
 
     // Must remain blocked even for local providers — none of these are a
     // legitimate local-inference-server target.
     #[test]
-    fn link_local_169_still_blocked() { assert!(check_ssrf_ip_allow_local(v4(169, 254, 0, 1)).is_err()); }
+    fn link_local_169_still_blocked() { assert!(check_ssrf_ip(v4(169, 254, 0, 1), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn cloud_metadata_ip_still_blocked() { assert!(check_ssrf_ip_allow_local(v4(169, 254, 169, 254)).is_err()); }
+    fn cloud_metadata_ip_still_blocked() { assert!(check_ssrf_ip(v4(169, 254, 169, 254), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn azure_imds_still_blocked()     { assert!(check_ssrf_ip_allow_local(v4(168, 63, 129, 16)).is_err()); }
+    fn azure_imds_still_blocked()     { assert!(check_ssrf_ip(v4(168, 63, 129, 16), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn rfc6598_still_blocked()        { assert!(check_ssrf_ip_allow_local(v4(100, 64, 0, 0)).is_err()); }
+    fn rfc6598_still_blocked()        { assert!(check_ssrf_ip(v4(100, 64, 0, 0), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn ipv6_link_local_still_blocked() { assert!(check_ssrf_ip_allow_local(v6("fe80::1")).is_err()); }
+    fn ipv6_link_local_still_blocked() { assert!(check_ssrf_ip(v6("fe80::1"), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn unspecified_v4_still_blocked() { assert!(check_ssrf_ip_allow_local(v4(0, 0, 0, 0)).is_err()); }
+    fn unspecified_v4_still_blocked() { assert!(check_ssrf_ip(v4(0, 0, 0, 0), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
-    fn multicast_v4_still_blocked()  { assert!(check_ssrf_ip_allow_local(v4(224, 0, 0, 1)).is_err()); }
+    fn multicast_v4_still_blocked()  { assert!(check_ssrf_ip(v4(224, 0, 0, 1), SsrfPolicy::AllowLocal).is_err()); }
 
     // Public IPs remain allowed, same as the strict variant.
     #[test]
-    fn public_ip_allowed() { assert!(check_ssrf_ip_allow_local(v4(8, 8, 8, 8)).is_ok()); }
+    fn public_ip_allowed() { assert!(check_ssrf_ip(v4(8, 8, 8, 8), SsrfPolicy::AllowLocal).is_ok()); }
 }
 
 #[cfg(test)]
 mod rfc6598_tests {
-    use super::check_ssrf_ip;
+    use super::{check_ssrf_ip, SsrfPolicy};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
     fn v6(s: &str) -> IpAddr { IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()) }
 
     #[test]
-    fn rfc6598_low_blocked()  { assert!(check_ssrf_ip(v4(100, 64, 0, 0)).is_err()); }
+    fn rfc6598_low_blocked()  { assert!(check_ssrf_ip(v4(100, 64, 0, 0), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn rfc6598_mid_blocked()  { assert!(check_ssrf_ip(v4(100, 100, 0, 1)).is_err()); }
+    fn rfc6598_mid_blocked()  { assert!(check_ssrf_ip(v4(100, 100, 0, 1), SsrfPolicy::Strict).is_err()); }
     #[test]
-    fn rfc6598_high_blocked() { assert!(check_ssrf_ip(v4(100, 127, 255, 255)).is_err()); }
+    fn rfc6598_high_blocked() { assert!(check_ssrf_ip(v4(100, 127, 255, 255), SsrfPolicy::Strict).is_err()); }
     #[test]
     fn rfc6598_boundary_low_allowed() {
         // 100.63.255.255 is just below 100.64.0.0/10 — must not be blocked by RFC 6598 rule
-        assert!(check_ssrf_ip(v4(100, 63, 255, 255)).is_ok());
+        assert!(check_ssrf_ip(v4(100, 63, 255, 255), SsrfPolicy::Strict).is_ok());
     }
     #[test]
     fn rfc6598_boundary_high_allowed() {
         // 100.128.0.0 is just above 100.64.0.0/10 — must not be blocked by RFC 6598 rule
-        assert!(check_ssrf_ip(v4(100, 128, 0, 0)).is_ok());
+        assert!(check_ssrf_ip(v4(100, 128, 0, 0), SsrfPolicy::Strict).is_ok());
     }
     #[test]
     fn rfc6598_ipv4_mapped_blocked() {
         // ::ffff:100.64.0.1 — IPv4-mapped form of RFC 6598 address (hex: 6440:0001)
-        assert!(check_ssrf_ip(v6("::ffff:6440:0001")).is_err());
+        assert!(check_ssrf_ip(v6("::ffff:6440:0001"), SsrfPolicy::Strict).is_err());
     }
 }
