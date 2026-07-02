@@ -52,7 +52,7 @@ jobs:
       # To suppress the warning: right-click the app → Open → Open. This is expected behaviour
       # for open-source releases without an Apple Developer account.
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
