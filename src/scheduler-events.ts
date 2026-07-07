@@ -9,7 +9,7 @@ import { setWorkflowRunning } from "./workflow-manager";
 import { getBgJobs, updateBgJobStoreFromEvent, hydrateBgJobsFromScheduler } from "./run-manager";
 import { saveRunToHistory } from "./run-history";
 import { isTauri } from "./utils";
-import { activateZone, getCurrentZone } from "./sidebar-sections";
+import { getCurrentZone } from "./sidebar-sections";
 import { loadBgPanel } from "./bg-panel-loader";
 
 type Toast  = (msg: string, type: "success" | "error" | "info") => void;
@@ -40,10 +40,6 @@ export async function bindSchedulerEvents(
     runManager.onNodeStatusEvent(evt.workflow_id, evt.node_id, evt.status);
   });
 
-  // Session-scoped set: tracks which workflow IDs have already activated the bg zone
-  // this session. Prevents re-switching on every restart.
-  const _bgZoneActivated = new Set<string>();
-
   await listenSchedulerStatus(async (evt: SchedulerStatusEvent) => {
     updateBgJobStoreFromEvent(evt);
     const bgPanel = await loadBgPanel();
@@ -68,11 +64,6 @@ export async function bindSchedulerEvents(
     }
 
     setWorkflowRunning(evt.workflow_id, evt.status === "running" || evt.status === "waiting");
-
-    if (evt.status === "running" && !_bgZoneActivated.has(evt.workflow_id)) {
-      _bgZoneActivated.add(evt.workflow_id);
-      activateZone("bgruns");
-    }
 
     if ((evt.status === "waiting" || evt.status === "error") && evt.last_result) {
       try {

@@ -9,7 +9,6 @@
 //! Run with: `cargo test -p aerini-engine --test schema_validation`
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use aerini_engine::node::NodeRegistry;
 use aerini_engine::nodes::register_builtins;
