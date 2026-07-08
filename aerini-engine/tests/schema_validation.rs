@@ -8,14 +8,12 @@
 //!
 //! Run with: `cargo test -p aerini-engine --test schema_validation`
 
-use std::path::PathBuf;
-
 use aerini_engine::node::NodeRegistry;
 use aerini_engine::nodes::register_builtins;
 
 fn make_registry() -> NodeRegistry {
     let mut registry = NodeRegistry::new();
-    let data_dir = PathBuf::from(std::env::temp_dir());
+    let data_dir = std::env::temp_dir();
     register_builtins(&mut registry, &data_dir, None);
     registry.seal_builtins();
     registry

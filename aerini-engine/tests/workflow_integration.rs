@@ -7,7 +7,6 @@
 //! Run with: `cargo test -p aerini-engine --test workflow_integration`
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,7 +32,7 @@ impl CredentialResolver for NoopResolver {
 
 fn make_registry() -> Arc<NodeRegistry> {
     let mut registry = NodeRegistry::new();
-    let data_dir = PathBuf::from(std::env::temp_dir());
+    let data_dir = std::env::temp_dir();
     register_builtins(&mut registry, &data_dir, None);
     registry.seal_builtins();
     Arc::new(registry)

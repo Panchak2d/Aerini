@@ -405,10 +405,7 @@ mod tests {
         // This test documents the contract — if the arm is changed to add a
         // header, this comment becomes a failing assertion trigger.
         let auth_mode = "none";
-        let adds_header = match auth_mode {
-            "none" => false,
-            _ => true,
-        };
+        let adds_header = !matches!(auth_mode, "none");
         assert!(!adds_header, "auth_mode 'none' must not add an Authorization header");
     }
 

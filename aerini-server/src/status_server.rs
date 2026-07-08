@@ -472,10 +472,9 @@ mod tests {
 
     #[tokio::test]
     async fn api_status_last_error_requires_auth() {
-        let state = std::sync::Arc::new(std::sync::RwLock::new({
-            let mut rs = RunState::default();
-            rs.last_error = Some("postgres://admin:secret@internal-db:5432/prod — connection refused".into());
-            rs
+        let state = std::sync::Arc::new(std::sync::RwLock::new(RunState {
+            last_error: Some("postgres://admin:secret@internal-db:5432/prod — connection refused".into()),
+            ..Default::default()
         }));
         let mut s = make_state(Some("secret"));
         s.run_state = state;

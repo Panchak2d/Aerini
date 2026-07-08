@@ -22,6 +22,49 @@ impl Drop for ActiveRunGuard {
     }
 }
 
+/// Tracks spawned per-connection webhook tasks and aborts every still-tracked
+/// one when dropped. Used so a hard abort of the owning job's own top-level
+/// task (stop_job/stop_all, or drain_all's timeout fallback to stop_all())
+/// cascades to any in-flight connection handler — a bare `tokio::spawn`
+/// would leave those as independent sibling tasks that survive the abort.
+///
+/// On a *graceful* exit (the webhook loop's `shutting_down` check), call
+/// `detach_all` first: drain_all's own contract is to let in-flight runs
+/// finish, not cut them off, so that path must not trigger this Drop.
+struct AbortOnDropTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDropTasks {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn push(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.0.push(handle);
+    }
+
+    /// Drops handles for tasks that have already finished, so this doesn't
+    /// grow for the life of a long-running webhook job.
+    fn reap(&mut self) {
+        self.0.retain(|h| !h.is_finished());
+    }
+
+    /// Clears every tracked handle without aborting the tasks they refer to
+    /// — dropping a `JoinHandle` (unlike aborting it) lets the task keep
+    /// running independently. Call before a graceful exit so in-flight
+    /// connections are allowed to finish rather than being cancelled.
+    fn detach_all(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for AbortOnDropTasks {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_job_loop(
     workflow_id:      String,
@@ -155,7 +198,25 @@ pub(super) async fn run_job_loop(
 
             emit_waiting(&event_sink, &db, &workflow_id, None);
 
+            // Tracks every per-connection task spawned below, aborting any
+            // still-tracked task when dropped. Held locally, not in
+            // SchedulerDaemon, so that a *hard* abort of this job's own
+            // top-level task (stop_job/stop_all's handle.abort(), or
+            // drain_all's timeout fallback to stop_all()) forcibly drops
+            // this wrapper mid-poll and cascades the cancellation to every
+            // in-flight connection handler — a bare tokio::spawn would
+            // instead leave those as siblings, not children, of the job's
+            // own handle, surviving the abort. On the *graceful*
+            // shutting_down exit below, this is explicitly detached first:
+            // drain_all's own contract is to let in-flight runs finish, not
+            // cut them off, so that path must not trigger the same Drop.
+            let mut conn_tasks = AbortOnDropTasks::new();
+
             loop {
+                // Reap already-finished connections so conn_tasks doesn't
+                // grow for the life of the job.
+                conn_tasks.reap();
+
                 let (mut stream, _) = match listener.accept().await {
                     Ok(s)  => s,
                     Err(e) => {
@@ -167,54 +228,83 @@ pub(super) async fn run_job_loop(
                     }
                 };
 
-                // Draining: reject new connections immediately so no new runs start.
+                // Draining: reject new connections immediately so no new runs
+                // start, then detach in-flight connections before returning —
+                // they keep running independently, matching drain_all's own
+                // "waits for in-flight runs to finish" contract, and only a
+                // subsequent hard abort (stop_all, e.g. on drain timeout) can
+                // still cancel them via their own JoinHandle::abort() path
+                // (unaffected by this wrapper once detached).
                 if shutting_down.load(Ordering::SeqCst) {
                     use tokio::io::AsyncWriteExt;
                     let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
+                    conn_tasks.detach_all();
                     break;
                 }
 
-                let payload = match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    parse_http_request(&mut stream, &path, &method, &secret),
-                ).await {
-                    Ok(Ok(p))  => p,
-                    Ok(Err(e)) => {
-                        use tokio::io::AsyncWriteExt;
-                        let _ = stream.write_all(e.as_bytes()).await;
-                        continue;
-                    }
-                    Err(_) => {
+                // Spawned per connection: a slow or stalled client (e.g. one that
+                // never sends a trailing newline) must not block this loop from
+                // accepting the next connection. Every captured value is cloned
+                // here (cheap — Arc clones and short strings) so the accept loop
+                // keeps its own copies for the next iteration.
+                let workflow_id      = workflow_id.clone();
+                let path             = path.clone();
+                let method           = method.clone();
+                let secret           = secret.clone();
+                let db               = Arc::clone(&db);
+                let registry         = Arc::clone(&registry);
+                let cred_store       = Arc::clone(&cred_store);
+                let event_sink       = Arc::clone(&event_sink);
+                let exec_lock        = Arc::clone(&exec_lock);
+                let env_allowlist    = env_allowlist.clone();
+                let file_sandbox_dir = file_sandbox_dir.clone();
+                let run_semaphore    = Arc::clone(&run_semaphore);
+                let active_runs      = Arc::clone(&active_runs);
+
+                let handle = tokio::spawn(async move {
+                    let payload = match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        parse_http_request(&mut stream, &path, &method, &secret),
+                    ).await {
+                        Ok(Ok(p))  => p,
+                        Ok(Err(e)) => {
+                            use tokio::io::AsyncWriteExt;
+                            let _ = stream.write_all(e.as_bytes()).await;
+                            return;
+                        }
+                        Err(_) => {
+                            use tokio::io::AsyncWriteExt;
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 408 Request Timeout\r\n\r\n"
+                            ).await;
+                            return;
+                        }
+                    };
+
+                    {
                         use tokio::io::AsyncWriteExt;
                         let _ = stream.write_all(
-                            b"HTTP/1.1 408 Request Timeout\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
                         ).await;
-                        continue;
                     }
-                };
 
-                {
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+                    let _guard = match exec_lock.try_lock() {
+                        Err(_) => {
+                            log_skip(&event_sink, &workflow_id, "previous run still in progress");
+                            return;
+                        }
+                        Ok(g) => g,
+                    };
+                    let _permit = run_semaphore.acquire().await;
+                    fire_once_with_vars(
+                        &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
+                        shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
+                        server_max_duration_secs, &file_sandbox_dir, &active_runs,
                     ).await;
-                }
 
-                let _guard = match exec_lock.try_lock() {
-                    Err(_) => {
-                        log_skip(&event_sink, &workflow_id, "previous run still in progress");
-                        continue;
-                    }
-                    Ok(g) => g,
-                };
-                let _permit = run_semaphore.acquire().await;
-                fire_once_with_vars(
-                    &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
-                    shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-                    server_max_duration_secs, &file_sandbox_dir, &active_runs,
-                ).await;
-
-                emit_waiting(&event_sink, &db, &workflow_id, None);
+                    emit_waiting(&event_sink, &db, &workflow_id, None);
+                });
+                conn_tasks.push(handle);
             }
         }
 
@@ -493,20 +583,58 @@ fn log_skip(event_sink: &Arc<dyn EventSink>, workflow_id: &str, reason: &str) {
     }));
 }
 
+/// Reads a single line (through the trailing `\n`, if present) from `reader`,
+/// enforcing `max_len` as a hard cap on bytes consumed *while reading* rather
+/// than only checking the result afterward — unlike `AsyncBufReadExt::
+/// read_line`, whose destination buffer can grow without bound before any
+/// length is ever checked. Returns `Ok(None)` if `max_len` bytes were read
+/// without finding a newline; the caller decides how to treat an oversized
+/// line. `Ok(Some(line))` covers both a normal `\n`-terminated line and one
+/// ended by EOF.
+async fn read_line_capped(
+    reader:  &mut (impl tokio::io::AsyncRead + Unpin),
+    max_len: usize,
+) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buf  = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if buf.len() >= max_len {
+            return Ok(None);
+        }
+        if reader.read(&mut byte).await? == 0 {
+            break; // EOF
+        }
+        buf.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 async fn parse_http_request(
     stream:          &mut tokio::net::TcpStream,
     expected_path:   &str,
     expected_method: &str,
     secret:          &str,
 ) -> Result<std::collections::HashMap<String, Value>, String> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, BufReader};
+
+    // Hard cap on a single request/header line, enforced *during* the read
+    // (see `read_line_capped`) rather than only checked after the fact.
+    const MAX_LINE_BYTES: usize = 8192;
 
     let (r, _w) = stream.split();
     let mut reader = BufReader::new(r);
 
-    let mut req_line = String::new();
-    reader.read_line(&mut req_line).await
-        .map_err(|_| "HTTP/1.1 400 Bad Request\r\n\r\n".to_string())?;
+    let req_line = match read_line_capped(&mut reader, MAX_LINE_BYTES).await {
+        Ok(Some(line)) => line,
+        _ => return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string()),
+    };
 
     let parts: Vec<&str> = req_line.split_whitespace().collect();
     let req_method = parts.first().copied().unwrap_or("GET");
@@ -524,9 +652,12 @@ async fn parse_http_request(
     let mut header_count = 0usize;
     loop {
         if header_count >= 100 { break; }
-        let mut line = String::new();
-        let _ = reader.read_line(&mut line).await;
-        if line.len() > 8192 { break; }
+        let line = match read_line_capped(&mut reader, MAX_LINE_BYTES).await {
+            Ok(Some(line)) => line,
+            // Oversized line, read error, or invalid UTF-8 — stop parsing
+            // headers, same as reaching the blank line that ends them.
+            _ => break,
+        };
         if line.trim().is_empty() { break; }
         if let Some((k, v)) = line.trim().split_once(": ") {
             let k_lower = k.to_lowercase();
