@@ -83,7 +83,7 @@ impl Node for SaveToFolderNode {
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let cfg = &input.input;
 
-        let folder_path = match cfg["folder_path"].as_str() {
+        let raw_folder_path = match cfg["folder_path"].as_str() {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return NodeOutput::failure(NodeError::unrecoverable(
                 "MISSING_FOLDER_PATH",
@@ -92,7 +92,10 @@ impl Node for SaveToFolderNode {
         };
 
         // Server mode: enforce __file_sandbox_dir if set, matching the same policy as FileNode.
-        if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
+        // The resolved path produced below is what every subsequent operation (create_dir_all,
+        // file writes, the echoed "folder" output field) uses — raw_folder_path is never
+        // touched again after this block, mirroring file.rs's resolve-once pattern.
+        let folder_path: String = if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
             if let Some(sandbox_str) = sandbox_val.as_str() {
                 // Canonicalize the sandbox root so symlinks in the operator-supplied path
                 // don't defeat the containment check.
@@ -104,11 +107,16 @@ impl Node for SaveToFolderNode {
                     )),
                 };
                 // Resolve relative paths against the canonical sandbox root.
-                let abs: std::path::PathBuf = if folder_path.starts_with('/') {
-                    std::path::PathBuf::from(&folder_path)
+                let abs: std::path::PathBuf = if raw_folder_path.starts_with('/') {
+                    std::path::PathBuf::from(&raw_folder_path)
                 } else {
-                    sandbox.join(&folder_path)
+                    sandbox.join(&raw_folder_path)
                 };
+                let outside = || NodeOutput::failure(NodeError::unrecoverable(
+                    "PATH_OUTSIDE_SANDBOX",
+                    format!("folder_path '{}' is outside the permitted sandbox directory '{}'",
+                        raw_folder_path, sandbox_str),
+                ));
                 // The target directory may not exist yet (create_dir_all runs later).
                 // Canonicalize the deepest existing ancestor and check containment.
                 // This also dereferences any symlinks inside the sandbox that point outside.
@@ -126,14 +134,33 @@ impl Node for SaveToFolderNode {
                     }
                 };
                 if !canonical_parent.starts_with(&sandbox) {
-                    return NodeOutput::failure(NodeError::unrecoverable(
-                        "PATH_OUTSIDE_SANDBOX",
-                        format!("folder_path '{}' is outside the permitted sandbox directory '{}'",
-                            folder_path, sandbox_str),
-                    ));
+                    return outside();
                 }
+                // Rejoin whatever suffix of `abs` doesn't exist yet onto the canonicalized
+                // (symlink-dereferenced) existing ancestor, so the value threaded through to
+                // flat_mode/subfolder_mode is exactly the path just validated above — not the
+                // raw, unresolved folder_path string the old code discarded here.
+                let suffix = match abs.strip_prefix(check) {
+                    Ok(s) => s,
+                    Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
+                        "INVALID_PATH",
+                        "folder_path could not be resolved relative to its existing ancestor",
+                    )),
+                };
+                // A ".." can only survive into suffix when the component it would walk back
+                // through never existed on disk (canonicalize couldn't resolve it away above),
+                // so its real target is unverified — reject rather than let create_dir_all/
+                // fs::write resolve it past the already-validated ancestor at write time.
+                if suffix.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    return outside();
+                }
+                canonical_parent.join(suffix).to_string_lossy().into_owned()
+            } else {
+                raw_folder_path
             }
-        }
+        } else {
+            raw_folder_path
+        };
 
         let overwrite = cfg["overwrite"].as_bool().unwrap_or(true);
         // Sanitize prefix: strip path separators to prevent directory traversal.
@@ -497,7 +524,9 @@ fn extract_config_files(val: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ExecutionContext;
     use serde_json::json;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     // "Hello World" → SGVsbG8gV29ybGQ=
@@ -508,6 +537,52 @@ mod tests {
 
     fn file_entry(name: &str, b64: &str) -> Value {
         json!({ "filename": name, "data": b64 })
+    }
+
+    // ── sandbox containment (T0-3 / S3-1) ────────────────────────────────────
+
+    // With __file_sandbox_dir set and a RELATIVE folder_path, the write must land
+    // inside the sandbox. Before the fix, the containment check validated a
+    // sandbox-resolved path that was then discarded — the actual write used the
+    // raw, unresolved folder_path, which resolves relative to the process's CWD
+    // instead of the sandbox root. This test exercises the full execute() path
+    // (not flat_mode directly) since the sandbox resolution lives there.
+    #[tokio::test]
+    async fn sandbox_relative_folder_path_writes_inside_sandbox() {
+        let sandbox_dir = TempDir::new().unwrap();
+        let canonical_sandbox = std::fs::canonicalize(sandbox_dir.path()).unwrap();
+
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert(
+            "__file_sandbox_dir".to_string(),
+            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
+        );
+
+        let input = NodeInput {
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            input: json!({
+                "folder_path": "relative/sub",
+                "files": [file_entry("hello.txt", "SGVsbG8gV29ybGQ=")]
+            }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata,
+                ..Default::default()
+            },
+        };
+
+        let out = SaveToFolderNode.execute(input).await;
+        assert!(out.success, "expected success: {:?}", out.error);
+
+        let expected_dir = canonical_sandbox.join("relative/sub");
+        assert!(
+            expected_dir.join("hello.txt").exists(),
+            "file must be written inside the sandbox for a relative folder_path, \
+             not at a CWD-relative location"
+        );
     }
 
     // ── flat_mode ─────────────────────────────────────────────────────────────

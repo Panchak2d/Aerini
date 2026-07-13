@@ -349,14 +349,25 @@ pub struct ExecutionContext {
     /// Serializes identically to HashMap<String, Value> — no wire-format change.
     pub node_outputs: Arc<HashMap<String, Value>>,
     pub metadata: HashMap<String, Value>,
+    /// Node ids in completion order. A node that completes more than once in a
+    /// single execution (a loop body node, once per iteration) moves to the end
+    /// on each completion rather than appending a duplicate — `.last()` always
+    /// names the most recently completed node, and length stays bounded by the
+    /// workflow's unique node count regardless of loop iteration count. See
+    /// `ExecutionState::mark_succeeded` in `context.rs` for the mutation.
+    /// `#[serde(default)]` so a pre-existing serialized context with no such key
+    /// still deserializes — additive field, no wire-format break.
+    #[serde(default)]
+    pub execution_order: Arc<Vec<String>>,
 }
 
 impl Default for ExecutionContext {
     fn default() -> Self {
         Self {
-            variables:    HashMap::new(),
-            node_outputs: Arc::new(HashMap::new()),
-            metadata:     HashMap::new(),
+            variables:       HashMap::new(),
+            node_outputs:    Arc::new(HashMap::new()),
+            metadata:        HashMap::new(),
+            execution_order: Arc::new(Vec::new()),
         }
     }
 }

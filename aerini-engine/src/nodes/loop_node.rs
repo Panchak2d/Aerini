@@ -84,9 +84,13 @@ impl Node for LoopNode {
         let item_var  = input.input["item_var"].as_str().unwrap_or("item").to_string();
         let index_var = input.input["index_var"].as_str().unwrap_or("index").to_string();
 
-        let source_data: Value = if let Some(source_node) = input.input["source_node"].as_str() {
-            input.context.node_outputs.get(source_node).cloned().unwrap_or(Value::Null)
-        } else {
+        // Batch A: source_node is schema-typed as a string (line 37), so a
+        // non-string, non-null value is a malformed config, not "unset" — it
+        // must not silently fall through to the search-all-outputs fallback
+        // below, which is reserved for a genuinely absent/null source_node.
+        // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern.
+        let source_node_value = &input.input["source_node"];
+        let source_data: Value = if source_node_value.is_null() {
             // Search all node outputs for the array field
             let mut found = Value::Null;
             for output_val in input.context.node_outputs.values() {
@@ -97,6 +101,16 @@ impl Node for LoopNode {
                 }
             }
             found
+        } else if let Some(source_node) = source_node_value.as_str() {
+            input.context.node_outputs.get(source_node).cloned().unwrap_or(Value::Null)
+        } else {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_SOURCE_NODE",
+                format!(
+                    "source_node is set to a non-string value ({}), which is not a valid node ID",
+                    source_node_value
+                ),
+            ));
         };
 
         let array = traverse_dotpath(&source_data, &array_field);
@@ -174,6 +188,64 @@ impl Node for LoopNode {
             }),
             vec![format!("Loop: item {}/{}", current_index + 1, total)],
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Batch A only: covers the source_node validation this batch added.
+// No test module existed in this file before this batch; scope is limited
+// to what this fix changes (Rule 7), not a full suite for pre-existing logic.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
+        NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata:     HashMap::new(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn non_string_source_node_returns_error() {
+        // Batch A / T1-1g pattern: a bare number for "source_node" must not
+        // silently fall through to the search-all-outputs fallback the way
+        // an absent key correctly does.
+        let input = make_input(
+            json!({ "array_field": "items", "source_node": 5 }),
+            HashMap::new(),
+        );
+        let out = LoopNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_SOURCE_NODE");
+    }
+
+    #[tokio::test]
+    async fn explicit_null_source_node_still_searches_all_outputs() {
+        // Explicit JSON null is treated the same as an absent key (both are
+        // "genuinely unset"), unlike a non-string value — unchanged from
+        // pre-batch behavior.
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": [1, 2, 3] }));
+        let input = make_input(
+            json!({ "array_field": "items", "source_node": null }),
+            outputs,
+        );
+        let out = LoopNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["total"], json!(3));
     }
 }
 

@@ -143,6 +143,7 @@ mod tests {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata:     HashMap::new(),
+                ..Default::default()
             },
         }
     }
@@ -205,6 +206,7 @@ mod tests {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata:     HashMap::new(),
+                ..Default::default()
             },
         };
         let out = IfConditionNode.execute(input).await;

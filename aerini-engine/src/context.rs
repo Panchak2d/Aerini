@@ -83,6 +83,15 @@ pub struct ExecutionState {
     // these directly via take_loop_results() and injects them into the done output.
     loop_results: HashMap<String, Vec<Value>>,
     pub logs: Vec<ExecutionLogEntry>,
+    // Node ids in completion order — root cause fix for the S3-2/S3-3/S4-6/S4-7
+    // family (output_node.rs, json_node.rs, merge.rs, loop_node.rs all currently
+    // iterate node_outputs' raw HashMap for "most recent"/ordered semantics,
+    // which is non-deterministic). Mutated only via mark_succeeded's move-to-end
+    // logic (see below) so a loop body node re-completing every iteration cannot
+    // grow this unboundedly — bounded by unique node count, not iteration count.
+    // T2-2 (this field) is additive-only; T2-5 (a separate, later batch) is what
+    // migrates the five consumer nodes above onto it.
+    execution_order: Vec<String>,
 }
 
 impl ExecutionState {
@@ -97,6 +106,7 @@ impl ExecutionState {
             loop_state: HashMap::new(),
             loop_results: HashMap::new(),
             logs: Vec::new(),
+            execution_order: Vec::new(),
         }
     }
 
@@ -115,6 +125,18 @@ impl ExecutionState {
     pub fn mark_succeeded(&mut self, node_id: &str, output: NodeOutput) {
         let value = output.output.clone().unwrap_or(serde_json::Value::Null);
         self.node_outputs.insert(node_id.to_string(), value);
+        // Move-to-end, not append: a loop body node calls mark_succeeded once per
+        // iteration (see executor/loop_executor.rs:337), not once per execution —
+        // an unconditional push would grow execution_order without bound across
+        // iterations and reproduce the exact O(k·n²) snapshot-clone cost the
+        // loop_results field above was specifically designed to avoid. Removing
+        // any prior entry before re-pushing keeps length bounded by unique node
+        // count and keeps `.last()` correctly naming the most recently completed
+        // node, including across loop iterations.
+        if let Some(pos) = self.execution_order.iter().position(|id| id == node_id) {
+            self.execution_order.remove(pos);
+        }
+        self.execution_order.push(node_id.to_string());
         if let Some(r) = self.node_statuses.get_mut(node_id) {
             r.status = NodeStatus::Succeeded;
             r.output = Some(output);
@@ -218,6 +240,7 @@ impl ExecutionState {
             variables: self.variables.clone(),
             node_outputs: Arc::new(outputs),
             metadata: meta,
+            execution_order: Arc::new(self.execution_order.clone()),
         }
     }
 }
@@ -229,4 +252,67 @@ pub fn new_shared_state(
     variables: HashMap<String, Value>,
 ) -> SharedExecutionState {
     Arc::new(RwLock::new(ExecutionState::new(workflow_id, variables)))
+}
+
+#[cfg(test)]
+mod execution_order_tests {
+    use super::*;
+    use crate::model::NodeOutput;
+    use serde_json::json;
+
+    #[test]
+    fn records_completion_order_for_distinct_nodes() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!(1)));
+        s.mark_succeeded("b", NodeOutput::success(json!(2)));
+        s.mark_succeeded("c", NodeOutput::success(json!(3)));
+        assert_eq!(s.execution_order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn snapshot_exposes_execution_order() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!(1)));
+        s.mark_succeeded("b", NodeOutput::success(json!(2)));
+        let ctx = s.snapshot();
+        assert_eq!(*ctx.execution_order, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// Loop-body node re-completing across iterations must move to the end,
+    /// not append a duplicate — this is the exact call pattern
+    /// executor/loop_executor.rs:337 produces (one mark_succeeded per iteration
+    /// for the same body_id).
+    #[test]
+    fn reexecuting_node_moves_to_end_not_duplicated() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!(1)));
+        s.mark_succeeded("body", NodeOutput::success(json!("iter0")));
+        s.mark_succeeded("z", NodeOutput::success(json!(9)));
+        s.mark_succeeded("body", NodeOutput::success(json!("iter1")));
+        assert_eq!(s.execution_order, vec!["a", "z", "body"]);
+        assert_eq!(s.execution_order.len(), 3);
+    }
+
+    /// Bounded-growth guarantee: an n-iteration loop body must not grow
+    /// execution_order past the unique node count, regardless of n — this is
+    /// the specific regression this batch's design decision (move-to-end,
+    /// not append) exists to prevent.
+    #[test]
+    fn many_reexecutions_of_same_node_stay_bounded() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        for i in 0..500 {
+            s.mark_succeeded("body", NodeOutput::success(json!(i)));
+        }
+        assert_eq!(s.execution_order.len(), 1);
+        assert_eq!(s.execution_order, vec!["body"]);
+    }
+
+    #[test]
+    fn last_reflects_most_recently_completed_node_across_reexecution() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("output_node", NodeOutput::success(json!("first")));
+        s.mark_succeeded("body", NodeOutput::success(json!("iter0")));
+        s.mark_succeeded("body", NodeOutput::success(json!("iter1")));
+        assert_eq!(s.execution_order.last().map(String::as_str), Some("body"));
+    }
 }

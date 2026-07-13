@@ -87,6 +87,42 @@ pub struct ScheduledJobRow {
     pub created_at:    String,
 }
 
+/// Placeholder written into a redacted row's `trigger_kind` in place of a
+/// real webhook secret. Deliberately non-empty so it can't be mistaken for
+/// an unset/empty secret.
+const REDACTED_WEBHOOK_SECRET: &str = "<redacted>";
+
+impl ScheduledJobRow {
+    /// Returns a copy with any `Webhook` trigger's `secret` replaced by
+    /// [`REDACTED_WEBHOOK_SECRET`]. Every other field, and every other
+    /// trigger kind, is unchanged.
+    ///
+    /// Internal engine consumers (`scheduler/mod.rs`, `scheduler/runner.rs`)
+    /// need the real secret to arm listeners and validate incoming webhook
+    /// requests, so they must keep reading rows straight from `SchedulerDb`.
+    /// This method exists only for call sites that hand a row to something
+    /// outside the engine's trust boundary — an HTTP response or an IPC
+    /// reply — where the raw secret would otherwise leak (see
+    /// AUDIT_REPORT.md S6-2 / S7-1).
+    pub fn redacted(&self) -> Self {
+        let mut row = self.clone();
+        if let Ok(TriggerKind::Webhook { port, path, method, .. }) =
+            serde_json::from_str::<TriggerKind>(&row.trigger_kind)
+        {
+            let redacted_trigger = TriggerKind::Webhook {
+                port,
+                path,
+                method,
+                secret: REDACTED_WEBHOOK_SECRET.to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&redacted_trigger) {
+                row.trigger_kind = json;
+            }
+        }
+        row
+    }
+}
+
 /// Emitted to the frontend on every state transition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerStatusEvent {
@@ -131,5 +167,74 @@ pub enum SchedulerError {
 impl From<SchedulerError> for String {
     fn from(e: SchedulerError) -> String {
         serde_json::to_string(&e).unwrap_or_else(|_| "scheduler_error".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row_with_trigger(trigger: &TriggerKind) -> ScheduledJobRow {
+        ScheduledJobRow {
+            workflow_id:   "wf-1".to_string(),
+            workflow_name: "Test Workflow".to_string(),
+            trigger_kind:  serde_json::to_string(trigger).unwrap(),
+            status:        "active".to_string(),
+            always_on:     false,
+            run_count:     0,
+            last_run_at:   None,
+            next_run_at:   None,
+            last_error:    None,
+            created_at:    "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn redacted_strips_webhook_secret_but_keeps_port_path_method() {
+        let trigger = TriggerKind::Webhook {
+            port:   3456,
+            path:   "/hook".to_string(),
+            method: "POST".to_string(),
+            secret: "super-secret-value".to_string(),
+        };
+        let row      = row_with_trigger(&trigger);
+        let redacted = row.redacted();
+
+        let parsed: TriggerKind = serde_json::from_str(&redacted.trigger_kind).unwrap();
+        match parsed {
+            TriggerKind::Webhook { port, path, method, secret } => {
+                assert_eq!(port, 3456);
+                assert_eq!(path, "/hook");
+                assert_eq!(method, "POST");
+                assert_eq!(secret, REDACTED_WEBHOOK_SECRET);
+                assert_ne!(secret, "super-secret-value");
+            }
+            other => panic!("expected Webhook trigger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn redacted_leaves_non_webhook_triggers_untouched() {
+        let trigger = TriggerKind::Cron { expr: "0 * * * *".to_string() };
+        let row      = row_with_trigger(&trigger);
+        let redacted = row.redacted();
+        assert_eq!(redacted.trigger_kind, row.trigger_kind);
+    }
+
+    #[test]
+    fn redacted_leaves_every_other_field_untouched() {
+        let trigger  = TriggerKind::Interval { secs: 60 };
+        let mut row  = row_with_trigger(&trigger);
+        row.run_count   = 7;
+        row.last_error  = Some("boom".to_string());
+        row.always_on   = true;
+        let redacted = row.redacted();
+        assert_eq!(redacted.workflow_id, row.workflow_id);
+        assert_eq!(redacted.workflow_name, row.workflow_name);
+        assert_eq!(redacted.status, row.status);
+        assert_eq!(redacted.always_on, row.always_on);
+        assert_eq!(redacted.run_count, row.run_count);
+        assert_eq!(redacted.last_error, row.last_error);
+        assert_eq!(redacted.created_at, row.created_at);
     }
 }

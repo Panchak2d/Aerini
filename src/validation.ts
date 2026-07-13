@@ -1,4 +1,5 @@
 import type { Canvas } from "./canvas/Canvas";
+import type { CanvasNode } from "./canvas/Node";
 import { NODE_IDS, TRIGGER_NODE_IDS, DANGEROUS_NODE_IDS } from "./node-ids";
 
 export const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -42,16 +43,22 @@ export function validateWorkflow(canvas: Canvas): string[] {
   return errors;
 }
 
-// approvedForExecution is session-scoped and owned by the caller (app.ts).
-// Passing it in avoids hidden module-level state while keeping the Set encapsulated
-// per-session in the caller.
+// approvedForExecution is session-scoped and owned by the caller (app.ts /
+// RunManager). Passing it in avoids hidden module-level state while keeping
+// the Set encapsulated per-caller.
+//
+// `nodes` is the exact set of nodes about to be executed — the whole canvas
+// for a normal Run, or just the ancestor subgraph for a single-node test run
+// (see run-manager/stream-handler.ts::handleRunSingleNode). Scoping to the
+// actual execution set means a dangerous node elsewhere in the workflow,
+// outside what's about to run, never triggers this warning (T1-15).
 export async function checkDangerousNodes(
   workflowId: string,
-  canvas: Canvas,
+  nodes: Iterable<CanvasNode>,
   approvedForExecution: Set<string>,
   confirm: (msg: string, isDanger: boolean) => Promise<boolean>,
 ): Promise<boolean> {
-  const dangerousNodes = [...canvas.nodes.values()]
+  const dangerousNodes = [...nodes]
     .filter(n => DANGEROUS_NODE_IDS.has(n.data.node_type_id as string));
   if (!dangerousNodes.length) return true;
 

@@ -151,6 +151,11 @@ const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// `execute()` per workflow run.
 const PLUGIN_EPOCH_DEADLINE: u64 = 3_000;
 
+/// Max chars of a malformed plugin `data` string echoed into the error log
+/// (`wit_output_to_engine`) — avoids dumping an arbitrarily large/binary
+/// blob into logs while still giving an operator enough to diagnose.
+const INVALID_OUTPUT_LOG_PREVIEW_CHARS: usize = 200;
+
 fn make_plugin_state() -> PluginState {
     PluginState {
         // No preopened directories, no inherited stdio — sandboxed context.
@@ -396,7 +401,8 @@ impl PluginLoader {
 /// # Output deserialization
 ///
 /// `NodeOutput.data` is a JSON string. On success it is parsed to `serde_json::Value`;
-/// parse failure is treated as empty output (`{}`), not an error.
+/// a parse failure is treated as a genuine, logged node failure (`wasm_invalid_output`),
+/// not silently substituted with empty output.
 ///
 /// # Static string fields
 ///
@@ -516,9 +522,27 @@ fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
 /// Convert a WIT `NodeOutput` record to the engine's [`NodeOutput`].
 fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
     if out.success {
-        let value: Value = serde_json::from_str(&out.data)
-            .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-        NodeOutput::success(value)
+        match serde_json::from_str::<Value>(&out.data) {
+            Ok(value) => NodeOutput::success(value),
+            Err(parse_err) => {
+                // A plugin that reports success but returns non-JSON `data` was
+                // previously papered over as an empty `{}` object with no error
+                // and no log line — indistinguishable from a plugin that legitimately
+                // returns no data. Surface it as a real, logged failure instead.
+                let preview: String = out.data.chars().take(INVALID_OUTPUT_LOG_PREVIEW_CHARS).collect();
+                tracing::error!(
+                    "plugin_loader: plugin reported success but `data` is not valid JSON: {} (data preview: {:?})",
+                    parse_err,
+                    preview
+                );
+                NodeOutput::failure(NodeError::unrecoverable(
+                    "wasm_invalid_output",
+                    format!(
+                        "plugin reported success but its output was not valid JSON: {parse_err}"
+                    ),
+                ))
+            }
+        }
     } else {
         NodeOutput::failure(NodeError {
             code: out.error_code,

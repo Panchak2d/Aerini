@@ -138,11 +138,7 @@ pub(super) fn sqlite_run_execute(conn: &Connection, query: &str, params: &[Value
 }
 
 pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value]) -> Result<Value, String> {
-    let first_word = query.split_whitespace().next().unwrap_or("").to_uppercase();
-    if first_word != "SELECT" && first_word != "WITH" {
-        return Err("The Query operation only accepts SELECT statements. \
-            Use the Execute operation for INSERT, UPDATE, DELETE, or other write operations.".to_string());
-    }
+    super::enforce_read_only_query(query)?;
     let sql_params = sqlite_bind_params(params)?;
     let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(query)
@@ -204,6 +200,39 @@ fn sqlite_bind_params(params: &[Value]) -> Result<Vec<Box<dyn rusqlite::ToSql>>,
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod sqlite_run_query_tests {
+    use super::sqlite_run_query;
+    use rusqlite::Connection;
+
+    #[test]
+    fn select_accepted() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (x INTEGER)", []).unwrap();
+        assert!(sqlite_run_query(&conn, "SELECT * FROM t", &[]).is_ok());
+    }
+
+    #[test]
+    fn delete_rejected_by_query_operation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (x INTEGER)", []).unwrap();
+        let err = sqlite_run_query(&conn, "DELETE FROM t", &[]).unwrap_err();
+        assert!(err.contains("SELECT"), "expected read-only rejection, got: {}", err);
+    }
+
+    /// S2-4's exact bypass, verified at the real call site (not just the pure
+    /// classifier tested in mod.rs's read_only_query_tests) — a WITH-prefixed
+    /// DELETE must still be rejected once wired into sqlite_run_query itself.
+    #[test]
+    fn with_prefixed_delete_rejected_by_query_operation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE users (name TEXT)", []).unwrap();
+        let err = sqlite_run_query(&conn, "WITH x AS (SELECT 1) DELETE FROM users", &[])
+            .unwrap_err();
+        assert!(err.contains("SELECT"), "expected read-only rejection, got: {}", err);
+    }
 }
 
 #[cfg(test)]

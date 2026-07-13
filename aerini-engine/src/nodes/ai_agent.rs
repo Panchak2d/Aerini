@@ -144,7 +144,11 @@ impl Node for AiAgentNode {
 
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
-        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url, crate::nodes::util::SsrfPolicy::Strict).await {
+        // AllowLocal (not Strict): same fix as ai_prompt/mod.rs (T1-11 / S2-2) —
+        // local inference servers (Ollama etc.) must be reachable via base_url.
+        // Single check site, upstream of the is_gemini branch, so it covers all
+        // three providers (OpenAI-compatible, Anthropic, Gemini).
+        if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url, crate::nodes::util::SsrfPolicy::AllowLocal).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
 
@@ -696,5 +700,80 @@ async fn call_anthropic_agent(
     }
 
     Ok(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use crate::node::Node;
+
+    /// T1-11 (S2-2): same SSRF-policy fix and same regression-proof pattern as
+    /// ai_prompt/mod.rs's `loopback_base_url_is_no_longer_ssrf_blocked` — a
+    /// loopback `base_url` must reach the local server (any outcome other than
+    /// `SSRF_BLOCKED` proves the pre-flight check no longer rejects it).
+    async fn spawn_minimal_openai_agent_mock() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (r, mut w) = stream.split();
+            let mut reader = BufReader::new(r);
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line).await;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                if line.trim().is_empty() { break; }
+                if let Some((k, v)) = line.trim().split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = reader.read_exact(&mut body).await;
+            }
+            let resp_body = r#"{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp_body.len(), resp_body
+            );
+            let _ = w.write_all(resp.as_bytes()).await;
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    fn make_input(val: serde_json::Value) -> NodeInput {
+        NodeInput {
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        val,
+            context:      ExecutionContext::default(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loopback_base_url_is_no_longer_ssrf_blocked() {
+        let base_url = spawn_minimal_openai_agent_mock().await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi",
+            "provider": "openai",
+            "base_url": base_url
+        }))).await;
+        if let Some(err) = &out.error {
+            assert_ne!(err.code, "SSRF_BLOCKED", "loopback base_url must be allowed under SsrfPolicy::AllowLocal");
+        }
+        assert!(out.success, "request should reach the local mock server and succeed: {:?}", out.error);
+    }
 }
 

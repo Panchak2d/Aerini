@@ -15,6 +15,10 @@ export interface CanvasNodeData {
   output_schema: Record<string, unknown>;
   retry: { max_attempts: number; backoff_ms: number };
   fallback_node: string | null;
+  /** Mirrors WorkflowNode.disabled (model.rs) — engine skips execution when true.
+   *  Optional so callers that construct fresh nodes (createNodeFromDescriptor)
+   *  need not set it; absent/undefined means false. */
+  disabled?: boolean;
   /** True when this node's input ports are derived from config slots at runtime. */
   dynamic_ports: boolean;
 }
@@ -67,7 +71,6 @@ export class CanvasNode {
   ports: Port[] = [];
   selected  = false;
   hovered   = false;
-  disabled  = false;
   status: "idle" | "running" | "success" | "error" = "idle";
   // True when this node has a required config field left empty after its
   // popover was closed. Cleared on a successful run (UX-7).
@@ -79,6 +82,18 @@ export class CanvasNode {
 
   // Running animation phase (0–1, loops)
   private _runPhase = 0;
+
+  // Backing field for `disabled`. The accessor below keeps `data.disabled`
+  // in sync on every write, so ContextMenu's Disable/Enable toggle (which
+  // only ever does `node.disabled = ...`) is automatically reflected in
+  // toWorkflowNode()'s output with no separate sync step required.
+  private _disabled = false;
+
+  get disabled(): boolean { return this._disabled; }
+  set disabled(v: boolean) {
+    this._disabled = v;
+    this.data.disabled = v;
+  }
 
   get height(): number {
     const maxPorts = Math.max(
@@ -92,6 +107,7 @@ export class CanvasNode {
 
   constructor(data: CanvasNodeData) {
     this.data = data;
+    this.disabled = data.disabled ?? false;
     // For dynamic-port nodes, derive ports from config before building
     // position-aware port list. This ensures ports are correct on first render
     // and after loading a saved workflow.
@@ -469,6 +485,7 @@ export class CanvasNode {
       output_schema: this.data.output_schema,
       retry:         this.data.retry,
       fallback_node: this.data.fallback_node,
+      disabled:      this.data.disabled ?? false,
       position:      this.data.position,
       dynamic_ports: this.data.dynamic_ports,
     };

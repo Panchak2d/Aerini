@@ -349,6 +349,9 @@ impl WorkflowExecutor {
             if let Some(done) = val.get("done").and_then(|d| d.as_bool()) {
                 return if done { "done".to_string() } else { "loop_body".to_string() };
             }
+            if let Some(port) = val.get("port").and_then(|p| p.as_str()) {
+                return port.to_string();
+            }
         }
         "output".to_string()
     }
@@ -1209,5 +1212,216 @@ mod tests {
             result,
             Err(EngineError::WorkflowTimeout { limit_secs: 10, .. })
         ));
+    }
+
+    // ── T1-1: resolve_taken_port recognizes Switch's "port" field ─────────────
+    //
+    // resolve_taken_port had no case for the "port" field switch.rs's output
+    // carries (case_1..case_8/default) — every Switch execution fell through
+    // to the hardcoded "output" fallback, which matches no edge a Switch node
+    // can actually have, so activate_successors dropped every branch.
+
+    #[test]
+    fn resolve_taken_port_reads_switch_port_field() {
+        let output = NodeOutput::success(serde_json::json!({
+            "matched_case": "ok",
+            "port": "case_3",
+            "value": "ok",
+            "data": {}
+        }));
+        assert_eq!(WorkflowExecutor::resolve_taken_port(&output), "case_3");
+    }
+
+    #[test]
+    fn resolve_taken_port_falls_back_to_output_when_no_recognized_field() {
+        let output = NodeOutput::success(serde_json::json!({ "some_field": "value" }));
+        assert_eq!(WorkflowExecutor::resolve_taken_port(&output), "output");
+    }
+
+    // Outputs { "status": "ok" } for the Switch node under test to route on.
+    struct SwitchSourceNode;
+    #[async_trait::async_trait]
+    impl Node for SwitchSourceNode {
+        fn type_id(&self)        -> &'static str { "switch_source_test" }
+        fn display_name(&self)   -> &'static str { "Switch Source Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::success(serde_json::json!({ "status": "ok" }))
+        }
+    }
+
+    // Records that it ran. Wired to the Switch node's "case_1" port — the
+    // branch that must activate for a "status" == "ok" match.
+    struct CaseOneMarkerNode { ran: Arc<Mutex<bool>> }
+    #[async_trait::async_trait]
+    impl Node for CaseOneMarkerNode {
+        fn type_id(&self)        -> &'static str { "case_one_marker_test" }
+        fn display_name(&self)   -> &'static str { "Case One Marker Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            *self.ran.lock().unwrap() = true;
+            crate::model::NodeOutput::success(serde_json::json!({}))
+        }
+    }
+
+    // Records that it ran. Wired to the Switch node's "case_2" port — the
+    // branch that must NOT activate for a "status" == "ok" match.
+    struct CaseTwoMarkerNode { ran: Arc<Mutex<bool>> }
+    #[async_trait::async_trait]
+    impl Node for CaseTwoMarkerNode {
+        fn type_id(&self)        -> &'static str { "case_two_marker_test" }
+        fn display_name(&self)   -> &'static str { "Case Two Marker Test" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            *self.ran.lock().unwrap() = true;
+            crate::model::NodeOutput::success(serde_json::json!({}))
+        }
+    }
+
+    // n_status → n_switch, whose "case_1"/"case_2" ports fan out to n_case1/
+    // n_case2. Switch config matches "status" == "ok" to case_1, so only
+    // n_case1 should activate.
+    fn switch_two_branch_workflow() -> Workflow {
+        use crate::model::WorkflowEdge;
+        let status = WorkflowNode {
+            id: "n_status".to_string(),
+            node_type_id: "switch_source_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Status Source".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let switch = WorkflowNode {
+            id: "n_switch".to_string(),
+            node_type_id: "switch".to_string(),
+            node_type: NodeType::Logic,
+            name: "Switch".to_string(),
+            config: serde_json::json!({
+                "field": "status",
+                "source_node": "n_status",
+                "cases": r#"[{"match":"ok","port":"case_1"},{"match":"error","port":"case_2"}]"#
+            }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let case1 = WorkflowNode {
+            id: "n_case1".to_string(),
+            node_type_id: "case_one_marker_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Case 1 Marker".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let case2 = WorkflowNode {
+            id: "n_case2".to_string(),
+            node_type_id: "case_two_marker_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Case 2 Marker".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_status_switch".to_string(),
+                from_node: "n_status".to_string(),
+                from_port: "output".to_string(),
+                to_node: "n_switch".to_string(),
+                to_port: "input".to_string(),
+                condition: None,
+                on_success: None,
+                on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_case1".to_string(),
+                from_node: "n_switch".to_string(),
+                from_port: "case_1".to_string(),
+                to_node: "n_case1".to_string(),
+                to_port: "input".to_string(),
+                condition: None,
+                on_success: None,
+                on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_case2".to_string(),
+                from_node: "n_switch".to_string(),
+                from_port: "case_2".to_string(),
+                to_node: "n_case2".to_string(),
+                to_port: "input".to_string(),
+                condition: None,
+                on_success: None,
+                on_failure: None,
+            },
+        ];
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_switch_two_branch".to_string(),
+            name: "Switch Two Branch".to_string(),
+            description: String::new(),
+            nodes: vec![status, switch, case1, case2],
+            edges,
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_node_activates_only_matched_case_branch() {
+        let case1_ran: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let case2_ran: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SwitchSourceNode));
+        registry.register(Arc::new(crate::nodes::switch::SwitchNode));
+        registry.register(Arc::new(CaseOneMarkerNode { ran: Arc::clone(&case1_ran) }));
+        registry.register(Arc::new(CaseTwoMarkerNode { ran: Arc::clone(&case2_ran) }));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let result = executor.run(Arc::new(switch_two_branch_workflow()), HashMap::new()).await;
+
+        assert!(result.is_ok(), "workflow failed: {:?}", result.err());
+        assert!(result.unwrap().success, "workflow did not succeed");
+        assert!(
+            *case1_ran.lock().unwrap(),
+            "matched case_1 branch never activated — resolve_taken_port regressed"
+        );
+        assert!(
+            !*case2_ran.lock().unwrap(),
+            "unmatched case_2 branch activated — routing is not selective"
+        );
     }
 }

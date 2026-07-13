@@ -187,3 +187,50 @@ describe("deserialize — empty canvas JSON", () => {
     expect(rt.connectors.size).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// disabled flag (T1-3): ContextMenu's Disable/Enable toggle must survive
+// save (serialize) and load (deserialize) — previously silently dropped.
+// ---------------------------------------------------------------------------
+
+describe("serialize — disabled flag", () => {
+  it("defaults a fresh node to disabled: false", () => {
+    const n1 = makeNode("n1", 0, 0);
+    const doc = JSON.parse(serialize("wf_dis", "Dis", new Map([["n1", n1]]), new Map()));
+    expect(doc.nodes[0].disabled).toBe(false);
+  });
+
+  it("reflects a runtime Disable toggle (mirrors ContextMenu's node.disabled = !node.disabled)", () => {
+    const n1 = makeNode("n1", 0, 0);
+    n1.disabled = true;
+    const doc = JSON.parse(serialize("wf_dis", "Dis", new Map([["n1", n1]]), new Map()));
+    expect(doc.nodes[0].disabled).toBe(true);
+  });
+});
+
+describe("deserialize — disabled flag roundtrip", () => {
+  it("restores disabled: true through a full serialize → deserialize cycle", () => {
+    const n1 = makeNode("n1", 0, 0);
+    n1.disabled = true;
+    const json = serialize("wf_dis_rt", "Dis RT", new Map([["n1", n1]]), new Map());
+    const rt = deserialize(json);
+    expect(rt.nodes.get("n1")?.disabled).toBe(true);
+  });
+
+  it("defaults to disabled: false when the field is absent (pre-existing saved workflows)", () => {
+    const legacyDoc = {
+      id: "wf_legacy", name: "Legacy",
+      nodes: [{
+        id: "n1", node_type_id: "http_request", node_type: "action", name: "Node n1",
+        config: {}, credentials: {}, position: { x: 0, y: 0 },
+        ports: { inputs: [], outputs: [] }, input_schema: {}, output_schema: {},
+        retry: { max_attempts: 1, backoff_ms: 500 }, fallback_node: null,
+        dynamic_ports: false,
+        // no `disabled` key — simulates a workflow saved before this field existed
+      }],
+      edges: [],
+    };
+    const rt = deserialize(JSON.stringify(legacyDoc));
+    expect(rt.nodes.get("n1")?.disabled).toBe(false);
+  });
+});

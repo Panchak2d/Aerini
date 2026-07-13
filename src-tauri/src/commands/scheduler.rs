@@ -25,7 +25,11 @@ pub async fn stop_scheduled_workflow(
 pub async fn get_scheduled_jobs(
     daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
 ) -> Result<Vec<ScheduledJobRow>, String> {
-    daemon.list_jobs()
+    // Never return a webhook trigger's plaintext secret over IPC to the
+    // frontend (AUDIT_REPORT.md S6-2, extended to the desktop IPC boundary
+    // per T0-1d) — the scheduler's own listener still holds the real secret
+    // internally for HMAC comparison.
+    Ok(daemon.list_jobs()?.iter().map(|row| row.redacted()).collect())
 }
 
 #[tauri::command]

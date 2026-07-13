@@ -627,6 +627,11 @@ async fn parse_http_request(
     // Hard cap on a single request/header line, enforced *during* the read
     // (see `read_line_capped`) rather than only checked after the fact.
     const MAX_LINE_BYTES: usize = 8192;
+    // Hard cap on the request body. A declared Content-Length beyond this is
+    // rejected outright (413) rather than truncated-and-read, so the socket
+    // is never left with an unread remainder and the workflow is never fed
+    // a partial body while still reporting success.
+    const MAX_BODY_BYTES: usize = 1_000_000;
 
     let (r, _w) = stream.split();
     let mut reader = BufReader::new(r);
@@ -691,9 +696,15 @@ async fn parse_http_request(
         None => 0,
     };
 
-    let mut body_bytes = vec![0u8; content_length.min(1_000_000)];
+    if content_length > MAX_BODY_BYTES {
+        return Err("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n".to_string());
+    }
+
+    let mut body_bytes = vec![0u8; content_length];
     if content_length > 0 {
-        let _ = reader.read_exact(&mut body_bytes).await;
+        if reader.read_exact(&mut body_bytes).await.is_err() {
+            return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string());
+        }
     }
     let body_str   = String::from_utf8_lossy(&body_bytes).to_string();
     let body_value: Value = serde_json::from_str(&body_str)

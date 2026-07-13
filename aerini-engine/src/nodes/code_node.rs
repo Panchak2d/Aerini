@@ -524,6 +524,7 @@ mod tests {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata,
+                ..Default::default()
             },
         }
     }
@@ -548,6 +549,7 @@ mod tests {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata:     HashMap::new(),
+                ..Default::default()
             },
         };
         let out = CodeNode.execute(input).await;

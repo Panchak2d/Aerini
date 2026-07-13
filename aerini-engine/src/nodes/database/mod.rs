@@ -158,6 +158,209 @@ pub(super) fn check_query_for_inline_values(query: &str) -> Option<String> {
     None
 }
 
+// ── Read-only query enforcement (T1-6 / S2-3, S2-4) ────────────────────────────
+//
+// Shared by all three SQL backends (sqlite, postgres, mysql) so the "query"
+// operation's read-only guarantee can't drift out of sync between them again —
+// S2-3 found postgres/mysql had NO such guard at all, and S2-4 found sqlite's
+// own first-keyword-only guard was bypassable via `WITH x AS (SELECT 1) DELETE
+// FROM users` (legal SQL: a WITH clause may prefix SELECT, INSERT, UPDATE, or
+// DELETE, per SQLite/ANSI SQL's own CTE grammar).
+//
+// Design: an allowlist, not a denylist. Only a bare SELECT, or a WITH clause
+// whose every CTE body AND final statement are (recursively) SELECT, passes.
+// Everything else is rejected — matching the pre-existing sqlite check's own
+// allowlist philosophy rather than trying to enumerate every dangerous keyword
+// (INSERT/UPDATE/DELETE/DROP/TRUNCATE/PRAGMA/ATTACH/... — an enumeration is
+// easy to leave a gap in; an allowlist of exactly one accepted shape is not).
+//
+// The recursion into each CTE body (not just the trailing keyword) exists
+// because PostgreSQL supports data-modifying CTEs — `WITH x AS (DELETE FROM t
+// RETURNING *) SELECT * FROM x` is valid, real Postgres syntax that performs a
+// DELETE even though the clause's own trailing keyword is SELECT (verified
+// against PostgreSQL's own docs: "You can use data-modifying statements
+// (INSERT, UPDATE, DELETE, or MERGE) in WITH"). Only checking the keyword after
+// the WITH clause, the way S2-4 characterized the sqlite bug, is not sufficient
+// once postgres is in scope. SQLite/MySQL don't support data-modifying CTE
+// bodies, so this recursion is a no-op for those two backends — any such body
+// would fail their own SQL parser as invalid syntax regardless of this check.
+//
+// Recursion depth is capped (`MAX_CTE_NESTING_DEPTH`) for the same reason T0-4
+// capped the expression engine's recursion: a `query` string is workflow data,
+// which can originate from an untrusted imported file, so an unbounded parser
+// here would just be a new stack-overflow DoS replacing the one this fix closes.
+// Real CTE nesting is at most a handful of levels; 32 is generous headroom.
+//
+// Any parse failure while walking a WITH clause (malformed CTE list, unclosed
+// string/paren, depth exceeded) is also rejected — fail closed, since this
+// function's entire purpose is to gate write access and an ambiguous input must
+// never be assumed safe.
+
+const MAX_CTE_NESTING_DEPTH: u32 = 32;
+
+/// Skips ASCII/Unicode whitespace, `-- line comments`, and `/* block comments */`
+/// from the front of `s`. An unterminated block comment consumes to end of
+/// string rather than erroring — safe for a read-only classifier, since that can
+/// only make the function see *less* trailing statement, never invent tokens
+/// that were not there.
+fn skip_ws_and_comments(s: &str) -> &str {
+    let mut s = s;
+    loop {
+        let trimmed = s.trim_start();
+        if let Some(after) = trimmed.strip_prefix("--") {
+            let end = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
+            s = &after[end..];
+            continue;
+        }
+        if let Some(after) = trimmed.strip_prefix("/*") {
+            match after.find("*/") {
+                Some(i) => { s = &after[i + 2..]; continue; }
+                None    => return "",
+            }
+        }
+        return trimmed;
+    }
+}
+
+/// Returns the next bare alphanumeric/underscore token at the front of `s`
+/// (after skipping whitespace/comments), uppercased via `to_ascii_uppercase`
+/// (never `to_uppercase` — Unicode case-folding can change a string's byte
+/// length, e.g. 'İ' -> "i̇", which would desync any later byte-offset built from
+/// the uppercased copy against the original; ASCII-only folding never does),
+/// plus the remainder starting immediately after it. Returns ("", <ws-skipped
+/// s>) if the next character isn't identifier-shaped.
+fn take_word(s: &str) -> (String, &str) {
+    let s = skip_ws_and_comments(s);
+    let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
+    (s[..end].to_ascii_uppercase(), &s[end..])
+}
+
+/// Skips one `quote`-delimited literal (string literal `'...'`, or a quoted
+/// identifier `"..."` / `` `...` ``) at the front of `s`, honoring the standard
+/// doubled-quote escape for an embedded quote character. `s` must start
+/// immediately after the opening quote. Returns the remainder after the closing
+/// quote, or Err if the literal is never closed.
+fn skip_quoted(s: &str, quote: char) -> Result<&str, ()> {
+    let mut s = s;
+    loop {
+        match s.find(quote) {
+            None => return Err(()),
+            Some(i) => {
+                let after = &s[i + quote.len_utf8()..];
+                if after.starts_with(quote) {
+                    s = &after[quote.len_utf8()..]; // doubled quote — escaped, keep going
+                } else {
+                    return Ok(after);
+                }
+            }
+        }
+    }
+}
+
+/// Skips one SQL identifier at the front of `s`: quoted (`"..."` or `` `...` ``)
+/// or a bare alphanumeric/underscore run. Returns the remainder after it, or Err
+/// if `s` doesn't start with anything identifier-shaped.
+fn skip_identifier(s: &str) -> Result<&str, ()> {
+    let s = skip_ws_and_comments(s);
+    if let Some(rest) = s.strip_prefix('"') {
+        return skip_quoted(rest, '"');
+    }
+    if let Some(rest) = s.strip_prefix('`') {
+        return skip_quoted(rest, '`');
+    }
+    let (word, rest) = take_word(s);
+    if word.is_empty() { Err(()) } else { Ok(rest) }
+}
+
+/// Skips one parenthesized group `( ... )` at the front of `s`, tracking nested
+/// parens and skipping over string/quoted-identifier literals so that a paren
+/// or quote character inside one doesn't miscount depth. Returns the remainder
+/// after the matching close-paren, or Err if `s` doesn't start with `(` or the
+/// group is never closed.
+fn skip_paren_group(s: &str) -> Result<&str, ()> {
+    let s = skip_ws_and_comments(s);
+    let mut rest = s.strip_prefix('(').ok_or(())?;
+    let mut depth: u32 = 1;
+    loop {
+        rest = skip_ws_and_comments(rest);
+        let mut chars = rest.chars();
+        match chars.next() {
+            None => return Err(()),
+            Some('(') => { depth += 1; rest = chars.as_str(); }
+            Some(')') => {
+                depth -= 1;
+                rest = chars.as_str();
+                if depth == 0 { return Ok(rest); }
+            }
+            Some(q @ ('\'' | '"' | '`')) => {
+                rest = skip_quoted(chars.as_str(), q)?;
+            }
+            Some(_) => { rest = chars.as_str(); }
+        }
+    }
+}
+
+/// Returns `Ok(())` iff the statement starting at `s` is provably read-only: a
+/// bare SELECT, or a WITH clause (optionally RECURSIVE) whose CTE bodies and
+/// final statement are all, recursively, read-only per this same rule.
+fn is_read_only_statement(s: &str, depth: u32) -> Result<(), ()> {
+    if depth > MAX_CTE_NESTING_DEPTH {
+        return Err(());
+    }
+    let (kw, after) = take_word(s);
+    if kw == "SELECT" {
+        return Ok(());
+    }
+    if kw != "WITH" {
+        return Err(());
+    }
+    let mut rest = skip_ws_and_comments(after);
+    let (maybe_recursive, after_recursive) = take_word(rest);
+    if maybe_recursive == "RECURSIVE" {
+        rest = skip_ws_and_comments(after_recursive);
+    }
+    loop {
+        rest = skip_identifier(rest)?;
+        rest = skip_ws_and_comments(rest);
+        if rest.starts_with('(') {
+            rest = skip_paren_group(rest)?; // optional column-name list
+            rest = skip_ws_and_comments(rest);
+        }
+        let (as_kw, after_as) = take_word(rest);
+        if as_kw != "AS" {
+            return Err(());
+        }
+        rest = skip_ws_and_comments(after_as);
+        if !rest.starts_with('(') {
+            return Err(());
+        }
+        // Validate the CTE body itself before opaquely skipping past it — a
+        // data-modifying CTE body (Postgres) must be rejected even though the
+        // clause's own trailing keyword, checked below, is SELECT.
+        is_read_only_statement(skip_ws_and_comments(&rest[1..]), depth + 1)?;
+        rest = skip_paren_group(rest)?;
+        rest = skip_ws_and_comments(rest);
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            rest = after_comma;
+            continue;
+        }
+        break;
+    }
+    let (final_kw, _) = take_word(rest);
+    if final_kw == "SELECT" { Ok(()) } else { Err(()) }
+}
+
+/// Entry point: rejects any query that is not provably read-only. Used by the
+/// "query" operation on all three SQL backends — "execute" has no such
+/// restriction and remains the correct, unrestricted path for writes.
+pub(super) fn enforce_read_only_query(query: &str) -> Result<(), String> {
+    const REJECT_MSG: &str = "The Query operation only accepts SELECT statements \
+        (a bare SELECT, or a WITH clause whose CTE definitions and final statement \
+        are all SELECT). Use the Execute operation for INSERT, UPDATE, DELETE, or \
+        other write operations.";
+    is_read_only_statement(query, 0).map_err(|_| REJECT_MSG.to_string())
+}
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 pub(super) fn parse_params(v: &Value) -> Vec<Value> {
@@ -226,5 +429,198 @@ mod tests {
                 "Expected SSRF block for: {url}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod read_only_query_tests {
+    use super::enforce_read_only_query;
+
+    #[test]
+    fn bare_select_accepted() {
+        assert!(enforce_read_only_query("SELECT * FROM users").is_ok());
+    }
+
+    #[test]
+    fn lowercase_select_accepted() {
+        assert!(enforce_read_only_query("select * from users").is_ok());
+    }
+
+    #[test]
+    fn leading_whitespace_and_comment_accepted() {
+        assert!(enforce_read_only_query("  -- get all users\n  SELECT * FROM users").is_ok());
+    }
+
+    #[test]
+    fn insert_rejected() {
+        assert!(enforce_read_only_query("INSERT INTO users (name) VALUES ('x')").is_err());
+    }
+
+    #[test]
+    fn update_rejected() {
+        assert!(enforce_read_only_query("UPDATE users SET name = 'x'").is_err());
+    }
+
+    #[test]
+    fn delete_rejected() {
+        assert!(enforce_read_only_query("DELETE FROM users").is_err());
+    }
+
+    #[test]
+    fn drop_rejected() {
+        assert!(enforce_read_only_query("DROP TABLE users").is_err());
+    }
+
+    #[test]
+    fn pragma_rejected() {
+        assert!(enforce_read_only_query("PRAGMA journal_mode=WAL").is_err());
+    }
+
+    #[test]
+    fn plain_with_select_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH recent AS (SELECT * FROM orders WHERE total > 100) \
+             SELECT * FROM recent WHERE total > 100"
+        ).is_ok());
+    }
+
+    #[test]
+    fn with_recursive_select_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x<10) \
+             SELECT x FROM cnt"
+        ).is_ok());
+    }
+
+    #[test]
+    fn multiple_ctes_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a, b"
+        ).is_ok());
+    }
+
+    #[test]
+    fn cte_with_column_list_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH x (a, b) AS (SELECT 1, 2) SELECT * FROM x"
+        ).is_ok());
+    }
+
+    #[test]
+    fn nested_with_all_select_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH a AS (WITH b AS (SELECT 1) SELECT * FROM b) SELECT * FROM a"
+        ).is_ok());
+    }
+
+    // S2-4's exact bypass: a WITH clause whose CTE body is a harmless SELECT,
+    // but whose trailing statement (the thing the WITH clause actually
+    // prefixes) is a DELETE. The original sqlite check only inspected the
+    // first keyword ("WITH") and let this straight through.
+    #[test]
+    fn with_select_then_delete_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH x AS (SELECT 1) DELETE FROM users"
+        ).is_err());
+    }
+
+    #[test]
+    fn with_select_then_update_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH x AS (SELECT 1) UPDATE users SET name = 'x'"
+        ).is_err());
+    }
+
+    #[test]
+    fn with_select_then_insert_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH x AS (SELECT 1) INSERT INTO users (name) VALUES ('x')"
+        ).is_err());
+    }
+
+    // PostgreSQL-specific bypass: a data-modifying CTE body (legal Postgres
+    // syntax -- INSERT/UPDATE/DELETE with RETURNING inside a WITH) whose
+    // trailing statement is an innocent-looking SELECT. Only checking the
+    // trailing keyword (S2-4's literal bug description) is not enough once
+    // postgres is in scope -- the fix must also reject the body itself.
+    #[test]
+    fn postgres_writable_cte_delete_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted"
+        ).is_err());
+    }
+
+    #[test]
+    fn postgres_writable_cte_update_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH t AS (UPDATE products SET price = price * 1.05 RETURNING *) SELECT * FROM t"
+        ).is_err());
+    }
+
+    #[test]
+    fn postgres_writable_cte_insert_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH moved AS (INSERT INTO archive SELECT * FROM staging RETURNING *) \
+             SELECT * FROM moved"
+        ).is_err());
+    }
+
+    // Nested variant: the data-modifying statement is two CTE levels deep.
+    #[test]
+    fn nested_writable_cte_rejected() {
+        assert!(enforce_read_only_query(
+            "WITH a AS (WITH b AS (DELETE FROM users RETURNING *) SELECT * FROM b) \
+             SELECT * FROM a"
+        ).is_err());
+    }
+
+    #[test]
+    fn quoted_identifier_cte_name_accepted() {
+        assert!(enforce_read_only_query(
+            "WITH \"my cte\" AS (SELECT 1) SELECT * FROM \"my cte\""
+        ).is_ok());
+    }
+
+    #[test]
+    fn semicolon_stacked_statement_after_with_rejected() {
+        // Trailing content after the CTE list must itself start with SELECT --
+        // a bare ';' (or anything else) is not, so this is rejected too, not
+        // just tolerated as "no second statement to worry about".
+        assert!(enforce_read_only_query(
+            "WITH x AS (SELECT 1); DROP TABLE users;"
+        ).is_err());
+    }
+
+    #[test]
+    fn malformed_with_clause_rejected() {
+        assert!(enforce_read_only_query("WITH x AS SELECT 1 SELECT * FROM x").is_err());
+    }
+
+    #[test]
+    fn unterminated_paren_rejected() {
+        assert!(enforce_read_only_query("WITH x AS (SELECT 1 SELECT * FROM x").is_err());
+    }
+
+    #[test]
+    fn empty_query_rejected() {
+        assert!(enforce_read_only_query("").is_err());
+    }
+
+    #[test]
+    fn deeply_nested_ctes_beyond_cap_rejected_not_stack_overflowing() {
+        // 40 levels of nesting exceeds MAX_CTE_NESTING_DEPTH (32) -- must
+        // reject cleanly rather than recurse without bound (the same DoS class
+        // T0-4 already closed in the expression engine, applied here so this
+        // fix doesn't reopen an equivalent hole).
+        let mut q = String::new();
+        for i in 0..40 {
+            q.push_str(&format!("WITH c{} AS (", i));
+        }
+        q.push_str("SELECT 1");
+        for _ in 0..40 {
+            q.push(')');
+        }
+        q.push_str(" SELECT 1");
+        assert!(enforce_read_only_query(&q).is_err());
     }
 }

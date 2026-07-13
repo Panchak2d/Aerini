@@ -117,7 +117,7 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.function":           NODE_IDS.CODE,
 };
 
-function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknown> {
+export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknown> {
   const MAX_IMPORT_NODES     = 200;
   const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
   const approxBytes = JSON.stringify(n8n).length;
@@ -134,7 +134,8 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
   }
   const n8nConns = (n8n.connections as Record<string, unknown>) ?? {};
 
-  const nodeIdMap = new Map<string, string>(); // n8n name → aerini id
+  const nodeIdMap   = new Map<string, string>(); // n8n name → aerini id
+  const nodeTypeMap = new Map<string, string>(); // aerini id → aerini node_type_id (for edge port resolution below)
 
   const aeriniNodes = n8nNodes.map((n: Record<string, unknown>, idx: number) => {
     const aeriniId = `node_imported_${idx}`;
@@ -142,6 +143,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
     nodeIdMap.set(n8nName, aeriniId);
 
     const typeId = N8N_TYPE_MAP[String(n.type ?? "")] ?? "unsupported";
+    nodeTypeMap.set(aeriniId, typeId);
     const pos = n.position as number[] | undefined;
 
     return {
@@ -151,7 +153,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
       name:         n8nName,
       config:       n.parameters ?? {},
       credentials:  {},
-      ports:        getDefaultPorts(typeId),
+      ports:        resolvePorts(typeId),
       input_schema:  { type: "object", properties: {} },
       output_schema: { type: "object" },
       retry:        { max_attempts: 1, backoff_ms: 500 },
@@ -168,6 +170,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
     if (!fromId) continue;
     const outputs = (conns as Record<string, unknown>).main as Array<Array<Record<string, unknown>>> | undefined;
     if (!Array.isArray(outputs)) continue;
+    const fromTypeId = nodeTypeMap.get(fromId) ?? "unsupported";
     outputs.forEach((portConns, portIdx) => {
       if (!Array.isArray(portConns)) return;
       portConns.forEach((c: Record<string, unknown>) => {
@@ -176,7 +179,7 @@ function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknow
         aeriniEdges.push({
           id:        `edge_imported_${edgeIdx++}`,
           from_node: fromId,
-          from_port: portIdx === 0 ? "output" : `out_${portIdx}`,
+          from_port: n8nOutputPortId(fromTypeId, portIdx),
           to_node:   toId,
           to_port:   "input",
           condition:  null, on_success: null, on_failure: null,
@@ -207,8 +210,59 @@ function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" 
   return "action";
 }
 
+/** Fallback only — used when no real descriptor for typeId exists in _allNodes (e.g. "unsupported"). */
 function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
   const inputs = TRIGGER_NODE_IDS.has(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
   const outputs = typeId === NODE_IDS.STOP ? [] : [{ id: "output", label: "Out", position: "right" }];
   return { inputs, outputs };
+}
+
+/**
+ * Real per-type ports, sourced from the live backend node registry (_allNodes,
+ * populated from get_node_types()) when a matching descriptor exists — this is
+ * what every branching/multi-port node's *actual* port ids come from (e.g.
+ * if_condition's on_true/on_false, switch's case_1..case_8/default). Falls back
+ * to the generic single input/output guess only for a type with no registered
+ * descriptor (e.g. the "unsupported" placeholder for n8n node types with no
+ * Aerini equivalent).
+ */
+function resolvePorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
+  const known = _allNodes.find(n => n.type_id === typeId);
+  if (known) return { inputs: known.ports.inputs, outputs: known.ports.outputs };
+  return getDefaultPorts(typeId);
+}
+
+/**
+ * Maps an n8n output-connection array index to the real Aerini output port id
+ * for the given (already-mapped) Aerini node type.
+ *
+ * If/Switch get explicit index→port mapping because n8n's connection format
+ * only carries a bare array index, not a port name — verified against
+ * if_condition.rs (ports() defines on_true before on_false, matching n8n's own
+ * documented "two outputs labeled True and False", index 0 = True) and
+ * switch.rs (case_1..case_8 + default). n8n's Switch node assigns sequential
+ * rule outputs to sequential indices (rule 1 = output 0, rule 2 = output 1,
+ * ...) and places its optional "Extra Output" fallback one index past the
+ * last rule (docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch)
+ * — so any index at or beyond Aerini's 8 case ports (including that fallback
+ * slot) is mapped to "default", the only remaining valid port. This is a
+ * best-effort index mapping only: it does not translate n8n's actual
+ * match/condition config into Aerini's `cases`/`default_port` config field
+ * (a separate, larger fix — n8n's rule shape varies per node version and
+ * isn't parsed here; tracked in the backlog, not fixed by this batch).
+ *
+ * Every other node type uses its real output port id at that array index
+ * (falling back to the first known output port, or "output" if the type has
+ * no registered descriptor at all) instead of the previous "output"/"out_N"
+ * guess.
+ */
+function n8nOutputPortId(typeId: string, portIdx: number): string {
+  if (typeId === NODE_IDS.IF_CONDITION) {
+    return portIdx === 0 ? "on_true" : "on_false";
+  }
+  if (typeId === NODE_IDS.SWITCH) {
+    return portIdx < 8 ? `case_${portIdx + 1}` : "default";
+  }
+  const outputs = resolvePorts(typeId).outputs;
+  return outputs[portIdx]?.id ?? outputs[0]?.id ?? "output";
 }

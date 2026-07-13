@@ -73,11 +73,10 @@ function buildInterpolationPaths(): string[] {
   const paths: string[] = [];
   for (const node of _interpCanvas.nodes.values()) {
     const name = node.data.name;
-    paths.push(`${name}`);
     paths.push(`${name}.output`);
-    paths.push(`${name}.result`);
-    paths.push(`${name}.content`);
-    paths.push(`${name}.value`);
+    paths.push(`${name}.output.result`);
+    paths.push(`${name}.output.content`);
+    paths.push(`${name}.output.value`);
   }
   return paths;
 }

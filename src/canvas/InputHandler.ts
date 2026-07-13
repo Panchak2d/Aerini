@@ -79,6 +79,16 @@ export class InputHandler {
       e.preventDefault(); c.onPaletteRequest?.();
     }
     if (e.key === "Escape") {
+      // Cancelling a wire-endpoint drag (reroute/detach) must restore the
+      // connector it grabbed — onDown already removed it from c.connectors
+      // and cleared any dynamic-port expression it fed; _up only re-adds it
+      // on a genuine drop-in-empty-space (a delete gesture, not a cancel).
+      // Without this, Escape silently and permanently deletes the wire (T1-4).
+      if (this.reconnEdge) {
+        c.connectors.set(this.reconnEdge.conn.data.id, this.reconnEdge.conn);
+        c.injectDynamicPortExpr(this.reconnEdge.conn);
+        this.reconnEdge = null;
+      }
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       c.pendingInsert = null; c.insertGhost = null;
       c._pendingInputWireDrop = null;

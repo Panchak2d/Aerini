@@ -2,6 +2,30 @@ wit_bindgen::generate!({ world: "aerini-node" });
 
 use exports::aerini::plugin::node::{Guest, NodeDescriptor, NodeInput, NodeOutput};
 
+/// Escape a string for embedding in a JSON string literal, per RFC 8259 §7.
+///
+/// Every control character (U+0000-U+001F) must be escaped, not just `"` and
+/// `\` — a raw newline/tab/etc. inside a JSON string literal is invalid JSON.
+/// Characters above U+001F (including all non-ASCII text) are valid,
+/// unescaped UTF-8 inside a JSON string and pass through unchanged.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 struct EchoPlugin;
 
 impl Guest for EchoPlugin {
@@ -24,8 +48,7 @@ impl Guest for EchoPlugin {
             .map(|p| p.value.as_str())
             .unwrap_or("");
 
-        // Escape backslash and double-quote before embedding in JSON.
-        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = escape_json_string(message);
 
         NodeOutput {
             success: true,

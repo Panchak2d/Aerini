@@ -262,6 +262,7 @@ mod tests {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata,
+                ..Default::default()
             },
         };
 

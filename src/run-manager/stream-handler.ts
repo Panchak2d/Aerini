@@ -2,6 +2,8 @@ import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, ty
 import { TRIGGER_NODE_IDS } from "../node-ids";
 import { serialize } from "../canvas/CanvasSerializer";
 import type { Canvas } from "../canvas/Canvas";
+import { checkDangerousNodes } from "../validation";
+import { showConfirm } from "../confirm";
 import {
   renderSummaryTab, renderResultsTab, renderErrorsTab,
   renderLogsView, renderDebugView,
@@ -23,6 +25,11 @@ export class RunManager {
   private onToast:  (msg: string, type: "success" | "error" | "info") => void;
   private state = new RunStateMachine();
   private _activeHistoryPanel: HistoryPanel | null = null;
+  // Own approval memory for the per-node "Run this node" path (T1-15) —
+  // deliberately separate from toolbar.ts's Set for the main Run button:
+  // the two check different node sets (ancestor subgraph vs. whole canvas),
+  // so approving one must not silently approve the other.
+  private approvedForExecution = new Set<string>();
 
   onRunStateChange: ((running: boolean) => void) | null = null;
   onRunResult: ((success: boolean) => void) | null = null;
@@ -389,6 +396,18 @@ export class RunManager {
 
     if (subNodes.size === 0) {
       this.onStatus("Node not found"); return;
+    }
+
+    // Gate on the actual subgraph about to run, not the whole canvas — a
+    // Shell/Code/Database node anywhere in the target's ancestor chain must
+    // not execute silently just because this path skips the main Run
+    // button's validateWorkflow/checkDangerousNodes gate (T1-15). Deliberately
+    // NOT running validateWorkflow's whole-workflow checks (e.g. "has a
+    // trigger") here — testing one node in isolation, before a trigger is
+    // even wired, is this feature's normal, legitimate use.
+    if (!await checkDangerousNodes(currentId, subNodes.values(), this.approvedForExecution, showConfirm)) {
+      this.onStatus("Run cancelled");
+      return;
     }
 
     const json = serialize(`${currentId}_sub`, `${currentName} (node test)`, subNodes, subConns,

@@ -110,6 +110,9 @@ async fn pg_run_execute(pool: &sqlx::PgPool, query: &str, params: &[Value]) -> N
 }
 
 async fn pg_run_query(pool: &sqlx::PgPool, query: &str, params: &[Value]) -> NodeOutput {
+    if let Err(e) = super::enforce_read_only_query(query) {
+        return NodeOutput::failure(NodeError::unrecoverable("QUERY_NOT_READ_ONLY", e));
+    }
     let rewritten = rewrite_pg_placeholders(query);
     let mut q = sqlx::query(&rewritten);
     for p in params {

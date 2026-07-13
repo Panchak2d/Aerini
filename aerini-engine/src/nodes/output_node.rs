@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 use super::util::traverse_dotpath;
@@ -57,9 +58,16 @@ impl Node for OutputNode {
         let label = input.input["label"].as_str().unwrap_or("Result").to_string();
         let field = input.input["field"].as_str().unwrap_or("").to_string();
 
-        let source: Value = if let Some(src_id) = input.input["source_node"].as_str() {
-            input.context.node_outputs.get(src_id).cloned().unwrap_or(Value::Null)
-        } else {
+        // Batch A: source_node is schema-typed as a string (line 27), so a
+        // non-string, non-null value is a malformed config, not "unset" — it
+        // must not silently fall through to the merged-context fallback
+        // below, which is reserved for a genuinely absent/null source_node.
+        // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern. Note:
+        // the fallback branch's own HashMap-iteration non-determinism
+        // (S3-2) is untouched — out of scope for this batch, tracked
+        // separately as T2-5/Batch K.
+        let source_node_value = &input.input["source_node"];
+        let source: Value = if source_node_value.is_null() {
             // Use all context outputs merged, preferring the most recent node's output
             // by taking the last entry in node_outputs that isn't this node itself
             let mut last: Option<Value> = None;
@@ -69,6 +77,16 @@ impl Node for OutputNode {
                 }
             }
             last.unwrap_or(input.input.clone())
+        } else if let Some(src_id) = source_node_value.as_str() {
+            input.context.node_outputs.get(src_id).cloned().unwrap_or(Value::Null)
+        } else {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_SOURCE_NODE",
+                format!(
+                    "source_node is set to a non-string value ({}), which is not a valid node ID",
+                    source_node_value
+                ),
+            ));
         };
 
         let value = if field.is_empty() {
@@ -112,6 +130,58 @@ impl Node for OutputNode {
             out,
             vec![format!("Output: {} ({})", label, type_name)],
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Batch A only: covers the source_node validation this batch added.
+// No test module existed in this file before this batch; scope is limited
+// to what this fix changes (Rule 7), not a full suite for pre-existing logic.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
+        NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata:     HashMap::new(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn non_string_source_node_returns_error() {
+        // Batch A / T1-1g pattern: a bare number for "source_node" must not
+        // silently fall through to the merged-context fallback the way an
+        // absent key correctly does.
+        let input = make_input(json!({ "source_node": 5 }), HashMap::new());
+        let out = OutputNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_SOURCE_NODE");
+    }
+
+    #[tokio::test]
+    async fn explicit_null_source_node_still_uses_merged_context() {
+        // Explicit JSON null is treated the same as an absent key (both are
+        // "genuinely unset"), unlike a non-string value — unchanged from
+        // pre-batch behavior.
+        let mut outputs = HashMap::new();
+        outputs.insert("prev".to_string(), json!({ "val": 7 }));
+        let input = make_input(json!({ "source_node": null }), outputs);
+        let out = OutputNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["value"]["val"], json!(7));
     }
 }
 

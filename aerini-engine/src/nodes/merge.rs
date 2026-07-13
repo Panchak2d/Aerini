@@ -98,6 +98,7 @@ mod tests {
                 variables: HashMap::new(),
                 node_outputs: Arc::new(node_outputs),
                 metadata: HashMap::new(),
+                ..Default::default()
             },
         }
     }

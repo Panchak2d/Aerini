@@ -45,7 +45,7 @@ export function bindToolbar(
       toast(`Fix before running:\n${errors.slice(0, 3).join("\n")}`, "error");
       return;
     }
-    if (!await checkDangerousNodes(wfManager.currentId, canvas, approvedForExecution, showConfirm)) return;
+    if (!await checkDangerousNodes(wfManager.currentId, canvas.nodes.values(), approvedForExecution, showConfirm)) return;
     runManager.handleRun(wfManager.currentId, wfManager.currentName);
   };
 

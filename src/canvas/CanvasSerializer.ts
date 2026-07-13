@@ -86,7 +86,11 @@ export function serialize(
       .filter(c => {
         const from = nodes.get(c.data.from_node);
         const to   = nodes.get(c.data.to_node);
-        return from?.data.node_type_id !== NODE_IDS.NOTE && to?.data.node_type_id !== NODE_IDS.NOTE;
+        // A missing endpoint means the edge is dangling — never ship it to
+        // the engine, whatever produced it (T1-14). This is a hard filter,
+        // independent of the NOTE-exclusion check below.
+        if (!from || !to) return false;
+        return from.data.node_type_id !== NODE_IDS.NOTE && to.data.node_type_id !== NODE_IDS.NOTE;
       })
       .map(c => c.toWorkflowEdge()),
     metadata: {
@@ -151,6 +155,8 @@ export function deserialize(json: string): {
         output_schema: (raw.output_schema as Record<string, unknown>) ?? {},
         retry:         (raw.retry as { max_attempts: number; backoff_ms: number }) ?? { max_attempts: 1, backoff_ms: 500 },
         fallback_node: (raw.fallback_node as string | null) ?? null,
+        // Old saved workflows predate this field — absent means enabled.
+        disabled:      (raw.disabled as boolean | undefined) ?? false,
         // Prefer the live registry value (authoritative) over saved JSON, since
         // saved files may predate the dynamic_ports field.
         dynamic_ports: _nodeRegistry.get(String(raw.node_type_id ?? ""))?.dynamic_ports ?? (raw.dynamic_ports as boolean | undefined) ?? false,

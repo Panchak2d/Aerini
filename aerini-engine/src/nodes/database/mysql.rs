@@ -31,6 +31,9 @@ pub(super) async fn mysql_run_execute(pool: &sqlx::MySqlPool, query: &str, param
 }
 
 pub(super) async fn mysql_run_query(pool: &sqlx::MySqlPool, query: &str, params: &[Value]) -> NodeOutput {
+    if let Err(e) = super::enforce_read_only_query(query) {
+        return NodeOutput::failure(NodeError::unrecoverable("QUERY_NOT_READ_ONLY", e));
+    }
     let mut q = sqlx::query(query);
     for p in params {
         q = mysql_bind_one(q, p);

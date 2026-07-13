@@ -7,6 +7,30 @@ use crate::model::{ExecutionContext, Workflow};
 use super::functions::apply_function;
 use super::parser::{find_matching_close, split_args};
 
+// resolve_expression and try_resolve_function recurse into each other once per
+// level of nested function-call expressions (e.g. {{a(b(c(...)))}}). This caps
+// that recursion so a deeply-nested expression degrades to the same
+// empty-string-plus-warning fallback every other unresolvable expression uses,
+// instead of overflowing the stack.
+const MAX_EXPRESSION_DEPTH: usize = 64;
+
+// resolve_value_recursive descends once per level of JSON array/object nesting
+// in a node's config value — a separate recursion path from MAX_EXPRESSION_DEPTH
+// above, keyed off structural nesting rather than {{...}} function-call nesting.
+// Same cap, same fallback, for the same reason.
+//
+// has_expressions below walks the same structure, one level per call, to decide
+// whether resolve_all_strings can take its fast path — it shares this cap so its
+// own recursion never runs deeper than resolve_value_recursive's does, and so a
+// capped-out branch reports `true` (conservatively "assume an expression exists")
+// rather than `false`. That forces resolve_all_strings past the fast path's
+// unguarded `value.clone()` and into resolve_value_recursive, which re-walks the
+// same structure under its own guard and safely replaces whatever exceeds the cap.
+// `false` is only reachable once the whole structure has been walked within the
+// cap, so whenever the fast path's `value.clone()` actually runs, the structure it
+// clones is already known to be within this same depth bound.
+const MAX_VALUE_NESTING_DEPTH: usize = 64;
+
 /// Resolve all `{{...}}` expressions inside a single string template.
 ///
 /// Returns `(resolved_string, warning_messages)`.
@@ -47,7 +71,7 @@ pub fn resolve_string(
                     return (result, warnings);
                 }
                 let expr = expr.trim();
-                let (val, mut w) = resolve_expression(expr, workflow, &name_to_id, ctx, env_allowlist);
+                let (val, mut w) = resolve_expression(expr, workflow, &name_to_id, ctx, env_allowlist, 0);
                 warnings.append(&mut w);
                 result.push_str(&val);
                 continue;
@@ -59,11 +83,14 @@ pub fn resolve_string(
     (result, warnings)
 }
 
-fn has_expressions(value: &Value) -> bool {
+fn has_expressions(value: &Value, depth: usize) -> bool {
+    if depth > MAX_VALUE_NESTING_DEPTH {
+        return true;
+    }
     match value {
         Value::String(s)   => s.contains("{{"),
-        Value::Array(arr)  => arr.iter().any(has_expressions),
-        Value::Object(map) => map.values().any(has_expressions),
+        Value::Array(arr)  => arr.iter().any(|v| has_expressions(v, depth + 1)),
+        Value::Object(map) => map.values().any(|v| has_expressions(v, depth + 1)),
         _ => false,
     }
 }
@@ -75,12 +102,12 @@ pub fn resolve_all_strings(
     ctx:           &ExecutionContext,
     env_allowlist: Option<&HashSet<String>>,
 ) -> (Value, Vec<String>) {
-    if !has_expressions(value) {
+    if !has_expressions(value, 0) {
         return (value.clone(), vec![]);
     }
 
     let mut warnings = Vec::new();
-    let resolved = resolve_value_recursive(value, workflow, ctx, &mut warnings, env_allowlist);
+    let resolved = resolve_value_recursive(value, workflow, ctx, &mut warnings, env_allowlist, 0);
     (resolved, warnings)
 }
 
@@ -90,7 +117,16 @@ pub(super) fn resolve_value_recursive(
     ctx:           &ExecutionContext,
     warnings:      &mut Vec<String>,
     env_allowlist: Option<&HashSet<String>>,
+    depth:         usize,
 ) -> Value {
+    if depth > MAX_VALUE_NESTING_DEPTH {
+        warnings.push(format!(
+            "Node config value nesting depth exceeds {} — possible runaway recursion. Replaced with empty string.",
+            MAX_VALUE_NESTING_DEPTH
+        ));
+        return Value::String(String::new());
+    }
+
     match value {
         Value::String(s) => {
             let (resolved, mut w) = resolve_string(s, workflow, ctx, env_allowlist);
@@ -98,12 +134,12 @@ pub(super) fn resolve_value_recursive(
             Value::String(resolved)
         }
         Value::Array(arr) => Value::Array(
-            arr.iter().map(|v| resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist)).collect(),
+            arr.iter().map(|v| resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist, depth + 1)).collect(),
         ),
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(k.clone(), resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist));
+                out.insert(k.clone(), resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist, depth + 1));
             }
             Value::Object(out)
         }
@@ -125,8 +161,17 @@ pub(super) fn resolve_expression(
     name_to_id:    &HashMap<String, String>,
     ctx:           &ExecutionContext,
     env_allowlist: Option<&HashSet<String>>,
+    depth:         usize,
 ) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
+
+    if depth > MAX_EXPRESSION_DEPTH {
+        warnings.push(format!(
+            "Expression '{{{{{}}}}}': nesting depth exceeds {} — possible runaway recursion. Replaced with empty string.",
+            expr, MAX_EXPRESSION_DEPTH
+        ));
+        return (String::new(), warnings);
+    }
 
     if expr.is_empty() || expr == "." {
         warnings.push(format!(
@@ -136,7 +181,7 @@ pub(super) fn resolve_expression(
         return (String::new(), warnings);
     }
 
-    if let Some(result) = try_resolve_function(expr, workflow, name_to_id, ctx, env_allowlist) {
+    if let Some(result) = try_resolve_function(expr, workflow, name_to_id, ctx, env_allowlist, depth) {
         return result;
     }
 
@@ -146,9 +191,15 @@ pub(super) fn resolve_expression(
         return resolve_special(expr, &segments, workflow, ctx, &mut warnings, env_allowlist);
     }
 
-    if segments.len() < 3 {
+    // Minimum is 2 segments (`node_name.output`, the whole-output shorthand) or 3+
+    // (`node_name.output.field...`). A 2-segment expression is only accepted when the
+    // second segment is literally "output" — anything else this short is almost
+    // certainly a missing ".output." middle segment, not a real field name, so it
+    // still gets the clear "too short" rejection instead of silently returning the
+    // entire output under the wrong label.
+    if segments.len() < 2 || (segments.len() == 2 && segments[1] != "output") {
         warnings.push(format!(
-            "Expression '{{{{{}}}}}': path too short — expected '{{{{node_name.output.field}}}}'. Replaced with empty string.",
+            "Expression '{{{{{}}}}}': path too short — expected '{{{{node_name.output}}}}' or '{{{{node_name.output.field}}}}'. Replaced with empty string.",
             expr
         ));
         return (String::new(), warnings);
@@ -345,6 +396,7 @@ fn try_resolve_function(
     name_to_id:    &HashMap<String, String>,
     ctx:           &ExecutionContext,
     env_allowlist: Option<&HashSet<String>>,
+    depth:         usize,
 ) -> Option<(String, Vec<String>)> {
     let paren_pos = expr.find('(')?;
     let func_name = &expr[..paren_pos];
@@ -382,7 +434,7 @@ fn try_resolve_function(
             resolved_args.push(arg.to_string());
             continue;
         }
-        let (val, mut w) = resolve_expression(arg, workflow, name_to_id, ctx, env_allowlist);
+        let (val, mut w) = resolve_expression(arg, workflow, name_to_id, ctx, env_allowlist, depth + 1);
         warnings.append(&mut w);
         resolved_args.push(val);
     }
@@ -434,7 +486,7 @@ mod tests {
         for (k, v) in vars { variables.insert(k.to_string(), v); }
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("execution_id".to_string(), json!("exec_abc123"));
-        ExecutionContext { variables, node_outputs: std::sync::Arc::new(node_outputs), metadata }
+        ExecutionContext { variables, node_outputs: std::sync::Arc::new(node_outputs), metadata, ..Default::default() }
     }
 
     #[test]
@@ -461,6 +513,38 @@ mod tests {
         let ctx = make_ctx(vec![("n1", json!({"items": ["a", "b", "c"]}))], vec![]);
         let (out, _) = resolve_string("{{List Items.output.items[1]}}", &wf, &ctx, None);
         assert_eq!(out, "b");
+    }
+
+    #[test]
+    fn two_segment_whole_output_resolves() {
+        let wf = make_workflow(vec![("n1", "Fetch Data")]);
+        let ctx = make_ctx(vec![("n1", json!({"body": "ok"}))], vec![]);
+        let (out, warns) = resolve_string("{{Fetch Data.output}}", &wf, &ctx, None);
+        assert_eq!(out, r#"{"body":"ok"}"#);
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn two_segment_non_output_second_segment_still_rejected() {
+        // Guards against the fix silently returning the *entire* output under a
+        // field name that doesn't actually mean "whole output" — a 2-segment
+        // expression is only valid when segment[1] is literally "output".
+        let wf = make_workflow(vec![("n1", "Fetch Data")]);
+        let ctx = make_ctx(vec![("n1", json!({"body": "ok", "result": "should not leak"}))], vec![]);
+        let (out, warns) = resolve_string("{{Fetch Data.result}}", &wf, &ctx, None);
+        assert_eq!(out, "");
+        assert!(!warns.is_empty());
+        assert!(warns[0].contains("path too short"));
+    }
+
+    #[test]
+    fn bare_node_name_single_segment_rejected() {
+        let wf = make_workflow(vec![("n1", "Fetch Data")]);
+        let ctx = make_ctx(vec![("n1", json!({"body": "ok"}))], vec![]);
+        let (out, warns) = resolve_string("{{Fetch Data}}", &wf, &ctx, None);
+        assert_eq!(out, "");
+        assert!(!warns.is_empty());
+        assert!(warns[0].contains("path too short"));
     }
 
     #[test]
@@ -828,5 +912,131 @@ mod tests {
         assert_eq!(out["e"][1], "world",              "array expression must resolve");
         assert_eq!(out["e"][2], true,                 "array bool must survive");
         assert!(warns.is_empty());
+    }
+
+    // T0-4: nested function calls comfortably under MAX_EXPRESSION_DEPTH still
+    // resolve normally — the depth cap must not affect legitimate nesting.
+    #[test]
+    fn nested_function_calls_within_depth_limit_resolve_normally() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let nested = format!("{}{}{}", "upper(".repeat(20), "\"hi\"", ")".repeat(20));
+        let (out, warns) = resolve_string(&format!("{{{{{}}}}}", nested), &wf, &ctx, None);
+        assert_eq!(out, "HI");
+        assert!(warns.is_empty());
+    }
+
+    // T0-4: a function-call expression nested past MAX_EXPRESSION_DEPTH — the
+    // {{a(b(c(...)))}} shape S6-9/S7-6/S11-2 identified as an unbounded-recursion
+    // crash reachable via a default write-scope API token or a plain file-drop
+    // import — must degrade to empty string + warning, not overflow the stack.
+    #[test]
+    fn function_calls_past_depth_limit_return_empty_with_warning_no_panic() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let nested = format!("{}{}{}", "upper(".repeat(100), "\"hi\"", ")".repeat(100));
+        let (out, warns) = resolve_string(&format!("{{{{{}}}}}", nested), &wf, &ctx, None);
+        assert_eq!(out, "", "expression past the depth cap must not resolve");
+        assert!(
+            warns.iter().any(|w| w.contains("nesting depth")),
+            "must warn that nesting depth was exceeded; got: {:?}", warns
+        );
+    }
+
+    // T0-4a: JSON array/object structural nesting comfortably under
+    // MAX_VALUE_NESTING_DEPTH still resolves normally — a separate recursion
+    // path from T0-4's function-call nesting, keyed off config-value structure
+    // rather than {{...}} expression nesting. The cap must not affect legitimate
+    // nesting depths.
+    #[test]
+    fn nested_config_structure_within_depth_limit_resolves_normally() {
+        let wf = make_workflow(vec![("n1", "Step")]);
+        let ctx = make_ctx(vec![("n1", json!({ "result": "world" }))], vec![]);
+        let mut input = json!("{{Step.output.result}}");
+        for _ in 0..20 {
+            input = Value::Array(vec![input]);
+        }
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        let mut cursor = &out;
+        for _ in 0..20 {
+            cursor = &cursor[0];
+        }
+        assert_eq!(cursor, &json!("world"), "expression 20 levels deep must still resolve");
+        assert!(warns.is_empty());
+    }
+
+    // T0-4a: a node config value whose JSON array/object nesting exceeds
+    // MAX_VALUE_NESTING_DEPTH — the same import-controlled attacker-reachability
+    // profile T0-4 already established (write-scope save_workflow, zero-auth
+    // .aerini file-drop import), just via structural nesting instead of
+    // function-call nesting — must degrade to empty string + warning at the
+    // point the cap is hit, not overflow the stack.
+    #[test]
+    fn config_structure_past_depth_limit_returns_empty_with_warning_no_panic() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let mut input = json!("{{unresolved}}");
+        for _ in 0..200 {
+            input = Value::Array(vec![input]);
+        }
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        let mut cursor = &out;
+        for _ in 0..=MAX_VALUE_NESTING_DEPTH {
+            cursor = &cursor[0];
+        }
+        assert_eq!(cursor, &json!(""), "structure past the depth cap must be replaced with empty string");
+        assert!(
+            warns.iter().any(|w| w.contains("nesting depth")),
+            "must warn that nesting depth was exceeded; got: {:?}", warns
+        );
+    }
+
+    // T0-4b: a node config value with no {{...}} anywhere, nested comfortably
+    // under MAX_VALUE_NESTING_DEPTH, must still take resolve_all_strings' fast
+    // path and come back unchanged — has_expressions' own depth guard must not
+    // affect legitimate expression-free structures at ordinary depths.
+    #[test]
+    fn has_expressions_false_within_depth_limit_preserves_structure_unchanged() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let mut input = json!("plain string, no expression");
+        for _ in 0..20 {
+            input = Value::Array(vec![input]);
+        }
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        assert_eq!(out, input, "expression-free structure within the cap must be returned unchanged");
+        assert!(warns.is_empty());
+    }
+
+    // T0-4b: a node config value with no {{...}} anywhere at all, but whose JSON
+    // array/object nesting exceeds MAX_VALUE_NESTING_DEPTH. Before this fix,
+    // has_expressions had no depth guard of its own — finding no expressions
+    // present, it would report `false` regardless of depth, sending the
+    // structure through resolve_all_strings' fast path, where the unguarded
+    // `value.clone()` would recurse to the same unbounded depth. This is the
+    // specific gap T0-4a's own tests never exercised, since their payload always
+    // contained an expression and so always reached resolve_value_recursive's
+    // guard on its own. has_expressions now caps its own recursion and reports
+    // `true` conservatively once the cap is exceeded, forcing the same
+    // guarded degrade-to-empty-string-plus-warning behavior even when no
+    // expression is actually present anywhere in the structure.
+    #[test]
+    fn has_expressions_reports_true_past_depth_limit_even_with_no_expressions_present() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let mut input = json!("plain string, no expression");
+        for _ in 0..200 {
+            input = Value::Array(vec![input]);
+        }
+        let (out, warns) = resolve_all_strings(&input, &wf, &ctx, None);
+        let mut cursor = &out;
+        for _ in 0..=MAX_VALUE_NESTING_DEPTH {
+            cursor = &cursor[0];
+        }
+        assert_eq!(cursor, &json!(""), "structure past the depth cap must be replaced with empty string even without an expression present");
+        assert!(
+            warns.iter().any(|w| w.contains("nesting depth")),
+            "must warn that nesting depth was exceeded; got: {:?}", warns
+        );
     }
 }

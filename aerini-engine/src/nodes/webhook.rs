@@ -455,6 +455,7 @@ mod tests {
                 variables,
                 node_outputs: Arc::new(HashMap::new()),
                 metadata:     HashMap::new(),
+                ..Default::default()
             },
         }
     }

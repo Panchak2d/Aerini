@@ -287,7 +287,7 @@ async fn api_status(
     headers:  HeaderMap,
 ) -> Json<Value> {
     let rs     = s.run_state.read().expect("run_state RwLock poisoned").clone();
-    let authed = check_run_secret(&s, &headers).is_ok();
+    let authed = check_run_secret(&s, &headers).await.is_ok();
     Json(json!({
         "workflow_name": s.workflow_name,
         "trigger":       s.trigger_desc,
@@ -306,7 +306,7 @@ async fn api_logs(
     State(s): State<StatusState>,
     headers:  HeaderMap,
 ) -> impl IntoResponse {
-    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+    if let Err((status, msg)) = check_run_secret(&s, &headers).await {
         return (status, msg).into_response();
     }
     Json(json!(s.log_buffer.last_n(50))).into_response()
@@ -330,12 +330,19 @@ fn default_runs_limit() -> i64 { 50 }
 ///
 /// Query-parameter auth is intentionally not supported: secrets in URLs
 /// are recorded in server logs, proxy logs, and browser history (RFC 6750 §5.3).
-fn check_run_secret(
+///
+/// The argon2id path is deliberately memory-hard and CPU-hard, so the actual
+/// comparison runs on the blocking thread pool via `spawn_blocking` — running
+/// it inline here would let an unauthenticated caller (this guards the public
+/// `/api/status` endpoint too) stall every other request on the same async
+/// worker thread. An empty/missing secret is rejected before that point so a
+/// bare, credential-less request never pays for a hash at all.
+async fn check_run_secret(
     state:   &StatusState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, &'static str)> {
     let stored = match &state.run_secret {
-        Some(s) => s,
+        Some(s) => s.clone(),
         None => return Err((StatusCode::FORBIDDEN,
             "Run history requires a run secret. Set one at export time.")),
     };
@@ -343,13 +350,32 @@ fn check_run_secret(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
+    if provided.is_empty() {
+        return Err((StatusCode::FORBIDDEN, "Invalid secret"));
+    }
+
+    // A panicked/cancelled blocking task is treated the same as a failed
+    // comparison — never fail open on an internal error.
+    let ok = tokio::task::spawn_blocking(move || verify_secret(&stored, &provided))
+        .await
+        .unwrap_or(false);
+
+    if ok { Ok(()) } else { Err((StatusCode::FORBIDDEN, "Invalid secret")) }
+}
+
+/// Compares `provided` against `stored`, dispatching on which of the three
+/// on-disk secret formats `stored` is in. Split out of `check_run_secret` so
+/// the comparison — expensive in the argon2id case — can run via
+/// `spawn_blocking` instead of inline on the async reactor.
+fn verify_secret(stored: &str, provided: &str) -> bool {
     // Since Aerini 0.3 the config stores an argon2id PHC string.
     // Backward-compat: Aerini 0.2 configs stored a 64-char BLAKE3 hex digest.
     // Detect by whether the value starts with the argon2 PHC prefix "$argon2".
     // For legacy configs, fall back to the old double-hash comparison path.
-    let ok: bool = if stored.starts_with("$argon2") {
+    if stored.starts_with("$argon2") {
         // New path (0.3+): verify against argon2id PHC hash.
         // This is brute-force resistant; BLAKE3 was not.
         match PasswordHash::new(stored) {
@@ -371,8 +397,7 @@ fn check_run_secret(
             .as_bytes()
             .ct_eq(b3(provided.as_bytes()).as_bytes())
             .into()
-    };
-    if ok { Ok(()) } else { Err((StatusCode::FORBIDDEN, "Invalid secret")) }
+    }
 }
 
 /// GET /api/runs?limit=N&offset=N&filter=success|failed — paginated run history.
@@ -382,7 +407,7 @@ async fn api_runs(
     headers:   HeaderMap,
     Query(q):  Query<RunsQuery>,
 ) -> impl IntoResponse {
-    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+    if let Err((status, msg)) = check_run_secret(&s, &headers).await {
         return (status, msg).into_response();
     }
     let Some(ref db) = s.run_history else {
@@ -407,7 +432,7 @@ async fn api_run_detail(
     headers:   HeaderMap,
     Path(id):  Path<String>,
 ) -> impl IntoResponse {
-    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+    if let Err((status, msg)) = check_run_secret(&s, &headers).await {
         return (status, msg).into_response();
     }
     let Some(ref db) = s.run_history else {
@@ -432,7 +457,7 @@ async fn api_run(
     if s.run_secret.is_none() {
         return (StatusCode::FORBIDDEN, "Manual trigger is disabled").into_response();
     }
-    if let Err((status, msg)) = check_run_secret(&s, &headers) {
+    if let Err((status, msg)) = check_run_secret(&s, &headers).await {
         return (status, msg).into_response();
     }
     s.run_trigger.notify_one();

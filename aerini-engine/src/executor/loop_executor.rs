@@ -109,6 +109,31 @@ impl WorkflowExecutor {
 
         let body_nodes = self.collect_loop_body_nodes(loop_node_id, workflow, topo_order);
 
+        // Direct loop_body successors of the loop node — these are the only body
+        // nodes that unconditionally run every iteration. Everything else reachable
+        // inside the body (e.g. downstream of an If/Switch node) only runs this
+        // iteration if that branching node's taken port actually activates it —
+        // see `active_body` below. Mirrors how sequential.rs seeds `active_nodes`
+        // from `graph.entry_nodes` for the outer topo walk.
+        let body_set: HashSet<&str> = body_nodes.iter().map(String::as_str).collect();
+        let seed_body: HashSet<String> = workflow.edges.iter()
+            .filter(|e| e.from_node == loop_node_id
+                && e.from_port == "loop_body"
+                && body_set.contains(e.to_node.as_str()))
+            .map(|e| e.to_node.clone())
+            .collect();
+
+        // Body nodes that have at least one outgoing edge to anything. Used below
+        // to tell "this branch genuinely goes nowhere for the port that fired —
+        // worth a warning" (e.g. an If node with only on_true wired) apart from
+        // "this is an ordinary leaf action node with nothing further wired,"
+        // which is the common case for a loop body and must not warn every
+        // single iteration.
+        let body_ids_with_any_outgoing_edge: HashSet<&str> = workflow.edges.iter()
+            .filter(|e| body_set.contains(e.from_node.as_str()))
+            .map(|e| e.from_node.as_str())
+            .collect();
+
         state.write().await.mark_running(loop_node_id);
         self.emit_node_status(&workflow.id, loop_node_id, "running");
 
@@ -192,6 +217,14 @@ impl WorkflowExecutor {
             // instead of pushing on every body node (which would wrongly produce k×n entries).
             let mut iteration_result: Option<serde_json::Value> = None;
 
+            // Per-iteration active-node set, reset from the seed every iteration.
+            // A body node only executes this iteration if it's in the seed set or
+            // was activated by a branching node's (If/Switch) taken port below —
+            // this is what makes branch selection actually gate execution inside
+            // a loop body, instead of every reachable body node running every
+            // iteration regardless of which branch the condition took.
+            let mut active_body: HashSet<String> = seed_body.clone();
+
             // Execute each body node in topo order for this iteration.
             for body_id in &body_nodes {
                 let body_def = match node_map.get(body_id.as_str()).copied() {
@@ -201,6 +234,14 @@ impl WorkflowExecutor {
                     )),
                 };
 
+                // Not activated by this iteration's branch selection — skip without
+                // executing (mirrors sequential.rs's `!active_nodes.contains(node_id)`).
+                if !active_body.contains(body_id) {
+                    state.write().await.mark_skipped(body_id);
+                    self.emit_node_status(&workflow.id, body_id, "skipped");
+                    continue;
+                }
+
                 // Honour disabled flag inside the loop body too.
                 if body_def.disabled {
                     {
@@ -209,6 +250,18 @@ impl WorkflowExecutor {
                         s.mark_skipped(body_id);
                     }
                     self.emit_node_status(&workflow.id, body_id, "skipped");
+                    // Pass through to "output" successors so the chain continues
+                    // through the disabled node, matching sequential.rs's handling
+                    // of a disabled node at the top level.
+                    let (_, drop_warn) = self.activate_successors(body_id, "output", workflow, &mut active_body);
+                    if let Some(msg) = drop_warn {
+                        if body_def.node_type_id != "output"
+                            && body_ids_with_any_outgoing_edge.contains(body_id.as_str())
+                        {
+                            let mut s = state.write().await;
+                            s.log(Some(body_id), LogLevel::Error, msg.replacen(body_id.as_str(), &body_def.name, 1));
+                        }
+                    }
                     continue;
                 }
 
@@ -280,8 +333,36 @@ impl WorkflowExecutor {
                 if let Some(ref val) = body_output.output {
                     iteration_result = Some(val.clone());
                 }
+                let taken_port = Self::resolve_taken_port(&body_output);
                 state.write().await.mark_succeeded(body_id, body_output);
                 self.emit_node_status(&workflow.id, body_id, "success");
+
+                // Branch gating: only the edge(s) on the node's actual taken port
+                // (on_true/on_false, case_N/default, done/loop_body, or the plain
+                // "output" port) become active for the rest of this iteration —
+                // an If/Switch node's untaken branch no longer runs.
+                let (fallback_fired, drop_warn) =
+                    self.activate_successors(body_id, &taken_port, workflow, &mut active_body);
+                if let Some(msg) = drop_warn {
+                    if body_def.node_type_id != "output"
+                        && body_ids_with_any_outgoing_edge.contains(body_id.as_str())
+                    {
+                        let mut s = state.write().await;
+                        s.log(Some(body_id), LogLevel::Error, msg.replacen(body_id.as_str(), &body_def.name, 1));
+                    }
+                } else if fallback_fired && taken_port != "output" {
+                    let mut s = state.write().await;
+                    s.log(
+                        Some(body_id),
+                        LogLevel::Warn,
+                        format!(
+                            "Node '{}': no edge found on port '{}' inside loop body — fell back \
+                             to 'output' port routing. Connect the '{}' port explicitly to \
+                             suppress this.",
+                            body_def.name, taken_port, taken_port
+                        ),
+                    );
+                }
             }
 
             // Push exactly one entry for this iteration (the last body node's
@@ -765,5 +846,299 @@ mod tests {
         assert_eq!(all_results[0]["seq"], 0, "iteration 0 output must be seq=0");
         assert_eq!(all_results[1]["seq"], 1, "iteration 1 output must be seq=1");
         assert_eq!(all_results[2]["seq"], 2, "iteration 2 output must be seq=2");
+    }
+
+    // ── T1-2 / S4-2 regression: If-style branch gating inside a loop body ──────
+    //
+    // Before the fix: collect_loop_body_nodes's BFS pulled every reachable node
+    // into body_set with no from_port filter, and execute_loop_node ran every
+    // body node every iteration unconditionally — an If/Switch node's branch
+    // selection was never honoured inside a loop body; both branches fired
+    // every iteration regardless of which one the condition node "took".
+    //
+    // Wires: loop_body -> cond (always emits branch:"on_true") ->
+    //   on_true  -> true_body  (increments true_counter)
+    //   on_false -> false_body (increments false_counter)
+    // Over 3 iterations, true_counter must be 3 and false_counter must be 0.
+    // Pre-fix behaviour would have produced false_counter == 3 as well, since
+    // both branches executed unconditionally every iteration.
+    #[tokio::test]
+    async fn loop_body_if_branch_gating_only_taken_branch_executes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CondNode;
+        #[async_trait::async_trait]
+        impl Node for CondNode {
+            fn type_id(&self) -> &'static str { "cond_branch_loop_test" }
+            fn display_name(&self) -> &'static str { "Cond" }
+            fn node_type(&self) -> NodeType { NodeType::Logic }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                NodeOutput::success(serde_json::json!({ "branch": "on_true" }))
+            }
+        }
+
+        struct CounterBranchNode { tid: &'static str, counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for CounterBranchNode {
+            fn type_id(&self) -> &'static str { self.tid }
+            fn display_name(&self) -> &'static str { "Counter Branch" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({}))
+            }
+        }
+
+        let true_counter = Arc::new(AtomicUsize::new(0));
+        let false_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(CondNode));
+        registry.register(Arc::new(CounterBranchNode {
+            tid: "true_body_branch_test", counter: true_counter.clone(),
+        }));
+        registry.register(Arc::new(CounterBranchNode {
+            tid: "false_body_branch_test", counter: false_counter.clone(),
+        }));
+
+        // loop_workflow_with_bodies only wires flat loop_body edges — this test
+        // needs cond's on_true/on_false edges, so the workflow is built by hand.
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let cond = WorkflowNode {
+            id: "cond".to_string(), node_type_id: "cond_branch_loop_test".to_string(),
+            node_type: NodeType::Logic, name: "Cond".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let true_body = WorkflowNode {
+            id: "true_body".to_string(), node_type_id: "true_body_branch_test".to_string(),
+            node_type: NodeType::Utility, name: "True Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let false_body = WorkflowNode {
+            id: "false_body".to_string(), node_type_id: "false_body_branch_test".to_string(),
+            node_type: NodeType::Utility, name: "False Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e1".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e2".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "cond".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e3".to_string(), from_node: "cond".to_string(), from_port: "on_true".to_string(),
+                to_node: "true_body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e4".to_string(), from_node: "cond".to_string(), from_port: "on_false".to_string(),
+                to_node: "false_body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_branch_test".to_string(),
+            name: "Loop Branch Gating Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, cond, true_body, false_body],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        assert_eq!(
+            true_counter.load(Ordering::SeqCst), 3,
+            "on_true branch must fire every iteration (3 items)"
+        );
+        assert_eq!(
+            false_counter.load(Ordering::SeqCst), 0,
+            "on_false branch must never fire — cond always takes on_true; pre-fix this \
+             would also be 3 (both branches ran unconditionally every iteration)"
+        );
+    }
+
+    // ── T1-2 / S4-2 regression: Switch-style ("port" field) gating in a loop ────
+    //
+    // Same bug, Switch's port shape instead of If's branch shape: a "switch" node
+    // emitting `{"port": "case_2"}` must activate only its case_2 edge inside a
+    // loop body, not case_1 or default as well.
+    #[tokio::test]
+    async fn loop_body_switch_port_gating_only_matching_case_executes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SwitchNode;
+        #[async_trait::async_trait]
+        impl Node for SwitchNode {
+            fn type_id(&self) -> &'static str { "switch_branch_loop_test" }
+            fn display_name(&self) -> &'static str { "Switch" }
+            fn node_type(&self) -> NodeType { NodeType::Logic }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                NodeOutput::success(serde_json::json!({ "port": "case_2" }))
+            }
+        }
+
+        struct CounterBranchNode { tid: &'static str, counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for CounterBranchNode {
+            fn type_id(&self) -> &'static str { self.tid }
+            fn display_name(&self) -> &'static str { "Counter Branch" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({}))
+            }
+        }
+
+        let case1_counter = Arc::new(AtomicUsize::new(0));
+        let case2_counter = Arc::new(AtomicUsize::new(0));
+        let default_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(SwitchNode));
+        registry.register(Arc::new(CounterBranchNode {
+            tid: "case1_branch_test", counter: case1_counter.clone(),
+        }));
+        registry.register(Arc::new(CounterBranchNode {
+            tid: "case2_branch_test", counter: case2_counter.clone(),
+        }));
+        registry.register(Arc::new(CounterBranchNode {
+            tid: "default_branch_test", counter: default_counter.clone(),
+        }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let switch = WorkflowNode {
+            id: "switch".to_string(), node_type_id: "switch_branch_loop_test".to_string(),
+            node_type: NodeType::Logic, name: "Switch".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let mut nodes = vec![data_source, loop_node, switch];
+        let mut edges = vec![
+            WorkflowEdge {
+                id: "e1".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e2".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "switch".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+        for (case_port, node_id, tid) in [
+            ("case_1", "case1_body", "case1_branch_test"),
+            ("case_2", "case2_body", "case2_branch_test"),
+            ("default", "default_body", "default_branch_test"),
+        ] {
+            nodes.push(WorkflowNode {
+                id: node_id.to_string(), node_type_id: tid.to_string(),
+                node_type: NodeType::Utility, name: node_id.to_string(),
+                config: serde_json::json!({}), credentials: HashMap::new(),
+                input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+                retry: Default::default(), fallback_node: None, disabled: false,
+                position: Default::default(),
+            });
+            edges.push(WorkflowEdge {
+                id: format!("e_{}", case_port),
+                from_node: "switch".to_string(), from_port: case_port.to_string(),
+                to_node: node_id.to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            });
+        }
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_switch_branch_test".to_string(),
+            name: "Loop Switch Gating Test".to_string(), description: String::new(),
+            nodes, edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        assert_eq!(case1_counter.load(Ordering::SeqCst), 0, "case_1 must never fire — switch always takes case_2");
+        assert_eq!(
+            case2_counter.load(Ordering::SeqCst), 2,
+            "case_2 must fire every iteration (2 items); pre-fix this and case_1/default \
+             would all have fired every iteration"
+        );
+        assert_eq!(default_counter.load(Ordering::SeqCst), 0, "default must never fire — switch always takes case_2");
     }
 }

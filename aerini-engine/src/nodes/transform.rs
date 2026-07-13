@@ -57,7 +57,15 @@ impl Node for TransformNode {
             ),
         };
 
-        let source: Value = if let Some(source_node) = input.input["source_node"].as_str() {
+        // Batch A: source_node is schema-typed as a string (line 32), so a
+        // non-string, non-null value is a malformed config, not "unset" — it
+        // must not silently fall through to the all-outputs merge below,
+        // which is reserved for a genuinely absent/null source_node. Mirrors
+        // switch.rs's T1-1g is_null/as_str/reject pattern.
+        let source_node_value = &input.input["source_node"];
+        let source: Value = if source_node_value.is_null() {
+            serde_json::to_value(&input.context.node_outputs).unwrap_or(Value::Null)
+        } else if let Some(source_node) = source_node_value.as_str() {
             match input.context.node_outputs.get(source_node) {
                 Some(v) => v.clone(),
                 None => return NodeOutput::failure(
@@ -68,7 +76,13 @@ impl Node for TransformNode {
                 ),
             }
         } else {
-            serde_json::to_value(&input.context.node_outputs).unwrap_or(Value::Null)
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_SOURCE_NODE",
+                format!(
+                    "source_node is set to a non-string value ({}), which is not a valid node ID",
+                    source_node_value
+                ),
+            ));
         };
 
         let mut result = serde_json::Map::new();
@@ -141,6 +155,7 @@ mod tests {
                 variables: HashMap::new(),
                 node_outputs: Arc::new(node_outputs),
                 metadata: HashMap::new(),
+                ..Default::default()
             },
         }
     }
@@ -254,6 +269,41 @@ mod tests {
         let out = TransformNode.execute(input).await;
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "SOURCE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn non_string_source_node_returns_error() {
+        // Batch A / T1-1g pattern: a bare number for "source_node" must not
+        // silently fall through to the all-outputs merge the way an absent
+        // key correctly does.
+        let input = make_input(
+            json!({
+                "source_node": 5,
+                "mappings": [{ "from": "/x", "to": "y" }]
+            }),
+            HashMap::new(),
+        );
+        let out = TransformNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_SOURCE_NODE");
+    }
+
+    #[tokio::test]
+    async fn explicit_null_source_node_still_uses_all_context_outputs() {
+        // Explicit JSON null is treated the same as an absent key (both are
+        // "genuinely unset"), unlike a non-string value.
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "val": 99 }));
+        let input = make_input(
+            json!({
+                "source_node": null,
+                "mappings": [{ "from": "/n_a/val", "to": "result" }]
+            }),
+            outputs,
+        );
+        let out = TransformNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!(99));
     }
 
     #[tokio::test]

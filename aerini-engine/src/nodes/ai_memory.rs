@@ -225,13 +225,19 @@ impl Node for AiMemoryNode {
 }
 
 fn read_messages(conn: &Connection, session_id: &str, limit: usize) -> Result<Vec<Value>, String> {
+    // Select the newest `limit` rows (DESC + LIMIT), then reverse so the returned
+    // Vec is in chronological order for the caller — the *window* selected is the
+    // newest N messages, matching the schema's documented "newest first" contract,
+    // while the messages *within* that window still read oldest-to-newest.
     let mut stmt = conn.prepare(
-        "SELECT role, content FROM ai_memory WHERE session_id = ?1 ORDER BY seq ASC LIMIT ?2"
+        "SELECT role, content FROM ai_memory WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![session_id, limit as i64], |row| {
         Ok(json!({ "role": row.get::<_, String>(0)?, "content": row.get::<_, String>(1)? }))
     }).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let mut msgs = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    msgs.reverse();
+    Ok(msgs)
 }
 
 fn get_next_seq(conn: &Connection, session_id: &str) -> Result<i64, String> {
@@ -316,6 +322,42 @@ mod tests {
                 { "role": "assistant", "content": "sunny" }
             ]),
             "session-b must survive session-a's clear untouched"
+        );
+
+        cleanup(&path);
+    }
+
+    /// T1-5 (S2-1): `read_messages` used to select the *oldest* N rows
+    /// (`ORDER BY seq ASC LIMIT`), contradicting the schema's documented
+    /// "max_messages ... newest first" contract. Seed 25 messages (5 more
+    /// than the default max_messages of 20) and assert the returned window
+    /// is msg-5..msg-24 (the newest 20), not msg-0..msg-19 (the oldest 20).
+    #[tokio::test]
+    async fn read_returns_newest_messages_not_oldest() {
+        let path = temp_db_path("read_newest");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        for i in 0..25 {
+            let out = node.execute(make_input(
+                "append", "session-x", Some("user"), Some(&format!("msg-{}", i)),
+            )).await;
+            assert!(out.success, "seed append {} failed: {:?}", i, out.error);
+        }
+
+        let read_out = node.execute(make_input("read", "session-x", None, None)).await;
+        assert!(read_out.success, "read failed: {:?}", read_out.error);
+        let out = read_out.output.unwrap();
+        assert_eq!(out["count"], 20, "default max_messages is 20");
+        let messages = out["messages"].as_array().expect("messages must be an array");
+        assert_eq!(messages.len(), 20);
+        assert_eq!(
+            messages[0]["content"], "msg-5",
+            "window must start at the newest-20 boundary (msg-5), not the oldest message (msg-0)"
+        );
+        assert_eq!(
+            messages[19]["content"], "msg-24",
+            "window must end at the most recently appended message"
         );
 
         cleanup(&path);

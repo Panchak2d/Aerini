@@ -1,4 +1,4 @@
-import{a as e,d as t,i as n,l as r,o as i}from"./index-CW6NjmjC.js";var a=class{el;creds=[];constructor(){this.el=document.getElementById(`cred-panel`),this.el||(this.el=document.createElement(`div`),this.el.id=`cred-panel`,this.el.className=`cred-panel hidden`,document.body.appendChild(this.el))}async show(){this.el.classList.remove(`hidden`),await this.refresh()}hide(){this.el.classList.add(`hidden`)}async refresh(){this.creds=await e().catch(()=>[]),this.render()}render(){let e=this.creds.length===0;this.el.innerHTML=`
+import{a as e,d as t,i as n,l as r,o as i}from"./index-B6c7Lvf8.js";var a=class{el;creds=[];constructor(){this.el=document.getElementById(`cred-panel`),this.el||(this.el=document.createElement(`div`),this.el.id=`cred-panel`,this.el.className=`cred-panel hidden`,document.body.appendChild(this.el))}async show(){this.el.classList.remove(`hidden`),await this.refresh()}hide(){this.el.classList.add(`hidden`)}async refresh(){this.creds=await e().catch(()=>[]),this.render()}render(){let e=this.creds.length===0;this.el.innerHTML=`
       <div class="cred-panel-backdrop"></div>
       <div class="cred-panel-box">
         <div class="cred-panel-header">

@@ -1,13 +1,25 @@
 import { CRON_PRESETS, mk, mkCustomSelect, mkField, type ExtensionContext } from "./popover-utils";
 
-// Converts a stored ISO string (2025-12-31T09:00:00Z) to datetime-local format
-// (2025-12-31T09:00) and back. datetime-local doesn't support seconds/timezone,
-// so we store as UTC ISO and display truncated to the minute.
-function isoToLocal(iso: string): string {
-  return iso.replace(/:[0-9]{2}(\.[0-9]+)?(Z|[+-].+)?$/, "");
+// Converts a stored UTC ISO string (2025-12-31T09:00:00Z) to datetime-local format
+// (2025-12-31T09:00, local wall-clock) and back. datetime-local's value carries no
+// timezone info (HTML Living Standard) and is always the user's local wall-clock time —
+// so the two formats represent the same instant only after a real timezone conversion,
+// not plain string splicing. `new Date(str)` on a date-time string with no offset is
+// parsed as *local* time (ES2015+ Date Time String Format, current cross-engine
+// behavior per MDN); the UTC/local getter pairs below do the actual conversion and
+// correctly bridge any DST transition in between, unlike hand-rolled offset math.
+export function isoToLocal(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-function localToIso(local: string): string {
-  return local ? `${local}:00Z` : "";
+export function localToIso(local: string): string {
+  if (!local) return "";
+  const d = new Date(local); // no offset in `local` -> parsed as local time
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00Z`;
 }
 
 export function renderScheduleFields(ctx: ExtensionContext): void {
