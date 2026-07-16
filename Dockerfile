@@ -35,7 +35,7 @@ RUN mkdir -p /data && chown 65532:65532 /data
 # not by the container process itself.
 FROM busybox:1.38-musl@sha256:8635836765b0c4c43970660219739baa58b0883c2e429e4b8918f7dd1519455c AS busybox
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7bb25d9f7c31d2bdd1982feb4dafcaf137703c7075dbe2febb41c24212b946f
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b
 
 COPY --from=busybox  /bin/wget                                                    /usr/local/bin/wget
 COPY --from=builder  /app/target/x86_64-unknown-linux-musl/release/aerini-server  /usr/local/bin/aerini-server
