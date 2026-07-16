@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
+use crate::nodes::util::read_json_response_capped;
 
 use super::shared::{network_err, strip_data_uri_prefix};
 
@@ -61,9 +62,9 @@ pub(super) async fn gen_gpt_image(client: reqwest::Client, req: GptImageRequest<
     };
 
     let status = resp.status().as_u16();
-    let json: Value = match resp.json().await {
+    let json: Value = match read_json_response_capped(resp).await {
         Ok(v)  => v,
-        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e.to_string())),
+        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e)),
     };
 
     if let Some(err) = json["error"].as_object() {
@@ -173,10 +174,10 @@ async fn gen_gpt_image_edit(client: reqwest::Client, req: GptImageRequest<'_>) -
     };
 
     let status = resp.status().as_u16();
-    let json: Value = match resp.json().await {
+    let json: Value = match read_json_response_capped(resp).await {
         Ok(v)  => v,
         Err(e) => return NodeOutput::failure_with_logs(
-            NodeError::unrecoverable("PARSE_ERROR", e.to_string()), logs,
+            NodeError::unrecoverable("PARSE_ERROR", e), logs,
         ),
     };
 

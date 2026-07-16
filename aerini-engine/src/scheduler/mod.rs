@@ -457,6 +457,66 @@ impl SchedulerDaemon {
                 .map_err(|e| SchedulerError::Other { message: e.to_string() })?
         };
 
+        // T2-1/T2-6: log the same dangerous-node signal at every execution
+        // entry point, including the scheduled/always-on path — which,
+        // unlike a manual run (see `run_workflow`'s identical check), had
+        // zero signal of any kind (AUDIT_REPORT.md S8-1: "will execute that
+        // node type indefinitely with zero warning ever shown"). This funnel
+        // is reached by both `start_job` (user clicks Start) and `start()`
+        // (always_on jobs re-armed at app launch), so one check here covers
+        // both without threading a new parameter through either call site.
+        // Warn-only — does not block; desktop's full-host-access default is
+        // unchanged. One extra `load_workflow_json` + parse per arm (not per
+        // execution tick) — acceptable at this frequency.
+        match db.load_workflow_json(&wf_id) {
+            Ok(Some(json)) => match Workflow::from_json(&json) {
+                Ok(wf) => {
+                    let dangerous = crate::nodes::dangerous_node_types_present(&wf.nodes);
+                    if !dangerous.is_empty() {
+                        tracing::warn!(
+                            workflow_id = %wf_id,
+                            node_types  = ?dangerous,
+                            "scheduler: workflow contains dangerous node type(s) {:?} — will \
+                             execute unattended on every scheduled/always-on run.",
+                            dangerous
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Batch L residual: this used to be `if let Ok(wf) = ...`,
+                    // silently dropping the dangerous-node check with zero
+                    // trace whenever a job's stored workflow JSON failed to
+                    // parse (e.g. a corrupted row). Diagnostic-only — arming
+                    // still proceeds unchanged below — but a corrupted record
+                    // should leave a trace instead of vanishing silently.
+                    tracing::warn!(
+                        workflow_id = %wf_id,
+                        error = %e,
+                        "scheduler: could not parse workflow JSON while checking for dangerous \
+                         node types — dangerous-node warning skipped for this arm (diagnostic \
+                         only, does not block scheduling)."
+                    );
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    workflow_id = %wf_id,
+                    "scheduler: no workflow JSON found while checking for dangerous node types \
+                     — dangerous-node warning skipped for this arm (diagnostic only, does not \
+                     block scheduling)."
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workflow_id = %wf_id,
+                    error = %e,
+                    "scheduler: failed to load workflow JSON while checking for dangerous node \
+                     types — dangerous-node warning skipped for this arm (diagnostic only, does \
+                     not block scheduling)."
+                );
+            }
+        }
+
         if let TriggerKind::Webhook { port, .. } = &trigger {
             ports_map.lock().expect("scheduler webhook_ports mutex poisoned").insert(*port, wf_id.clone());
         }

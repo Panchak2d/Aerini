@@ -4,6 +4,7 @@ import { showImportPreview } from "./modal-manager";
 import { isTauri } from "./utils";
 import { getSetting, installPluginFromPath } from "./ipc/workflow";
 import { showRestartBanner } from "./plugin-settings";
+import { showConfirm } from "./confirm";
 
 type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
 
@@ -94,7 +95,7 @@ export function bindFileInput(toast: ToastFn): void {
   });
 }
 
-async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<void> {
+export async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<void> {
   let pluginDir: string | null = null;
   try {
     pluginDir = await getSetting("plugin_dir");
@@ -105,6 +106,18 @@ async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<void> {
     toast("Set a plugin directory in Settings → Plugins first.", "info");
     return;
   }
+  // T2-14/S9-5: the .aerini/.json drop path already gates on
+  // showImportPreview before anything happens; a dropped .wasm plugin
+  // previously installed with zero confirmation despite running with the
+  // same trust-sensitive capabilities (S5/S8's SSRF-bypass trust
+  // boundary). Match the friction level here.
+  const fileName = srcPath.split(/[\\/]/).pop() ?? srcPath;
+  const ok = await showConfirm(
+    `Install plugin "${fileName}"? Only install plugins from sources you trust.`,
+    true,
+    "Install",
+  );
+  if (!ok) return;
   try {
     await installPluginFromPath(srcPath, pluginDir);
     toast("Plugin installed. Restart to activate.", "success");

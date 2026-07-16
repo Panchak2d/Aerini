@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use super::util::traverse_dotpath;
+use super::util::{ordered_node_outputs, traverse_dotpath};
 
 /// Loop node — iterates over an array, emitting one item at a time.
 ///
@@ -91,12 +91,16 @@ impl Node for LoopNode {
         // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern.
         let source_node_value = &input.input["source_node"];
         let source_data: Value = if source_node_value.is_null() {
-            // Search all node outputs for the array field
+            // Search all node outputs for the array field. T2-5 / S4-7:
+            // search in real completion order (via ordered_node_outputs),
+            // not the raw HashMap's unspecified order — previously, which
+            // upstream node "won" when two shared an array-valued field at
+            // this path was non-deterministic across runs.
             let mut found = Value::Null;
-            for output_val in input.context.node_outputs.values() {
-                let candidate = traverse_dotpath(output_val, &array_field);
+            for (_, output_val) in ordered_node_outputs(&input.context) {
+                let candidate = traverse_dotpath(&output_val, &array_field);
                 if candidate.is_array() {
-                    found = output_val.clone();
+                    found = output_val;
                     break;
                 }
             }
@@ -243,6 +247,31 @@ mod tests {
             json!({ "array_field": "items", "source_node": null }),
             outputs,
         );
+        let out = LoopNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["total"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn null_source_node_search_deterministically_picks_first_completed_match() {
+        // T2-5 / S4-7: two upstream nodes both carry an "items" array —
+        // resolution must be deterministic (first in execution_order), not
+        // whichever the raw HashMap happened to enumerate first.
+        let mut outputs = HashMap::new();
+        outputs.insert("z_second".to_string(), json!({ "items": [9, 9] }));
+        outputs.insert("a_first".to_string(), json!({ "items": [1, 2, 3] }));
+        let input = NodeInput {
+            node_id: "test".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "array_field": "items", "source_node": null }),
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata: HashMap::new(),
+                execution_order: Arc::new(vec!["a_first".to_string(), "z_second".to_string()]),
+            },
+        };
         let out = LoopNode.execute(input).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["total"], json!(3));

@@ -3,9 +3,16 @@
 //! # Architecture
 //!
 //! [`PluginLoader`] holds a shared [`wasmtime::Engine`] (expensive to construct; built
-//! once at startup). [`load_plugins_from_dir`](PluginLoader::load_plugins_from_dir)
+//! once per process via [`PluginLoader::shared`], which every call site — startup
+//! loading and later, repeatable inspection/listing calls alike — goes through
+//! instead of [`PluginLoader::new`] directly).
+//! [`load_plugins_from_dir`](PluginLoader::load_plugins_from_dir)
 //! iterates a directory, calls [`load_plugin`](PluginLoader::load_plugin) for each
 //! `.wasm` file, logs warnings for failures, and returns all successfully loaded nodes.
+//! [`describe_plugin`](PluginLoader::describe_plugin) does the same compile/link/describe
+//! work as `load_plugin` for a single file but returns owned metadata instead of a
+//! registered, `'static`-leaking [`Node`] — the path for callers (e.g. a UI listing
+//! command) that need to call this repeatedly rather than once per process.
 //!
 //! Each [`WasmPluginNode`] is registered in [`crate::node::NodeRegistry`] identically
 //! to built-in nodes and appears in the UI palette automatically.
@@ -42,8 +49,10 @@
 //! Plugins cannot access the real filesystem: `WasiCtx::builder().build()` creates an
 //! empty context with no preopened directories. Filesystem syscalls return errors.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -186,9 +195,93 @@ fn make_store(engine: &Engine, state: PluginState) -> wasmtime::Store<PluginStat
 /// Loads WASM plugin components and registers them as [`Node`] implementations.
 ///
 /// `Engine` is expensive to construct and designed to be shared across threads.
-/// Build one `PluginLoader` at startup and reuse it for all plugin loading calls.
+/// Build one `PluginLoader` at startup and reuse it for all plugin loading calls —
+/// in practice, call [`PluginLoader::shared`] rather than [`PluginLoader::new`]
+/// directly, so this invariant is enforced by construction rather than by
+/// caller discipline.
 pub struct PluginLoader {
     engine: Engine,
+    /// Compiled-`Component` cache keyed by plugin path — see
+    /// `compile_and_link` for the caching/invalidation
+    /// contract. T2-8 residual: T2-8 fixed the per-call Engine/thread/leak
+    /// cost of repeated `describe_plugin` calls but left the actual `.wasm`
+    /// recompilation itself un-cached, so a caller like `list_installed_plugins`
+    /// still paid full compile cost on every panel refresh for every plugin.
+    component_cache: Mutex<HashMap<PathBuf, CachedComponent>>,
+    /// Counts real (cache-miss) compiles — lets tests assert cache-hit
+    /// behavior directly instead of only inferring it from timing.
+    /// Per-instance (not a shared global) so tests running in parallel
+    /// can't interfere with each other's counts. Always present (one
+    /// `AtomicUsize`, one relaxed-cost increment per real compile — compile
+    /// itself dwarfs this) rather than `#[cfg(test)]`-gated, since only the
+    /// *definition* form of field-level `cfg` is a confirmed-safe pattern;
+    /// only the read accessor below needs to be test-only.
+    #[allow(dead_code)]
+    compile_count: std::sync::atomic::AtomicUsize,
+}
+
+/// One cached, already-compiled [`wasmtime::component::Component`] plus the
+/// file fingerprint (mtime, length) it was compiled from.
+///
+/// `Component::clone` is a cheap, `Arc`-backed shallow copy, not a
+/// recompilation (VERIFIED — wasmtime's own doc comment on `Component`:
+/// "Using clone on a Component is a cheap operation. It will not create an
+/// entirely new component, but rather just a new reference to the existing
+/// component."), so serving a cache hit costs one `stat()` plus one cheap
+/// clone, versus a full read + Cranelift compile on a miss.
+struct CachedComponent {
+    fingerprint: (Option<SystemTime>, u64),
+    component: wasmtime::component::Component,
+}
+
+/// Process-wide, lazily-constructed [`PluginLoader`].
+///
+/// [`PluginLoader::new`] builds a `wasmtime::Engine` and spawns a permanent,
+/// process-lifetime epoch-ticker OS thread — both are meant to exist at most
+/// once per process (see the struct-level doc comment above). Every call site
+/// that needs a loader — [`load_plugins`] at startup, and any UI-facing
+/// listing/inspection command — goes through [`PluginLoader::shared`] instead
+/// of calling `new()` itself, so a caller invoked repeatedly within one
+/// process (e.g. a Plugins settings panel re-listing installed plugins) can
+/// never construct a second engine/thread.
+static SHARED_LOADER: OnceLock<Result<PluginLoader, String>> = OnceLock::new();
+
+/// Metadata about a plugin, obtained without registering it as a live
+/// [`Node`] and without leaking any memory.
+///
+/// [`PluginLoader::load_plugin`] returns an `Arc<dyn Node>` whose `type_id`
+/// and `display_name` are [`Box::leak`]ed, because the [`Node`] trait
+/// requires `&'static str` — correct and bounded when called once per
+/// plugin at process startup (see [`load_plugins`]), but not safe to call
+/// repeatedly. [`PluginLoader::describe_plugin`] runs the identical
+/// compile/link/describe steps but returns owned data instead, so it is
+/// safe to call as many times as a caller needs (e.g. every time a UI
+/// panel lists installed plugins).
+pub struct PluginDescriptor {
+    pub type_id: String,
+    pub display_name: String,
+    pub node_type: NodeType,
+}
+
+/// Maps a plugin-supplied category string to a [`NodeType`], defaulting to
+/// [`NodeType::Action`] (with a warning) for any unrecognised value. Shared
+/// by [`PluginLoader::load_plugin`] and [`PluginLoader::describe_plugin`] so
+/// the mapping — and its warning — can't drift between the two call paths.
+fn category_to_node_type(category: &str, type_id_for_log: &str) -> NodeType {
+    match category {
+        "ai" => NodeType::Ai,
+        "logic" => NodeType::Logic,
+        "utility" => NodeType::Utility,
+        "action" => NodeType::Action,
+        other => {
+            tracing::warn!(
+                "plugin '{}': unrecognised category '{}' — defaulting to Action",
+                type_id_for_log,
+                other
+            );
+            NodeType::Action
+        }
+    }
 }
 
 impl PluginLoader {
@@ -219,29 +312,84 @@ impl PluginLoader {
             })
             .expect("failed to spawn wasm epoch ticker thread");
 
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            component_cache: Mutex::new(HashMap::new()),
+            compile_count: std::sync::atomic::AtomicUsize::new(0),
+        })
     }
 
-    /// Load a single WASM plugin from `path`.
-    ///
-    /// Steps:
-    /// 1. Read the file (→ [`PluginLoadError::Io`] on failure).
-    /// 2. Compile to a component (→ [`PluginLoadError::WasmCompile`] on failure).
-    /// 3. Build a linker with full WASIp2 + HTTP and pre-instantiate
-    ///    (→ [`PluginLoadError::WasmLink`] on failure).
-    /// 4. Validate that the component exports the `aerini-node` world
-    ///    (→ [`PluginLoadError::MissingInterface`] if absent).
-    /// 5. Call `describe()` once to populate the [`NodeDescriptor`](crate::node::NodeDescriptor).
-    ///
-    /// The `describe()` result is cached in [`WasmPluginNode`] for the lifetime
-    /// of the process — it is never called again after load time.
-    pub fn load_plugin(&self, path: &Path) -> Result<Arc<dyn Node>, PluginLoadError> {
-        // Step 1: read — produces Io error (not WasmCompile) for missing files.
-        let bytes = std::fs::read(path)?;
+    /// Number of real (cache-miss) compiles performed by this instance so
+    /// far. Test-only — see the `compile_count` field doc above.
+    #[cfg(test)]
+    fn compile_count(&self) -> usize {
+        self.compile_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
 
-        // Step 2: compile. Accepts WAT text or WASM binary — wasmtime detects by magic.
-        let component = wasmtime::component::Component::new(&self.engine, &bytes)
-            .map_err(|e| PluginLoadError::WasmCompile(e.to_string()))?;
+    /// Returns the process-wide shared [`PluginLoader`], constructing it on
+    /// the first call and reusing it — and its one `Engine` and one
+    /// epoch-ticker thread — for every later call, from any caller, for the
+    /// rest of the process's lifetime.
+    ///
+    /// If [`PluginLoader::new`] fails (e.g. unsupported CPU features on the
+    /// host), the error is cached and returned again on every subsequent
+    /// call rather than retried — a construction failure here reflects a
+    /// host/environment condition that will not change between calls within
+    /// the same process.
+    pub fn shared() -> Result<&'static PluginLoader, String> {
+        SHARED_LOADER
+            .get_or_init(|| PluginLoader::new().map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    /// Steps shared by [`load_plugin`](Self::load_plugin) and
+    /// [`describe_plugin`](Self::describe_plugin): read the file, compile it
+    /// to a component, build a linker with the full WASIp2 + HTTP surface,
+    /// pre-instantiate, and validate that the `aerini-node` world is
+    /// exported. Extracted so the two call paths — one that goes on to leak
+    /// `'static` strings and register a live `Node`, one that doesn't —
+    /// can't drift apart on the compile/link logic itself.
+    fn compile_and_link(&self, path: &Path) -> Result<wit::AeriniNodePre<PluginState>, PluginLoadError> {
+        // Steps 1-2: read + compile — or reuse a cached `Component` for this
+        // exact path if its (mtime, len) fingerprint matches what's cached.
+        // `std::fs::metadata` (not `std::fs::read`) is the first fallible
+        // call so a missing/unreadable file still produces `Io`, not
+        // `WasmCompile` — matching the pre-cache error classification the
+        // existing tests assert on. A changed fingerprint (file replaced,
+        // e.g. via remove+reinstall under the same filename) forces a fresh
+        // compile rather than serving stale bytes.
+        let meta = std::fs::metadata(path)?;
+        let fingerprint = (meta.modified().ok(), meta.len());
+
+        let cached = self
+            .component_cache
+            .lock()
+            .expect("component cache mutex poisoned")
+            .get(path)
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| entry.component.clone());
+
+        let component = match cached {
+            Some(c) => c,
+            None => {
+                // Step 1: read — produces Io error (not WasmCompile) for missing files.
+                let bytes = std::fs::read(path)?;
+
+                // Step 2: compile. Accepts WAT text or WASM binary — wasmtime detects by magic.
+                let component = wasmtime::component::Component::new(&self.engine, &bytes)
+                    .map_err(|e| PluginLoadError::WasmCompile(e.to_string()))?;
+
+                self.compile_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                self.component_cache
+                    .lock()
+                    .expect("component cache mutex poisoned")
+                    .insert(path.to_path_buf(), CachedComponent { fingerprint, component: component.clone() });
+
+                component
+            }
+        };
 
         // Step 3: linker + pre-instantiation.
         //
@@ -266,8 +414,25 @@ impl PluginLoader {
             .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
 
         // Step 4: validate the `aerini-node` world export exists.
-        let pre = wit::AeriniNodePre::new(instance_pre)
-            .map_err(|_| PluginLoadError::MissingInterface)?;
+        wit::AeriniNodePre::new(instance_pre).map_err(|_| PluginLoadError::MissingInterface)
+    }
+
+    /// Load a single WASM plugin from `path`.
+    ///
+    /// Steps:
+    /// 1. Read the file (→ [`PluginLoadError::Io`] on failure).
+    /// 2. Compile to a component (→ [`PluginLoadError::WasmCompile`] on failure).
+    /// 3. Build a linker with full WASIp2 + HTTP and pre-instantiate
+    ///    (→ [`PluginLoadError::WasmLink`] on failure).
+    /// 4. Validate that the component exports the `aerini-node` world
+    ///    (→ [`PluginLoadError::MissingInterface`] if absent).
+    /// 5. Call `describe()` once to populate the [`NodeDescriptor`](crate::node::NodeDescriptor).
+    ///
+    /// The `describe()` result is cached in [`WasmPluginNode`] for the lifetime
+    /// of the process — it is never called again after load time.
+    pub fn load_plugin(&self, path: &Path) -> Result<Arc<dyn Node>, PluginLoadError> {
+        // Steps 1-4: read, compile, link, pre-instantiate, validate world export.
+        let pre = self.compile_and_link(path)?;
 
         // Step 5: call describe() once to get node metadata.
         let mut store = make_store(&self.engine, make_plugin_state());
@@ -282,23 +447,14 @@ impl PluginLoader {
 
         // Leak type_id and display_name once per plugin load — bounded intentional leak:
         // plugins are loaded once at process start and live for the process lifetime.
+        // Only safe because this method is reached once per plugin per process (via
+        // `load_plugins_from_dir`, called from `load_plugins` through `shared()`) —
+        // a caller needing repeatable metadata lookups must use `describe_plugin`
+        // instead, which runs the identical steps but leaks nothing.
         let type_id: &'static str = Box::leak(descriptor.type_id.into_boxed_str());
         let display_name: &'static str = Box::leak(descriptor.display_name.into_boxed_str());
 
-        let node_type = match descriptor.category.as_str() {
-            "ai" => NodeType::Ai,
-            "logic" => NodeType::Logic,
-            "utility" => NodeType::Utility,
-            "action" => NodeType::Action,
-            other => {
-                tracing::warn!(
-                    "plugin '{}': unrecognised category '{}' — defaulting to Action",
-                    type_id,
-                    other
-                );
-                NodeType::Action
-            }
-        };
+        let node_type = category_to_node_type(&descriptor.category, type_id);
 
         // JSON Schema strings from the plugin — fall back to empty schema on parse failure.
         let input_schema: Value = serde_json::from_str(&descriptor.input_schema)
@@ -315,6 +471,39 @@ impl PluginLoader {
             input_schema,
             output_schema,
         }))
+    }
+
+    /// Returns `type_id`/`display_name`/`node_type` for the plugin at `path`
+    /// without registering it as a live [`Node`] and without leaking any
+    /// memory — every string in the returned [`PluginDescriptor`] is owned.
+    ///
+    /// Runs the identical compile/link/describe steps as
+    /// [`load_plugin`](Self::load_plugin) (steps 1-5 of that method's own
+    /// doc comment), but never calls [`Box::leak`] and never constructs a
+    /// [`WasmPluginNode`] — the compiled component, linker, and store are
+    /// all dropped when this method returns. Safe to call as many times as
+    /// a caller needs, unlike `load_plugin`, whose leak is only bounded when
+    /// called once per plugin per process.
+    pub fn describe_plugin(&self, path: &Path) -> Result<PluginDescriptor, PluginLoadError> {
+        let pre = self.compile_and_link(path)?;
+
+        let mut store = make_store(&self.engine, make_plugin_state());
+
+        let bindings = pre.instantiate(&mut store)
+            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+
+        let descriptor = bindings
+            .aerini_plugin_node()
+            .call_describe(&mut store)
+            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+
+        let node_type = category_to_node_type(&descriptor.category, &descriptor.type_id);
+
+        Ok(PluginDescriptor {
+            type_id: descriptor.type_id,
+            display_name: descriptor.display_name,
+            node_type,
+        })
     }
 
     /// Load all `.wasm` files from `dir` as plugins.
@@ -582,7 +771,7 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
         plugin_dir.display()
     );
 
-    let loader = match PluginLoader::new() {
+    let loader = match PluginLoader::shared() {
         Ok(l) => l,
         Err(e) => {
             tracing::error!(
@@ -661,6 +850,143 @@ mod tests {
         assert!(
             matches!(err, PluginLoadError::MissingInterface),
             "expected MissingInterface, got: {err:?}"
+        );
+    }
+
+    /// `describe_plugin` must classify errors identically to `load_plugin`
+    /// for the same non-existent-path input (T2-8 regression: the new
+    /// non-leaking path must not silently swallow or misclassify an error
+    /// `load_plugin` already handles correctly).
+    #[test]
+    fn describe_plugin_nonexistent_file_returns_io_error() {
+        let l = loader();
+        let result = l.describe_plugin(Path::new("/nonexistent/path/to/plugin.wasm"));
+        assert!(result.is_err(), "expected Io error, got Ok");
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, PluginLoadError::Io(_)),
+            "expected Io, got: {err:?}"
+        );
+    }
+
+    /// `describe_plugin` must classify a world-less component identically to
+    /// `load_plugin` (same mechanism as `load_plugin_empty_component_returns_missing_interface`
+    /// above — see that test's doc comment for why `(component)` triggers this path).
+    #[test]
+    fn describe_plugin_empty_component_returns_missing_interface() {
+        let l = loader();
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let result = l.describe_plugin(tmp.path());
+        assert!(result.is_err(), "expected MissingInterface error, got Ok");
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, PluginLoadError::MissingInterface),
+            "expected MissingInterface, got: {err:?}"
+        );
+    }
+
+    /// T2-8 regression: `PluginLoader::shared()` must return the same
+    /// process-wide instance on every call, not construct a fresh `Engine` +
+    /// epoch-ticker thread each time (which is the exact leak `list_installed_plugins`
+    /// had via its own `PluginLoader::new()` call before this fix). Pointer
+    /// equality on the returned `&'static PluginLoader` is a direct proxy for
+    /// "no second construction happened": `OnceLock::get_or_init` only ever
+    /// runs its initializer once, so two `Ok` results can only share an
+    /// address if they came from the same underlying `PluginLoader`.
+    #[test]
+    fn shared_returns_same_instance_across_repeated_calls() {
+        let a = PluginLoader::shared().expect("shared() should succeed on a normal host");
+        let b = PluginLoader::shared().expect("shared() should succeed on a normal host");
+        let c = PluginLoader::shared().expect("shared() should succeed on a normal host");
+        assert!(
+            std::ptr::eq(a, b) && std::ptr::eq(b, c),
+            "shared() must return the same PluginLoader on every call, not construct a new one"
+        );
+    }
+
+    /// `describe_plugin` must agree with `load_plugin` on the metadata it
+    /// extracts for the same input — this only has an error path to compare
+    /// in this test module (no valid `aerini-node`-exporting fixture is
+    /// available without a real compiled plugin), so this asserts the two
+    /// paths at least agree on failure classification for a second distinct
+    /// error shape (`WasmCompile`, via a byte string that is neither valid
+    /// WAT text nor a valid WASM binary).
+    #[test]
+    fn describe_plugin_and_load_plugin_agree_on_invalid_bytes() {
+        let l = loader();
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"not a wasm module or wat text").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let load_err = l.load_plugin(tmp.path()).err().expect("load_plugin should fail");
+        let describe_err = l.describe_plugin(tmp.path()).err().expect("describe_plugin should fail");
+
+        assert!(matches!(load_err, PluginLoadError::WasmCompile(_)));
+        assert!(matches!(describe_err, PluginLoadError::WasmCompile(_)));
+    }
+
+    /// Batch-Q-residual regression: repeated `describe_plugin` calls against
+    /// the same, unchanged file must compile the `.wasm` bytes exactly once,
+    /// not on every call (the recompile-every-call cost `list_installed_plugins`
+    /// paid on every Plugins-panel refresh even after T2-8's Engine/thread/leak
+    /// fix). Uses a per-instance compile counter (see `compile_count`) rather
+    /// than timing, so this can't be flaky.
+    #[test]
+    fn describe_plugin_reuses_cached_component_for_unchanged_file() {
+        let l = loader();
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        for _ in 0..3 {
+            // Every call returns MissingInterface (no export) — only the
+            // compile *count*, not the result, is under test here.
+            let _ = l.describe_plugin(tmp.path());
+        }
+
+        assert_eq!(
+            l.compile_count(),
+            1,
+            "expected exactly one real compile across three describe_plugin calls on an unchanged file"
+        );
+    }
+
+    /// Companion to the above: if the file at the same path actually
+    /// changes (different length — covers a plugin removed and a
+    /// different one reinstalled under the same filename), the cache must
+    /// not serve stale bytes — a fresh compile is required.
+    #[test]
+    fn describe_plugin_recompiles_when_file_content_changes() {
+        let l = loader();
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let _ = l.describe_plugin(tmp.path());
+        assert_eq!(l.compile_count(), 1);
+
+        // Truncate and rewrite with different (longer) content so the
+        // (mtime, len) fingerprint changes regardless of filesystem mtime
+        // resolution.
+        use std::io::{Seek, SeekFrom};
+        tmp.as_file_mut().set_len(0).expect("truncate failed");
+        tmp.as_file_mut().seek(SeekFrom::Start(0)).expect("seek failed");
+        tmp.write_all(b"(component (core module (memory 1) (data (i32.const 100) \"abcd\")))")
+            .expect("tempfile rewrite failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let _ = l.describe_plugin(tmp.path());
+        assert_eq!(
+            l.compile_count(),
+            2,
+            "file content/length changed at the same path — must recompile, not reuse the stale cached Component"
         );
     }
 }

@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils";
+import { getOAuthRedirectPort } from "../ipc/oauth";
 
 // ---------------------------------------------------------------------------
 // SocialSetupGuide — per-platform OAuth setup instructions
@@ -7,7 +8,22 @@ import { escapeHtml } from "../utils";
 
 type Platform = "youtube" | "instagram" | "tiktok";
 
-const REDIRECT_URI = "http://127.0.0.1:42069/callback";
+const DEFAULT_OAUTH_PORT = 42069;
+const DEFAULT_REDIRECT_URI = `http://127.0.0.1:${DEFAULT_OAUTH_PORT}/callback`;
+
+// T2-15/S10-2: PLATFORMS below is built once, at module load, so the real
+// redirect URI can't be baked into its `steps` strings directly — it's only
+// known live, via an async port probe that may resolve after first render.
+// Each step that shows the redirect URI uses this placeholder instead; renderGuide()
+// substitutes it for the current best-known value every time it renders.
+const REDIRECT_URI_TOKEN = "%%REDIRECT_URI%%";
+
+// Best-known live redirect URI. Starts at the documented default and is updated
+// (and the guide re-rendered, if still open) once getOAuthRedirectPort() resolves.
+let _liveRedirectUri = DEFAULT_REDIRECT_URI;
+// True once a probe has confirmed the live port isn't the documented default —
+// drives the warning banner below.
+let _portMismatch = false;
 
 interface PlatformDef {
   id:    Platform;
@@ -30,7 +46,7 @@ const PLATFORMS: PlatformDef[] = [
       `Go to <strong>APIs &amp; Services → Credentials</strong>. Click <strong>+ Create Credentials → OAuth client ID</strong>.`,
       `Set Application type to <strong>Desktop app</strong>. Give it a name and click <strong>Create</strong>.`,
       `Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the dialog.`,
-      `Under <strong>Authorized redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
+      `Under <strong>Authorized redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
       `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>YouTube OAuth</strong>. Paste your Client ID and Client Secret.`,
     ],
     notes: [
@@ -50,7 +66,7 @@ const PLATFORMS: PlatformDef[] = [
       `Inside your app dashboard, click <strong>Add Product</strong> and add <strong>Instagram</strong>.`,
       `Go to <strong>Instagram → API setup with Instagram login</strong>. Click <strong>Generate token</strong> to confirm your Instagram account is linked.`,
       `Go to <strong>App settings → Basic</strong>. Note your <strong>App ID</strong> (Client ID) and <strong>App Secret</strong> (Client Secret).`,
-      `Under <strong>Instagram → Settings → Valid OAuth Redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
+      `Under <strong>Instagram → Settings → Valid OAuth Redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
       `Request the <strong>instagram_content_publish</strong> permission under <strong>App Review → Permissions and Features</strong>. For testing, add your Instagram account under <strong>Roles → Instagram Testers</strong>.`,
       `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>Instagram OAuth</strong>. Paste your App ID and App Secret.`,
     ],
@@ -67,7 +83,7 @@ const PLATFORMS: PlatformDef[] = [
       `Go to <a href="https://developers.tiktok.com" target="_blank" rel="noopener noreferrer">developers.tiktok.com</a> and sign in with your TikTok account.`,
       `Click <strong>Manage Apps → Create app</strong>. Fill in the app name and description. Set platform to <strong>Web</strong>.`,
       `Under <strong>Products</strong>, add <strong>Login Kit</strong> and <strong>Content Posting API</strong>.`,
-      `In the <strong>Login Kit</strong> settings, add the redirect URI exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI}">${escapeHtml(REDIRECT_URI)}</code>`,
+      `In the <strong>Login Kit</strong> settings, add the redirect URI exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
       `Request the <strong>video.publish</strong> scope under <strong>Content Posting API → Scopes</strong>. For sandbox testing, use the sandbox environment.`,
       `Copy your <strong>Client Key</strong> (Client ID) and <strong>Client Secret</strong> from the app's <strong>App info</strong> page.`,
       `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>TikTok OAuth</strong>. Paste your Client Key and Client Secret.`,
@@ -97,7 +113,23 @@ export function showSocialSetupGuide(platform: Platform = "youtube"): void {
   _activePlatform = platform;
   const el = getOrCreateEl();
   el.classList.remove("hidden");
-  renderGuide(el);
+  renderGuide(el); // render immediately with the current best-known redirect URI
+
+  // Best-effort live port probe (T2-15/S10-2). Re-renders only if the guide is
+  // still open and the result actually changed anything — avoids a pointless
+  // rebuild when the port was already the documented default, as it usually is.
+  // Failure (older backend, IPC error) is silent: the guide keeps showing the
+  // documented default, exactly as it did before this fix existed.
+  getOAuthRedirectPort()
+    .then(port => {
+      const uri = `http://127.0.0.1:${port}/callback`;
+      const mismatch = port !== DEFAULT_OAUTH_PORT;
+      if (uri === _liveRedirectUri && mismatch === _portMismatch) return;
+      _liveRedirectUri = uri;
+      _portMismatch = mismatch;
+      if (!el.classList.contains("hidden")) renderGuide(el);
+    })
+    .catch(() => { /* keep showing the default — same as before this fix */ });
 }
 
 export function hideSocialSetupGuide(): void {
@@ -105,6 +137,17 @@ export function hideSocialSetupGuide(): void {
 }
 
 function renderGuide(el: HTMLElement): void {
+  // Placeholder substitution (T2-15/S10-2): PLATFORMS' step strings were built
+  // once at module load with a fixed token in place of the redirect URI, since
+  // the real value is only known live and can change between opens. Substitute
+  // here, at render time, into a plain string, before assigning to innerHTML —
+  // the URI's charset (letters/digits/./:/`/`) needs no HTML escaping, but it's
+  // routed through escapeHtml anyway for consistency with every other dynamic
+  // value in this file.
+  const liveUriHtml = escapeHtml(_liveRedirectUri);
+  const stepsHtml = (steps: string[]) =>
+    steps.map(s => s.split(REDIRECT_URI_TOKEN).join(liveUriHtml));
+
   el.innerHTML = `
     <div class="ssg-backdrop"></div>
     <div class="ssg-box" role="dialog" aria-modal="true" aria-label="Social platform setup guide">
@@ -140,8 +183,14 @@ function renderGuide(el: HTMLElement): void {
                 <span>${p.warning}</span>
               </div>
             ` : ""}
+            ${_portMismatch ? `
+              <div class="ssg-warning" role="alert">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Port ${DEFAULT_OAUTH_PORT} is currently unavailable, so OAuth will use a different port for this session. The redirect URI shown in the steps below and at the bottom of this guide already reflects the port that will actually be used — register that value with this platform, not ${DEFAULT_OAUTH_PORT}, or close whatever else is using port ${DEFAULT_OAUTH_PORT} and reopen this guide.</span>
+              </div>
+            ` : ""}
             <ol class="ssg-steps">
-              ${p.steps.map((step, i) => `
+              ${stepsHtml(p.steps).map((step, i) => `
                 <li class="ssg-step">
                   <span class="ssg-step-num">${i + 1}</span>
                   <span class="ssg-step-text">${step}</span>
@@ -163,7 +212,7 @@ function renderGuide(el: HTMLElement): void {
       <div class="ssg-footer">
         <div class="ssg-redirect-row">
           <span class="ssg-redirect-label">Redirect URI (use this exact value in all platforms):</span>
-          <span class="ssg-redirect-uri">${escapeHtml(REDIRECT_URI)}</span>
+          <span class="ssg-redirect-uri">${liveUriHtml}</span>
           <button class="ssg-copy-btn" id="ssg-copy-uri">Copy</button>
         </div>
       </div>
@@ -200,7 +249,7 @@ function renderGuide(el: HTMLElement): void {
   // Copy redirect URI button
   el.querySelector<HTMLButtonElement>("#ssg-copy-uri")!.addEventListener("click", e => {
     const btn = e.currentTarget as HTMLButtonElement;
-    navigator.clipboard.writeText(REDIRECT_URI).catch(() => {});
+    navigator.clipboard.writeText(_liveRedirectUri).catch(() => {});
     btn.textContent = "Copied!";
     setTimeout(() => { btn.textContent = "Copy"; }, 1500);
   });

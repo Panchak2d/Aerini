@@ -585,7 +585,7 @@ async fn call_gemini_agent(
         .await
         .map_err(|e| e.to_string())?;
 
-    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
 
     if let Some(err) = json["error"].as_object() {
         return Err(err.get("message")
@@ -638,7 +638,7 @@ async fn call_openai_agent(
     ).json(&body);
 
     let response = req.send().await.map_err(|e| e.to_string())?;
-    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
 
     if let Some(err) = json["error"].as_object() {
         return Err(err.get("message")
@@ -690,7 +690,7 @@ async fn call_anthropic_agent(
     ).json(&body);
 
     let response = req.send().await.map_err(|e| e.to_string())?;
-    let json: Value = response.json().await.map_err(|e| e.to_string())?;
+    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
 
     if let Some(err) = json["error"].as_object() {
         return Err(err.get("message")

@@ -346,14 +346,14 @@ export class Canvas {
     window.addEventListener("keyup",   ih._keyUpH);
   }
 
-  destroy() {
-    const ih = this.input;
-    window.removeEventListener("mousemove", ih._winMoveH);
-    window.removeEventListener("mouseup",   ih._winUpH);
-    window.removeEventListener("mouseup",   this.minimap._mmUpH);
-    window.removeEventListener("keydown",   ih._keyH);
-    window.removeEventListener("keyup",     ih._keyUpH);
-  }
+  // S9-6/Rule 25: destroy() was removed here — it had zero callers
+  // anywhere in the app (Canvas is instantiated exactly once, at startup,
+  // and never torn down) and was incomplete even if it had been called:
+  // it only removed 5 of bind()'s 15 registered listeners and never
+  // disconnected the ResizeObserver. No concrete near-term feature needs
+  // teardown; reintroduce a correct version (stored, removable handler
+  // references for every listener bind() adds, plus ro.disconnect()) in
+  // the same patch that actually needs it.
 
   // ── Port snap ─────────────────────────────────────────────────────────────
 

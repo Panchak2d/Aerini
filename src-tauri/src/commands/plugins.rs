@@ -34,7 +34,13 @@ pub async fn list_installed_plugins(plugin_dir: String) -> Result<Vec<PluginInfo
         Err(_) => return Ok(Vec::new()),
     };
 
-    let loader = PluginLoader::new().map_err(|e| e.to_string())?;
+    // T2-8 fix: `PluginLoader::shared()` reuses the one process-wide `Engine` +
+    // epoch-ticker thread instead of constructing a fresh pair on every call to
+    // this command (e.g. every time a user opens/refreshes the Plugins settings
+    // panel). `describe_plugin` (vs. `load_plugin`) additionally avoids leaking
+    // two `Box`'d strings per plugin per call — this command only inspects
+    // metadata for display, it never registers or executes any of these plugins.
+    let loader = PluginLoader::shared()?;
     let mut out = Vec::new();
 
     for entry in entries.flatten() {
@@ -47,12 +53,12 @@ pub async fn list_installed_plugins(plugin_dir: String) -> Result<Vec<PluginInfo
             None => continue,
         };
 
-        match loader.load_plugin(&path) {
-            Ok(node) => out.push(PluginInfo {
+        match loader.describe_plugin(&path) {
+            Ok(desc) => out.push(PluginInfo {
                 filename,
-                display_name: node.display_name().to_string(),
-                type_id: node.type_id().to_string(),
-                category: node_type_to_category(&node.node_type()).to_string(),
+                display_name: desc.display_name,
+                type_id: desc.type_id,
+                category: node_type_to_category(&desc.node_type).to_string(),
                 load_error: None,
             }),
             Err(e) => out.push(PluginInfo {

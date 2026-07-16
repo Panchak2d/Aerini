@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
+use crate::nodes::oauth_listener;
 
 pub struct GoogleSheetsNode;
 
@@ -24,7 +25,9 @@ impl Node for GoogleSheetsNode {
                 "spreadsheet_id": { "type": "string", "description": "Google Sheets spreadsheet ID (from the URL)" },
                 "range":          { "type": "string", "description": "A1 notation range (e.g. Sheet1!A1:D1)" },
                 "values":         { "description": "Row data for append_row — array of arrays, e.g. [[\"a\",\"b\"]]" },
-                "api_key":        { "type": "string", "description": "Google OAuth 2.0 access token" }
+                "client_id":      { "type": "string", "description": "Google OAuth client ID — enables automatic token refresh (recommended). Resolved from Connections (credential store)." },
+                "client_secret":  { "type": "string", "description": "Google OAuth client secret — enables automatic token refresh (recommended). Resolved from Connections (credential store)." },
+                "api_key":        { "type": "string", "description": "Google OAuth 2.0 access token, pasted directly. Does not auto-refresh (expires after ~1 hour). Only used when client_id/client_secret are not set." }
             }
         })
     }
@@ -43,12 +46,9 @@ impl Node for GoogleSheetsNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        let api_key = match input.input["api_key"].as_str().filter(|s| !s.is_empty()) {
-            Some(k) => k.to_string(),
-            None => return NodeOutput::failure(NodeError::unrecoverable(
-                "MISSING_TOKEN",
-                "Google OAuth access token is required — store it as a credential named 'api_key'",
-            )),
+        let access_token = match Self::resolve_access_token(&input.input).await {
+            Ok(t) => t,
+            Err(e) => return NodeOutput::failure(e),
         };
 
         let action         = input.input["action"].as_str().unwrap_or("get_values");
@@ -85,7 +85,7 @@ impl Node for GoogleSheetsNode {
 
                 match super::shared_http_client()
                     .post(&url)
-                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Authorization", format!("Bearer {}", access_token))
                     .json(&body)
                     .send()
                     .await
@@ -128,7 +128,7 @@ impl Node for GoogleSheetsNode {
 
                 match super::shared_http_client()
                     .get(&url)
-                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Authorization", format!("Bearer {}", access_token))
                     .send()
                     .await
                 {
@@ -159,6 +159,96 @@ impl Node for GoogleSheetsNode {
                 format!("Unknown action '{}'. Valid values: append_row, get_values", other),
             )),
         }
+    }
+}
+
+impl GoogleSheetsNode {
+    /// Resolves a valid Google OAuth access token for Sheets access.
+    ///
+    /// Prefers `client_id`/`client_secret` (OAuth app credentials): the token is
+    /// then obtained via `oauth_listener::get_tokens`, which transparently stores,
+    /// checks expiry, and refreshes under a per-credential mutex — the same
+    /// mechanism `SocialUploadNode` already uses for YouTube/Instagram/TikTok
+    /// (T2-7/S1-9/S6-6). Falls back to a raw, caller-supplied `api_key` (this
+    /// node's original behavior) when `client_id`/`client_secret` are absent, so
+    /// existing workflows configured with a manually-pasted access token keep
+    /// working unchanged — no breaking change.
+    async fn resolve_access_token(cfg: &Value) -> Result<String, NodeError> {
+        let client_id = cfg["client_id"].as_str().filter(|s| !s.is_empty());
+        let client_secret = cfg["client_secret"].as_str().filter(|s| !s.is_empty());
+
+        match (client_id, client_secret) {
+            (Some(id), Some(secret)) => {
+                oauth_listener::get_tokens("google_sheets", id, secret)
+                    .await
+                    .map(|t| t.access_token)
+            }
+            (None, None) => cfg["api_key"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| NodeError::unrecoverable(
+                    "MISSING_TOKEN",
+                    "Google OAuth credentials required — set client_id/client_secret (auto-refreshing, recommended) or a raw api_key access token.",
+                )),
+            // Exactly one of client_id/client_secret set: a real misconfiguration
+            // (e.g. secret not pasted yet) — must not silently fall back to a
+            // possibly-stale api_key and mask it.
+            _ => Err(NodeError::unrecoverable(
+                "INCOMPLETE_OAUTH_CONFIG",
+                "client_id and client_secret must both be set to enable auto-refresh — set both, or neither (to use api_key instead).",
+            )),
+        }
+    }
+}
+
+// ── Tests (T2-7/S1-9/S6-6) ─────────────────────────────────────────────────────
+//
+// The client_id+client_secret path is a direct passthrough to
+// `oauth_listener::get_tokens`, which already owns its own keychain/refresh/
+// full-flow logic and is not itself re-tested here — verified by manual trace
+// only (same escape hatch used by Batch F for its postgres/mysql wiring), since
+// exercising it would mean mocking a real OS keychain, which is out of this
+// batch's scope. What's new and cheaply testable without any mocking — which
+// of the two paths `resolve_access_token` picks, and its two failure cases —
+// is covered below.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_access_token_falls_back_to_api_key_when_no_oauth_creds() {
+        let cfg = json!({ "api_key": "raw-token-123" });
+        let token = GoogleSheetsNode::resolve_access_token(&cfg).await.unwrap();
+        assert_eq!(token, "raw-token-123");
+    }
+
+    #[tokio::test]
+    async fn resolve_access_token_ignores_empty_string_oauth_creds() {
+        // Empty client_id/client_secret must not be treated as "present" —
+        // otherwise a config with blank fields would try (and fail) the OAuth
+        // path instead of correctly falling back to api_key.
+        let cfg = json!({ "client_id": "", "client_secret": "", "api_key": "raw-token-123" });
+        let token = GoogleSheetsNode::resolve_access_token(&cfg).await.unwrap();
+        assert_eq!(token, "raw-token-123");
+    }
+
+    #[tokio::test]
+    async fn resolve_access_token_errors_when_nothing_provided() {
+        let cfg = json!({});
+        let err = GoogleSheetsNode::resolve_access_token(&cfg).await.unwrap_err();
+        assert_eq!(err.code, "MISSING_TOKEN");
+        assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn resolve_access_token_errors_when_only_client_id_given() {
+        // Partial OAuth config (id without secret) must error loudly, not
+        // silently fall back to api_key — that would mask a real misconfiguration
+        // (e.g. secret not pasted yet) behind a possibly-stale manual token.
+        let cfg = json!({ "client_id": "abc", "api_key": "raw-token-123" });
+        let err = GoogleSheetsNode::resolve_access_token(&cfg).await.unwrap_err();
+        assert_eq!(err.code, "INCOMPLETE_OAUTH_CONFIG");
     }
 }
 

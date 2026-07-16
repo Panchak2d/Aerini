@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
+use super::util::ordered_node_outputs;
 
 /// Merge node — collects all upstream node outputs into a single object.
 ///
@@ -10,7 +11,23 @@ use crate::node::Node;
 /// {
 ///   "mode": "object" | "array"   (default: "object")
 ///     "object" -> { "node_id_1": <output>, "node_id_2": <output>, ... }
-///     "array"  -> [ <output1>, <output2>, ... ]  (order: insertion order of node_outputs)
+///     "array"  -> [ <output1>, <output2>, ... ]
+///       Order: completion order (context.execution_order — see
+///       `ExecutionState::mark_succeeded` in `context.rs`). T2-5 design
+///       decision, stated once: this was previously documented as
+///       "insertion order" but implemented as raw, non-deterministic
+///       HashMap iteration (S4-6) — neither was true. execution_order uses
+///       move-to-end semantics (a node that completes more than once, e.g.
+///       inside a loop body, reflects its most recent completion position,
+///       not its first) rather than literal first-insertion order, the same
+///       semantic Batch J's output_node.rs "most recent" fix already
+///       depends on. For Merge's actual use — waiting on independent
+///       parallel branches that each complete once before the merge fires
+///       — this is indistinguishable from true insertion order; it only
+///       diverges for a predecessor that re-completes before the merge
+///       runs, in which case "most recent position" is the more useful
+///       behavior anyway (deterministic and reflects the freshest value),
+///       not a special case worth a second ordering mechanism.
 /// }
 pub struct MergeNode;
 
@@ -47,13 +64,29 @@ impl Node for MergeNode {
 
         let outputs = &input.context.node_outputs;
 
-        if outputs.is_empty() {
-            return NodeOutput::success(json!({ "merged": {} }));
-        }
-
+        // T2-5 residual: the zero-outputs case used to short-circuit to a
+        // hardcoded `{"merged": {}}` object *regardless of mode*, while the
+        // non-empty path below always returns the merged value unwrapped
+        // (a bare array for "array" mode, a bare object for "object" mode —
+        // see the tests, which assert on `data` directly, never
+        // `data["merged"]`). Net effect: a Merge node with zero upstream
+        // outputs — e.g. every incoming branch was disabled or skipped —
+        // returned an *object* even when configured for "array" mode,
+        // silently handing a downstream node the wrong JSON type for the
+        // one case where mode-correctness matters most (an empty result is
+        // exactly the case a caller is most likely to check the shape of).
+        // Removing the special case lets the match below produce a
+        // mode-correct, unwrapped empty value (`[]` or `{}`) the same way
+        // it already does for the non-empty case — no behavior change for
+        // any non-empty input.
         let merged: Value = match mode {
             "array" => {
-                Value::Array(outputs.values().cloned().collect())
+                Value::Array(
+                    ordered_node_outputs(&input.context)
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect()
+                )
             }
             _ => {
                 // "object" — key each output by its source node ID
@@ -103,16 +136,64 @@ mod tests {
         }
     }
 
+    /// Same as make_input, but seeds execution_order too — needed for T2-5
+    /// tests that assert on the exact resulting order, not just membership.
+    fn make_input_ordered(mode: Option<&str>, node_outputs: HashMap<String, Value>, order: Vec<&str>) -> NodeInput {
+        let input = match mode {
+            Some(m) => json!({ "mode": m }),
+            None    => json!({}),
+        };
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(node_outputs),
+                metadata: HashMap::new(),
+                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
+            },
+        }
+    }
+
     // ── Empty context ───────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn empty_context_returns_empty_merged() {
+    async fn empty_context_object_mode_returns_empty_object() {
+        // T2-5 residual: object mode's non-empty path already returns the
+        // merged value unwrapped (see object_mode_keys_are_node_ids below) —
+        // the empty case must match that shape, not a `{"merged": {}}`
+        // wrapper that no other path in this node ever produces.
+        let out = MergeNode.execute(make_input(Some("object"), HashMap::new())).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert!(data.is_object(), "expected object output, got {:?}", data);
+        assert!(data.as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_context_default_mode_returns_empty_object() {
         let out = MergeNode.execute(make_input(None, HashMap::new())).await;
         assert!(out.success);
-        // merged key present, value is empty object
         let data = out.output.unwrap();
-        assert!(data["merged"].is_object());
-        assert!(data["merged"].as_object().unwrap().is_empty());
+        assert!(data.is_object(), "expected object output, got {:?}", data);
+        assert!(data.as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_context_array_mode_returns_empty_array_not_object() {
+        // T2-5 residual, the actual bug: pre-fix, this returned
+        // `{"merged": {}}` (an object) regardless of `mode`, so a Merge node
+        // in "array" mode with zero upstream outputs (e.g. every incoming
+        // branch was disabled/skipped) silently handed downstream nodes the
+        // wrong JSON type — an object where every other "array" mode run
+        // produces an array.
+        let out = MergeNode.execute(make_input(Some("array"), HashMap::new())).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert!(data.is_array(), "expected array output for empty array-mode merge, got {:?}", data);
+        assert!(data.as_array().unwrap().is_empty());
     }
 
     // ── object mode ─────────────────────────────────────────────────────────
@@ -152,11 +233,27 @@ mod tests {
         assert!(data.is_array(), "expected array output, got {:?}", data);
         let arr = data.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        // Values present — order may vary (HashMap), so check membership
+        // T2-5: array mode is now deterministic (ordered_node_outputs), but
+        // this fixture has no execution_order seeded, so it falls back to
+        // sorted-by-key order — check membership here, exact order below.
         let set: std::collections::HashSet<i64> =
             arr.iter().filter_map(|v| v.as_i64()).collect();
         assert!(set.contains(&10));
         assert!(set.contains(&20));
+    }
+
+    #[tokio::test]
+    async fn array_mode_order_follows_execution_order_deterministically() {
+        // T2-5 / S4-6: array mode must reflect real completion order, not
+        // whichever order the raw HashMap happened to enumerate — same
+        // input, run twice, must produce the same order every time.
+        let mut outputs = HashMap::new();
+        outputs.insert("z".to_string(), json!(20));
+        outputs.insert("a".to_string(), json!(10));
+        let out = MergeNode.execute(make_input_ordered(Some("array"), outputs, vec!["z", "a"])).await;
+        assert!(out.success);
+        let arr = out.output.unwrap().as_array().unwrap().clone();
+        assert_eq!(arr, vec![json!(20), json!(10)]);
     }
 
     // ── conflicting keys in object mode ────────────────────────────────────

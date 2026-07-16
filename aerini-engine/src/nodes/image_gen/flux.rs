@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
+use crate::nodes::util::{check_host_ssrf_from_url, read_json_response_capped, SsrfPolicy};
 
 use super::shared::{network_err, download_to_base64};
 
@@ -98,8 +98,8 @@ async fn call_flux_one(
         .map_err(network_err)?;
 
     let status = resp.status().as_u16();
-    let json: Value = resp.json().await.map_err(|e| {
-        NodeError::unrecoverable("PARSE_ERROR", e.to_string())
+    let json: Value = read_json_response_capped(resp).await.map_err(|e| {
+        NodeError::unrecoverable("PARSE_ERROR", e)
     })?;
 
     if status >= 400 {
@@ -152,7 +152,7 @@ async fn bfl_poll(
             .await
             .map_err(network_err)?;
 
-        let json: Value = resp.json().await.map_err(|e| {
+        let json: Value = read_json_response_capped(resp).await.map_err(|e| {
             NodeError::unrecoverable("PARSE_ERROR", format!("BFL poll parse error: {}", e))
         })?;
 

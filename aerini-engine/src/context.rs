@@ -66,10 +66,25 @@ pub struct ExecutionState {
     pub execution_id: String,
     pub workflow_id: String,
     pub started_at: DateTime<Utc>,
-    // DashMap allows concurrent reads without a lock and concurrent writes via fine-grained
-    // bucket locking. Safe for the parallel executor where multiple tokio tasks may write
-    // node outputs concurrently without holding the outer RwLock the entire time.
-    node_outputs: Arc<dashmap::DashMap<String, Value>>,
+    // Plain HashMap, not DashMap: every mutation path here takes `&mut self`,
+    // reachable only through SharedExecutionState's outer `Arc<RwLock<...>>`
+    // write lock — access is already fully serialized before it ever reaches
+    // this field, so DashMap's fine-grained bucket locking is never actually
+    // exercised. It previously cost real allocation/indirection overhead per
+    // entry for concurrency this field can't observe (S5-2).
+    node_outputs: HashMap<String, Value>,
+    // Cached clone of `node_outputs`, rebuilt once inside mark_succeeded (the
+    // only site that mutates node_outputs) rather than on every snapshot()
+    // call. snapshot() is called under a shared *read* lock (build_input:
+    // `state.read().await`), so in parallel mode several nodes can become
+    // ready and each call snapshot() before the next mark_succeeded — every
+    // one of those used to independently deep-clone the same, unchanged map,
+    // expensive when node outputs embed large payloads (files, images, HTTP
+    // bodies). Caching turns every snapshot() call after the first such call
+    // into an O(1) Arc clone instead of an O(n) deep clone of the map
+    // contents. Sequential mode is unaffected either way (already ~1
+    // snapshot() per mark_succeeded, so no reduction, but no regression).
+    node_outputs_snapshot: Arc<HashMap<String, Value>>,
     node_statuses: HashMap<String, NodeExecution>,
     pub variables: HashMap<String, Value>,
     // Loop-internal state: __loop_*_index keys.
@@ -84,13 +99,12 @@ pub struct ExecutionState {
     loop_results: HashMap<String, Vec<Value>>,
     pub logs: Vec<ExecutionLogEntry>,
     // Node ids in completion order — root cause fix for the S3-2/S3-3/S4-6/S4-7
-    // family (output_node.rs, json_node.rs, merge.rs, loop_node.rs all currently
-    // iterate node_outputs' raw HashMap for "most recent"/ordered semantics,
-    // which is non-deterministic). Mutated only via mark_succeeded's move-to-end
-    // logic (see below) so a loop body node re-completing every iteration cannot
-    // grow this unboundedly — bounded by unique node count, not iteration count.
-    // T2-2 (this field) is additive-only; T2-5 (a separate, later batch) is what
-    // migrates the five consumer nodes above onto it.
+    // family. Mutated only via mark_succeeded's move-to-end logic (see below)
+    // so a loop body node re-completing every iteration cannot grow this
+    // unboundedly — bounded by unique node count, not iteration count.
+    // T2-2 (this field) landed in Batch J; T2-5 (Batch K) has since migrated
+    // the five consumer nodes (output_node.rs, json_node.rs, text_splitter.rs,
+    // merge.rs, loop_node.rs) onto it via nodes/util.rs::ordered_node_outputs.
     execution_order: Vec<String>,
 }
 
@@ -100,7 +114,8 @@ impl ExecutionState {
             execution_id: Uuid::new_v4().to_string(),
             workflow_id: workflow_id.into(),
             started_at: Utc::now(),
-            node_outputs: Arc::new(dashmap::DashMap::new()),
+            node_outputs: HashMap::new(),
+            node_outputs_snapshot: Arc::new(HashMap::new()),
             node_statuses: HashMap::new(),
             variables,
             loop_state: HashMap::new(),
@@ -125,6 +140,10 @@ impl ExecutionState {
     pub fn mark_succeeded(&mut self, node_id: &str, output: NodeOutput) {
         let value = output.output.clone().unwrap_or(serde_json::Value::Null);
         self.node_outputs.insert(node_id.to_string(), value);
+        // Rebuild the cached snapshot here (the one place node_outputs
+        // mutates), not in snapshot() itself — see node_outputs_snapshot's
+        // doc comment above.
+        self.node_outputs_snapshot = Arc::new(self.node_outputs.clone());
         // Move-to-end, not append: a loop body node calls mark_succeeded once per
         // iteration (see executor/loop_executor.rs:337), not once per execution —
         // an unconditional push would grow execution_order without bound across
@@ -170,7 +189,7 @@ impl ExecutionState {
 
     #[allow(dead_code)]
     pub fn get_node_output(&self, node_id: &str) -> Option<Value> {
-        self.node_outputs.get(node_id).map(|r| r.value().clone())
+        self.node_outputs.get(node_id).cloned()
     }
 
     #[allow(dead_code)]
@@ -229,16 +248,11 @@ impl ExecutionState {
         for (k, v) in &self.loop_state {
             meta.insert(k.clone(), v.clone());
         }
-        // Convert DashMap → HashMap for the snapshot. O(n) but infrequent —
-        // snapshot() is called once per node execution, and node_outputs only
-        // contains entries for completed nodes.
-        let outputs: HashMap<String, Value> = self.node_outputs
-            .iter()
-            .map(|r| (r.key().clone(), r.value().clone()))
-            .collect();
         ExecutionContext {
             variables: self.variables.clone(),
-            node_outputs: Arc::new(outputs),
+            // O(1) Arc clone — node_outputs_snapshot is rebuilt in mark_succeeded,
+            // not here. See that field's doc comment.
+            node_outputs: self.node_outputs_snapshot.clone(),
             metadata: meta,
             execution_order: Arc::new(self.execution_order.clone()),
         }
@@ -314,5 +328,44 @@ mod execution_order_tests {
         s.mark_succeeded("body", NodeOutput::success(json!("iter0")));
         s.mark_succeeded("body", NodeOutput::success(json!("iter1")));
         assert_eq!(s.execution_order.last().map(String::as_str), Some("body"));
+    }
+
+    // ── node_outputs snapshot caching (memory-efficiency batch) ─────────────
+
+    #[test]
+    fn repeated_snapshot_calls_reuse_same_arc_when_unmutated() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!(1)));
+        let first = s.snapshot().node_outputs;
+        let second = s.snapshot().node_outputs;
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "snapshot() must reuse the cached Arc when node_outputs hasn't changed"
+        );
+    }
+
+    #[test]
+    fn snapshot_arc_changes_after_mark_succeeded() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!(1)));
+        let before = s.snapshot().node_outputs;
+        s.mark_succeeded("b", NodeOutput::success(json!(2)));
+        let after = s.snapshot().node_outputs;
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "snapshot() must rebuild the cached Arc once node_outputs changes"
+        );
+        assert_eq!(after.len(), 2);
+        assert_eq!(before.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_node_outputs_content_matches_mark_succeeded_calls() {
+        let mut s = ExecutionState::new("wf", HashMap::new());
+        s.mark_succeeded("a", NodeOutput::success(json!({"x": 1})));
+        s.mark_succeeded("b", NodeOutput::success(json!({"y": 2})));
+        let ctx = s.snapshot();
+        assert_eq!(ctx.node_outputs.get("a"), Some(&json!({"x": 1})));
+        assert_eq!(ctx.node_outputs.get("b"), Some(&json!({"y": 2})));
     }
 }

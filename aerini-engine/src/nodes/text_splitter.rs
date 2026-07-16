@@ -4,13 +4,22 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use super::util::traverse_dotpath;
+use super::util::{ordered_node_outputs, traverse_dotpath};
 
 /// Text Splitter node — splits long text into overlapping chunks suitable for AI processing.
 ///
 /// Essential for RAG (Retrieval-Augmented Generation) pipelines: you split a document,
 /// then feed each chunk to an AI node or embed it for vector search.
 pub struct TextSplitterNode;
+
+/// Hard cap on input text length (S3-11). Without it, and combined with an
+/// `overlap >= chunk_size` misconfiguration (see the clamp in `execute()`
+/// below), a large document could produce a chunk count approaching its own
+/// character count — e.g. an uncapped 200,000-character document with
+/// `overlap >= chunk_size` would produce roughly 200,000 near-duplicate
+/// chunks. Capping the input bounds the worst case regardless of chunk_size/
+/// overlap configuration.
+const MAX_TEXT_CHARS: usize = 2_000_000;
 
 #[async_trait]
 impl Node for TextSplitterNode {
@@ -72,13 +81,17 @@ impl Node for TextSplitterNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        // Resolve text — either from direct config or from a field in previous node output
+        // Resolve text — either from direct config or from a field in previous node output.
+        // T2-5 / S3-4: search upstream outputs in real completion order (via
+        // ordered_node_outputs), not the raw HashMap's unspecified order —
+        // previously, which upstream node "won" when two shared a field name
+        // at source_field's path was non-deterministic across runs.
         let text: String = input.input["source_field"]
             .as_str()
             .filter(|f| !f.is_empty())
             .and_then(|field| {
-                input.context.node_outputs.values().find_map(|v| {
-                    let val = traverse_dotpath(v, field);
+                ordered_node_outputs(&input.context).into_iter().find_map(|(_, v)| {
+                    let val = traverse_dotpath(&v, field);
                     val.as_str().map(|s| s.to_string())
                 })
             })
@@ -92,12 +105,47 @@ impl Node for TextSplitterNode {
         let mode = input.input["mode"].as_str().unwrap_or("chars");
         let total_chars = text.chars().count();
 
+        if total_chars > MAX_TEXT_CHARS {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "TEXT_TOO_LARGE",
+                format!(
+                    "Input text is {} chars, exceeds the {}-char limit for this node",
+                    total_chars, MAX_TEXT_CHARS
+                ),
+            ));
+        }
+
         let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(match mode {
             "sentences" => 5, "paragraphs" => 3, "words" => 200, _ => 1000
         }) as usize;
-        let overlap = input.input["overlap"].as_u64().unwrap_or(match mode {
+        let mut overlap = input.input["overlap"].as_u64().unwrap_or(match mode {
             "sentences" => 1, "paragraphs" => 0, "words" => 20, _ => 100
         }) as usize;
+
+        let mut logs: Vec<String> = Vec::new();
+        if chunk_size > 0 && overlap >= chunk_size {
+            // Previously fell through silently to split_by_*'s own `step = 1`
+            // fallback with no indication anything was wrong — a config like
+            // chunk_size: 1000, overlap: 1000 against a large document would
+            // silently produce a chunk count approaching total_chars. Clamp
+            // and say so, instead of letting the run "succeed" at an
+            // unintended, much larger output.
+            //
+            // Clamping to chunk_size - 1 (the original fix) still leaves
+            // step = chunk_size - overlap = 1 — i.e. it stops overlap from
+            // being *invalid* but does not stop the *blowup* it exists to
+            // prevent; a 1000-char chunk_size=100 document still produces
+            // ~900 near-duplicate chunks. Clamping to chunk_size / 2 instead
+            // bounds step to a meaningful fraction of chunk_size regardless
+            // of how large the misconfigured overlap was, capping the worst
+            // case at roughly double the zero-overlap chunk count.
+            let clamped = chunk_size / 2;
+            logs.push(format!(
+                "overlap ({}) >= chunk_size ({}) — clamped overlap to {}",
+                overlap, chunk_size, clamped
+            ));
+            overlap = clamped;
+        }
 
         let chunks: Vec<String> = match mode {
             "sentences"  => split_by_sentences(&text, chunk_size, overlap),
@@ -107,6 +155,7 @@ impl Node for TextSplitterNode {
         };
 
         let total_chunks = chunks.len();
+        logs.push(format!("Split {} chars into {} chunks ({} mode)", total_chars, total_chunks, mode));
 
         NodeOutput::success_with_logs(
             json!({
@@ -117,7 +166,7 @@ impl Node for TextSplitterNode {
                 "chunk_size":   chunk_size,
                 "overlap":      overlap
             }),
-            vec![format!("Split {} chars into {} chunks ({} mode)", total_chars, total_chunks, mode)],
+            logs,
         )
     }
 }
@@ -211,6 +260,8 @@ mod tests {
     use super::*;
     use crate::model::ExecutionContext;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {
@@ -219,6 +270,28 @@ mod tests {
             execution_id: "exec".to_string(),
             input,
             context: ExecutionContext::default(),
+        }
+    }
+
+    /// T2-5: source_field's resolution against real node_outputs previously
+    /// had zero test coverage (S3-4) — every pre-existing test used
+    /// ExecutionContext::default(), which never exercises this code path.
+    fn make_input_with_context(
+        input: Value,
+        node_outputs: HashMap<String, Value>,
+        order: Vec<&str>,
+    ) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(node_outputs),
+                metadata: HashMap::new(),
+                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
+            },
         }
     }
 
@@ -242,6 +315,42 @@ mod tests {
         let out = TextSplitterNode.execute(make_input(json!({ "text": null }))).await;
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "MISSING_TEXT");
+    }
+
+    // ── source_field resolution ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn source_field_extracts_from_upstream_output() {
+        let mut outputs = HashMap::new();
+        outputs.insert("http".to_string(), json!({ "body": "hello from upstream" }));
+        let input = make_input_with_context(
+            json!({ "mode": "chars", "chunk_size": 100, "overlap": 0, "source_field": "body" }),
+            outputs,
+            vec!["http"],
+        );
+        let out = TextSplitterNode.execute(input).await;
+        assert!(out.success);
+        let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
+        assert_eq!(chunks[0].as_str().unwrap(), "hello from upstream");
+    }
+
+    #[tokio::test]
+    async fn source_field_deterministically_picks_first_completed_match() {
+        // T2-5 / S3-4: two upstream nodes both carry a "body" field —
+        // resolution must be deterministic (first in execution_order),
+        // not whichever the raw HashMap happened to enumerate first.
+        let mut outputs = HashMap::new();
+        outputs.insert("z_second".to_string(), json!({ "body": "wrong" }));
+        outputs.insert("a_first".to_string(), json!({ "body": "right" }));
+        let input = make_input_with_context(
+            json!({ "mode": "chars", "chunk_size": 100, "overlap": 0, "source_field": "body" }),
+            outputs,
+            vec!["a_first", "z_second"],
+        );
+        let out = TextSplitterNode.execute(input).await;
+        assert!(out.success);
+        let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
+        assert_eq!(chunks[0].as_str().unwrap(), "right");
     }
 
     // ── chars mode ─────────────────────────────────────────────────────────
@@ -385,6 +494,58 @@ mod tests {
         assert!(data["total_chunks"].as_u64().unwrap() > 0);
         assert_eq!(data["total_chars"].as_u64().unwrap(), 7);
         assert_eq!(data["mode"].as_str().unwrap(), "chars");
+    }
+
+    // ── Memory caps (S3-11) ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn text_over_max_chars_fails_cleanly() {
+        let text = "a".repeat(MAX_TEXT_CHARS + 1);
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text, "mode": "chars", "chunk_size": 1000, "overlap": 0
+        }))).await;
+        assert!(!out.success, "expected failure once text exceeds MAX_TEXT_CHARS");
+        assert_eq!(out.error.unwrap().code, "TEXT_TOO_LARGE");
+    }
+
+    #[tokio::test]
+    async fn text_at_max_chars_succeeds() {
+        let text = "a".repeat(MAX_TEXT_CHARS);
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text, "mode": "chars", "chunk_size": 1000, "overlap": 0
+        }))).await;
+        assert!(out.success, "exactly MAX_TEXT_CHARS must still be accepted");
+    }
+
+    #[tokio::test]
+    async fn overlap_equal_to_chunk_size_is_clamped_not_silently_stepped() {
+        let text = "a".repeat(1000);
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text, "mode": "chars", "chunk_size": 100, "overlap": 100
+        }))).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        // Previously silently fell through to split_by_chars's own step=1
+        // fallback (≈900 near-duplicate chunks). Clamped overlap (50) should
+        // produce a small, sane chunk count instead.
+        assert_eq!(data["overlap"].as_u64().unwrap(), 50);
+        assert!(data["total_chunks"].as_u64().unwrap() < 50,
+            "clamp should prevent the near-one-chunk-per-char blowup, got {} chunks",
+            data["total_chunks"]);
+    }
+
+    #[tokio::test]
+    async fn overlap_greater_than_chunk_size_is_clamped_and_logged() {
+        let text = "a".repeat(500);
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text, "mode": "chars", "chunk_size": 50, "overlap": 9999
+        }))).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["overlap"].as_u64().unwrap(), 25);
+        assert!(
+            out.logs.iter().any(|l| l.contains("clamped overlap")),
+            "clamp must be logged, not silent: {:?}", out.logs
+        );
     }
 
     // ── split_by_chars unit tests ───────────────────────────────────────────

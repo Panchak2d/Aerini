@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::NodePorts;
+use super::util::ordered_node_outputs;
 
 pub struct JsonNode;
 
@@ -75,8 +76,12 @@ impl crate::node::Node for JsonNode {
             }
 
             "merge" => {
+                // T2-5 / S3-3: iterate in real completion order so which
+                // node's keys "win" a collision is deterministic (the most
+                // recently completed node wins) instead of depending on the
+                // raw HashMap's unspecified iteration order.
                 let mut merged = serde_json::Map::new();
-                for output_val in input.context.node_outputs.values() {
+                for (_, output_val) in ordered_node_outputs(&input.context) {
                     if let Some(obj) = output_val.as_object() {
                         for (k, v) in obj {
                             merged.insert(k.clone(), v.clone());
@@ -89,12 +94,17 @@ impl crate::node::Node for JsonNode {
             "array_get" => {
                 let idx = input.input["index"].as_u64().unwrap_or(0) as usize;
 
-                for output_val in input.context.node_outputs.values() {
+                // T2-5 / S3-3: "first array found" now means first in real
+                // completion order, not first in the raw HashMap's
+                // unspecified iteration order.
+                for (_, output_val) in ordered_node_outputs(&input.context) {
                     if let Some(arr) = output_val.as_array() {
                         let item = arr.get(idx).cloned().unwrap_or(Value::Null);
                         return NodeOutput::success(json!({ "result": item, "index": idx, "length": arr.len() }));
                     }
-                    // Check one level deeper
+                    // Check one level deeper. serde_json::Map is BTreeMap-backed
+                    // (no `preserve_order` feature in Cargo.toml), so this inner
+                    // iteration is already deterministic — no fix needed here.
                     if let Some(obj) = output_val.as_object() {
                         for v in obj.values() {
                             if let Some(arr) = v.as_array() {
@@ -139,6 +149,24 @@ mod tests {
                 node_outputs: Arc::new(node_outputs),
                 metadata: HashMap::new(),
                 ..Default::default()
+            },
+        }
+    }
+
+    /// Same as make_input, but also seeds execution_order — needed for the
+    /// T2-5 determinism tests, which assert on *which* node's data wins,
+    /// not just that some deterministic winner exists.
+    fn make_input_ordered(input: Value, node_outputs: HashMap<String, Value>, order: Vec<&str>) -> NodeInput {
+        NodeInput {
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(node_outputs),
+                metadata: HashMap::new(),
+                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
             },
         }
     }
@@ -261,6 +289,25 @@ mod tests {
         assert!(result.get("0").is_none());
     }
 
+    #[tokio::test]
+    async fn merge_conflicting_key_deterministically_prefers_most_recently_completed() {
+        // T2-5 / S3-3: two upstream nodes sharing a key "x" must resolve the
+        // same way on every run of an identical workflow — the more
+        // recently completed node's value wins, per execution_order, not
+        // whichever the raw HashMap happened to enumerate last.
+        let mut outputs = HashMap::new();
+        outputs.insert("z_first".to_string(), json!({ "x": "stale" }));
+        outputs.insert("a_second".to_string(), json!({ "x": "fresh" }));
+        let input = make_input_ordered(
+            json!({ "operation": "merge" }),
+            outputs,
+            vec!["z_first", "a_second"],
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"]["x"], json!("fresh"));
+    }
+
     // ── array_get ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -298,6 +345,24 @@ mod tests {
         let out = JsonNode.execute(input).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["result"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn array_get_deterministically_picks_first_completed_array() {
+        // T2-5 / S3-3: two upstream nodes both carry an array — "first
+        // array found" must mean first in execution_order, deterministically,
+        // not whichever the raw HashMap enumerated first.
+        let mut outputs = HashMap::new();
+        outputs.insert("z_second".to_string(), json!([99, 98]));
+        outputs.insert("a_first".to_string(), json!([1, 2, 3]));
+        let input = make_input_ordered(
+            json!({ "operation": "array_get", "index": 0 }),
+            outputs,
+            vec!["a_first", "z_second"],
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!(1));
     }
 
     // ── unknown operation ──────────────────────────────────────────────────

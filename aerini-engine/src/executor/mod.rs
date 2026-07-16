@@ -580,9 +580,16 @@ impl WorkflowExecutor {
 
     pub(super) fn find_failure_route(&self, node_id: &str, graph: &ExecutionGraph) -> Option<String> {
         let idx = graph.index_map.get(node_id)?;
+        // neighbors_directed yields the same target once per parallel edge between
+        // node_id and that target; edge_meta() already returns every edge for a
+        // pair in one call, so each distinct neighbor only needs checking once.
+        let mut checked: HashSet<&str> = HashSet::new();
         for neighbor_idx in graph.graph.neighbors_directed(*idx, Direction::Outgoing) {
-            let neighbor_id = &graph.graph[neighbor_idx];
-            if let Some(meta) = graph.edge_meta(node_id, neighbor_id) {
+            let neighbor_id: &str = graph.graph[neighbor_idx].as_str();
+            if !checked.insert(neighbor_id) {
+                continue;
+            }
+            for meta in graph.edge_meta(node_id, neighbor_id) {
                 if meta.on_failure.is_some() {
                     return meta.on_failure.clone();
                 }
@@ -597,7 +604,7 @@ mod tests {
     use super::*;
     use crate::error::EngineError;
     use crate::migration::CURRENT_VERSION;
-    use crate::model::{NodeType, Workflow, WorkflowNode};
+    use crate::model::{NodeType, Workflow, WorkflowEdge, WorkflowNode};
     use crate::node::{Node, NodeRegistry};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1423,5 +1430,129 @@ mod tests {
             !*case2_ran.lock().unwrap(),
             "unmatched case_2 branch activated — routing is not selective"
         );
+    }
+
+    // ── T2-3 (S5-4): find_failure_route across parallel edges ──────────────────
+
+    // Two edges from n_src to n_mid, only one carrying on_failure. `failing_first`
+    // controls insertion order so both orderings get exercised — the old
+    // find_edge()-based lookup returned only one arbitrary edge per (from, to)
+    // pair, so whichever order happened to shadow the on_failure edge would make
+    // find_failure_route wrongly return None regardless of which order that was.
+    fn parallel_on_failure_workflow(failing_first: bool) -> Workflow {
+        let src = WorkflowNode {
+            id: "n_src".to_string(),
+            node_type_id: "instant_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Src".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let mid = WorkflowNode {
+            id: "n_mid".to_string(),
+            node_type_id: "instant_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Mid".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let recovery = WorkflowNode {
+            id: "n_recovery".to_string(),
+            node_type_id: "instant_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Recovery".to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let plain_edge = WorkflowEdge {
+            id: "e_plain".to_string(),
+            from_node: "n_src".to_string(),
+            from_port: "case_1".to_string(),
+            to_node: "n_mid".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        };
+        let failing_edge = WorkflowEdge {
+            id: "e_with_failure".to_string(),
+            from_node: "n_src".to_string(),
+            from_port: "default".to_string(),
+            to_node: "n_mid".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: Some("n_recovery".to_string()),
+        };
+        let edges = if failing_first {
+            vec![failing_edge, plain_edge]
+        } else {
+            vec![plain_edge, failing_edge]
+        };
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_parallel_on_failure".to_string(),
+            name: "Parallel On Failure".to_string(),
+            description: String::new(),
+            nodes: vec![src, mid, recovery],
+            edges,
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn find_failure_route_finds_on_failure_edge_added_first() {
+        let registry = NodeRegistry::new();
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = parallel_on_failure_workflow(true);
+        let graph = ExecutionGraph::build(&workflow).expect("graph should build");
+        assert_eq!(
+            executor.find_failure_route("n_src", &graph),
+            Some("n_recovery".to_string())
+        );
+    }
+
+    #[test]
+    fn find_failure_route_finds_on_failure_edge_added_second() {
+        let registry = NodeRegistry::new();
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = parallel_on_failure_workflow(false);
+        let graph = ExecutionGraph::build(&workflow).expect("graph should build");
+        assert_eq!(
+            executor.find_failure_route("n_src", &graph),
+            Some("n_recovery".to_string())
+        );
+    }
+
+    #[test]
+    fn find_failure_route_normal_single_edge_case_still_works() {
+        let registry = NodeRegistry::new();
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = single_node_workflow("instant_test", None);
+        let graph = ExecutionGraph::build(&workflow).expect("graph should build");
+        // No outgoing edges at all — must return None, not panic.
+        assert_eq!(executor.find_failure_route("n1", &graph), None);
     }
 }

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
+use crate::nodes::util::{check_host_ssrf_from_url, read_json_response_capped, SsrfPolicy};
 
 use super::shared::network_err;
 
@@ -45,7 +45,7 @@ pub(super) async fn gen_comfyui(
     };
 
     let status = resp.status().as_u16();
-    let json: Value = match resp.json().await {
+    let json: Value = match read_json_response_capped(resp).await {
         Ok(v)  => v,
         Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
             "PARSE_ERROR",
@@ -155,7 +155,7 @@ async fn comfyui_poll(
             .await
             .map_err(network_err)?;
 
-        let json: Value = resp.json().await.map_err(|e| {
+        let json: Value = read_json_response_capped(resp).await.map_err(|e| {
             NodeError::unrecoverable("PARSE_ERROR", format!("ComfyUI history parse error: {}", e))
         })?;
 

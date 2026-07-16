@@ -95,8 +95,36 @@ echo "  Restart:     systemctl --user restart $SERVICE_NAME"
     )
 }
 
-pub(super) fn build_service_file(workflow_name: &str, port: u16) -> String {
+/// Maps canonical dangerous node-type ids (aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS)
+/// to the exact CLI flag `aerini-server serve` needs to enable that node type.
+fn allow_flags_for(dangerous: &[&str]) -> String {
+    dangerous.iter().map(|id| match *id {
+        "shell_exec" => "--allow-shell",
+        "code"       => "--allow-code",
+        "database"   => "--allow-database",
+        other        => other, // unreachable for the current canonical list; fail loud, not silent
+    }).collect::<Vec<_>>().join(" ")
+}
+
+pub(super) fn build_service_file(workflow_name: &str, port: u16, dangerous: &[&str]) -> String {
     let safe_name = workflow_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
+    // T2-1/T2-6: dangerous node types (Shell/Code/Database) are DISABLED by
+    // default in the generated service, matching aerini-server's own
+    // default-secure posture (see main.rs::serve_mode) -- flags are never
+    // auto-injected here, since that would grant elevated execution with no
+    // human decision point at export time. If the workflow needs one, the
+    // exact flag(s) are surfaced as a comment directly above ExecStart so an
+    // operator editing this file sees them without having to open the README.
+    let exec_flags_comment = if dangerous.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "# This workflow uses: {types}. These node types are DISABLED by default.\n\
+             # To enable, audit the workflow, then append to ExecStart below: {flags}\n",
+            types = dangerous.join(", "),
+            flags = allow_flags_for(dangerous),
+        )
+    };
     format!(
         "[Unit]\n\
          Description=Aerini Workflow: {safe_name}\n\
@@ -106,6 +134,7 @@ pub(super) fn build_service_file(workflow_name: &str, port: u16) -> String {
          Type=simple\n\
          WorkingDirectory={{{{INSTALL_DIR}}}}\n\
          EnvironmentFile={{{{INSTALL_DIR}}}}/.env\n\
+         {exec_flags_comment}\
          ExecStart={{{{INSTALL_DIR}}}}/aerini-server --config {{{{INSTALL_DIR}}}}/aerini-server.json --port {port}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
@@ -114,8 +143,9 @@ pub(super) fn build_service_file(workflow_name: &str, port: u16) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        safe_name     = safe_name,
-        port          = port,
+        safe_name           = safe_name,
+        port                = port,
+        exec_flags_comment  = exec_flags_comment,
     )
 }
 
@@ -184,6 +214,7 @@ pub(super) fn build_serve_docker_compose(
     workflow_name: &str,
     status_port:   u16,
     creds:         &[CredentialExport],
+    dangerous:     &[&str],
 ) -> String {
     let safe_name = workflow_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
 
@@ -194,6 +225,29 @@ pub(super) fn build_serve_docker_compose(
         "    environment:\n      RUST_LOG: info\n".to_string()
     } else {
         "    env_file:\n      - .env\n    environment:\n      RUST_LOG: info\n".to_string()
+    };
+
+    // T2-1/T2-6: the Dockerfile's CMD never passes --allow-shell/--allow-code/
+    // --allow-database (disabled by default, same reasoning as
+    // build_service_file). docker-compose's own `command:` override is the
+    // one workflow-specific place we CAN surface the exact flags this export
+    // needs, as a ready-to-uncomment example — still requires the operator to
+    // act, never auto-enabled.
+    let command_hint = if dangerous.is_empty() {
+        String::new()
+    } else {
+        let flags_json = allow_flags_for(dangerous)
+            .split(' ')
+            .map(|f| format!("\"{}\"", f))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "\x20   # This workflow uses: {types}. These node types are DISABLED by default.\n\
+             \x20   # To enable, audit the workflow, then uncomment and edit:\n\
+             \x20   # command: [\"serve\", \"--config\", \"/data/aerini-server.json\", \"--bind\", \"0.0.0.0\", {flags_json}]\n",
+            types      = dangerous.join(", "),
+            flags_json = flags_json,
+        )
     };
 
     format!(
@@ -214,12 +268,14 @@ pub(super) fn build_serve_docker_compose(
          \x20     - ./aerini-server.json:/data/aerini-server.json:ro\n\
          \x20     - aerini_{safe_name}_data:/data\n\
          {env_block}\
+         {command_hint}\
          \x20   restart: unless-stopped\n\n\
          volumes:\n\
          \x20 aerini_{safe_name}_data:\n",
         safe_name     = safe_name,
         status_port   = status_port,
         env_block     = env_block,
+        command_hint  = command_hint,
     )
 }
 
@@ -258,10 +314,11 @@ fn escape_md(s: &str) -> String {
 }
 
 pub(super) fn build_docker_readme(
-    name:    &str,
-    trigger: &str,
-    port:    u16,
-    creds:   &[CredentialExport],
+    name:      &str,
+    trigger:   &str,
+    port:      u16,
+    creds:     &[CredentialExport],
+    dangerous: &[&str],
 ) -> String {
     let name    = escape_md(name);
     let trigger = escape_md(trigger);
@@ -276,6 +333,28 @@ pub(super) fn build_docker_readme(
     };
 
     let safe = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
+
+    // T2-1/T2-6: replaces the old, misleading "Shell Command and Code Nodes"
+    // section, which implied these node types simply run — they don't,
+    // unless explicitly enabled (matches aerini-server's own default-secure
+    // posture; see build_serve_dockerfile/build_serve_docker_compose).
+    // Extended to Database, which the old section never mentioned at all.
+    let dangerous_section = if dangerous.is_empty() {
+        "This workflow does not use any node type from the dangerous list below \
+         — nothing to enable.".to_string()
+    } else {
+        format!(
+            "**This workflow uses:** {types}. These node types are **DISABLED by \
+             default** — an attempt to run one reports success for the workflow but \
+             fails that specific node until explicitly enabled.\n\
+             \n\
+             To enable, audit every node in this workflow, then uncomment the \
+             `command:` override already present (commented out) in \
+             `docker-compose.yml`, or add the flag(s) yourself: `{flags}`",
+            types = dangerous.join(", "),
+            flags = allow_flags_for(dangerous),
+        )
+    };
 
     format!(
         "# Aerini Docker Deployment\n\
@@ -360,21 +439,27 @@ Treat this zip like a credentials file: do not commit it to version\n\
          ```\n\
          Use a reverse proxy (Caddy, Nginx) with TLS for public-facing deployments.\n\
          \n\
-         ## Shell Command and Code Nodes\n\
+         ## Dangerous Node Types (Shell Command, Code, Database)\n\
          \n\
-         Shell Command and Code nodes execute inside the container with the privileges\n\
-         of the `aerini` user. The container has no elevated capabilities.\n",
-        ver     = env!("CARGO_PKG_VERSION"),
-        name    = name,
-        trigger = trigger,
-        port    = port,
-        safe    = safe,
-        creds   = cred_section,
+         {dangerous_section}\n\
+         \n\
+         | Node type | Flag | Risk |\n\
+         |---|---|---|\n\
+         | Shell Command | `--allow-shell` | Executes arbitrary OS commands as the container's `aerini` user (no elevated capabilities, but full command execution within the container). |\n\
+         | Code (JS) | `--allow-code` | Spawns a Node.js subprocess as the container's `aerini` user. |\n\
+         | Database | `--allow-database` | Connects to PostgreSQL/MySQL/SQLite/Redis; SSRF surface and RUSTSEC-2023-0071 (RSA timing side-channel in sqlx-mysql). |\n",
+        ver       = env!("CARGO_PKG_VERSION"),
+        name      = name,
+        trigger   = trigger,
+        port      = port,
+        safe      = safe,
+        creds     = cred_section,
+        dangerous_section = dangerous_section,
     )
 }
 
 pub(super) fn build_readme(
-    name: &str, trigger: &str, port: u16, creds: &[CredentialExport]
+    name: &str, trigger: &str, port: u16, creds: &[CredentialExport], dangerous: &[&str]
 ) -> String {
     let name    = strip_newlines(name);
     let trigger = strip_newlines(trigger);
@@ -386,6 +471,30 @@ pub(super) fn build_readme(
             .map(|c| format!("  {}={}\n", c.env_var_name, "<your-value>"))
             .collect();
         format!("Edit .env and set:\n{}", lines)
+    };
+
+    // T2-1/T2-6: replaces the old "SHELL COMMAND NODES" section, which only
+    // covered Shell (never Code or Database) and never mentioned that these
+    // node types are DISABLED by default — a workflow using one would
+    // silently no-op that node with only a journalctl line to explain why
+    // (AUDIT_REPORT.md S8-2).
+    let dangerous_section = if dangerous.is_empty() {
+        "This workflow does not use any node type from the list below — nothing to enable.".to_string()
+    } else {
+        format!(
+            "This workflow uses: {types}. These node types are DISABLED by default.\n\
+             \n\
+             To enable, audit every node in this workflow first, then edit\n\
+             ~/.config/systemd/user/aerini-{safe}.service and append to the ExecStart\n\
+             line:\n\
+             \x20 {flags}\n\
+             Then: systemctl --user daemon-reload && systemctl --user restart aerini-{safe}\n\
+             (Re-running install.sh regenerates this file from aerini.service in this zip —\n\
+             \x20add the flag there too, or re-apply it after any re-install.)",
+            types = dangerous.join(", "),
+            flags = allow_flags_for(dangerous),
+            safe  = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_"),
+        )
     };
 
     format!(
@@ -416,7 +525,7 @@ Treat this zip like a credentials file:\n\
          ------------\n\
          - Linux x86_64 (Ubuntu 20.04+, Debian 11+, CentOS 7+, Alpine)\n\
          - systemd with user lingering enabled (install.sh handles this)\n\
-         - Node.js (only required if workflow uses Code nodes)\n\
+         - Node.js (only required if workflow uses Code nodes, and only once enabled — see below)\n\
          \n\
          CREDENTIALS\n\
          -----------\n\
@@ -426,10 +535,19 @@ Treat this zip like a credentials file:\n\
            nano ~/.aerini-server/{safe}/.env\n\
            systemctl --user restart aerini-{safe}\n\
          \n\
-         SHELL COMMAND NODES\n\
-         -------------------\n\
-         Shell Command nodes execute on the server's Linux environment,\n\
-         not your desktop. Commands that use macOS or Windows tooling will fail.\n\
+         DANGEROUS NODE TYPES (Shell Command, Code, Database)\n\
+         ------------------------------------------------------\n\
+         {dangerous_section}\n\
+         \n\
+         --allow-shell     Shell Command: executes arbitrary OS commands as the\n\
+         \x20                 server process's own user. Commands that use macOS or\n\
+         \x20                 Windows tooling will fail — this runs on your server's\n\
+         \x20                 Linux environment, not your desktop.\n\
+         --allow-code      Code (JS): spawns a Node.js subprocess as the server\n\
+         \x20                 process's own user.\n\
+         --allow-database  Database: connects to PostgreSQL/MySQL/SQLite/Redis;\n\
+         \x20                 SSRF surface and RUSTSEC-2023-0071 (RSA timing\n\
+         \x20                 side-channel in sqlx-mysql).\n\
          \n\
          DESKTOP NOTIFICATION NODES\n\
          --------------------------\n\
@@ -450,5 +568,71 @@ Treat this zip like a credentials file:\n\
         port    = port,
         creds   = cred_section,
         safe    = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_"),
+        dangerous_section = dangerous_section,
     )
+}
+
+#[cfg(test)]
+mod dangerous_export_tests {
+    use super::*;
+
+    #[test]
+    fn allow_flags_for_maps_each_canonical_id() {
+        assert_eq!(allow_flags_for(&["shell_exec"]), "--allow-shell");
+        assert_eq!(allow_flags_for(&["code"]), "--allow-code");
+        assert_eq!(allow_flags_for(&["database"]), "--allow-database");
+        assert_eq!(
+            allow_flags_for(&["shell_exec", "database"]),
+            "--allow-shell --allow-database"
+        );
+        assert_eq!(allow_flags_for(&[]), "");
+    }
+
+    #[test]
+    fn service_file_has_no_flag_comment_when_no_dangerous_nodes() {
+        let out = build_service_file("wf", 7700, &[]);
+        assert!(!out.contains("DISABLED by default"));
+        // ExecStart must still be the very next non-blank line after
+        // EnvironmentFile — no stray blank comment line left behind.
+        assert!(out.contains("EnvironmentFile={{INSTALL_DIR}}/.env\nExecStart="));
+    }
+
+    #[test]
+    fn service_file_lists_exact_flags_needed_above_execstart() {
+        let out = build_service_file("wf", 7700, &["shell_exec", "database"]);
+        assert!(out.contains("shell_exec, database"));
+        assert!(out.contains("--allow-shell --allow-database"));
+        // Comment must come before ExecStart, not after (an operator editing
+        // top-to-bottom must see it before reaching the line it explains).
+        let comment_pos = out.find("DISABLED by default").unwrap();
+        let exec_pos    = out.find("ExecStart=").unwrap();
+        assert!(comment_pos < exec_pos);
+    }
+
+    #[test]
+    fn readme_and_docker_readme_state_nothing_to_enable_when_safe() {
+        let readme = build_readme("wf", "Schedule", 7700, &[], &[]);
+        assert!(readme.contains("nothing to enable"));
+        let docker_readme = build_docker_readme("wf", "Schedule", 7700, &[], &[]);
+        assert!(docker_readme.contains("nothing to enable"));
+    }
+
+    #[test]
+    fn readme_and_docker_readme_surface_flags_when_dangerous_present() {
+        let readme = build_readme("wf", "Schedule", 7700, &[], &["code"]);
+        assert!(readme.contains("--allow-code"));
+        assert!(readme.contains("DISABLED by default"));
+        let docker_readme = build_docker_readme("wf", "Schedule", 7700, &[], &["code"]);
+        assert!(docker_readme.contains("--allow-code"));
+        assert!(docker_readme.contains("DISABLED by default"));
+    }
+
+    #[test]
+    fn docker_compose_command_hint_only_present_when_dangerous() {
+        let safe = build_serve_docker_compose("wf", 7700, &[], &[]);
+        assert!(!safe.contains("# command:"));
+        let unsafe_ = build_serve_docker_compose("wf", 7700, &[], &["shell_exec"]);
+        assert!(unsafe_.contains("# command:"));
+        assert!(unsafe_.contains("\"--allow-shell\""));
+    }
 }

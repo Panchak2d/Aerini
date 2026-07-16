@@ -64,7 +64,7 @@ export function renderCollectFilesFields(ctx: ExtensionContext): void {
     }
     const srcs = node.data.config["sources"] as Array<{ id: string; name: string; source_expr: string }>;
     srcs.push({
-      id: `src_${Date.now()}`,
+      id: `src_${crypto.randomUUID()}`,
       name: `Source ${srcs.length + 1}`,
       source_expr: "",
     });

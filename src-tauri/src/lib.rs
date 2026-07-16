@@ -441,6 +441,7 @@ pub fn run() {
             commands::credentials::get_credential_metadata,
             commands::credentials::save_credential,
             commands::credentials::delete_credential,
+            commands::oauth::get_oauth_redirect_port,
             // Keep original command names for IPC compatibility with frontend
             commands::scheduler::start_scheduled_workflow,
             commands::scheduler::stop_scheduled_workflow,

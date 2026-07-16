@@ -113,7 +113,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
       node.data.config["subfolders"] = [];
     }
     (node.data.config["subfolders"] as Array<{ id: string; name: string; source_expr: string }>).push({
-      id: `sf_${Date.now()}`,
+      id: `sf_${crypto.randomUUID()}`,
       name: "New Subfolder",
       source_expr: "",
     });

@@ -91,47 +91,18 @@ impl Node for FileNode {
                 ));
 
                 match operation.as_str() {
-                    "write" | "append" => {
-                        // The target file may not exist yet. Canonicalize its parent directory
-                        // instead, then rejoin the filename. If the parent does not exist on
-                        // disk, INVALID_PATH is returned — create_dir_all only runs after this
-                        // check passes, never before.
-                        let fname = match abs.file_name() {
-                            Some(f) => f.to_owned(),
-                            None => return NodeOutput::failure(NodeError::unrecoverable(
-                                "INVALID_PATH", "Path has no filename component",
-                            )),
-                        };
-                        let parent = abs.parent().unwrap_or(sandbox.as_path());
-                        match std::fs::canonicalize(parent) {
-                            Ok(cp) if cp.starts_with(&sandbox) => {
-                                cp.join(fname).to_string_lossy().into_owned()
-                            }
-                            Ok(_)  => return outside(),
-                            Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                                "INVALID_PATH",
-                                "Path parent does not exist or cannot be resolved",
-                            )),
-                        }
-                    }
-                    "exists" => {
-                        // Try full canonicalize first: if the file exists, this dereferences
-                        // all symlinks and we can check containment precisely.
-                        // If the file does not exist, canonicalize returns Err (nothing to
-                        // dereference). In that case fall back to starts_with on abs: safe
-                        // because ".." is already rejected above, and if the final target
-                        // existed a symlink would have made canonicalize succeed.
-                        match std::fs::canonicalize(&abs) {
-                            Ok(cp) if cp.starts_with(&sandbox) => {
-                                cp.to_string_lossy().into_owned()
-                            }
-                            Ok(_)  => return outside(),
-                            Err(_) => {
-                                if !abs.starts_with(&sandbox) {
-                                    return outside();
-                                }
-                                abs.to_string_lossy().into_owned()
-                            }
+                    // write/append: the target file may not exist yet.
+                    // exists: the target may legitimately not exist (that's a valid,
+                    //   non-error "exists: false" result) — but the old lexical fallback
+                    //   here trusted an unresolved suffix past a symlinked *intermediate*
+                    //   directory (S3-7). All three now resolve through the same
+                    //   walk-up-to-nearest-existing-ancestor helper, which also lets
+                    //   write/append reach nested, not-yet-created directories inside the
+                    //   sandbox (S3-6) — create_dir_all runs later, after this check.
+                    "write" | "append" | "exists" => {
+                        match resolve_within_sandbox(&sandbox, sandbox_str, &abs) {
+                            Ok(resolved) => resolved,
+                            Err(failure) => return failure,
                         }
                     }
                     _ => {
@@ -189,22 +160,43 @@ impl Node for FileNode {
             }
             "write" => {
                 let content = input.input["content"].as_str().unwrap_or("");
+                let encoding = input.input["encoding"].as_str().unwrap_or("utf8");
+                let bytes = match decode_write_content(content, encoding) {
+                    Ok(b) => b,
+                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
+                        "INVALID_BASE64",
+                        format!("content is not valid base64: {}", e),
+                    )),
+                };
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = fs::create_dir_all(parent).await;
                 }
-                match fs::write(&path, content).await {
+                match fs::write(&path, &bytes).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("WRITE_ERR", e.to_string())),
-                    Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": content.len() })),
+                    Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
                 }
             }
             "append" => {
                 use tokio::io::AsyncWriteExt;
                 let content = input.input["content"].as_str().unwrap_or("");
+                let encoding = input.input["encoding"].as_str().unwrap_or("utf8");
+                let bytes = match decode_write_content(content, encoding) {
+                    Ok(b) => b,
+                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
+                        "INVALID_BASE64",
+                        format!("content is not valid base64: {}", e),
+                    )),
+                };
+                // Inline fix (Rule 6): this arm never created missing parent directories,
+                // unlike "write" above — the same file/mechanism, small, no design call.
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = fs::create_dir_all(parent).await;
+                }
                 match tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                    Ok(mut f) => match f.write_all(content.as_bytes()).await {
+                    Ok(mut f) => match f.write_all(&bytes).await {
                         Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                        Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": content.len() })),
+                        Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
                     }
                 }
             }
@@ -220,6 +212,79 @@ impl Node for FileNode {
             }
             _ => NodeOutput::failure(NodeError::unrecoverable("INVALID_OP", format!("Unknown operation: {}", operation))),
         }
+    }
+}
+
+/// Resolve `abs` to a canonical path guaranteed to be inside `sandbox`, even when
+/// `abs` (or trailing components of it) don't exist on disk yet.
+///
+/// Walks up to the nearest existing ancestor, canonicalizes *that* (dereferencing
+/// any symlink along the way — including a symlinked *intermediate* directory, not
+/// just the final component), verifies it is contained within `sandbox`, then
+/// rejoins the non-existent suffix lexically. That rejoin is safe: a path component
+/// that doesn't exist yet cannot itself be a symlink pointing elsewhere.
+///
+/// Mirrors save_to_folder.rs's canonical_parent/suffix pattern exactly (S3-1's fix
+/// for that file used the same shape) — see AUDIT_REPORT.md S3-6/S3-7.
+fn resolve_within_sandbox(
+    sandbox: &std::path::Path,
+    sandbox_str: &str,
+    abs: &std::path::Path,
+) -> Result<String, NodeOutput> {
+    let outside = || NodeOutput::failure(NodeError::unrecoverable(
+        "PATH_OUTSIDE_SANDBOX",
+        format!("File access is restricted to '{}'", sandbox_str),
+    ));
+
+    let mut check: &std::path::Path = abs;
+    let canonical_ancestor = loop {
+        match std::fs::canonicalize(check) {
+            Ok(p) => break p,
+            Err(_) => match check.parent() {
+                Some(p) => check = p,
+                None => return Err(NodeOutput::failure(NodeError::unrecoverable(
+                    "INVALID_PATH",
+                    "Path cannot be resolved to an existing ancestor",
+                ))),
+            },
+        }
+    };
+
+    if !canonical_ancestor.starts_with(sandbox) {
+        return Err(outside());
+    }
+
+    let suffix = match abs.strip_prefix(check) {
+        Ok(s) => s,
+        Err(_) => return Err(NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_PATH",
+            "Path could not be resolved relative to its existing ancestor",
+        ))),
+    };
+
+    // raw_path already rejects any ".." up in execute() before this fn is ever
+    // reached, so suffix can't legitimately contain one — kept as defense in
+    // depth (matching save_to_folder.rs's own belt-and-suspenders check) rather
+    // than relying solely on that earlier, separate call site.
+    if suffix.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(outside());
+    }
+
+    Ok(canonical_ancestor.join(suffix).to_string_lossy().into_owned())
+}
+
+/// Decode `content` per `encoding` ("base64" or anything else = utf8 passthrough).
+/// Shared by the "write" and "append" arms so both honor `encoding` identically —
+/// previously neither did (T2-9): base64-encoded content was written as literal
+/// base64 text instead of the decoded bytes it represents.
+fn decode_write_content(content: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    if encoding == "base64" {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(content)
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(content.as_bytes().to_vec())
     }
 }
 
@@ -274,6 +339,201 @@ mod tests {
             "Expected PATH_OUTSIDE_SANDBOX, got: {}",
             err.code
         );
+    }
+
+    fn no_sandbox_input(op_json: Value) -> NodeInput {
+        NodeInput {
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            input: op_json,
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+                ..Default::default()
+            },
+        }
+    }
+
+    // T2-9 — normal case: base64-encoded, non-UTF8 binary content must round-trip
+    // through "write" as decoded bytes, not literal base64 text.
+    #[tokio::test]
+    async fn write_base64_encoding_decodes_before_write() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        let raw_bytes: &[u8] = &[0x00, 0xFF, 0x10, 0xAB, 0xCD, 0xEF];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_bytes);
+
+        let input = no_sandbox_input(json!({
+            "operation": "write",
+            "path": path.to_str().unwrap(),
+            "content": encoded,
+            "encoding": "base64"
+        }));
+
+        let result = FileNode.execute(input).await;
+        assert!(result.success, "write should succeed: {:?}", result.error);
+        assert_eq!(result.output.as_ref().unwrap()["bytes"], raw_bytes.len());
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(
+            on_disk, raw_bytes,
+            "file must contain decoded binary bytes, not literal base64 text"
+        );
+    }
+
+    // T2-9 — normal case: base64-encoded content must be decoded on "append" too.
+    #[tokio::test]
+    async fn append_base64_encoding_decodes_before_append() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        std::fs::write(&path, [0x01u8, 0x02]).unwrap();
+
+        let more: &[u8] = &[0xFE, 0xFF];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(more);
+        let input = no_sandbox_input(json!({
+            "operation": "append",
+            "path": path.to_str().unwrap(),
+            "content": encoded,
+            "encoding": "base64"
+        }));
+
+        let result = FileNode.execute(input).await;
+        assert!(result.success, "append should succeed: {:?}", result.error);
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk, vec![0x01, 0x02, 0xFE, 0xFF]);
+    }
+
+    // T2-9 — edge case: malformed base64 content must fail cleanly, not silently
+    // write garbage or panic.
+    #[tokio::test]
+    async fn write_invalid_base64_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+
+        let input = no_sandbox_input(json!({
+            "operation": "write",
+            "path": path.to_str().unwrap(),
+            "content": "not-valid-base64!!!",
+            "encoding": "base64"
+        }));
+
+        let result = FileNode.execute(input).await;
+        assert!(!result.success);
+        assert_eq!(result.error.unwrap().code, "INVALID_BASE64");
+        assert!(!path.exists(), "no file should be written on decode failure");
+    }
+
+    // T2-13 (S3-6) — normal case: sandboxed write to a relative path whose parent
+    // directories don't exist yet must create them, matching desktop/no-sandbox
+    // behaviour, instead of failing with INVALID_PATH.
+    #[tokio::test]
+    async fn sandboxed_write_creates_missing_nested_parent_dirs() {
+        let sandbox_dir = tempfile::tempdir().unwrap();
+
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert(
+            "__file_sandbox_dir".to_string(),
+            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
+        );
+
+        let input = NodeInput {
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            input: json!({
+                "operation": "write",
+                "path": "new/nested/file.txt",
+                "content": "hello"
+            }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata,
+                ..Default::default()
+            },
+        };
+
+        let result = FileNode.execute(input).await;
+        assert!(result.success, "expected success, got: {:?}", result.error);
+        let on_disk = sandbox_dir.path().join("new/nested/file.txt");
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "hello");
+    }
+
+    // T2-13 (S3-7) — edge case: a symlink inside the sandbox pointing outside it,
+    // used as an *intermediate* directory (the final path component under it does
+    // NOT exist), must be rejected by "exists" rather than falling back to a
+    // lexical starts_with check that trusts the unresolved suffix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandboxed_exists_symlinked_intermediate_dir_is_rejected() {
+        let sandbox_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+
+        let link = sandbox_dir.path().join("escapelink");
+        std::os::unix::fs::symlink(outside_dir.path(), &link).unwrap();
+
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert(
+            "__file_sandbox_dir".to_string(),
+            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
+        );
+
+        let input = NodeInput {
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            // "nonexistent.txt" doesn't exist under the symlinked dir, so a full
+            // canonicalize(abs) fails and the old code fell back to a lexical
+            // starts_with(sandbox) check that incorrectly passed.
+            input: json!({ "operation": "exists", "path": "escapelink/nonexistent.txt" }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata,
+                ..Default::default()
+            },
+        };
+
+        let result = FileNode.execute(input).await;
+        assert!(!result.success, "expected rejection, got success: {:?}", result.output);
+        assert_eq!(result.error.unwrap().code, "PATH_OUTSIDE_SANDBOX");
+    }
+
+    // T2-13 (S3-7) — normal case, guards against an overzealous fix: a genuinely
+    // missing file inside a real (non-symlinked) sandboxed directory must still
+    // return exists:false, not an error.
+    #[tokio::test]
+    async fn sandboxed_exists_missing_file_in_real_dir_returns_false() {
+        let sandbox_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(sandbox_dir.path().join("realdir")).unwrap();
+
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert(
+            "__file_sandbox_dir".to_string(),
+            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
+        );
+
+        let input = NodeInput {
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            input: json!({ "operation": "exists", "path": "realdir/missing.txt" }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata,
+                ..Default::default()
+            },
+        };
+
+        let result = FileNode.execute(input).await;
+        assert!(result.success, "expected success, got: {:?}", result.error);
+        assert_eq!(result.output.as_ref().unwrap()["exists"], false);
     }
 }
 

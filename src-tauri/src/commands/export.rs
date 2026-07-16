@@ -107,6 +107,13 @@ pub async fn generate_server_package(
     let credentials   = collect_credentials(&wf);
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
+    // T2-1/T2-6: same canonical list every other execution entry point
+    // consults. The generated package does NOT auto-pass --allow-shell/
+    // --allow-code/--allow-database for these (see build_service_file's own
+    // comment for why) -- this is only used to render an explicit warning so
+    // the operator isn't surprised when such a node silently no-ops.
+    let dangerous = aerini_engine::nodes::dangerous_node_types_present(&wf.nodes);
+
     let cred_env_vars: HashMap<String, String> = credentials.iter()
         .map(|c| (c.credential_id.clone(), c.env_var_name.clone()))
         .collect();
@@ -141,9 +148,9 @@ pub async fn generate_server_package(
 
     let install_sh = templates::build_install_sh(&wf.name, request.status_port);
 
-    let service_file = templates::build_service_file(&wf.name, request.status_port);
+    let service_file = templates::build_service_file(&wf.name, request.status_port, &dangerous);
 
-    let readme = templates::build_readme(&wf.name, &trigger_desc, request.status_port, &credentials);
+    let readme = templates::build_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous);
 
     let temp_dir  = std::env::temp_dir();
     let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
@@ -299,6 +306,13 @@ pub async fn generate_docker_package(
     let credentials   = collect_credentials(&wf);
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
+    // T2-1/T2-6: same canonical list every other execution entry point
+    // consults. The generated package does NOT auto-pass --allow-shell/
+    // --allow-code/--allow-database for these (see build_service_file's own
+    // comment for why) -- this is only used to render an explicit warning so
+    // the operator isn't surprised when such a node silently no-ops.
+    let dangerous = aerini_engine::nodes::dangerous_node_types_present(&wf.nodes);
+
     let cred_env_vars: HashMap<String, String> = credentials.iter()
         .map(|c| (c.credential_id.clone(), c.env_var_name.clone()))
         .collect();
@@ -324,9 +338,9 @@ pub async fn generate_docker_package(
         .map_err(|e| e.to_string())?;
 
     let dockerfile      = templates::build_serve_dockerfile();
-    let docker_compose  = templates::build_serve_docker_compose(&wf.name, request.status_port, &credentials);
+    let docker_compose  = templates::build_serve_docker_compose(&wf.name, request.status_port, &credentials, &dangerous);
     let env_example     = templates::build_docker_env_example(&credentials);
-    let readme          = templates::build_docker_readme(&wf.name, &trigger_desc, request.status_port, &credentials);
+    let readme          = templates::build_docker_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous);
 
     let temp_dir  = std::env::temp_dir();
     let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");

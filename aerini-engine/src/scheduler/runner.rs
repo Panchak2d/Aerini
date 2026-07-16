@@ -701,10 +701,8 @@ async fn parse_http_request(
     }
 
     let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 {
-        if reader.read_exact(&mut body_bytes).await.is_err() {
-            return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string());
-        }
+    if content_length > 0 && reader.read_exact(&mut body_bytes).await.is_err() {
+        return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string());
     }
     let body_str   = String::from_utf8_lossy(&body_bytes).to_string();
     let body_value: Value = serde_json::from_str(&body_str)

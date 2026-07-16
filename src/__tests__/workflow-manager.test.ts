@@ -1,14 +1,26 @@
 /**
+ * @vitest-environment jsdom
+ *
  * DEVIATION NOTE: `WorkflowManager` (from workflow-manager.ts) requires a
- * live Canvas, DOM, localStorage, and Tauri IPC — not testable in unit
- * isolation. The plan's intent is to verify workflow serialization roundtrip,
- * which lives in `CanvasSerializer.ts`. Tests are written against
- * `serialize` / `deserialize` directly, which is where that logic resides.
+ * live Canvas, DOM, localStorage, and Tauri IPC — not fully testable in unit
+ * isolation. Most tests here are written against `serialize` / `deserialize`
+ * directly, which is where that logic resides.
+ *
+ * Batch R (S11-13) adds one exception: `duplicateWorkflow` only reads
+ * `this.onToast` / `this.refreshWorkflowList` from its `this` and reads/
+ * writes `localStorage` directly (via module-private lsLoad/lsSave, since
+ * isTauri() is false under jsdom/no Tauri globals) — so, matching the
+ * `Canvas.prototype.method.call(fakeThis)` precedent already established in
+ * canvas-safety.test.ts, the real prototype method is exercised directly
+ * against a minimal duck-typed `this` and real jsdom `localStorage`, without
+ * needing a full WorkflowManager (which would otherwise require a live
+ * Canvas + `#workflow-list` DOM element neither of these tests need).
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { serialize, deserialize, DEFAULT_CHAT_SETTINGS } from "../canvas/CanvasSerializer";
 import { CanvasNode } from "../canvas/Node";
 import { Connector } from "../canvas/Connector";
+import { WorkflowManager } from "../workflow-manager";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
 vi.mock("@tauri-apps/api/core", () => ({
@@ -232,5 +244,111 @@ describe("deserialize — disabled flag roundtrip", () => {
     };
     const rt = deserialize(JSON.stringify(legacyDoc));
     expect(rt.nodes.get("n1")?.disabled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// duplicateWorkflow (S11-13, Batch R): must route through deserialize()/
+// serialize() so a pre-existing dangling edge is dropped rather than
+// propagated verbatim into the copy — the old implementation hand-edited
+// the raw parsed JSON and had no such filter.
+// ---------------------------------------------------------------------------
+
+const LS_KEY = "aerini_workflows_v1";
+
+/**
+ * Node's own built-in Web Storage global (nodejs/node#57666) can shadow
+ * jsdom's window.localStorage with a non-functional stand-in (getItem/
+ * setItem undefined unless the process was started with
+ * --localstorage-file), depending on Node version — the same gotcha
+ * modal-manager.test.ts already documents and works around. duplicateWorkflow
+ * reads/writes localStorage directly, so give every test in this describe
+ * block a real, working in-memory implementation regardless of what the
+ * host Node build provides.
+ */
+function installLocalStorageStub(): void {
+  const store = new Map<string, string>();
+  const stub: Pick<Storage, "getItem" | "setItem" | "removeItem" | "clear"> = {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => { store.set(key, String(value)); },
+    removeItem: (key: string) => { store.delete(key); },
+    clear: () => { store.clear(); },
+  };
+  globalThis.localStorage = stub as Storage;
+}
+
+function lsSaveRaw(id: string, name: string, json: string): void {
+  const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+  all[id] = { id, name, json, updated_at: new Date().toISOString() };
+  localStorage.setItem(LS_KEY, JSON.stringify(all));
+}
+
+function fakeManagerThis() {
+  return { onToast: vi.fn(), refreshWorkflowList: vi.fn(async () => {}) };
+}
+
+describe("duplicateWorkflow — dangling-edge filter (S11-13)", () => {
+  beforeEach(() => {
+    installLocalStorageStub();
+  });
+
+  it("drops a pre-existing dangling edge instead of propagating it into the copy", async () => {
+    const n1 = makeNode("n1", 0, 0);
+    const n2 = makeNode("n2", 100, 0);
+    const validConn = makeConnector("e_valid", "n1", "n2");
+    const goodJson = serialize("wf_src", "Source", new Map([["n1", n1], ["n2", n2]]), new Map([["e_valid", validConn]]));
+
+    // Simulate a pre-existing dangling edge (e.g. via the undo-sharing bug
+    // S9-3 describes) by splicing one directly into the saved document —
+    // serialize()'s own filter (T1-14) would otherwise never let one exist
+    // in a freshly-serialized document.
+    const doc = JSON.parse(goodJson);
+    doc.edges.push({
+      id: "e_dangling", from_node: "n1", to_node: "NODE_THAT_DOES_NOT_EXIST",
+      from_port: "output", to_port: "input",
+      condition: null, on_success: null, on_failure: null,
+    });
+    lsSaveRaw("wf_src", "Source", JSON.stringify(doc));
+
+    const fakeThis = fakeManagerThis();
+    await WorkflowManager.prototype.duplicateWorkflow.call(fakeThis as never, "wf_src", "Source");
+
+    const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    const copyEntry = Object.values(all as Record<string, { id: string; json: string }>)
+      .find(e => e.id !== "wf_src");
+    expect(copyEntry).toBeDefined();
+
+    const copyDoc = JSON.parse(copyEntry!.json);
+    expect(copyDoc.edges).toHaveLength(1);
+    expect(copyDoc.nodes).toHaveLength(2);
+    // The surviving edge must reference the *remapped* node ids, not the
+    // dangling target and not the original source ids.
+    const survivingEdge = copyDoc.edges[0];
+    const newIds = copyDoc.nodes.map((n: { id: string }) => n.id);
+    expect(newIds).toContain(survivingEdge.from_node);
+    expect(newIds).toContain(survivingEdge.to_node);
+    expect(survivingEdge.to_node).not.toBe("NODE_THAT_DOES_NOT_EXIST");
+  });
+
+  it("gives the duplicate new node/edge ids, distinct from the source", async () => {
+    const n1 = makeNode("n1", 0, 0);
+    const n2 = makeNode("n2", 100, 0);
+    const conn = makeConnector("e1", "n1", "n2");
+    const json = serialize("wf_src2", "Source2", new Map([["n1", n1], ["n2", n2]]), new Map([["e1", conn]]));
+    lsSaveRaw("wf_src2", "Source2", json);
+
+    const fakeThis = fakeManagerThis();
+    await WorkflowManager.prototype.duplicateWorkflow.call(fakeThis as never, "wf_src2", "Source2");
+
+    const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    const copyEntry = Object.values(all as Record<string, { id: string; json: string }>)
+      .find(e => e.id !== "wf_src2");
+    const copyDoc = JSON.parse(copyEntry!.json);
+
+    const copyNodeIds = copyDoc.nodes.map((n: { id: string }) => n.id);
+    expect(copyNodeIds).not.toContain("n1");
+    expect(copyNodeIds).not.toContain("n2");
+    expect(copyDoc.edges[0].id).not.toBe("e1");
+    expect(fakeThis.onToast).toHaveBeenCalledWith(expect.stringContaining("Duplicated as"), "success");
   });
 });

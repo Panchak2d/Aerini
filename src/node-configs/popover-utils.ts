@@ -104,6 +104,33 @@ export const CRON_PRESETS = [
 
 let _cselIdCounter = 0;
 
+// S10-6: previously each `openDropdown()` call added its own
+// `document`-level "mousedown" listener, removed only if that exact
+// dropdown's own outside-click handler happened to fire. Any other close
+// path (Escape, the popover being torn down, a different node's popover
+// opening) left that listener attached to `document` forever, referencing
+// a detached `wrap`. Fix: one shared, capture-phase listener bound once
+// for the whole module, backed by a live registry of currently-open
+// instances — closing an entry (however it closes) removes it from the
+// registry; a `wrap` that got disconnected from the DOM without going
+// through `closeDropdown()` at all is swept on the very next mousedown
+// anywhere, instead of leaking for the rest of the app session.
+interface OpenDropdownEntry { wrap: HTMLElement; close: () => void; }
+const openDropdownRegistry = new Set<OpenDropdownEntry>();
+let delegatedOutsideClickBound = false;
+
+function ensureDelegatedOutsideClickListener(): void {
+  if (delegatedOutsideClickBound) return;
+  delegatedOutsideClickBound = true;
+  document.addEventListener("mousedown", (e) => {
+    for (const entry of Array.from(openDropdownRegistry)) {
+      if (!entry.wrap.isConnected || !entry.wrap.contains(e.target as Node)) {
+        entry.close();
+      }
+    }
+  }, true);
+}
+
 export function mkCustomSelect(
   options: string[],
   current: string,
@@ -171,6 +198,7 @@ export function mkCustomSelect(
   wrap.appendChild(dropdown);
 
   let isOpen = false;
+  const dropdownEntry: OpenDropdownEntry = { wrap, close: () => closeDropdown() };
 
   const commitSelection = (idx: number) => {
     const opt = options[idx];
@@ -205,13 +233,8 @@ export function mkCustomSelect(
     optionEls[activeIdx]?.scrollIntoView({ block: "nearest" });
     trigger.setAttribute("aria-activedescendant", optionEls[activeIdx]?.id ?? "");
 
-    const onOutside = (e: MouseEvent) => {
-      if (!wrap.contains(e.target as Node)) {
-        closeDropdown();
-        document.removeEventListener("mousedown", onOutside, true);
-      }
-    };
-    setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
+    openDropdownRegistry.add(dropdownEntry);
+    ensureDelegatedOutsideClickListener();
   };
 
   const closeDropdown = () => {
@@ -221,6 +244,7 @@ export function mkCustomSelect(
     trigger.classList.remove("open");
     trigger.setAttribute("aria-expanded", "false");
     trigger.removeAttribute("aria-activedescendant");
+    openDropdownRegistry.delete(dropdownEntry);
   };
 
   trigger.addEventListener("click", (e) => {

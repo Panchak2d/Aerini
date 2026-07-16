@@ -15,7 +15,27 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { initModals, convertN8nWorkflow } from "../modal-manager";
 import type { NodeDescriptor } from "../ipc/workflow";
 
+/**
+ * Node's own built-in Web Storage global (nodejs/node#57666) can shadow
+ * jsdom's window.localStorage with a non-functional stand-in (getItem/
+ * setItem undefined unless the process was started with
+ * --localstorage-file), depending on Node version. initModals() reads/
+ * writes localStorage directly, so give every test a real, working
+ * in-memory implementation regardless of what the host Node build provides.
+ */
+function installLocalStorageStub(): void {
+  const store = new Map<string, string>();
+  const stub: Pick<Storage, "getItem" | "setItem" | "removeItem" | "clear"> = {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => { store.set(key, String(value)); },
+    removeItem: (key: string) => { store.delete(key); },
+    clear: () => { store.clear(); },
+  };
+  globalThis.localStorage = stub as Storage;
+}
+
 function mkModalDom(): void {
+  installLocalStorageStub();
   document.body.innerHTML = "";
   const divIds = [
     "import-preview-modal", "import-name", "import-desc", "import-node-count",

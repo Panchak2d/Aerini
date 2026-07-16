@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
+use crate::nodes::util::read_json_response_capped;
 
 use super::shared::{network_err, strip_data_uri_prefix, mime_to_ext};
 
@@ -110,8 +111,8 @@ async fn call_nano_banana_once(
         .map_err(network_err)?;
 
     let status = resp.status().as_u16();
-    let json: Value = resp.json().await.map_err(|e| {
-        NodeError::unrecoverable("PARSE_ERROR", e.to_string())
+    let json: Value = read_json_response_capped(resp).await.map_err(|e| {
+        NodeError::unrecoverable("PARSE_ERROR", e)
     })?;
 
     if let Some(err) = json["error"].as_object() {

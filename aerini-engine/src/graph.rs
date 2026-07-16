@@ -147,11 +147,22 @@ impl ExecutionGraph {
         }
     }
 
-    pub fn edge_meta(&self, from: &str, to: &str) -> Option<&EdgeMeta> {
-        let from_idx = self.index_map.get(from)?;
-        let to_idx = self.index_map.get(to)?;
-        let edge_idx = self.graph.find_edge(*from_idx, *to_idx)?;
-        Some(&self.graph[edge_idx])
+    /// Returns the `EdgeMeta` for every edge from `from` to `to` — a workflow can
+    /// have more than one edge between the same node pair (e.g. a Switch node's
+    /// `case_1` and `default` ports both wired to the same downstream node).
+    /// `petgraph::Graph` permits such parallel edges; a single-edge lookup via
+    /// `find_edge` returns only one of them and can silently miss a sibling edge's
+    /// `on_failure` (see `find_failure_route`'s use of this, AUDIT_REPORT.md S5-4).
+    /// Empty `Vec` (not `None`) when `from`/`to` don't exist or aren't connected.
+    pub fn edge_meta(&self, from: &str, to: &str) -> Vec<&EdgeMeta> {
+        let (from_idx, to_idx) = match (self.index_map.get(from), self.index_map.get(to)) {
+            (Some(f), Some(t)) => (*f, *t),
+            _ => return Vec::new(),
+        };
+        self.graph
+            .edges_connecting(from_idx, to_idx)
+            .map(|edge_ref| edge_ref.weight())
+            .collect()
     }
 
     fn reachable_nodes(
@@ -185,5 +196,105 @@ impl ExecutionGraph {
             }
         }
         "unknown".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::CURRENT_VERSION;
+    use crate::model::{NodeType, Workflow, WorkflowEdge, WorkflowNode};
+
+    fn test_node(id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.to_string(),
+            node_type_id: "instant_test".to_string(),
+            node_type: NodeType::Utility,
+            name: id.to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        }
+    }
+
+    fn test_edge(id: &str, from: &str, to: &str, on_failure: Option<&str>) -> WorkflowEdge {
+        WorkflowEdge {
+            id: id.to_string(),
+            from_node: from.to_string(),
+            from_port: "output".to_string(),
+            to_node: to.to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: on_failure.map(|s| s.to_string()),
+        }
+    }
+
+    fn test_workflow(nodes: Vec<WorkflowNode>, edges: Vec<WorkflowEdge>) -> Workflow {
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            nodes,
+            edges,
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn edge_meta_normal_single_edge() {
+        let wf = test_workflow(
+            vec![test_node("a"), test_node("b")],
+            vec![test_edge("e1", "a", "b", None)],
+        );
+        let g = ExecutionGraph::build(&wf).expect("graph should build");
+        let metas = g.edge_meta("a", "b");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].edge_id, "e1");
+    }
+
+    #[test]
+    fn edge_meta_no_matching_edge_returns_empty_vec() {
+        let wf = test_workflow(
+            vec![test_node("a"), test_node("b")],
+            vec![test_edge("e1", "a", "b", None)],
+        );
+        let g = ExecutionGraph::build(&wf).expect("graph should build");
+        assert!(g.edge_meta("b", "a").is_empty(), "reverse direction has no edge");
+        assert!(g.edge_meta("a", "nope").is_empty(), "unknown target node");
+        assert!(g.edge_meta("nope", "a").is_empty(), "unknown source node");
+    }
+
+    // T2-3 (S5-4) — edge case: two edges between the same (from, to) pair must
+    // BOTH be returned by edge_meta, not just whichever one an internal
+    // find_edge()-style single lookup happened to pick.
+    #[test]
+    fn edge_meta_returns_all_parallel_edges_between_same_pair() {
+        let wf = test_workflow(
+            vec![test_node("a"), test_node("b"), test_node("rec1"), test_node("rec2")],
+            vec![
+                test_edge("e1", "a", "b", Some("rec1")),
+                test_edge("e2", "a", "b", Some("rec2")),
+            ],
+        );
+        let g = ExecutionGraph::build(&wf).expect("graph should build");
+        let metas = g.edge_meta("a", "b");
+        assert_eq!(metas.len(), 2, "both parallel edges must be returned");
+        let failures: HashSet<String> = metas
+            .iter()
+            .filter_map(|m| m.on_failure.clone())
+            .collect();
+        assert!(failures.contains("rec1"));
+        assert!(failures.contains("rec2"));
     }
 }

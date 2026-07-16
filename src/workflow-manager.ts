@@ -6,6 +6,8 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { serialize, deserialize, type ChatSettings, DEFAULT_CHAT_SETTINGS } from "./canvas/CanvasSerializer";
 import type { Canvas } from "./canvas/Canvas";
+import type { CanvasNode } from "./canvas/Node";
+import type { Connector } from "./canvas/Connector";
 import { isTauri } from "./utils";
 
 const LS_KEY = "aerini_workflows_v1";
@@ -64,7 +66,7 @@ export function isWorkflowRunning(id: string): boolean {
 
 export class WorkflowManager {
   canvas: Canvas;
-  currentId   = `wf_${Date.now()}`;
+  currentId   = `wf_${crypto.randomUUID()}`;
   currentName = "Untitled";
   /** Per-workflow parallel execution setting. Serialised into workflow JSON. */
   parallelExecution   = false;
@@ -270,24 +272,45 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onToast("Could not find workflow to duplicate", "error"); return; }
-      const parsed = JSON.parse(json);
+
+      // S11-13: route through deserialize()/serialize() — the same pattern
+      // every other load/save path in this file already uses — instead of
+      // hand-editing the raw parsed JSON. deserialize() drops any edge whose
+      // from_node/to_node isn't present in the node list (T1-14's
+      // dangling-edge guard, CanvasSerializer.ts); the old raw-JSON approach
+      // bypassed that guard entirely, so a workflow that already had a
+      // dangling edge (e.g. via the undo-sharing bug S9-3 describes)
+      // propagated it into the duplicate verbatim, uncaught.
+      const { nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(json);
+
       const newId   = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const newName = `${name} (copy)`;
-      // Re-assign all node IDs to avoid collisions
+
+      // Re-assign all node IDs to avoid collisions, re-keying the Map so
+      // each entry's key still matches its own data.id (CanvasNode/Connector
+      // objects returned by deserialize() are safe to mutate in place — this
+      // duplicate call is the only reference to them).
       const idMap: Record<string, string> = {};
-      const nodes = (parsed.nodes ?? []).map((n: Record<string,unknown>) => {
-        const newNodeId = `node_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
-        idMap[String(n.id)] = newNodeId;
-        return { ...n, id: newNodeId };
-      });
-      const edges = (parsed.edges ?? []).map((e: Record<string,unknown>) => ({
-        ...e,
-        id: `edge_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
-        from_node: idMap[String(e.from_node)] ?? e.from_node,
-        to_node:   idMap[String(e.to_node)]   ?? e.to_node,
-      }));
-      const duplicate = { ...parsed, id: newId, name: newName, nodes, edges };
-      const dupJson = JSON.stringify(duplicate);
+      const newNodes = new Map<string, CanvasNode>();
+      for (const node of nodes.values()) {
+        const newNodeId = `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        idMap[node.data.id] = newNodeId;
+        node.data.id = newNodeId;
+        newNodes.set(newNodeId, node);
+      }
+
+      // deserialize() guarantees every connector's from_node/to_node is a
+      // key in `nodes`, so both idMap lookups below are always present.
+      const newConnectors = new Map<string, Connector>();
+      for (const conn of connectors.values()) {
+        const newEdgeId = `edge_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        conn.data.id = newEdgeId;
+        conn.data.from_node = idMap[conn.data.from_node];
+        conn.data.to_node = idMap[conn.data.to_node];
+        newConnectors.set(newEdgeId, conn);
+      }
+
+      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings);
       if (isTauri()) await saveWorkflow(dupJson);
       else lsSave(newId, newName, dupJson);
       await this.refreshWorkflowList();
@@ -354,7 +377,7 @@ export class WorkflowManager {
       const ok = await this.confirmFn(`Start a new workflow? Unsaved changes to "${this.currentName}" will be lost.`);
       if (!ok) return;
     }
-    this.currentId          = `wf_${Date.now()}`;
+    this.currentId          = `wf_${crypto.randomUUID()}`;
     this.currentName        = "Untitled";
     this.parallelExecution  = false;
     this.maxConcurrentNodes = 8;

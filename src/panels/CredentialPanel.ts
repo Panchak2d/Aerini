@@ -274,7 +274,20 @@ function credTypeLabel(value: string): string {
   return labels[value] ?? value;
 }
 
-function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void): HTMLElement {
+// S10-5: render() (and therefore this function) is called fresh on every
+// panel open, save, and delete — each call used to add a brand-new
+// `document`-level "mousedown" listener with no removal, permanently
+// leaking one dead listener per render. Track the previously-registered
+// cleanup and run it before adding a new one, so at most one such
+// listener is ever attached at a time, regardless of how many times the
+// panel re-renders. Exported (previously module-private) solely so this
+// fix has direct test coverage — same precedent as Batch G/H's exports.
+let activeCredTypeSelectCleanup: (() => void) | null = null;
+
+export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void): HTMLElement {
+  activeCredTypeSelectCleanup?.();
+  activeCredTypeSelectCleanup = null;
+
   let current = types[0];
 
   const wrap    = document.createElement("div");
@@ -326,12 +339,14 @@ function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void)
   });
 
   // Close on outside click
-  document.addEventListener("mousedown", (e) => {
+  const onOutsideClick = (e: MouseEvent) => {
     if (!wrap.contains(e.target as Node)) {
       dropdown.classList.add("hidden");
       trigger.setAttribute("aria-expanded", "false");
     }
-  });
+  };
+  document.addEventListener("mousedown", onOutsideClick);
+  activeCredTypeSelectCleanup = () => document.removeEventListener("mousedown", onOutsideClick);
 
   return wrap;
 }

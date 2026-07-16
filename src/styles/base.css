@@ -57,6 +57,19 @@ input[type="datetime-local"] { color-scheme: dark; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bd); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--t3); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Firefox has no ::-webkit-scrollbar-* support; these are the real (non-vendor)
+   scrollbar properties it uses instead. PLAN_UI.md's own gap analysis claimed
+   this app "relies on the OS/browser default" for scrollbars — checked against
+   this file directly and that claim doesn't hold: the four webkit rules above
+   already themed the thumb/track with --bd/--t3, not browser default gray.
+   The one real, narrower gap is Firefox specifically, which ignores all four
+   webkit rules above and had nothing themed until this line. Elements that
+   deliberately hide their own scrollbar (.category-chips, .drawer-tabs, via
+   scrollbar-width:none) still win here — their selector is more specific than
+   this universal rule, so they're unaffected. */
+* { scrollbar-width: thin; scrollbar-color: var(--bd) transparent; }
 
 .hidden { display: none !important; }
 

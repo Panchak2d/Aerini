@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@ab7a4bef6b34bec5dc471eec8f22bd328ba94675 # v1.1.0 (pinned; was @main)
         with:
           tool-cache: false
           android: true

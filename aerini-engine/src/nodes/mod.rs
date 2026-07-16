@@ -59,6 +59,29 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// Node type ids capable of arbitrary command/code execution or direct
+/// database access — the single canonical list consulted by every execution
+/// entry point: desktop `run_workflow`, desktop `SchedulerDaemon` job-start,
+/// `aerini-server` `serve_mode`/`api_mode` startup gating, and export
+/// packaging. AUDIT_REPORT.md T2-1/T2-6 — previously six independently
+/// written, inconsistent checks; every one of them now reads this list.
+///
+/// The frontend keeps its own UI-only list, `DANGEROUS_NODE_IDS` in
+/// `src/node-ids.ts` — the two crates share no build step, so keep them in
+/// sync by hand. `node-ids.ts` currently lists `file` instead of `database`;
+/// that is a separate, already-tracked frontend gap, not fixed here.
+pub const DANGEROUS_NODE_TYPE_IDS: &[&str] = &["shell_exec", "code", "database"];
+
+/// Returns every id from [`DANGEROUS_NODE_TYPE_IDS`] present in `nodes`, in
+/// the list's own canonical order (not workflow order), deduplicated. Empty
+/// when none are present.
+pub fn dangerous_node_types_present(nodes: &[crate::model::WorkflowNode]) -> Vec<&'static str> {
+    DANGEROUS_NODE_TYPE_IDS.iter()
+        .copied()
+        .filter(|dangerous_id| nodes.iter().any(|n| n.node_type_id == *dangerous_id))
+        .collect()
+}
+
 /// Register all built-in node implementations.
 ///
 /// `db` is `None` in aerini-server's single-workflow serve mode, where no WorkflowDb
@@ -124,4 +147,60 @@ pub fn register_builtins(
     registry.register(Arc::new(variables::SetVariableNode { db: db.clone() }));
     registry.register(Arc::new(variables::GetVariableNode { db }));
     registry.register(Arc::new(output_node::OutputNode));
+}
+
+#[cfg(test)]
+mod dangerous_node_tests {
+    use super::*;
+    use crate::model::{NodeType, WorkflowNode};
+    use std::collections::HashMap;
+
+    fn node(id: &str, node_type_id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id:            id.to_string(),
+            node_type_id:  node_type_id.to_string(),
+            node_type:     NodeType::Utility,
+            name:          id.to_string(),
+            config:        serde_json::json!({}),
+            credentials:   HashMap::new(),
+            input_schema:  serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry:         Default::default(),
+            fallback_node: None,
+            disabled:      false,
+            position:      Default::default(),
+        }
+    }
+
+    #[test]
+    fn empty_when_no_dangerous_nodes_present() {
+        let nodes = vec![node("n1", "http_request"), node("n2", "manual_trigger")];
+        assert!(dangerous_node_types_present(&nodes).is_empty());
+    }
+
+    #[test]
+    fn finds_each_dangerous_type_independently() {
+        assert_eq!(dangerous_node_types_present(&[node("n1", "shell_exec")]), vec!["shell_exec"]);
+        assert_eq!(dangerous_node_types_present(&[node("n1", "code")]), vec!["code"]);
+        assert_eq!(dangerous_node_types_present(&[node("n1", "database")]), vec!["database"]);
+    }
+
+    #[test]
+    fn dedupes_and_orders_by_canonical_list_not_workflow_order() {
+        // Workflow order is database, then shell_exec, then a second shell_exec —
+        // result must still be [shell_exec, database] (canonical list order),
+        // and the duplicate shell_exec must not produce a duplicate entry.
+        let nodes = vec![
+            node("n1", "database"),
+            node("n2", "shell_exec"),
+            node("n3", "shell_exec"),
+        ];
+        assert_eq!(dangerous_node_types_present(&nodes), vec!["shell_exec", "database"]);
+    }
+
+    #[test]
+    fn ignores_non_dangerous_types_mixed_in() {
+        let nodes = vec![node("n1", "http_request"), node("n2", "code"), node("n3", "if_condition")];
+        assert_eq!(dangerous_node_types_present(&nodes), vec!["code"]);
+    }
 }

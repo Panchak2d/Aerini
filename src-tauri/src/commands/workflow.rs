@@ -182,6 +182,24 @@ pub async fn run_workflow(
 ) -> Result<WorkflowResult, String> {
     let workflow = Workflow::from_json(&workflow_json).map_err(|e| e.to_string())?;
 
+    // T2-1/T2-6: log the same dangerous-node signal at every execution entry
+    // point. Desktop's design posture is intentional full host access (no
+    // default block, no opt-in flag exists) — this does not change execution
+    // behavior, it only closes the gap where a manual run left zero backend
+    // signal, unlike the frontend confirm dialog (Batch D) or the server's
+    // own startup warnings for the same node types.
+    let dangerous = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
+    if !dangerous.is_empty() {
+        tracing::warn!(
+            workflow_id = %workflow.id,
+            node_types  = ?dangerous,
+            "run_workflow: workflow contains dangerous node type(s) {:?} — desktop executes \
+             these unconditionally by design; review the source of this workflow if it was \
+             imported or shared.",
+            dangerous
+        );
+    }
+
     let token = CancellationToken::new();
     *active_run.0.lock().expect("ActiveRunToken lock poisoned") = Some(token.clone());
 

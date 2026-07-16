@@ -4,6 +4,9 @@
 //   - Token storage via OS keychain (keyring v3)                         — G1
 //   - Per-credential refresh mutex (DashMap<key, Arc<Mutex<()>>>)        — G3
 //   - OAuth redirect port 42069 preferred; falls back to OS-assigned port — G6
+//   - `probe_redirect_port()` reports that port ahead of time, without   — T2-15
+//     starting a flow, so callers (e.g. the Setup Guide) can show the
+//     real redirect URI instead of an unconditional "42069" — S10-2.
 //   - TCP listener closed on every exit path (defer-style cleanup)       — G10
 //   - 60-second callback timeout
 //
@@ -22,6 +25,16 @@
 //     auth    https://www.tiktok.com/v2/auth/authorize/
 //     token   https://open.tiktokapis.com/v2/oauth/token/
 //     scope   video.publish
+//   Google Sheets (added Batch S, VERIFIED Jul 2026 — developers.google.com/workspace/sheets/api/scopes):
+//     auth    https://accounts.google.com/o/oauth2/v2/auth
+//     token   https://oauth2.googleapis.com/token   (Google's generic token endpoint — shared with YouTube)
+//     scope   https://www.googleapis.com/auth/spreadsheets
+//
+// T2-7/S1-9/S6-6: `google_sheets.rs` previously required a raw, manually-pasted
+// access token with no refresh path (~1h expiry, then a silent 401). It now goes
+// through this same store/refresh/full-flow pipeline as a fourth platform,
+// "google_sheets", reusing the existing Google token-exchange/refresh functions
+// (they don't hardcode a scope — only `build_auth_url` does) — see `get_tokens`.
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -47,8 +60,9 @@ const EXPIRY_MARGIN_SECS: u64 = 300;
 const INSTAGRAM_LL_EXPIRY_SECS: u64 = 55 * 24 * 3600;
 /// TikTok access token lifetime (24 h).
 const TIKTOK_ACCESS_EXPIRY_SECS: u64 = 86400;
-/// YouTube access token lifetime (1 h).
-const YOUTUBE_ACCESS_EXPIRY_SECS: u64 = 3600;
+/// Google access token lifetime (1 h) — shared default for youtube and google_sheets,
+/// both issued by the same Google OAuth2 token endpoint.
+const GOOGLE_ACCESS_EXPIRY_SECS: u64 = 3600;
 
 // ── Refresh mutex map (G3) ────────────────────────────────────────────────────
 
@@ -149,7 +163,12 @@ async fn exchange_code(
     redirect_uri: &str,
 ) -> Result<StoredTokens, NodeError> {
     match platform {
-        "youtube" => exchange_code_youtube(code, client_id, client_secret, redirect_uri).await,
+        // "google_sheets" reuses the youtube fn: both are plain Google OAuth2 token
+        // exchange against the same endpoint, with no scope hardcoded in this fn —
+        // the scope is chosen per-platform in `build_auth_url` (T2-7/S1-9/S6-6).
+        "youtube" | "google_sheets" => {
+            exchange_code_youtube(code, client_id, client_secret, redirect_uri).await
+        }
         "instagram" => exchange_code_instagram(code, client_id, client_secret, redirect_uri).await,
         "tiktok" => exchange_code_tiktok(code, client_id, client_secret, redirect_uri).await,
         p => Err(NodeError::unrecoverable("UNKNOWN_PLATFORM", format!("Unknown platform: {}", p))),
@@ -165,14 +184,15 @@ async fn refresh_tokens(
     stored: &StoredTokens,
 ) -> Result<StoredTokens, NodeError> {
     match platform {
-        "youtube" => refresh_tokens_youtube(client_id, client_secret, stored).await,
+        // Same reuse rationale as exchange_code above.
+        "youtube" | "google_sheets" => refresh_tokens_youtube(client_id, client_secret, stored).await,
         "instagram" => refresh_tokens_instagram(stored).await,
         "tiktok" => refresh_tokens_tiktok(client_id, client_secret, stored).await,
         p => Err(NodeError::unrecoverable("UNKNOWN_PLATFORM", format!("Unknown platform: {}", p))),
     }
 }
 
-// ─── YouTube ──────────────────────────────────────────────────────────────────
+// ─── YouTube (also reused by google_sheets — both are plain Google OAuth2) ────
 
 async fn exchange_code_youtube(
     code: &str,
@@ -203,7 +223,7 @@ async fn refresh_tokens_youtube(
     stored: &StoredTokens,
 ) -> Result<StoredTokens, NodeError> {
     let refresh_token = stored.refresh_token.as_deref().ok_or_else(|| {
-        NodeError::unrecoverable("OAUTH_NO_REFRESH_TOKEN", "No YouTube refresh token stored")
+        NodeError::unrecoverable("OAUTH_NO_REFRESH_TOKEN", "No Google refresh token stored — re-authenticate.")
     })?;
     let params = [
         ("client_id", client_id),
@@ -256,7 +276,7 @@ async fn parse_google_token_response(
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in response"))?
         .to_string();
-    let expires_in = body["expires_in"].as_u64().unwrap_or(YOUTUBE_ACCESS_EXPIRY_SECS);
+    let expires_in = body["expires_in"].as_u64().unwrap_or(GOOGLE_ACCESS_EXPIRY_SECS);
     let refresh_token = body["refresh_token"].as_str().map(str::to_string);
 
     Ok(StoredTokens {
@@ -485,6 +505,16 @@ fn build_auth_url(platform: &str, client_id: &str, state: &str, redirect_uri: &s
             &scope=video.publish\
             &state={state}"
         ),
+        "google_sheets" => format!(
+            "https://accounts.google.com/o/oauth2/v2/auth\
+            ?client_id={client_id}\
+            &redirect_uri={redirect}\
+            &response_type=code\
+            &scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets\
+            &access_type=offline\
+            &prompt=consent\
+            &state={state}"
+        ),
         _ => String::new(),
     }
 }
@@ -642,21 +672,44 @@ fn pct_decode(s: &str) -> String {
 
 // ── Full OAuth flow ───────────────────────────────────────────────────────────
 
+/// Binds the OAuth callback listener: preferred port first, falling back to any
+/// OS-assigned port on conflict (G6). Shared by `run_full_oauth_flow` (which keeps
+/// and uses the listener) and `probe_redirect_port` (which reads the port and drops
+/// it immediately) so the fallback policy is defined in exactly one place — T2-15.
+async fn bind_oauth_listener() -> Result<TcpListener, NodeError> {
+    match TcpListener::bind(("127.0.0.1", OAUTH_PORT)).await {
+        Ok(l) => Ok(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e2| {
+                NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e2.to_string())
+            })
+        }
+        Err(e) => Err(NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())),
+    }
+}
+
+/// Reports the OAuth callback port that would be used right now if a flow were
+/// started this instant — `OAUTH_PORT` (42069) if free, otherwise whatever
+/// OS-assigned port `bind_oauth_listener` would fall back to. Binds and immediately
+/// drops the listener; there is an inherent, small TOCTOU race against whatever binds
+/// next (another process, or a real flow started moments later) — same caveat as any
+/// "is this port free" probe. Used by the Setup Guide (T2-15/S10-2) so the redirect
+/// URI a user is told to register reflects live reality instead of an unconditional
+/// "42069" that silently stops matching once that port is ever unavailable.
+pub async fn probe_redirect_port() -> Result<u16, NodeError> {
+    let listener = bind_oauth_listener().await?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string()))
+}
+
 async fn run_full_oauth_flow(
     platform: &str,
     client_id: &str,
     client_secret: &str,
 ) -> Result<StoredTokens, NodeError> {
-    // Try the preferred port first; fall back to any OS-assigned port on conflict.
-    let listener = match TcpListener::bind(("127.0.0.1", OAUTH_PORT)).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e2| {
-                NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e2.to_string())
-            })?
-        }
-        Err(e) => return Err(NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())),
-    };
+    let listener = bind_oauth_listener().await?;
 
     let actual_port = listener
         .local_addr()
@@ -740,4 +793,65 @@ pub async fn get_tokens(
     let tokens = run_full_oauth_flow(platform, client_id, client_secret).await?;
     save_tokens(platform, client_id, &tokens).await;
     Ok(OAuthTokens { access_token: tokens.access_token })
+}
+
+// ── Tests (T2-15/S10-2, T2-7/S1-9/S6-6) ───────────────────────────────────────
+//
+// exchange_code/refresh_tokens's new "google_sheets" match arms are thin
+// delegations to the pre-existing, already-network-tested youtube functions
+// (no new logic of their own) — verified by manual trace only, matching the
+// precedent set by Batch F's postgres/mysql wiring (this file has no HTTP-mock
+// test infrastructure to exercise them against, and adding one is out of this
+// batch's scope). What *is* new logic — the URL a user is told to register, and
+// the live-port probe — is unit-tested below.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_auth_url_google_sheets_has_correct_scope_and_params() {
+        let url = build_auth_url("google_sheets", "abc123", "state-xyz", "http://127.0.0.1:42069/callback");
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
+        assert!(url.contains("client_id=abc123"));
+        assert!(url.contains("state=state-xyz"));
+        assert!(url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets"));
+        // redirect_uri must be percent-encoded, not embedded raw (would break query parsing).
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A42069%2Fcallback"));
+        assert!(!url.contains("127.0.0.1:42069/callback&")); // raw, unencoded form must not appear
+    }
+
+    #[test]
+    fn build_auth_url_unknown_platform_still_empty() {
+        // Regression guard: adding the google_sheets arm must not disturb the
+        // existing "unrecognized platform" fallback used by run_full_oauth_flow's
+        // own empty-string check.
+        assert_eq!(build_auth_url("bogus", "id", "state", "http://x/callback"), "");
+    }
+
+    #[tokio::test]
+    async fn probe_redirect_port_falls_back_then_recovers() {
+        // Force the conflict ourselves (rather than assuming 42069 happens to be
+        // free or occupied in whatever environment runs this test) so both the
+        // fallback and normal-case behavior are deterministic, not environment-
+        // dependent. This is the only test in the crate that touches port 42069
+        // (grep-confirmed at write time) so it doesn't race a sibling test.
+        let held = TcpListener::bind(("127.0.0.1", OAUTH_PORT))
+            .await
+            .expect("test setup: must be able to bind 42069 when no other listener holds it");
+
+        // Edge case: preferred port is taken — probe must fall back, not error.
+        let fallback_port = probe_redirect_port()
+            .await
+            .expect("probe should fall back to an OS-assigned port, not fail");
+        assert_ne!(fallback_port, OAUTH_PORT, "must not report the port it couldn't actually bind");
+        assert_ne!(fallback_port, 0, "must report the real assigned port, not the wildcard");
+
+        drop(held);
+
+        // Normal case: preferred port is free again — probe must report it.
+        let preferred_port = probe_redirect_port()
+            .await
+            .expect("probe should succeed once 42069 is free");
+        assert_eq!(preferred_port, OAUTH_PORT);
+    }
 }

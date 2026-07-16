@@ -1,5 +1,5 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
-import { NODE_IDS } from "../node-ids";
+import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
 
 export interface CanvasNodeData {
@@ -56,6 +56,14 @@ const STATUS_COLOR = {
   success: "#34d399",
   error:   "#f87171",
 };
+
+// Cosmetic-only indicator for AUDIT_REPORT.md T2-1/S9-4/S8-1 — nodes able to run
+// arbitrary code/commands or touch a database directly. Deliberately independent
+// of TYPE_META's per-category accent (dangerous node types all currently share
+// the "action" category, but the badge must not silently disappear if that
+// changes). The real gate is aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS
+// (Batch L) — this draws a marker only, never blocks or warns on its own.
+const DANGER_ACCENT = "#f87171";
 
 // Note color palette for note-type nodes
 const NOTE_COLORS: Record<string, { bg: string; border: string; text: string }> = {
@@ -344,7 +352,15 @@ export class CanvasNode {
     ctx.fillStyle    = accent + "99";
     ctx.textBaseline = "middle";
     ctx.textAlign    = "right";
-    ctx.fillText(meta.label, x + w - (this.status !== "idle" ? 20 : 8), y + NODE_HEADER / 2);
+    const labelRightEdge = x + w - (this.status !== "idle" ? 20 : 8);
+    const labelY          = y + NODE_HEADER / 2;
+    ctx.fillText(meta.label, labelRightEdge, labelY);
+
+    // ── Danger badge (top right, immediately left of the category label) ────
+    if (DANGEROUS_NODE_IDS.has(this.data.node_type_id)) {
+      const labelWidth = ctx.measureText(meta.label).width;
+      drawDangerBadge(ctx, labelRightEdge - labelWidth - 9, labelY);
+    }
 
     // ── Disabled overlay label ─────────────────────────────────────────────
     if (this.disabled) {
@@ -518,6 +534,30 @@ export function createNodeFromDescriptor(
 
 function trunc(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+/**
+ * Small filled warning-triangle glyph, centered at (cx, cy). Drawn immediately
+ * left of the category label for node types in DANGEROUS_NODE_IDS. Cosmetic
+ * only — see DANGER_ACCENT's comment above for what this does and doesn't do.
+ */
+function drawDangerBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
+  const s = 5;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - s);
+  ctx.lineTo(cx - s, cy + s * 0.8);
+  ctx.lineTo(cx + s, cy + s * 0.8);
+  ctx.closePath();
+  ctx.fillStyle = DANGER_ACCENT;
+  ctx.fill();
+
+  ctx.font         = "bold 7px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.fillStyle    = "#161b22"; // node body background — contrasts against the fill
+  ctx.textAlign    = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("!", cx, cy + s * 0.15);
+  ctx.restore();
 }
 
 export function roundedRect(

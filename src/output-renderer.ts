@@ -680,11 +680,6 @@ export function syntaxHighlight(json: string): string {
   );
 }
 
-// Legacy exports — kept for backward compatibility with any callers
-export function renderRunSummary(result: WorkflowResult): string {
-  return renderSummaryTab(result, new Map());
-}
-
 // Called after any innerHTML assignment that includes copy buttons produced by
 // renderSummaryTab or renderErrorsTab. Reads data-copy-text, attaches click
 // listeners. Safe to call multiple times — each call only processes buttons

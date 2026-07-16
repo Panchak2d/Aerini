@@ -2,15 +2,20 @@ import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import { NODE_IDS, TRIGGER_NODE_IDS, DANGEROUS_NODE_IDS } from "./node-ids";
 
+// `database` is deliberately absent here — its required fields depend on
+// `db_type` (sqlite needs db_path+query; postgres/mysql need
+// connection_url+query; redis needs connection_url+operation+key) and can't
+// be expressed as one flat list. See the NODE_IDS.DATABASE branch in
+// validateWorkflow below, which mirrors sqlite.rs/postgres.rs/redis.rs's own
+// MISSING_PATH/MISSING_URL/MISSING_QUERY/MISSING_OPERATION/MISSING_KEY checks.
 export const REQUIRED_FIELDS: Record<string, string[]> = {
   [NODE_IDS.HTTP_REQUEST]: ["url", "method"],
-  email_send:              ["to", "subject"],
+  email_send:              ["smtp_host", "from", "to", "subject", "body"],
   [NODE_IDS.SHELL_EXEC]:   ["command"],
   [NODE_IDS.CODE]:         ["code"],
   [NODE_IDS.AI_PROMPT]:    ["prompt"],
-  [NODE_IDS.AI_AGENT]:     ["goal"],
+  [NODE_IDS.AI_AGENT]:     ["goal", "provider"],
   [NODE_IDS.SCHEDULE]:     ["mode"],
-  database:                ["db_path", "query"],
 };
 
 export function validateWorkflow(canvas: Canvas): string[] {
@@ -30,6 +35,21 @@ export function validateWorkflow(canvas: Canvas): string[] {
   }
 
   for (const node of nodes.values()) {
+    if (node.data.node_type_id === NODE_IDS.DATABASE) {
+      const dbType = String(node.data.config["db_type"] ?? "sqlite");
+      const dbRequired =
+        dbType === "postgres" || dbType === "mysql" ? ["connection_url", "query"]
+        : dbType === "redis"                        ? ["connection_url", "operation", "key"]
+        :                                              ["db_path", "query"]; // sqlite (default)
+      for (const field of dbRequired) {
+        const val = node.data.config[field];
+        if (!val || String(val).trim() === "") {
+          errors.push(`"${node.data.name}" — ${field.replace(/_/g, " ")} is required.`);
+        }
+      }
+      continue;
+    }
+
     const required = REQUIRED_FIELDS[node.data.node_type_id];
     if (!required) continue;
     for (const field of required) {

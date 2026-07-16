@@ -18,11 +18,20 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-
-use crate::model::{NodeInput, NodeOutput, NodeType};
 use std::collections::HashSet;
 
+use crate::error::NodeError;
+use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+
+/// Caps applied while merging files across sources (S3-13): `merged_files`
+/// previously grew without bound, and each entry typically embeds a file's
+/// full contents inline as base64. Both caps are checked as files are
+/// collected — the node fails fast rather than silently truncating the
+/// batch (a truncated file set handed to a downstream Save-to-Folder/S3
+/// node would look like a successful, complete run).
+const MAX_MERGED_FILES: usize = 10_000;
+const MAX_MERGED_BYTES: usize = 10 * 1024 * 1024;
 
 pub struct CollectFilesNode;
 
@@ -93,6 +102,7 @@ impl Node for CollectFilesNode {
         let mut merged_files: Vec<Value> = Vec::new();
         let mut seen_filenames: HashSet<String> = HashSet::new();
         let mut logs: Vec<String> = Vec::new();
+        let mut total_bytes: usize = 0;
 
         for (source_index, source) in sources.iter().enumerate() {
             let name = source["name"].as_str().unwrap_or("unnamed");
@@ -116,6 +126,31 @@ impl Node for CollectFilesNode {
             logs.push(format!("Source '{}': {} file(s)", name, files.len()));
 
             for file in files {
+                let file_bytes = file.get("data").and_then(Value::as_str).map(str::len).unwrap_or(0);
+
+                if merged_files.len() + 1 > MAX_MERGED_FILES {
+                    return NodeOutput::failure_with_logs(
+                        NodeError::unrecoverable(
+                            "TOO_MANY_FILES",
+                            format!("Collect Files exceeds {} file limit", MAX_MERGED_FILES),
+                        ),
+                        logs,
+                    );
+                }
+                if total_bytes + file_bytes > MAX_MERGED_BYTES {
+                    return NodeOutput::failure_with_logs(
+                        NodeError::unrecoverable(
+                            "TOTAL_SIZE_EXCEEDED",
+                            format!(
+                                "Collect Files exceeds {} MB combined file-data limit",
+                                MAX_MERGED_BYTES / (1024 * 1024)
+                            ),
+                        ),
+                        logs,
+                    );
+                }
+                total_bytes += file_bytes;
+
                 let original_name = file["filename"].as_str().unwrap_or("file.bin").to_string();
                 let deduped = deduplicate_filename(&original_name, source_index, &seen_filenames);
                 seen_filenames.insert(deduped.clone());
@@ -349,6 +384,54 @@ mod tests {
         ]))).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["count"], json!(1));
+    }
+
+    // ── Memory caps (S3-13) ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn file_count_over_cap_fails_cleanly() {
+        let files: Vec<Value> = (0..=MAX_MERGED_FILES).map(|i| file(&format!("f{i}.txt"))).collect();
+        let c = media_contract(files);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "S1", "source_expr": c }
+        ]))).await;
+        assert!(!out.success, "expected failure once file count exceeds MAX_MERGED_FILES");
+        assert_eq!(out.error.unwrap().code, "TOO_MANY_FILES");
+    }
+
+    #[tokio::test]
+    async fn file_count_at_cap_succeeds() {
+        let files: Vec<Value> = (0..MAX_MERGED_FILES).map(|i| file(&format!("f{i}.txt"))).collect();
+        let c = media_contract(files);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "S1", "source_expr": c }
+        ]))).await;
+        assert!(out.success, "MAX_MERGED_FILES itself must still be accepted");
+        assert_eq!(out.output.unwrap()["count"], json!(MAX_MERGED_FILES));
+    }
+
+    #[tokio::test]
+    async fn total_size_over_cap_fails_cleanly() {
+        let big = "a".repeat(MAX_MERGED_BYTES); // exactly at the cap, alone
+        let f1 = json!({ "filename": "big.bin", "data": big, "mime_type": "application/octet-stream" });
+        let f2 = file("tips_it_over.txt"); // any additional bytes push total over
+        let c = media_contract(vec![f1, f2]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "S1", "source_expr": c }
+        ]))).await;
+        assert!(!out.success, "expected failure once combined data size exceeds MAX_MERGED_BYTES");
+        assert_eq!(out.error.unwrap().code, "TOTAL_SIZE_EXCEEDED");
+    }
+
+    #[tokio::test]
+    async fn total_size_at_cap_succeeds() {
+        let big = "a".repeat(MAX_MERGED_BYTES); // exactly at the cap, no more
+        let f1 = json!({ "filename": "big.bin", "data": big, "mime_type": "application/octet-stream" });
+        let c = media_contract(vec![f1]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "S1", "source_expr": c }
+        ]))).await;
+        assert!(out.success, "exactly MAX_MERGED_BYTES must still be accepted");
     }
 
     // ── parse_source_expr unit tests ────────────────────────────────────────

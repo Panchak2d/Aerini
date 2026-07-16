@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::error::NodeError;
-use crate::model::NodeOutput;
+use crate::model::{ExecutionContext, NodeOutput};
 
 /// Scrubs embedded URL passwords from a driver error string before it is
 /// stored or returned to callers.
@@ -92,6 +92,112 @@ pub fn traverse_dotpath(data: &Value, path: &str) -> Value {
         }
     }
     current.clone()
+}
+
+/// Returns every `(node_id, output)` pair from `context.node_outputs` in a
+/// deterministic order, instead of the raw `HashMap`'s unspecified (and
+/// empirically randomized, per `RandomState`) iteration order.
+///
+/// Root-cause fix for the T2-5 / S3-2 / S3-3 / S3-4 / S4-6 / S4-7 family:
+/// `output_node.rs`, `json_node.rs`, `text_splitter.rs`, `merge.rs`, and
+/// `loop_node.rs` each previously called `.iter()`/`.values()` directly on
+/// `node_outputs`, so "most recent", "first found", and "array order"
+/// semantics all silently differed between runs of an identical workflow.
+///
+/// Ordering: nodes appear in `context.execution_order` order (see
+/// `ExecutionState::mark_succeeded` in `context.rs` — completion order, with
+/// a node that completes more than once, e.g. a loop body node re-run each
+/// iteration, moved to the position of its *most recent* completion rather
+/// than duplicated). Any `node_outputs` entry with no corresponding
+/// `execution_order` entry (a context built directly — e.g. by a test, or by
+/// any future caller that populates `node_outputs` without going through the
+/// executor) is appended afterward, sorted by node id, so the result is
+/// always fully deterministic and never silently drops an entry.
+pub fn ordered_node_outputs(context: &ExecutionContext) -> Vec<(String, Value)> {
+    let mut seen = std::collections::HashSet::with_capacity(context.node_outputs.len());
+    let mut out = Vec::with_capacity(context.node_outputs.len());
+    for id in context.execution_order.iter() {
+        if let Some(v) = context.node_outputs.get(id) {
+            out.push((id.clone(), v.clone()));
+            seen.insert(id.clone());
+        }
+    }
+    if out.len() < context.node_outputs.len() {
+        let mut rest: Vec<(&String, &Value)> = context.node_outputs
+            .iter()
+            .filter(|(k, _)| !seen.contains(*k))
+            .collect();
+        rest.sort_by(|a, b| a.0.cmp(b.0));
+        out.extend(rest.into_iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    out
+}
+
+#[cfg(test)]
+mod ordered_node_outputs_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use serde_json::json;
+
+    fn ctx(node_outputs: HashMap<String, Value>, execution_order: Vec<&str>) -> ExecutionContext {
+        ExecutionContext {
+            variables: HashMap::new(),
+            node_outputs: Arc::new(node_outputs),
+            metadata: HashMap::new(),
+            execution_order: Arc::new(execution_order.into_iter().map(String::from).collect()),
+        }
+    }
+
+    #[test]
+    fn follows_execution_order_when_present() {
+        let mut outputs = HashMap::new();
+        outputs.insert("b".to_string(), json!(2));
+        outputs.insert("a".to_string(), json!(1));
+        outputs.insert("c".to_string(), json!(3));
+        let result = ordered_node_outputs(&ctx(outputs, vec!["c", "a", "b"]));
+        let ids: Vec<&str> = result.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn falls_back_to_sorted_keys_when_execution_order_empty() {
+        // Matches every pre-existing test fixture across the five consumer
+        // node files, which construct ExecutionContext directly and leave
+        // execution_order at its ..Default::default() value (empty).
+        let mut outputs = HashMap::new();
+        outputs.insert("zebra".to_string(), json!(1));
+        outputs.insert("apple".to_string(), json!(2));
+        let result = ordered_node_outputs(&ctx(outputs, vec![]));
+        let ids: Vec<&str> = result.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["apple", "zebra"]);
+    }
+
+    #[test]
+    fn entries_missing_from_execution_order_are_appended_sorted() {
+        let mut outputs = HashMap::new();
+        outputs.insert("known".to_string(), json!(1));
+        outputs.insert("z_unknown".to_string(), json!(2));
+        outputs.insert("a_unknown".to_string(), json!(3));
+        let result = ordered_node_outputs(&ctx(outputs, vec!["known"]));
+        let ids: Vec<&str> = result.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["known", "a_unknown", "z_unknown"]);
+    }
+
+    #[test]
+    fn stale_execution_order_entry_with_no_matching_output_is_skipped_not_panicking() {
+        let mut outputs = HashMap::new();
+        outputs.insert("a".to_string(), json!(1));
+        let result = ordered_node_outputs(&ctx(outputs, vec!["ghost", "a"]));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "a");
+    }
+
+    #[test]
+    fn empty_context_returns_empty_vec() {
+        let result = ordered_node_outputs(&ctx(HashMap::new(), vec![]));
+        assert!(result.is_empty());
+    }
 }
 
 /// Policy for SSRF host/IP validation.
@@ -319,6 +425,64 @@ pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
     }
 }
 
+/// Cap applied when buffering an HTTP response body in memory before parsing
+/// it as JSON. Mirrors `http.rs`'s own `MAX_RESPONSE_BYTES` (same 10 MB
+/// value). Kept as an independent constant rather than importing http.rs's
+/// private one: this helper is called from ai_prompt/ai_agent/image_gen,
+/// none of which otherwise depend on the http node.
+pub const MAX_JSON_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Reads an HTTP response body and parses it as JSON, hard-capping memory
+/// use at `MAX_JSON_RESPONSE_BYTES` regardless of what (or whether)
+/// `Content-Length` declares.
+///
+/// Same two-stage guard as `http.rs`'s own response reader: (1) reject
+/// upfront if a declared `Content-Length` already exceeds the cap, avoiding
+/// a pre-sized allocation for a body we're not going to read; (2) stream the
+/// body chunk-by-chunk regardless, hard-capping at the same limit, so a
+/// missing/lying `Content-Length` can't bypass the guard.
+///
+/// Returns a plain `String` error rather than `NodeError` or `NodeOutput` so
+/// each call site — some build a `NodeError::unrecoverable`, some a
+/// `NodeError::recoverable`, some a bare `String` — can wrap it in whatever
+/// error shape that call site already uses, without this helper picking one.
+pub async fn read_json_response_capped(mut response: reqwest::Response) -> Result<Value, String> {
+    if let Some(cl) = response.content_length() {
+        if cl > MAX_JSON_RESPONSE_BYTES as u64 {
+            return Err(format!(
+                "Response Content-Length {} exceeds {} MB limit",
+                cl,
+                MAX_JSON_RESPONSE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+
+    let capacity = response
+        .content_length()
+        .unwrap_or(0)
+        .min(MAX_JSON_RESPONSE_BYTES as u64) as usize;
+    let mut body_buf = Vec::with_capacity(capacity);
+
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body_buf.len() + chunk.len() > MAX_JSON_RESPONSE_BYTES {
+                    return Err(format!(
+                        "Response body exceeds {} MB limit",
+                        MAX_JSON_RESPONSE_BYTES / (1024 * 1024)
+                    ));
+                }
+                body_buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to read response body: {}", e)),
+        }
+    }
+
+    serde_json::from_slice::<Value>(&body_buf)
+        .map_err(|e| format!("Failed to parse response as JSON: {}", e))
+}
+
 #[cfg(test)]
 mod ssrf_tests {
     use super::{check_ssrf_ip, SsrfPolicy};
@@ -432,5 +596,98 @@ mod rfc6598_tests {
     fn rfc6598_ipv4_mapped_blocked() {
         // ::ffff:100.64.0.1 — IPv4-mapped form of RFC 6598 address (hex: 6440:0001)
         assert!(check_ssrf_ip(v6("::ffff:6440:0001"), SsrfPolicy::Strict).is_err());
+    }
+}
+
+#[cfg(test)]
+mod read_json_response_capped_tests {
+    use super::{read_json_response_capped, MAX_JSON_RESPONSE_BYTES};
+
+    /// Spawns a one-shot raw TCP server that replies with exactly `raw_response`
+    /// (the caller supplies the full HTTP status line + headers + body, so tests
+    /// can control Content-Length independently of actual body length). Same
+    /// idiom as `ai_prompt/openai.rs::backward_compat_tests`'s mock server.
+    async fn spawn_raw_mock(raw_response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock server bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            // Drain the request so the client isn't left waiting on a full
+            // request write before we respond.
+            let mut discard = [0u8; 1024];
+            let _ = stream.read(&mut discard).await;
+            let _ = stream.write_all(&raw_response).await;
+            let _ = stream.shutdown().await;
+        });
+
+        format!("http://127.0.0.1:{}/", port)
+    }
+
+    #[tokio::test]
+    async fn small_valid_json_parses() {
+        let body = r#"{"ok":true,"n":1}"#;
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let url = spawn_raw_mock(raw.into_bytes()).await;
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let json = read_json_response_capped(resp).await.expect("should parse");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_rejected_before_read() {
+        // Declares a body far larger than the cap; body itself is small — if
+        // the function read the body anyway before checking, this would
+        // incorrectly succeed. Asserts the Content-Length pre-check fires.
+        let declared = MAX_JSON_RESPONSE_BYTES as u64 + 1;
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{{}}",
+            declared
+        );
+        let url = spawn_raw_mock(raw.into_bytes()).await;
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = read_json_response_capped(resp).await.expect_err("must reject");
+        assert!(err.contains("Content-Length"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn oversized_body_without_content_length_rejected_during_stream() {
+        // No Content-Length header (server declares none) — cap must still be
+        // enforced during the chunked read, not skipped because there was
+        // nothing to pre-check.
+        let oversized_body = "x".repeat(MAX_JSON_RESPONSE_BYTES + 1024);
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            oversized_body
+        );
+        let url = spawn_raw_mock(raw.into_bytes()).await;
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = read_json_response_capped(resp).await.expect_err("must reject");
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_json_within_size_cap_reports_parse_error() {
+        let body = "not json";
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let url = spawn_raw_mock(raw.into_bytes()).await;
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = read_json_response_capped(resp).await.expect_err("must fail to parse");
+        assert!(err.contains("parse"), "unexpected error: {err}");
     }
 }

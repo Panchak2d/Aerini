@@ -14,6 +14,12 @@ use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
+/// Hard cap on an S3 object's size when downloading it into memory as base64.
+/// Mirrors `http.rs`'s `MAX_RESPONSE_BYTES` — same reasoning: a multi-GB
+/// object (or a misconfigured/malicious custom r2/minio endpoint) must not
+/// be able to exhaust process memory via a single download.
+const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+
 pub struct S3Node;
 
 #[async_trait]
@@ -257,7 +263,7 @@ async fn op_download(client: &Client, bucket: &str, cfg: &Value) -> NodeOutput {
         None    => return NodeOutput::failure(NodeError::unrecoverable("MISSING_KEY", "key is required for download")),
     };
 
-    let output = match client.get_object().bucket(bucket).key(&key).send().await {
+    let mut output = match client.get_object().bucket(bucket).key(&key).send().await {
         Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
             "DOWNLOAD_ERROR",
             format!("Download failed for key '{}': {}", key, e),
@@ -265,13 +271,51 @@ async fn op_download(client: &Client, bucket: &str, cfg: &Value) -> NodeOutput {
         Ok(o)  => o,
     };
 
-    let bytes = match output.body.collect().await {
-        Ok(b)  => b.into_bytes(),
-        Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
-            "DOWNLOAD_ERROR",
-            format!("Failed to read response body for key '{}': {}", key, e),
-        )),
-    };
+    // Reject upfront if the declared size already exceeds the cap — avoids
+    // reading anything for an object we know we're going to refuse.
+    if let Some(cl) = output.content_length() {
+        if cl > 0 && cl as u64 > MAX_DOWNLOAD_BYTES as u64 {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "DOWNLOAD_TOO_LARGE",
+                format!(
+                    "Object '{}' is {} bytes, exceeds {} MB download limit",
+                    key, cl, MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
+    }
+
+    // Stream chunk-by-chunk instead of `.collect()`'s unbounded single-shot
+    // buffer (S1-3) — hard-caps memory regardless of what content_length
+    // declared (or omitted), same two-stage guard as http.rs's response
+    // reader / nodes/util.rs's read_json_response_capped.
+    let capacity = output
+        .content_length()
+        .filter(|&cl| cl > 0)
+        .unwrap_or(0)
+        .min(MAX_DOWNLOAD_BYTES as i64) as usize;
+    let mut bytes: Vec<u8> = Vec::with_capacity(capacity);
+    loop {
+        match output.body.next().await {
+            Some(Ok(chunk)) => {
+                if bytes.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "DOWNLOAD_TOO_LARGE",
+                        format!(
+                            "Object '{}' exceeds {} MB download limit",
+                            key, MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                        ),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Some(Err(e)) => return NodeOutput::failure(NodeError::unrecoverable(
+                "DOWNLOAD_ERROR",
+                format!("Failed to read response body for key '{}': {}", key, e),
+            )),
+            None => break,
+        }
+    }
 
     let size    = bytes.len();
     let content = base64::engine::general_purpose::STANDARD.encode(&bytes);

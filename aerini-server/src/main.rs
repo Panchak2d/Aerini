@@ -99,6 +99,14 @@ enum Command {
         #[arg(long, default_value_t = false)]
         allow_code: bool,
 
+        /// Allow Database nodes (disabled by default, matching `api` mode).
+        /// Database nodes can connect to PostgreSQL, MySQL, SQLite, and Redis.
+        /// Disabled by default due to SSRF surface and RUSTSEC-2023-0071
+        /// (RSA timing side-channel in sqlx-mysql). Only enable this flag if
+        /// you have audited every node in the exported workflow.
+        #[arg(long, default_value_t = false)]
+        allow_database: bool,
+
         /// Allow the server to start when run_secret is stored as a legacy BLAKE3
         /// hash instead of argon2id. By default (this flag absent) the server
         /// REFUSES to start with a legacy hash, since BLAKE3 is fast and not
@@ -416,7 +424,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir } => serve_mode(ServeArgs { config_path: config, port_override: port, bind, trusted_proxy_count, allow_shell, allow_code, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }).await,
+        Command::Serve { config, port, bind, trusted_proxy_count, allow_shell, allow_code, allow_database, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir } => serve_mode(ServeArgs { config_path: config, port_override: port, bind, trusted_proxy_count, allow_shell, allow_code, allow_database, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }).await,
         Command::Api { token, port, data_dir, allow_origins, allow_env_vars, bind, file_sandbox_dir, trusted_proxy_count, allow_shell, allow_code, allow_database, code_sandbox, ssrf_firewall_acknowledged, keychain, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, db_pool_size, max_concurrent_runs, max_queue_wait_secs, max_code_memory_mb, plugin_dir } => {
             let shell_exec_disabled    = !allow_shell;
             let code_exec_disabled     = !allow_code;
@@ -458,6 +466,7 @@ struct ServeArgs {
     trusted_proxy_count:        usize,
     allow_shell:                bool,
     allow_code:                 bool,
+    allow_database:             bool,
     allow_legacy_run_secret:    bool,
     file_sandbox_dir:           Option<PathBuf>,
     i_acknowledge_partial_sandbox: bool,
@@ -470,7 +479,7 @@ struct ServeArgs {
     plugin_dir:                 Option<PathBuf>,
 }
 
-async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_count, allow_shell, allow_code, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }: ServeArgs) {
+async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_count, allow_shell, allow_code, allow_database, allow_legacy_run_secret, file_sandbox_dir, i_acknowledge_partial_sandbox, ssrf_firewall_acknowledged, parallel_execution, max_concurrent_nodes, max_workflow_duration_secs, code_sandbox, max_code_memory_mb, plugin_dir }: ServeArgs) {
     init_tracing();
     let config = match ServerConfig::from_file(&config_path) {
         Ok(c)  => c,
@@ -542,10 +551,16 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
 
     let db = Arc::clone(&workflow_db) as Arc<dyn SchedulerDb>;
 
-    // Warn if the workflow contains Shell or Code nodes and the operator has not
-    // explicitly opted in with --allow-shell / --allow-code.
-    let has_shell_node = workflow.nodes.iter().any(|n| n.node_type_id == "shell_exec");
-    let has_code_node  = workflow.nodes.iter().any(|n| n.node_type_id == "code");
+    // Warn if the workflow contains Shell, Code, or Database nodes and the
+    // operator has not explicitly opted in with --allow-shell / --allow-code /
+    // --allow-database. T2-1/T2-6: derived from the one canonical dangerous-
+    // node list (aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS) instead of a
+    // locally hardcoded pair of checks, so this can't independently drift
+    // from api_mode's own gate again the way it did for Database (S8-2).
+    let dangerous_present = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
+    let has_shell_node    = dangerous_present.contains(&"shell_exec");
+    let has_code_node     = dangerous_present.contains(&"code");
+    let has_database_node = dangerous_present.contains(&"database");
     let has_http_node  = workflow.nodes.iter().any(|n| n.node_type_id == "http_request");
     let has_file_node  = workflow.nodes.iter().any(|n| n.node_type_id == "file" || n.node_type_id == "save_to_folder");
     if has_file_node && file_sandbox_dir.is_none() {
@@ -565,6 +580,14 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         tracing::warn!(
             "Workflow contains a Code (JS) node but --allow-code was not set. \
              Code execution is DISABLED. Pass --allow-code only after auditing the workflow."
+        );
+    }
+    if has_database_node && !allow_database {
+        tracing::warn!(
+            "Workflow contains a Database node but --allow-database was not set. \
+             Database execution is DISABLED. Pass --allow-database only after auditing the \
+             workflow — Database nodes carry SSRF surface and RUSTSEC-2023-0071 (RSA timing \
+             side-channel in sqlx-mysql)."
         );
     }
     if has_http_node {
@@ -625,6 +648,9 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     }
     if !allow_code {
         daemon = daemon.with_code_disabled(true);
+    }
+    if !allow_database {
+        daemon = daemon.with_database_disabled(true);
     }
     if code_sandbox {
         daemon = daemon.with_code_sandbox(true);

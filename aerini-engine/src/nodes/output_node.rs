@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use super::util::traverse_dotpath;
+use super::util::{ordered_node_outputs, traverse_dotpath};
 
 /// Output node — the final display node in a workflow.
 /// It passes through whatever value arrives on its input port unchanged,
@@ -62,18 +62,20 @@ impl Node for OutputNode {
         // non-string, non-null value is a malformed config, not "unset" — it
         // must not silently fall through to the merged-context fallback
         // below, which is reserved for a genuinely absent/null source_node.
-        // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern. Note:
-        // the fallback branch's own HashMap-iteration non-determinism
-        // (S3-2) is untouched — out of scope for this batch, tracked
-        // separately as T2-5/Batch K.
+        // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern. Batch K
+        // (T2-5) since fixed the fallback branch's HashMap-iteration
+        // non-determinism (S3-2) — see ordered_node_outputs below.
         let source_node_value = &input.input["source_node"];
         let source: Value = if source_node_value.is_null() {
-            // Use all context outputs merged, preferring the most recent node's output
-            // by taking the last entry in node_outputs that isn't this node itself
+            // Use all context outputs merged, preferring the most recently
+            // completed node's output. T2-5 fix: iterate in real completion
+            // order (context.execution_order, via ordered_node_outputs) —
+            // previously iterated the raw HashMap, whose order is
+            // unspecified and differs run to run for an identical workflow.
             let mut last: Option<Value> = None;
-            for (id, val) in input.context.node_outputs.iter() {
-                if id != &input.node_id {
-                    last = Some(val.clone());
+            for (id, val) in ordered_node_outputs(&input.context) {
+                if id != input.node_id {
+                    last = Some(val);
                 }
             }
             last.unwrap_or(input.input.clone())
@@ -182,6 +184,33 @@ mod tests {
         let out = OutputNode.execute(input).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["value"]["val"], json!(7));
+    }
+
+    #[tokio::test]
+    async fn null_source_node_fallback_picks_most_recently_completed_not_hashmap_order() {
+        // T2-5 / S3-2: the fallback must select the node that actually
+        // completed last per execution_order, not whichever node the raw
+        // HashMap happens to enumerate last (non-deterministic pre-fix).
+        // "z_early" would sort/hash after "a_late" under most naive
+        // orderings, but execution_order says a_late finished after it.
+        let mut outputs = HashMap::new();
+        outputs.insert("z_early".to_string(), json!({ "val": "wrong" }));
+        outputs.insert("a_late".to_string(), json!({ "val": "right" }));
+        let input = NodeInput {
+            node_id: "test".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "source_node": null }),
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata: HashMap::new(),
+                execution_order: Arc::new(vec!["z_early".to_string(), "a_late".to_string()]),
+            },
+        };
+        let out = OutputNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["value"]["val"], json!("right"));
     }
 }
 
