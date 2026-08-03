@@ -120,6 +120,7 @@ export class ChatPanel {
   private pendingAttachments:  ChatAttachment[] = [];
   /** Snapshot of what was actually sent, for the error-bubble Retry button. */
   private lastSentAttachments: ChatAttachment[] = [];
+  private persistFailureToasted = false;
 
   constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast) {
     this.canvas    = canvas;
@@ -802,8 +803,15 @@ export class ChatPanel {
   }
 
   private persist(): void {
-    try { localStorage.setItem(this.storageKey(), JSON.stringify(this.store)); }
-    catch { /* storage full or unavailable — chat still works for this session, just not saved */ }
+    try {
+      localStorage.setItem(this.storageKey(), JSON.stringify(this.store));
+      this.persistFailureToasted = false;
+    } catch {
+      if (!this.persistFailureToasted) {
+        this.persistFailureToasted = true;
+        this.toast("Chat history isn't saving — device storage may be full.", "error");
+      }
+    }
   }
 
   private renderSessionLabel(): void {
