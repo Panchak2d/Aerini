@@ -1,11 +1,37 @@
 import type { NodeDescriptor } from "./ipc/workflow";
 import type { Canvas } from "./canvas/Canvas";
-import { NODE_IDS } from "./node-ids";
+import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 import { escapeHtml } from "./utils";
 import { getIconSvg } from "./icon-cache";
 import { NODE_DESCRIPTION_FALLBACK } from "./node-descriptions";
 
 interface Category { label: string; nodes: NodeDescriptor[] }
+
+function makeCategoryHeader(label: string): HTMLButtonElement {
+  const h = document.createElement("button");
+  h.type = "button";
+  h.className = "palette-category";
+  h.setAttribute("aria-expanded", "true");
+  const chev = document.createElement("span");
+  chev.className = "palette-category-chev";
+  chev.innerHTML = '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+  const lbl = document.createElement("span");
+  lbl.className = "palette-category-label";
+  lbl.textContent = label;
+  h.append(chev, lbl);
+  h.addEventListener("click", () => togglePaletteCategory(h));
+  return h;
+}
+
+function togglePaletteCategory(header: HTMLElement): void {
+  const collapsed = header.classList.toggle("collapsed");
+  header.setAttribute("aria-expanded", String(!collapsed));
+  let sib = header.nextElementSibling as HTMLElement | null;
+  while (sib && !sib.classList.contains("palette-category")) {
+    sib.classList.toggle("collapsed", collapsed);
+    sib = sib.nextElementSibling as HTMLElement | null;
+  }
+}
 
 const CATEGORY_ORDER = ["trigger", "action", "ai", "logic", "utility", "other"];
 
@@ -100,10 +126,7 @@ export function buildSidebarPalette(
   const nodeDescMap = new Map(allNodes.map(n => [n.type_id, n]));
   const hasAnyPreset = PRESETS.some(p => nodeDescMap.has(p.baseTypeId));
   if (hasAnyPreset) {
-    const ph = document.createElement("div");
-    ph.className = "palette-category";
-    ph.textContent = "Templates";
-    pal.appendChild(ph);
+    pal.appendChild(makeCategoryHeader("Templates"));
 
     for (const preset of PRESETS) {
       const base = nodeDescMap.get(preset.baseTypeId);
@@ -145,18 +168,21 @@ export function buildSidebarPalette(
 
   for (const cat of buildCategories(allNodes)) {
     if (!cat.nodes.length) continue;
-
-    const h = document.createElement("div");
-    h.className = "palette-category";
-    h.textContent = cat.label;
-    pal.appendChild(h);
+    pal.appendChild(makeCategoryHeader(cat.label));
 
     for (const desc of cat.nodes) {
       const item = document.createElement("div");
       item.className = "palette-item";
       item.dataset.search = `${desc.display_name} ${desc.node_type} ${desc.type_id}`.toLowerCase();
-      item.dataset.cat = desc.node_type;
-      item.innerHTML = `<span class="palette-dot dot-${desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>${desc.is_plugin ? '<span class="palette-plugin-badge" title="Plugin node">P</span>' : ""}`;
+      // Trigger identity overlay (filter-facing only) — mirrors Node.ts's
+      // canvas draw() overlay exactly: TRIGGER_NODE_IDS is a plain id set,
+      // unrelated to the 4-value NodeType union, so desc.node_type (and
+      // therefore this item's palette-category header) stays untouched —
+      // schedule/webhook/manual_trigger still group under "Actions". Only
+      // the chip-filter attribute and dot color swap to "trigger".
+      const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
+      item.dataset.cat = isTrigger ? "trigger" : desc.node_type;
+      item.innerHTML = `<span class="palette-dot dot-${isTrigger ? "trigger" : desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>${desc.is_plugin ? '<span class="palette-plugin-badge" title="Plugin node">P</span>' : ""}`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -306,7 +332,7 @@ function renderPaletteResults(q: string): void {
         ? !desc.ports.outputs.length
         : false;
       if (inWireDrop && cannotConnect) {
-        row.style.opacity = "0.35";
+        row.classList.add("palette-result--disabled");
         row.title = inInputWireDrop
           ? "This node has no output ports — cannot connect"
           : "This node has no input ports — cannot connect";
@@ -334,8 +360,8 @@ function insertFromPalette(desc: NodeDescriptor): void {
       // Flash the result red briefly to signal it can't be connected
       const activeEl = document.querySelector<HTMLElement>(".palette-result.active");
       if (activeEl) {
-        activeEl.style.outline = "1px solid var(--red)";
-        setTimeout(() => { activeEl.style.outline = ""; }, 600);
+        activeEl.classList.add("palette-result--flash-error");
+        setTimeout(() => activeEl.classList.remove("palette-result--flash-error"), 600);
       }
       _canvas._pendingWireDrop = null;
       return; // Don't place or close
@@ -348,8 +374,8 @@ function insertFromPalette(desc: NodeDescriptor): void {
     if (!desc.ports.outputs.length) {
       const activeEl = document.querySelector<HTMLElement>(".palette-result.active");
       if (activeEl) {
-        activeEl.style.outline = "1px solid var(--red)";
-        setTimeout(() => { activeEl.style.outline = ""; }, 600);
+        activeEl.classList.add("palette-result--flash-error");
+        setTimeout(() => activeEl.classList.remove("palette-result--flash-error"), 600);
       }
       _canvas._pendingInputWireDrop = null;
       return; // Don't place or close

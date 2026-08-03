@@ -6,7 +6,7 @@ use crate::error::NodeError;
 use crate::model::NodeOutput;
 use crate::nodes::util::{check_host_ssrf_from_url, read_json_response_capped, SsrfPolicy};
 
-use super::shared::network_err;
+use super::shared::{network_err, read_bytes_response_capped};
 
 // -- ComfyUI ------------------------------------------------------------------
 //
@@ -213,14 +213,83 @@ async fn comfyui_fetch_image(
 ) -> Result<String, NodeError> {
     // Use query() for proper URL encoding of filename/subfolder values.
     // Host is the same as base_url (SSRF-checked once in gen_comfyui).
-    let bytes = client
+    let response = client
         .get(view_base)
         .query(&[("filename", filename), ("subfolder", subfolder), ("type", img_type)])
         .send()
         .await
-        .map_err(network_err)?
-        .bytes()
+        .map_err(network_err)?;
+    // hard-cap the read regardless of what the local ComfyUI
+    // server's Content-Length declares (or omits) -- see shared.rs's
+    // read_bytes_response_capped doc comment.
+    let bytes = read_bytes_response_capped(response)
         .await
-        .map_err(|e| NodeError::unrecoverable("DOWNLOAD_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("DOWNLOAD_ERROR", e))?;
     Ok(BASE64.encode(&bytes))
+}
+
+#[cfg(test)]
+mod comfyui_fetch_image_tests {
+    // confirms comfyui_fetch_image is actually wired to the
+    // capped reader end-to-end, not just that shared.rs's helper works in
+    // isolation. comfyui_fetch_image does no SSRF check itself (done once
+    // upstream in gen_comfyui), so a loopback mock URL reaches it directly
+    // -- unlike download_to_base64/flux.rs, no split-out helper is needed
+    // here to make this testable.
+    use super::*;
+
+    async fn spawn_raw_mock(raw_response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock server bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut discard = [0u8; 1024];
+            let _ = stream.read(&mut discard).await;
+            let _ = stream.write_all(&raw_response).await;
+            let _ = stream.shutdown().await;
+        });
+
+        format!("http://127.0.0.1:{}/view", port)
+    }
+
+    #[tokio::test]
+    async fn small_image_round_trips_to_base64() {
+        let body = b"\x89PNG-not-a-real-png-but-fine-for-this-test";
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut raw = raw.into_bytes();
+        raw.extend_from_slice(body);
+        let view_base = spawn_raw_mock(raw).await;
+
+        let client = reqwest::Client::new();
+        let b64 = comfyui_fetch_image(&client, &view_base, "f.png", "", "output")
+            .await
+            .expect("should succeed");
+        assert_eq!(BASE64.decode(&b64).expect("must be valid base64"), body);
+    }
+
+    #[tokio::test]
+    async fn oversized_image_rejected_not_buffered() {
+        let declared = 10 * 1024 * 1024 + 1; // MAX_IMAGE_DOWNLOAD_BYTES + 1
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n{{}}",
+            declared
+        );
+        let view_base = spawn_raw_mock(raw.into_bytes()).await;
+
+        let client = reqwest::Client::new();
+        let err = comfyui_fetch_image(&client, &view_base, "f.png", "", "output")
+            .await
+            .expect_err("must reject");
+        assert_eq!(err.code, "DOWNLOAD_ERROR");
+    }
 }

@@ -8,12 +8,12 @@
 //     size: 1024x1024 | 1536x1024 | 1024x1536 | auto  (different from DALL-E 3 sizes)
 //     quality: auto | low | medium | high
 //     "dalle3" alias → gpt-image-1. DALL-E 3 retired May 12 2026.
-//     VERIFIED: OpenAI API reference (developers.openai.com/api/reference), June 2026
+// OpenAI API reference (developers.openai.com/api/reference), June 2026
 //
 //   "gpt_image_2" → GPT Image 2
 //     Same endpoint, model="gpt-image-2". n=1-8 native.
 //     size: arbitrary WxH divisible by 16 (ratio 1:3-3:1, max 2560x1440), or same presets.
-//     VERIFIED: OpenAI API reference (developers.openai.com/api/reference), June 2026
+// OpenAI API reference (developers.openai.com/api/reference), June 2026
 //
 //   "imagen4" / "nano_banana" → NanoBanana (gemini-2.5-flash-image)
 //     POST https://generativelanguage.googleapis.com/v1beta/models/
@@ -26,7 +26,7 @@
 //     "imagen4" alias preserved — Imagen 4 direct API shuts down Aug 17 2026.
 //     NOTE: Google now recommends gemini-3.1-flash-image over gemini-2.5-flash-image.
 //           API shapes identical. Upgrade = change model name in endpoint URL only.
-//     VERIFIED: Google AI developer docs (ai.google.dev/gemini-api/docs/image-generation),
+// Google AI developer docs (ai.google.dev/gemini-api/docs/image-generation),
 //               June 2026
 //
 //   "flux_pro" → Black Forest Labs FLUX1.1 [pro]
@@ -34,12 +34,12 @@
 //     Auth: x-key header. width/height: 256-1440, multiple of 32 (enforced here).
 //     ASYNC: POST -> {id, polling_url}. GET polling_url until "Ready" or terminal status.
 //     result.sample URL (expires 10 min) -> download -> base64. n>1: loop.
-//     VERIFIED: docs.bfl.ml OpenAPI spec, June 2026
+// docs.bfl.ml OpenAPI spec, June 2026
 //
 //   "flux_2_pro" → Black Forest Labs FLUX.2 [pro]
 //     POST https://api.bfl.ai/v1/flux-2-pro. Same async polling pattern.
 //     width/height: min 64, no multipleOf constraint.
-//     VERIFIED: docs.bfl.ml OpenAPI spec, June 2026
+// docs.bfl.ml OpenAPI spec, June 2026
 //
 //   "a1111" → Automatic1111 / Stable Diffusion WebUI (local)
 //     POST {base_url}/sdapi/v1/txt2img
@@ -53,7 +53,7 @@
 //     large batch_size / high step counts on local hardware -- this field lets the
 //     request run longer without raising the timeout for cloud providers sharing
 //     the same client.
-//     VERIFIED: AUTOMATIC1111/stable-diffusion-webui wiki + API docs, June 2026
+// AUTOMATIC1111/stable-diffusion-webui wiki + API docs, June 2026
 //
 //   "comfyui" → ComfyUI local server (local)
 //     POST {base_url}/prompt with {"prompt": workflow_json} → {"prompt_id": "..."}
@@ -61,7 +61,7 @@
 //     Output: traverse outputs nodes, GET {base_url}/view?filename=...&subfolder=...&type=output
 //     SSRF check: validated once on base_url (covers all derived /prompt, /history, /view URLs).
 //     No api_key required. Workflow JSON must be in ComfyUI API format (not UI format).
-//     VERIFIED: ComfyUI API reference (runflow.io/blog/comfyui-api-endpoints), June 2026
+// ComfyUI API reference (runflow.io/blog/comfyui-api-endpoints), June 2026
 //
 // Output (DATA CONTRACT - unchanged from v1):
 //   { "files": [{"filename":"...","data":"<raw b64>","mime_type":"image/..."}],

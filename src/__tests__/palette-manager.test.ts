@@ -1,25 +1,12 @@
 // @vitest-environment jsdom
-/**
- * DEVIATION NOTE: palette-manager.ts has no exported pure filter function.
- * Filtering is split across two private functions:
- *   - `renderPaletteResults(q)` — filters _allNodes and renders to #palette-results
- *     (the command palette / ⌘K panel)
- *   - `applyFilters()` — reads .palette-item elements and toggles the "hidden"
- *     class (sidebar palette category chips)
- *
- * Tests 1–4 exercise the command palette via `initCommandPalette` + `openPalette`
- * and inspect the rendered DOM.
- *
- * Tests 5–9 exercise `filterByCategory` / `applyFilters` by manually seeding
- * `.palette-item` elements in the DOM then calling the exported
- * `filterByCategory` function — exactly the path the UI uses.
- */
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initCommandPalette,
   openPalette,
   closePalette,
   filterByCategory,
+  buildSidebarPalette,
 } from "../palette-manager";
 
 // palette-manager → icon-cache → @tauri-apps/api/core
@@ -74,6 +61,19 @@ const SLACK_NODE = {
 };
 
 const ALL_NODES = [HTTP_NODE, AI_NODE, SLACK_NODE];
+
+const NO_INPUT_NODE = {
+  type_id: "manual_trigger",
+  display_name: "Manual Trigger",
+  node_type: "action" as const,
+  version: "1.0",
+  input_schema: {},
+  output_schema: {},
+  ports: {
+    inputs:  [],
+    outputs: [makePort("output", "right")],
+  },
+};
 
 // Minimal Canvas stub — only properties read inside renderPaletteResults
 const mockCanvas = {
@@ -145,6 +145,57 @@ describe("command palette — name filter", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Command palette — wire-drop mismatch feedback (Batch 10: inline .style.*
+// writes replaced with CSS class hooks; behavior/timing must stay identical)
+// ---------------------------------------------------------------------------
+
+describe("command palette — wire-drop mismatch feedback", () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="command-palette-overlay" class="hidden">
+        <input id="palette-search" type="text" />
+        <div id="palette-results"></div>
+      </div>
+      <div id="canvas"></div>
+    `;
+  });
+
+  afterEach(() => {
+    closePalette();
+    document.body.innerHTML = "";
+  });
+
+  it("dims a node with no input ports via a class, not an inline style, while dropping from an output wire", () => {
+    const canvas = { ...mockCanvas, _pendingWireDrop: { fromNode: "n1" } };
+    initCommandPalette([NO_INPUT_NODE], canvas as never, vi.fn());
+    openPalette();
+
+    const row = document.querySelector<HTMLElement>(".palette-result")!;
+    expect(row.classList.contains("palette-result--disabled")).toBe(true);
+    expect(row.style.opacity).toBe(""); // no inline style written
+  });
+
+  it("flashes .palette-result--flash-error on a mismatched click, then clears it after 600ms, without touching inline style", () => {
+    vi.useFakeTimers();
+    const canvas = { ...mockCanvas, _pendingWireDrop: { fromNode: "n1" } };
+    initCommandPalette([NO_INPUT_NODE], canvas as never, vi.fn());
+    openPalette();
+
+    const row = document.querySelector<HTMLElement>(".palette-result")!;
+    row.click();
+
+    expect(row.classList.contains("palette-result--flash-error")).toBe(true);
+    expect(row.style.outline).toBe("");
+    expect(canvas._pendingWireDrop).toBeNull(); // mismatch still cancels the wire-drop, unchanged
+
+    vi.advanceTimersByTime(600);
+    expect(row.classList.contains("palette-result--flash-error")).toBe(false);
+
+    vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Sidebar palette — category filter (via filterByCategory / applyFilters)
 // ---------------------------------------------------------------------------
 
@@ -204,5 +255,88 @@ describe("filterByCategory — sidebar palette", () => {
     expect(actionChip.classList.contains("active")).toBe(true);
     expect(aiChip.classList.contains("active")).toBe(false);
     expect(allChip.classList.contains("active")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sidebar palette — collapsible category sections (Batch 5)
+// ---------------------------------------------------------------------------
+
+describe("buildSidebarPalette — collapsible categories", () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="canvas"></div>
+    `;
+    buildSidebarPalette(ALL_NODES, mockCanvas as never, vi.fn());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  function headers(): HTMLButtonElement[] {
+    return Array.from(document.querySelectorAll<HTMLButtonElement>(".palette-category"));
+  }
+
+  // Locates a category's header by walking back from its first item, rather
+  // than matching on label text — buildCategories()'s label capitalization
+  // ("Action", "Ai") is a pre-existing, unrelated quirk, not something this
+  // test should assume or depend on.
+  function headerFor(cat: string): HTMLButtonElement {
+    let el: Element | null = document.querySelector(`.palette-item[data-cat="${cat}"]`);
+    while (el && !el.classList.contains("palette-category")) el = el.previousElementSibling;
+    return el as HTMLButtonElement;
+  }
+
+  it("renders a real, focusable button per category, each expanded by default", () => {
+    const hs = headers();
+    expect(hs.length).toBeGreaterThan(0);
+    hs.forEach(h => {
+      expect(h.tagName).toBe("BUTTON");
+      expect(h.getAttribute("aria-expanded")).toBe("true");
+      expect(h.classList.contains("collapsed")).toBe(false);
+    });
+  });
+
+  it("clicking a header collapses only its own items, leaving other categories untouched", () => {
+    const actionsHeader = headerFor("action");
+    const aiHeader       = headerFor("ai");
+
+    actionsHeader.click();
+    expect(actionsHeader.classList.contains("collapsed")).toBe(true);
+    expect(actionsHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(aiHeader.classList.contains("collapsed")).toBe(false);
+
+    const actionItems = document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]');
+    expect(actionItems.length).toBeGreaterThan(0);
+    actionItems.forEach(el => expect(el.classList.contains("collapsed")).toBe(true));
+
+    const aiItems = document.querySelectorAll<HTMLElement>('.palette-item[data-cat="ai"]');
+    aiItems.forEach(el => expect(el.classList.contains("collapsed")).toBe(false));
+  });
+
+  it("clicking a collapsed header a second time re-expands it", () => {
+    const actionsHeader = headerFor("action");
+    actionsHeader.click();
+    actionsHeader.click();
+
+    expect(actionsHeader.classList.contains("collapsed")).toBe(false);
+    expect(actionsHeader.getAttribute("aria-expanded")).toBe("true");
+    document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]').forEach(el =>
+      expect(el.classList.contains("collapsed")).toBe(false)
+    );
+  });
+
+  it("collapse state (.collapsed) is independent of filter state (.hidden) — a collapsed-but-matching category stays reachable", () => {
+    const actionsHeader = headerFor("action");
+    actionsHeader.click();
+    filterByCategory("action"); // matches the very items we just collapsed
+
+    expect(actionsHeader.classList.contains("hidden")).toBe(false); // header itself never hidden by filtering
+    document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]').forEach(el => {
+      expect(el.classList.contains("collapsed")).toBe(true); // still tucked away
+      expect(el.classList.contains("hidden")).toBe(false);    // but not filtered out
+    });
   });
 });

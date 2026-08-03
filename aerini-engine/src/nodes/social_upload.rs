@@ -264,7 +264,7 @@ fn map_http_error(status: u16, platform: &str) -> UploadError {
 
 /// Uploads a single file to YouTube using the multipart upload protocol.
 ///
-/// Endpoint (VERIFIED May 2026):
+/// Endpoint (May 2026):
 ///   POST https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status
 ///
 /// Body format: multipart/related with metadata JSON part and binary video part.
@@ -376,7 +376,7 @@ async fn upload_to_instagram(
 
 /// Uploads a single file to TikTok using the Direct Post chunked upload flow.
 ///
-/// Flow (VERIFIED May 2026):
+/// Flow (May 2026):
 ///   1. POST /v2/post/publish/video/init/  → publish_id + upload_url
 ///   2. PUT {upload_url} per chunk with Content-Range header
 ///   3. Return publish_id (processing is async on TikTok's side)

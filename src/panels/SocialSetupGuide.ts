@@ -11,7 +11,7 @@ type Platform = "youtube" | "instagram" | "tiktok";
 const DEFAULT_OAUTH_PORT = 42069;
 const DEFAULT_REDIRECT_URI = `http://127.0.0.1:${DEFAULT_OAUTH_PORT}/callback`;
 
-// T2-15/S10-2: PLATFORMS below is built once, at module load, so the real
+// PLATFORMS below is built once, at module load, so the real
 // redirect URI can't be baked into its `steps` strings directly — it's only
 // known live, via an async port probe that may resolve after first render.
 // Each step that shows the redirect URI uses this placeholder instead; renderGuide()
@@ -115,11 +115,11 @@ export function showSocialSetupGuide(platform: Platform = "youtube"): void {
   el.classList.remove("hidden");
   renderGuide(el); // render immediately with the current best-known redirect URI
 
-  // Best-effort live port probe (T2-15/S10-2). Re-renders only if the guide is
-  // still open and the result actually changed anything — avoids a pointless
-  // rebuild when the port was already the documented default, as it usually is.
-  // Failure (older backend, IPC error) is silent: the guide keeps showing the
-  // documented default, exactly as it did before this fix existed.
+  // Best-effort live port probe. Re-renders only if the guide is still open
+  // and the result actually changed anything — avoids a pointless rebuild
+  // when the port was already the documented default, as it usually is.
+  // Failure (older backend, IPC error) is silent: the guide keeps showing
+  // the documented default.
   getOAuthRedirectPort()
     .then(port => {
       const uri = `http://127.0.0.1:${port}/callback`;
@@ -129,7 +129,7 @@ export function showSocialSetupGuide(platform: Platform = "youtube"): void {
       _portMismatch = mismatch;
       if (!el.classList.contains("hidden")) renderGuide(el);
     })
-    .catch(() => { /* keep showing the default — same as before this fix */ });
+    .catch(() => { /* IPC error — keep showing the documented default */ });
 }
 
 export function hideSocialSetupGuide(): void {
@@ -137,7 +137,7 @@ export function hideSocialSetupGuide(): void {
 }
 
 function renderGuide(el: HTMLElement): void {
-  // Placeholder substitution (T2-15/S10-2): PLATFORMS' step strings were built
+  // Placeholder substitution: PLATFORMS' step strings were built
   // once at module load with a fixed token in place of the redirect URI, since
   // the real value is only known live and can change between opens. Substitute
   // here, at render time, into a plain string, before assigning to innerHTML —
@@ -157,7 +157,7 @@ function renderGuide(el: HTMLElement): void {
           <div class="ssg-subtitle">Follow the steps for your platform to create OAuth credentials.</div>
         </div>
         <button class="ssg-close" id="ssg-close" aria-label="Close">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
         </button>

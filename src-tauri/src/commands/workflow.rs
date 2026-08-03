@@ -24,6 +24,42 @@ pub async fn save_run_record(
         .await.map_err(|e| e.to_string())?
 }
 
+/// Persists the just-finished run's performance report, linking it to the
+/// same `run_id` its `RunRecord` was saved under. Deliberately does not
+/// accept a caller-supplied report (PLAN.md, Batch 2 §3) — it fetches the
+/// frozen report itself via `perf_monitor::get_recent_report`, the same
+/// non-destructive read the MEM chip/popover will use once repointed
+/// (Batch 5), so the frontend never sees or plumbs a `PerformanceReport`.
+/// Called immediately after `run_workflow` resolves — `executor::run()`
+/// (VERIFIED by direct read of `executor/mod.rs`: every `run()` call is
+/// wrapped in `perf_monitor::monitor_run`) finalizes the report into
+/// `RECENT` before returning, and the same `workflow_id` exec-lock
+/// `run_workflow` already holds guarantees no other run can overwrite it
+/// in between — so a `None` here means no run of this `workflow_id` has
+/// completed since process start (stale/duplicate call), not a real
+/// failure. Treated as a no-op, not an error, for that reason.
+#[tauri::command]
+pub async fn save_performance_report(
+    run_id:      String,
+    workflow_id: String,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<(), String> {
+    let db = Arc::clone(&db);
+    tokio::task::spawn_blocking(move || {
+        match aerini_engine::perf_monitor::get_recent_report(&workflow_id) {
+            Some(report) => db.save_performance_report(&run_id, &report),
+            None => {
+                tracing::warn!(
+                    run_id = %run_id, workflow_id = %workflow_id,
+                    "save_performance_report: no recent report found for this workflow_id — skipping"
+                );
+                Ok(())
+            }
+        }
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn save_run_started(
     id: String,
@@ -111,8 +147,13 @@ pub async fn delete_workflow(
     daemon:  tauri::State<'_, Arc<SchedulerDaemon>>,
 ) -> Result<(), String> {
     // Stop any running job for this workflow first.
-    // stop_job is a no-op if the workflow is not scheduled.
-    let _ = daemon.stop_job(&id);
+    // stop_job can fail on a genuine DB write error, not just when the
+    // workflow isn't scheduled (that case returns Ok — see scheduler/mod.rs).
+    // Deletion still proceeds either way; the failure is now logged instead
+    // of silently discarded.
+    if let Err(e) = daemon.stop_job(&id) {
+        tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job failed before delete");
+    }
 
     let db = Arc::clone(&db);
     tokio::task::spawn_blocking(move || {
@@ -175,18 +216,24 @@ pub async fn delete_version(
 pub async fn run_workflow(
     workflow_json:      String,
     initial_variables:  HashMap<String, Value>,
+    run_id:             Option<String>,
     registry:           tauri::State<'_, Arc<NodeRegistry>>,
     cred_resolver:      tauri::State<'_, Arc<dyn CredentialResolver>>,
     event_sink:         tauri::State<'_, Arc<dyn EventSink>>,
     active_run:         tauri::State<'_, Arc<crate::ActiveRunToken>>,
 ) -> Result<WorkflowResult, String> {
+    // Callers that never need to cancel this run by id (e.g. a popover node
+    // preview) may omit run_id — matches start_scheduled_workflow's existing
+    // Option<T> IPC parameter convention in this same file's sibling command.
+    let run_id = run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     let workflow = Workflow::from_json(&workflow_json).map_err(|e| e.to_string())?;
 
-    // T2-1/T2-6: log the same dangerous-node signal at every execution entry
+    // log the same dangerous-node signal at every execution entry
     // point. Desktop's design posture is intentional full host access (no
     // default block, no opt-in flag exists) — this does not change execution
     // behavior, it only closes the gap where a manual run left zero backend
-    // signal, unlike the frontend confirm dialog (Batch D) or the server's
+    // signal, unlike the frontend confirm dialog or the server's
     // own startup warnings for the same node types.
     let dangerous = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
     if !dangerous.is_empty() {
@@ -200,8 +247,23 @@ pub async fn run_workflow(
         );
     }
 
+    // reject a second concurrent run of the identical saved
+    // workflow rather than letting both execute fully concurrently and
+    // double every side effect (HTTP calls, file writes, DB rows, emails).
+    // Mirrors the server's own reject-if-busy shape for the same scenario
+    // (aerini-server/src/api_server/routes/workflows.rs, 5s timeout) — matched
+    // here rather than inventing a new figure. Single-node test runs use a
+    // distinct `${workflow_id}_sub` id (stream-handler.ts::handleRunSingleNode),
+    // so they get their own lock bucket and are never rejected by, or block,
+    // a concurrent full run of the same open canvas; that overlap is instead
+    // prevented client-side by the shared isRunning guard.
+    let _exec_guard = active_run
+        .acquire_exec_lock(&workflow.id, std::time::Duration::from_secs(5))
+        .await
+        .map_err(String::from)?;
+
     let token = CancellationToken::new();
-    *active_run.0.lock().expect("ActiveRunToken lock poisoned") = Some(token.clone());
+    active_run.register(&run_id, token.clone());
 
     let executor = WorkflowExecutor::new(
         Arc::clone(&*registry),
@@ -210,13 +272,23 @@ pub async fn run_workflow(
     .with_event_sink(Arc::clone(&*event_sink))
     .with_parallel_execution(workflow.parallel_execution)
     .with_max_concurrent_nodes(workflow.max_concurrent_nodes.unwrap_or(8))
-    .with_cancel_token(token);
+    .with_cancel_token(token)
+    // T4: desktop is single-tenant — the person running this
+    // workflow is the same person who owns the machine and its data.
+    // Unlocks node-level admin gates (e.g. `allow_raw_sql`) the same way
+    // aerini-server does for a `write`+`admin`-scoped token
+    // (api_server/routes/workflows.rs). Never set for server call sites.
+    .with_caller_is_admin(true);
 
     let workflow_id = workflow.id.clone();
     let result = executor.run(Arc::new(workflow), initial_variables).await;
 
-    // Clear stored token regardless of outcome.
-    *active_run.0.lock().expect("ActiveRunToken lock poisoned") = None;
+    // Remove only this run's own token — never a different, still-in-flight
+    // run's. (Previously a single shared `Option<CancellationToken>` slot was
+    // unconditionally cleared here, which could wipe out a concurrent run's
+    // still-active cancellation handle — see ActiveRunToken's doc comment.)
+    active_run.unregister(&run_id);
+    // _exec_guard drops here (end of scope), releasing this workflow_id's lock.
 
     match result {
         Ok(r) => Ok(r),

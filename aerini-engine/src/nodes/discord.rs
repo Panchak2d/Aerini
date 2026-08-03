@@ -13,7 +13,7 @@ impl Node for DiscordNode {
     fn display_name(&self) -> &'static str { "Discord" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Send a message or embed to a Discord channel via a webhook URL." }
+    fn description(&self) -> &'static str { "Send a text message to a Discord channel via a webhook URL." }
 
     fn input_schema(&self) -> Value {
         json!({

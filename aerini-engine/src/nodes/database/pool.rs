@@ -23,10 +23,19 @@ struct PoolEntry<P> {
     last_used: Instant,
 }
 
-/// SQLite pools are excluded from eviction: SQLite is file-local with no remote
-/// credential rotation concern, and evicting WAL-mode connections unnecessarily
-/// disrupts in-progress transactions.
-static SQLITE_POOLS: Lazy<DashMap<String, Pool<SqliteConnectionManager>>> =
+/// SQLite pools are evicted on the same idle-timeout schedule as the other
+/// backends (see `start_pool_eviction_task`) rather than kept forever: a
+/// workflow that generates a distinct `db_path` per run (e.g. a per-iteration
+/// output file inside a loop) would otherwise grow this cache — and its
+/// backing r2d2 pools/file handles — without bound.
+///
+/// Evicting the cache *entry* does not touch a connection already checked
+/// out by an in-flight query: r2d2's `Pool` is `Clone` over a shared,
+/// internally ref-counted pool, and the clone held inside a running
+/// `spawn_blocking` task keeps that pool alive independently of this map.
+/// Only a later caller pays the cost of reopening. WAL-mode files are safe
+/// to reopen at any time, so no in-progress transaction is disrupted.
+static SQLITE_POOLS: Lazy<DashMap<String, PoolEntry<Pool<SqliteConnectionManager>>>> =
     Lazy::new(DashMap::new);
 
 /// PG and MySQL pool maps use `Mutex<HashMap>` rather than DashMap so that
@@ -72,8 +81,9 @@ pub(super) fn validate_db_path(path: &str) -> Result<(), String> {
 }
 
 pub(super) fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager>, String> {
-    if let Some(pool) = SQLITE_POOLS.get(path) {
-        return Ok(pool.clone());
+    if let Some(mut entry) = SQLITE_POOLS.get_mut(path) {
+        entry.last_used = Instant::now();
+        return Ok(entry.pool.clone());
     }
     let manager = SqliteConnectionManager::file(path)
         .with_init(|conn| conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;"));
@@ -81,13 +91,13 @@ pub(super) fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager
         .max_size(4)
         .build(manager)
         .map_err(|e| format!("Could not create pool for '{}': {}", path, e))?;
-    SQLITE_POOLS.insert(path.to_string(), pool.clone());
+    SQLITE_POOLS.insert(path.to_string(), PoolEntry { pool: pool.clone(), last_used: Instant::now() });
     Ok(pool)
 }
 
 // ── sqlx pool (Postgres / MySQL) ──────────────────────────────────────────────
 
-/// Spawns a background task that evicts idle sqlx and Redis pools every 5 minutes.
+/// Spawns a background task that evicts idle SQLite, sqlx, and Redis pools every 5 minutes.
 /// Call once at application startup (e.g. in main() or plugin setup).
 /// Safe to call multiple times — extra calls are no-ops after the first spawn.
 ///
@@ -102,6 +112,7 @@ pub fn start_pool_eviction_task(rt: &tokio::runtime::Handle) {
             let evict_after = Duration::from_secs(1800);
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;
+                SQLITE_POOLS.retain(|_, v| v.last_used.elapsed() < evict_after);
                 PG_POOLS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);
                 MYSQL_POOLS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);
                 REDIS_CONNS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);

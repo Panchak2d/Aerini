@@ -47,6 +47,49 @@ fn substitute_names(field: &str) -> String {
         .replace("DEC", "12")
 }
 
+/// Normalizes the day-of-week field only. Vixie cron and most crontab-compatible
+/// tools accept both `0` and `7` for Sunday; `substitute_names` already maps
+/// `SUN` -> `0`, so a bare literal `7` (standalone or inside a comma list) is
+/// the one remaining common, unremarkable convention that isn't handled.
+///
+/// Also validates every bare numeric token in the field is in `0..=6` after
+/// substitution, returning a clear error immediately instead of letting an
+/// out-of-range value fall through to `next_cron_delay_secs`'s 527,040-iteration
+/// exhaustive search, which would otherwise return the same generic
+/// "no matching cron time found" error for what is really just a bad value.
+///
+/// Ranges/steps/wildcards are left untouched — mixing `7` into a range
+/// endpoint (e.g. `5-7`) is not a well-defined convention in Vixie cron either,
+/// so only bare numeric tokens are in scope here.
+fn normalize_dow_field(field: &str) -> Result<String, String> {
+    if field == "*" {
+        return Ok(field.to_string());
+    }
+    let parts: Result<Vec<String>, String> = field
+        .split(',')
+        .map(|part| {
+            let part = part.trim();
+            let is_bare_number = !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+            if is_bare_number {
+                let v: u64 = part
+                    .parse()
+                    .map_err(|_| format!("Invalid cron value: {}", part))?;
+                let normalized = if v == 7 { 0 } else { v };
+                if normalized > 6 {
+                    return Err(format!(
+                        "Invalid day-of-week value '{}': must be 0-7 (0 and 7 both mean Sunday)",
+                        part
+                    ));
+                }
+                Ok(normalized.to_string())
+            } else {
+                Ok(part.to_string())
+            }
+        })
+        .collect();
+    Ok(parts?.join(","))
+}
+
 fn expand_macro(expr: &str) -> Option<&'static str> {
     match expr.trim() {
         "@hourly"  => Some("0 * * * *"),
@@ -74,6 +117,7 @@ pub fn next_cron_delay_secs(expr: &str, now: &DateTime<Utc>) -> Result<u64, Stri
     // Also substitute in all fields so expressions like MON in a list work.
     let subs: Vec<String> = raw_fields.iter().map(|f| substitute_names(f)).collect();
     let fields: Vec<&str> = subs.iter().map(|s| s.as_str()).collect();
+    let dow_field = normalize_dow_field(fields[4])?;
 
     let mut candidate = now
         .with_second(0).expect("cron: second normalization to 0 overflowed — impossible before year 262143")
@@ -84,7 +128,7 @@ pub fn next_cron_delay_secs(expr: &str, now: &DateTime<Utc>) -> Result<u64, Stri
             && cron_field_matches(fields[1], candidate.hour() as u64, 0)?
             && cron_field_matches(fields[2], candidate.day() as u64, 1)?
             && cron_field_matches(fields[3], candidate.month() as u64, 1)?
-            && cron_field_matches(fields[4],
+            && cron_field_matches(&dow_field,
                candidate.weekday().num_days_from_sunday() as u64, 0)?
         {
             let delay = candidate.signed_duration_since(*now);
@@ -250,5 +294,69 @@ mod tests {
     #[test]
     fn test_step_range_zero_step() {
         assert!(cron_field_matches("1-5/0", 3, 0).is_err());
+    }
+
+    // ── day-of-week '7' == Sunday ────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_dow_field_bare_seven_becomes_zero() {
+        assert_eq!(normalize_dow_field("7").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_normalize_dow_field_seven_in_list() {
+        // "1,7" (Monday + Sunday-as-7) must normalize to "1,0", not error and
+        // not silently fail to match Sunday.
+        assert_eq!(normalize_dow_field("1,7").unwrap(), "1,0");
+    }
+
+    #[test]
+    fn test_normalize_dow_field_leaves_wildcard_and_ranges_alone() {
+        assert_eq!(normalize_dow_field("*").unwrap(), "*");
+        assert_eq!(normalize_dow_field("1-5").unwrap(), "1-5");
+        assert_eq!(normalize_dow_field("*/2").unwrap(), "*/2");
+    }
+
+    #[test]
+    fn test_normalize_dow_field_out_of_range_bare_value_errors_upfront() {
+        // 8 is not a valid day-of-week under any convention (0-7). Must return
+        // a clear error immediately, not silently fall through.
+        let err = normalize_dow_field("8").unwrap_err();
+        assert!(err.contains("8"), "error must mention the bad value: {}", err);
+        assert!(
+            err.contains("0-7"),
+            "error must state the valid range: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_next_cron_delay_secs_bare_seven_matches_sunday() {
+        // Reference time is Saturday 2026-07-18T23:30:00Z; the next midnight
+        // boundary, 2026-07-19T00:00:00Z, is a Sunday — the target both
+        // expressions below must match, 30 minutes later.
+        let ref_time = chrono::DateTime::parse_from_rfc3339("2026-07-18T23:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let via_seven = next_cron_delay_secs("0 0 * * 7", &ref_time).unwrap();
+        let via_zero = next_cron_delay_secs("0 0 * * 0", &ref_time).unwrap();
+        assert_eq!(
+            via_seven, via_zero,
+            "day-of-week '7' must resolve identically to '0' (both mean Sunday)"
+        );
+    }
+
+    #[test]
+    fn test_next_cron_delay_secs_invalid_dow_value_returns_clear_error() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-18T23:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let err = next_cron_delay_secs("0 0 * * 8", &now).unwrap_err();
+        assert!(
+            err.contains("0-7"),
+            "must fail fast with a clear range error, not the generic \
+             'no matching cron time found within 366 days' message: {}",
+            err
+        );
     }
 }

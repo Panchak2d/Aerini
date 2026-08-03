@@ -159,9 +159,14 @@ impl Node for S3Node {
 /// endpoint; AWS uses the SDK's default virtual-hosted-style endpoints.
 ///
 /// SSRF protection: custom endpoints (R2, MinIO) are validated with
-/// `check_host_ssrf_from_url` before the client is constructed. AWS endpoints
-/// are derived from the region string by the SDK — no user-controlled URL is
-/// used — so no SSRF check is needed for the `aws` provider.
+/// `check_host_ssrf_from_url` before the client is constructed. MinIO's
+/// primary real-world deployment is self-hosted on localhost/LAN, so it is
+/// checked under `SsrfPolicy::AllowLocal` — same precedent already
+/// established by `image_gen/a1111.rs`/`image_gen/comfyui.rs`. R2 is
+/// always a remote Cloudflare-hosted endpoint and stays `SsrfPolicy::Strict`.
+/// AWS endpoints are derived from the region string by the SDK — no
+/// user-controlled URL is used — so no SSRF check is needed for the `aws`
+/// provider.
 async fn build_client(cfg: &Value) -> Result<(Client, String), String> {
     let access_key = cfg["access_key_id"]
         .as_str()
@@ -199,7 +204,13 @@ async fn build_client(cfg: &Value) -> Result<(Client, String), String> {
                 if provider == "r2" { "https://ACCOUNT_ID.r2.cloudflarestorage.com" } else { "http://host:9000" }
             ))?;
 
-        check_host_ssrf_from_url(endpoint, SsrfPolicy::Strict).await
+        // MinIO is a local/self-hosted-only provider in practice (its default
+        // deployment is http://localhost:9000 or a LAN address) — same
+        // rationale image_gen/a1111.rs and image_gen/comfyui.rs already use
+        // for their own local-only base_url checks. R2 is always a remote
+        // Cloudflare-hosted endpoint, so it keeps the strict check.
+        let ssrf_policy = if provider == "minio" { SsrfPolicy::AllowLocal } else { SsrfPolicy::Strict };
+        check_host_ssrf_from_url(endpoint, ssrf_policy).await
             .map_err(|e| format!("SSRF check failed for {} endpoint: {}", provider, e))?;
 
         config_builder = config_builder
@@ -286,7 +297,7 @@ async fn op_download(client: &Client, bucket: &str, cfg: &Value) -> NodeOutput {
     }
 
     // Stream chunk-by-chunk instead of `.collect()`'s unbounded single-shot
-    // buffer (S1-3) — hard-caps memory regardless of what content_length
+    // buffer — hard-caps memory regardless of what content_length
     // declared (or omitted), same two-stage guard as http.rs's response
     // reader / nodes/util.rs's read_json_response_capped.
     let capacity = output
@@ -430,5 +441,68 @@ async fn op_presign(client: &Client, bucket: &str, cfg: &Value) -> NodeOutput {
             json!({ "url": presigned.uri().to_string(), "key": key, "expires_in": expiry_secs }),
             vec![format!("Generated presigned URL for '{}' (expires in {}s)", key, expiry_secs)],
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_client;
+    use serde_json::{json, Value};
+
+    fn cfg_for(provider: &str, endpoint: &str) -> Value {
+        json!({
+            "provider":          provider,
+            "access_key_id":     "test-access-key",
+            "secret_access_key": "test-secret-key",
+            "bucket":            "test-bucket",
+            "endpoint":          endpoint
+        })
+    }
+
+    // MinIO's primary real-world deployment is self-hosted on
+    // localhost/LAN. Under the pre-fix SsrfPolicy::Strict, a loopback
+    // endpoint was unconditionally rejected. The AllowLocal escape hatch
+    // must actually open for it now — `build_client` never touches the
+    // network itself (client construction only), so a successful `Ok`
+    // here proves the SSRF check is what changed, not a live server.
+    #[tokio::test]
+    async fn minio_endpoint_allows_loopback() {
+        let cfg = cfg_for("minio", "http://127.0.0.1:9000");
+        let result = build_client(&cfg).await;
+        assert!(
+            result.is_ok(),
+            "minio loopback endpoint must be allowed under SsrfPolicy::AllowLocal, got: {:?}",
+            result.err()
+        );
+    }
+
+    // R2 is always a remote Cloudflare-hosted endpoint — the AllowLocal
+    // escape hatch is minio-only. A loopback R2 endpoint (never a
+    // legitimate R2 URL) must stay blocked exactly as before this fix, so
+    // this fix didn't accidentally widen the check for both providers.
+    #[tokio::test]
+    async fn r2_endpoint_still_rejects_loopback() {
+        let cfg = cfg_for("r2", "http://127.0.0.1:9000");
+        let result = build_client(&cfg).await;
+        assert!(result.is_err(), "r2 loopback endpoint must still be rejected under SsrfPolicy::Strict");
+        assert!(
+            result.unwrap_err().contains("SSRF check failed"),
+            "rejection must come from the SSRF check, not some other config error"
+        );
+    }
+
+    // AllowLocal widens only the loopback/RFC1918-private block — it must
+    // NOT widen the always-blocked list (link-local / cloud metadata / etc,
+    // per check_ssrf_ip_impl). 169.254.169.254 is the AWS/GCP/Azure IMDS
+    // range; this must stay blocked even for minio.
+    #[tokio::test]
+    async fn minio_endpoint_still_rejects_link_local_metadata_ip() {
+        let cfg = cfg_for("minio", "http://169.254.169.254:9000");
+        let result = build_client(&cfg).await;
+        assert!(result.is_err(), "minio must not bypass the always-blocked link-local/metadata range");
+        assert!(
+            result.unwrap_err().contains("SSRF check failed"),
+            "rejection must come from the SSRF check, not some other config error"
+        );
     }
 }

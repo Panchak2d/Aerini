@@ -9,6 +9,7 @@ import { Minimap } from "./Minimap";
 import { SnapEngine } from "./SnapEngine";
 import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
+import { getCanvasColors } from "./theme-colors";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -46,7 +47,6 @@ export class Canvas {
   onNodeSelected:   ((n: CanvasNode | null) => void) | null = null;
   onNodeClicked:    ((n: CanvasNode) => void) | null = null;
   onCanvasChanged:  (() => void) | null = null;
-  onPanelClose:     (() => void) | null = null;
   onRunNode:        ((nodeId: string) => void) | null = null;
   onZoomChange:     ((zoom: number) => void) | null = null;
   onViewportChange: (() => void) | null = null;
@@ -129,6 +129,8 @@ export class Canvas {
     }
     if (ih.pendingConn) ih.pendingConn.draw(ctx);
 
+    const colors = getCanvasColors();
+
     // Port snap ring
     if (ih.pendingConn) {
       const snap = this.nearestIn(ih.pendingConn.toX, ih.pendingConn.toY, ih.pendingConn.fromNode);
@@ -136,12 +138,12 @@ export class Canvas {
         ctx.save();
         ctx.beginPath();
         ctx.arc(snap.x, snap.y, PORT_RADIUS + 7, 0, Math.PI * 2);
-        ctx.strokeStyle = "#4d9effcc";
+        ctx.strokeStyle = colors.actionNav + "cc";
         ctx.lineWidth   = 2 / this.zoom;
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(snap.x, snap.y, PORT_RADIUS + 3, 0, Math.PI * 2);
-        ctx.fillStyle = "#4d9eff22";
+        ctx.fillStyle = colors.actionNav + "22";
         ctx.fill();
         ctx.restore();
       }
@@ -153,29 +155,31 @@ export class Canvas {
         ctx.save();
         ctx.beginPath();
         ctx.arc(srcPort.x, srcPort.y, PORT_RADIUS + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = "#4d9eff88";
+        ctx.strokeStyle = colors.actionNav + "88";
         ctx.lineWidth   = 2 / this.zoom;
         ctx.stroke();
         ctx.restore();
       }
     }
 
-    // Build connected-port lookup for live port fill state (UX-4)
+    // Build connected-port lookup for live port fill state (UX-4) and the
+    // per-output-port connection count for badges (G12) in a single pass —
+    // both are derived from the same connector list, which is unchanged
+    // frame-to-frame outside an edit; this loop still runs every frame, but
+    // now walks `this.connectors` once instead of twice.
     const connectedPorts = new Set<string>();
+    const outCount = new Map<string, number>();
     for (const c of this.connectors.values()) {
-      connectedPorts.add(`${c.data.from_node}:${c.data.from_port}`);
+      const fromKey = `${c.data.from_node}:${c.data.from_port}`;
+      connectedPorts.add(fromKey);
       connectedPorts.add(`${c.data.to_node}:${c.data.to_port}`);
+      outCount.set(fromKey, (outCount.get(fromKey) ?? 0) + 1);
     }
 
     // Draw nodes
     for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts);
 
     // ── G12: output port connection-count badges ───────────────────────────
-    const outCount = new Map<string, number>();
-    for (const c of this.connectors.values()) {
-      const key = `${c.data.from_node}:${c.data.from_port}`;
-      outCount.set(key, (outCount.get(key) ?? 0) + 1);
-    }
     for (const [key, cnt] of outCount) {
       if (cnt < 2) continue;
       const colonIdx = key.indexOf(":");
@@ -193,7 +197,7 @@ export class Canvas {
       ctx.save();
       ctx.beginPath();
       ctx.arc(bx, by, BADGE_R, 0, Math.PI * 2);
-      ctx.fillStyle   = "#4d9eff";
+      ctx.fillStyle   = colors.actionNav;
       ctx.shadowColor = "rgba(0,0,0,0.6)";
       ctx.shadowBlur  = 3 / this.zoom;
       ctx.fill();
@@ -223,8 +227,8 @@ export class Canvas {
       ctx.save();
       const bx = Math.min(ih.bx0, ih.bx1), by = Math.min(ih.by0, ih.by1);
       const bw = Math.abs(ih.bx1 - ih.bx0), bh = Math.abs(ih.by1 - ih.by0);
-      ctx.fillStyle   = "rgba(77,158,255,0.06)";
-      ctx.strokeStyle = "#4d9eff";
+      ctx.fillStyle   = colors.actionNav + "0f";
+      ctx.strokeStyle = colors.actionNav;
       ctx.lineWidth   = 1.5 / this.zoom;
       ctx.fillRect(bx, by, bw, bh);
       ctx.strokeRect(bx, by, bw, bh);
@@ -237,7 +241,7 @@ export class Canvas {
       ctx.beginPath();
       ctx.moveTo(ih.cutPath[0].x, ih.cutPath[0].y);
       for (let i = 1; i < ih.cutPath.length; i++) ctx.lineTo(ih.cutPath[i].x, ih.cutPath[i].y);
-      ctx.strokeStyle = "#f87171";
+      ctx.strokeStyle = colors.error;
       ctx.lineWidth   = 2 / this.zoom;
       ctx.setLineDash([5 / this.zoom, 3 / this.zoom]);
       ctx.stroke();
@@ -247,7 +251,7 @@ export class Canvas {
     // Snap guides
     if (this.snap.snapGuides.length && ih.draggingNode) {
       ctx.save();
-      ctx.strokeStyle = "#4d9eff66";
+      ctx.strokeStyle = colors.actionNav + "66";
       ctx.lineWidth   = 1 / this.zoom;
       for (const g of this.snap.snapGuides) {
         ctx.beginPath();
@@ -307,15 +311,16 @@ export class Canvas {
       const bx = Math.max(4, Math.min(sx - boxW / 2, W - boxW - 4));
       const by = Math.max(4, sy - gap - boxH);
 
+      const colors = getCanvasColors();
       ctx.beginPath();
       roundedRect(ctx, bx, by, boxW, boxH, 4);
-      ctx.fillStyle = "#21262d";
+      ctx.fillStyle = colors.surface3;
       ctx.fill();
-      ctx.strokeStyle = "#30363d";
+      ctx.strokeStyle = colors.border;
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      ctx.fillStyle = "#e6edf3";
+      ctx.fillStyle = colors.textPrimary;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(label, bx + padX, by + boxH / 2);
@@ -346,7 +351,7 @@ export class Canvas {
     window.addEventListener("keyup",   ih._keyUpH);
   }
 
-  // S9-6/Rule 25: destroy() was removed here — it had zero callers
+  // destroy was removed here — it had zero callers
   // anywhere in the app (Canvas is instantiated exactly once, at startup,
   // and never torn down) and was incomplete even if it had been called:
   // it only removed 5 of bind()'s 15 registered listeners and never
@@ -622,7 +627,7 @@ export class Canvas {
     // Each node's undo action only carries the connectors that actually touch
     // that node. A shared dc array previously let undoing one node from a
     // multi-node delete also resurrect connectors whose other endpoint is a
-    // still-deleted sibling — a dangling from_node/to_node reference (T1-14).
+    // still-deleted sibling — a dangling from_node/to_node reference.
     for (const n of dn) {
       const ownConns = dc.filter(c => c.data.from_node === n.data.id || c.data.to_node === n.data.id);
       this.pushUndo({ type: "delete_node", node: n, connectors: ownConns });
@@ -655,7 +660,6 @@ export class Canvas {
   toggleFocusMode() {
     this.focusMode = !this.focusMode;
     document.getElementById("sidebar")?.classList.toggle("focus-hidden", this.focusMode);
-    document.getElementById("right-panel")?.classList.toggle("focus-hidden", this.focusMode);
     document.body.classList.toggle("focus-mode", this.focusMode);
   }
 
@@ -713,7 +717,38 @@ export class Canvas {
     this.zoom = Math.min((r.width - pad * 2) / ((mxX - mnX) || 1), (r.height - pad * 2) / ((mxY - mnY) || 1), 1.2);
     this.panX = r.width / 2 - ((mnX + mxX) / 2) * this.zoom;
     this.panY = r.height / 2 - ((mnY + mxY) / 2) * this.zoom;
+    // Batch 2: fitToScreen() changed zoom/pan but never told anyone — the N-1
+    // zoom-hint (app.ts's onZoomChange) and the per-workflow viewport
+    // persistence (onViewportChange) both silently missed every fit, whether
+    // triggered by the pre-existing Ctrl+Shift+F keybind or the new Fit
+    // button (toolbar.ts). onWheel already fires both after every zoom
+    // change; doing the same here is the same existing pattern, not new
+    // zoom logic.
+    this.onZoomChange?.(this.zoom);
+    this.onViewportChange?.();
   }
+
+  /** Zoom by `factor` anchored on the viewport's visual center — the same
+   * clamp (MIN_ZOOM/MAX_ZOOM) and anchor-preserving pan formula InputHandler's
+   * onWheel already uses, just anchored at the viewport center instead of the
+   * cursor position (a button click has no cursor-over-canvas position to
+   * anchor on). No new zoom math — mirrors the existing formula exactly. */
+  private zoomAtCenter(factor: number) {
+    const r = this.el.getBoundingClientRect();
+    const cx = r.width / 2, cy = r.height / 2;
+    const { x: wx, y: wy } = this.s2w(cx, cy);
+    const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * factor));
+    this.panX = cx - wx * nz;
+    this.panY = cy - wy * nz;
+    this.zoom = nz;
+    this.onZoomChange?.(this.zoom);
+    this.onViewportChange?.();
+  }
+
+  /** Same step factor as onWheel's non-pinch wheel tick (1/0.90). */
+  zoomIn()  { this.zoomAtCenter(1 / 0.90); }
+  zoomOut() { this.zoomAtCenter(0.90); }
+
 
   completeWireDrop(desc: NodeDescriptor): void {
     const drop = this._pendingWireDrop;

@@ -23,6 +23,14 @@ export class SnapEngine {
           this.snapGuides.push({ x1: b, y1: Math.min(my, ny) - 20, x2: b, y2: Math.max(my + mh, ny + nh) + 20 });
         }
       }
+      // y-axis (row) alignment — top edge, bottom edge, vertical center.
+      // Mirrors the x-axis loop above; needed here (unlike width) since node
+      // heights genuinely vary (e.g. Note nodes via effectiveHeight()).
+      for (const [a, b] of [[my, ny], [my, ny + nh - mh], [my + mh / 2, ny + nh / 2]] as [number, number][]) {
+        if (Math.abs(a - b) < SNAP) {
+          this.snapGuides.push({ x1: Math.min(mx, nx) - 20, y1: b, x2: Math.max(mx + mw, nx + NODE_WIDTH) + 20, y2: b });
+        }
+      }
     }
   }
 

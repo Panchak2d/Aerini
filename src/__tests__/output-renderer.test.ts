@@ -1,28 +1,3 @@
-/**
- * DEVIATION NOTES:
- *
- * Plan: "Test that a value matching the files array shape renders a file chip"
- * Reality: No "file chip" renderer exists. Media files are rendered by
- * `renderMediaBatch` (private), which is async and calls Tauri's
- * `invoke("write_temp_file")`. Not unit-testable in isolation.
- *
- * Plan: "Test that a base64 image value renders an image element"
- * Reality: `renderMediaBatch` creates <img> elements for image/* MIME types
- * but it is private, async, and Tauri-dependent. Not reachable in a unit test.
- *
- * Plan: "Test that a plain string renders to text, not HTML-escaped incorrectly"
- * Reality: `extractPreview` is the public pure helper for previewing values.
- * It does NOT HTML-escape — it is a preview function, not a renderer.
- * The HTML renderers (renderGenericOutput etc.) are internal.
- *
- * NOTE — syntaxHighlight string highlighting:
- * `syntaxHighlight` calls `escapeHtml` as its first step, which converts `"`
- * to `&quot;`. The regex that wraps JSON string keys and values requires
- * literal `"` characters. After escaping, `"` is gone, so json-key and
- * json-str spans are never produced. Only `null`, `true`, `false`, and
- * numbers are wrapped — these survive escapeHtml unchanged.
- * Tests below reflect this actual behaviour.
- */
 import { describe, it, expect, vi } from "vitest";
 import { extractPreview, syntaxHighlight } from "../output-renderer";
 

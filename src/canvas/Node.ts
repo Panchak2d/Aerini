@@ -1,6 +1,7 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
-import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
+import { NODE_IDS, DANGEROUS_NODE_IDS, TRIGGER_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
+import { getCanvasColors, headerTint, resolveNoteColors } from "./theme-colors";
 
 export interface CanvasNodeData {
   id: string;
@@ -38,41 +39,40 @@ export const PORT_GAP    = 28;
 const PADDING            = 14;
 const CORNER_R           = 10;
 
-const TYPE_META: Record<string, {
-  accent: string;
-  dim:    string;
-  icon:   string;
-  label:  string;
+type CatKey = "action" | "ai" | "logic" | "utility" | "trigger";
+
+
+const TYPE_META_BASE: Record<Exclude<CatKey, "trigger">, {
+  icon:  string;
+  label: string;
 }> = {
-  action:  { accent: "#4d9eff", dim: "#0f1f35", icon: "A",  label: "ACTION"  },
-  ai:      { accent: "#a78bfa", dim: "#1a1035", icon: "AI", label: "AI"      },
-  logic:   { accent: "#34d399", dim: "#0b2820", icon: "L",  label: "LOGIC"   },
-  utility: { accent: "#f59e0b", dim: "#211600", icon: "U",  label: "UTILITY" },
+  action:  { icon: "A",  label: "ACTION"  },
+  ai:      { icon: "AI", label: "AI"      },
+  logic:   { icon: "L",  label: "LOGIC"   },
+  utility: { icon: "U",  label: "UTILITY" },
 };
 
-const STATUS_COLOR = {
-  idle:    null,
-  running: "#f59e0b",
-  success: "#34d399",
-  error:   "#f87171",
-};
+const CAT_KEY_TO_COLORS_FIELD = {
+  action: "catAction", ai: "catAI", logic: "catLogic", utility: "catUtility", trigger: "catTrigger",
+} as const satisfies Record<CatKey, keyof ReturnType<typeof getCanvasColors>>;
 
-// Cosmetic-only indicator for AUDIT_REPORT.md T2-1/S9-4/S8-1 — nodes able to run
-// arbitrary code/commands or touch a database directly. Deliberately independent
-// of TYPE_META's per-category accent (dangerous node types all currently share
-// the "action" category, but the badge must not silently disappear if that
-// changes). The real gate is aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS
-// (Batch L) — this draws a marker only, never blocks or warns on its own.
-const DANGER_ACCENT = "#f87171";
+/** Per-kind chrome (icon/label) plus its live, theme-reactive accent color. */
+function typeMeta(nodeType: string): { accent: string; icon: string; label: string } {
+  const key = (nodeType in TYPE_META_BASE ? nodeType : "utility") as Exclude<CatKey, "trigger">;
+  const accent = getCanvasColors()[CAT_KEY_TO_COLORS_FIELD[key]];
+  return { accent, ...TYPE_META_BASE[key] };
+}
 
-// Note color palette for note-type nodes
-const NOTE_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  default: { bg: "#1c2128", border: "#30363d",  text: "#8b949e" },
-  yellow:  { bg: "#2a2200", border: "#f59e0b44", text: "#f59e0b" },
-  blue:    { bg: "#0f1f35", border: "#4d9eff44", text: "#4d9eff" },
-  green:   { bg: "#0b2820", border: "#34d39944", text: "#34d399" },
-  red:     { bg: "#2a0a0a", border: "#f8717144", text: "#f87171" },
-};
+
+function statusAccent(status: CanvasNode["status"], colors: ReturnType<typeof getCanvasColors>): string | null {
+  switch (status) {
+    case "running": return colors.warning;
+    case "success": return colors.actionRun;
+    case "error":   return colors.error;
+    default:        return null;
+  }
+}
+
 
 export class CanvasNode {
   data: CanvasNodeData;
@@ -212,23 +212,41 @@ export class CanvasNode {
     const w = NODE_WIDTH;
     const h = this.height;
     const r = CORNER_R;
-    const meta = TYPE_META[this.data.node_type] ?? TYPE_META.utility;
-    const accent = STATUS_COLOR[this.status] ?? meta.accent;
+    const colors = getCanvasColors();
+    const meta = typeMeta(this.data.node_type);
+    const accent = statusAccent(this.status, colors) ?? meta.accent;
+
+    // ── Trigger identity overlay (independent of NodeType/TYPE_META) ────────
+    // TRIGGER_NODE_IDS is a plain id set, unrelated to the 4-value NodeType
+    // union — schedule/webhook/manual_trigger are node_type "action" same as
+    // everything else (verified against aerini-engine/src/nodes/{schedule,
+    // webhook,manual_trigger}.rs and onboarding.ts's own fixture). This only
+    // swaps the *identity* marks (left stripe + category label) to
+    // --cat-trigger; it deliberately does not touch `accent` above, so ports,
+    // selection, the running pulse, the status dot, and the node icon all stay
+    // on the category/status accent, untouched. Two reasons: (1) that's what
+    // "two independent systems, don't merge" means in practice, not just in
+    // type signatures; (2) icon-cache.ts's bitmap cache is keyed by exact
+    // color string and only preloads the 4 category colors + error red —
+    // feeding it a 5th, unpreloaded color would silently degrade trigger
+    // icons to the letter-fallback glyph, and icon-cache.ts is out of this
+    // batch's file scope.
+    const isTrigger      = TRIGGER_NODE_IDS.has(this.data.node_type_id);
+    const identityAccent = isTrigger ? colors.catTrigger : meta.accent;
+    const identityLabel  = isTrigger ? "TRIGGER" : meta.label;
 
     ctx.save();
     if (this.disabled) ctx.globalAlpha = 0.35;
 
-    // ── Selection / hover outer ring ────────────────────────────────────────
+    // ── Selection / hover outer indicator ────────────────────────────────────
+  
     if (this.selected) {
-      ctx.beginPath();
-      roundedRect(ctx, x - 3, y - 3, w + 6, h + 6, r + 3);
-      ctx.strokeStyle = accent + "88";
-      ctx.lineWidth   = 2;
-      ctx.stroke();
+      drawCornerBrackets(ctx, x, y, w, h, accent + "88", 2);
     } else if (this.hovered) {
+
       ctx.beginPath();
       roundedRect(ctx, x - 2, y - 2, w + 4, h + 4, r + 2);
-      ctx.strokeStyle = "#ffffff18";
+      ctx.strokeStyle = colors.border + "b0";
       ctx.lineWidth   = 1.5;
       ctx.stroke();
     }
@@ -236,7 +254,7 @@ export class CanvasNode {
     // ── Node body ───────────────────────────────────────────────────────────
     ctx.beginPath();
     roundedRect(ctx, x, y, w, h, r);
-    ctx.fillStyle = "#161b22";
+    ctx.fillStyle = colors.surface1;
     ctx.fill();
 
     // ── Left accent stripe ──────────────────────────────────────────────────
@@ -244,16 +262,20 @@ export class CanvasNode {
     ctx.beginPath();
     roundedRect(ctx, x, y, w, h, r);
     ctx.clip();
-    ctx.fillStyle = accent;
+    ctx.fillStyle = identityAccent;
     ctx.fillRect(x, y, 3, h);
     ctx.restore();
 
     // ── Header background ───────────────────────────────────────────────────
+    // meta.accent (category-tied, not the trigger-swapped identityAccent —
+    // same "two independent systems" split the stripe/label already keep,
+    // see the trigger-overlay comment above) at low alpha over the opaque
+    // body just filled. Was 4 hardcoded near-black hexes, theme-blind.
     ctx.save();
     ctx.beginPath();
     roundedRect(ctx, x, y, w, NODE_HEADER, r);
     ctx.rect(x, y + r, w, NODE_HEADER - r); // make bottom flat
-    ctx.fillStyle = meta.dim;
+    ctx.fillStyle = headerTint(meta.accent);
     ctx.fill();
     ctx.restore();
 
@@ -261,7 +283,7 @@ export class CanvasNode {
     ctx.beginPath();
     ctx.moveTo(x + 3, y + NODE_HEADER);
     ctx.lineTo(x + w, y + NODE_HEADER);
-    ctx.strokeStyle = "#ffffff0f";
+    ctx.strokeStyle = colors.border + "40";
     ctx.lineWidth   = 1;
     ctx.stroke();
 
@@ -271,8 +293,8 @@ export class CanvasNode {
     ctx.strokeStyle = this.selected
       ? accent
       : this.hovered
-      ? "#ffffff22"
-      : "#ffffff0f";
+      ? colors.border + "99"
+      : colors.border + "40";
     ctx.lineWidth = this.selected ? 1.5 : 1;
     ctx.stroke();
 
@@ -316,13 +338,13 @@ export class CanvasNode {
       const by = y + 10;
       ctx.beginPath();
       ctx.arc(bx, by, 6, 0, Math.PI * 2);
-      ctx.fillStyle = "#1c2128";
+      ctx.fillStyle = colors.surface2;
       ctx.fill();
-      ctx.strokeStyle = "#f59e0b";
+      ctx.strokeStyle = colors.warning;
       ctx.lineWidth   = 1.5;
       ctx.stroke();
       ctx.font         = "bold 9px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillStyle    = "#f59e0b";
+      ctx.fillStyle    = colors.warning;
       ctx.textAlign    = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("!", bx, by + 0.5);
@@ -342,30 +364,35 @@ export class CanvasNode {
 
     // ── Node name ──────────────────────────────────────────────────────────
     ctx.font         = "500 12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif";
-    ctx.fillStyle    = "#e6edf3";
+    ctx.fillStyle    = colors.textPrimary;
     ctx.textBaseline = "middle";
     ctx.textAlign    = "left";
     ctx.fillText(trunc(this.data.name, 20), x + 34, y + NODE_HEADER / 2);
 
     // ── Category label (top right) ─────────────────────────────────────────
     ctx.font         = "500 8px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillStyle    = accent + "99";
+    ctx.fillStyle    = identityAccent + "99";
     ctx.textBaseline = "middle";
     ctx.textAlign    = "right";
     const labelRightEdge = x + w - (this.status !== "idle" ? 20 : 8);
     const labelY          = y + NODE_HEADER / 2;
-    ctx.fillText(meta.label, labelRightEdge, labelY);
+    ctx.fillText(identityLabel, labelRightEdge, labelY);
 
     // ── Danger badge (top right, immediately left of the category label) ────
+    // Measures identityLabel (not meta.label) so the badge stays correctly
+    // positioned if a node is ever both trigger and dangerous — no overlap
+    // exists today (TRIGGER_NODE_IDS and DANGEROUS_NODE_IDS are disjoint,
+    // verified against node-ids.ts), but the two sets are independently
+    // maintained elsewhere, so this shouldn't rely on them staying that way.
     if (DANGEROUS_NODE_IDS.has(this.data.node_type_id)) {
-      const labelWidth = ctx.measureText(meta.label).width;
+      const labelWidth = ctx.measureText(identityLabel).width;
       drawDangerBadge(ctx, labelRightEdge - labelWidth - 9, labelY);
     }
 
     // ── Disabled overlay label ─────────────────────────────────────────────
     if (this.disabled) {
       ctx.font      = "700 9px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillStyle = "#f87171cc";
+      ctx.fillStyle = colors.error + "cc";
       ctx.textAlign = "center";
       ctx.fillText("DISABLED", x + w / 2, y + NODE_HEADER / 2);
     }
@@ -377,16 +404,16 @@ export class CanvasNode {
     for (const port of this.ports) {
       const isConnected = connectedPorts.has(`${this.data.id}:${port.id}`);
 
-      // Port outer ring
+      // Port outer ring — matches the node body it's cut out of
       ctx.beginPath();
       ctx.arc(port.x, port.y, PORT_RADIUS + 2, 0, Math.PI * 2);
-      ctx.fillStyle = "#161b22";
+      ctx.fillStyle = colors.surface1;
       ctx.fill();
 
       // Port fill — solid when connected, hollow when empty
       ctx.beginPath();
       ctx.arc(port.x, port.y, PORT_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle   = isConnected ? accent + "cc" : "#1c2128";
+      ctx.fillStyle   = isConnected ? accent + "cc" : colors.surface2;
       ctx.strokeStyle = accent + "cc";
       ctx.lineWidth   = 1.5;
       ctx.fill();
@@ -399,7 +426,7 @@ export class CanvasNode {
       ctx.fill();
 
       // Port label
-      ctx.fillStyle = "#8b949e";
+      ctx.fillStyle = colors.textSecondary;
       if (port.isInput) {
         ctx.textAlign = "left";
         ctx.fillText(port.label, port.x + PORT_RADIUS + 7, port.y);
@@ -416,13 +443,13 @@ export class CanvasNode {
       ctx.beginPath();
       ctx.moveTo(x + 3, previewY);
       ctx.lineTo(x + w, previewY);
-      ctx.strokeStyle = "#ffffff0a";
+      ctx.strokeStyle = colors.border + "30";
       ctx.lineWidth   = 1;
       ctx.stroke();
 
       // Preview text
-      ctx.font         = "11px 'SF Mono', 'Fira Code', monospace";
-      ctx.fillStyle    = "#34d39988";
+      ctx.font         = "11px 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      ctx.fillStyle    = colors.actionRun + "88";
       ctx.textBaseline = "middle";
       ctx.textAlign    = "left";
       ctx.fillText(trunc(this.outputPreview, 28), x + 10, previewY + 17);
@@ -439,7 +466,8 @@ export class CanvasNode {
     const text = String(this.data.config["text"] ?? "Double-click to edit");
     const color = String(this.data.config["color"] ?? "default");
 
-    const c = NOTE_COLORS[color] ?? NOTE_COLORS.default;
+    const noteColors = resolveNoteColors(getCanvasColors());
+    const c = noteColors[color] ?? noteColors.default;
 
     ctx.font = "12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     const maxW = w - 24;
@@ -539,21 +567,23 @@ function trunc(s: string, max: number): string {
 /**
  * Small filled warning-triangle glyph, centered at (cx, cy). Drawn immediately
  * left of the category label for node types in DANGEROUS_NODE_IDS. Cosmetic
- * only — see DANGER_ACCENT's comment above for what this does and doesn't do.
+ * only — draws a marker, never blocks or warns on its own (the real gate is
+ * aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS, Batch L).
  */
 function drawDangerBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
   const s = 5;
+  const colors = getCanvasColors();
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(cx, cy - s);
   ctx.lineTo(cx - s, cy + s * 0.8);
   ctx.lineTo(cx + s, cy + s * 0.8);
   ctx.closePath();
-  ctx.fillStyle = DANGER_ACCENT;
+  ctx.fillStyle = colors.error;
   ctx.fill();
 
   ctx.font         = "bold 7px -apple-system, BlinkMacSystemFont, sans-serif";
-  ctx.fillStyle    = "#161b22"; // node body background — contrasts against the fill
+  ctx.fillStyle    = colors.surface1; // node body color — contrasts against the fill, any theme
   ctx.textAlign    = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("!", cx, cy + s * 0.15);
@@ -571,6 +601,43 @@ export function roundedRect(
   ctx.arcTo(x,     y + h, x,     y,     r);
   ctx.arcTo(x,     y,     x + w, y,     r);
   ctx.closePath();
+}
+
+
+ 
+function drawCornerBrackets(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+  color: string, lineWidth: number
+): void {
+  const ARM = 10; // arm length, matches the 10px scale of the reference mockup's corner boxes
+  const OFF = 3;  // outward offset — matches the previous ring's -3 offset, for visual continuity
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = lineWidth;
+  ctx.lineCap     = "butt";
+
+  // [cornerX, cornerY, armDirX, armDirY] — arms extend from the corner back
+  // toward the node's own edges (dir = +1) or away from them (dir = -1).
+  const corners: Array<[number, number, number, number]> = [
+    [x,     y,     1,  1], // top-left
+    [x + w, y,    -1,  1], // top-right
+    [x,     y + h, 1, -1], // bottom-left
+    [x + w, y + h,-1, -1], // bottom-right
+  ];
+
+  for (const [cx, cy, dx, dy] of corners) {
+    const ox = cx - dx * OFF;
+    const oy = cy - dy * OFF;
+    ctx.beginPath();
+    ctx.moveTo(ox + dx * ARM, oy);
+    ctx.lineTo(ox, oy);
+    ctx.lineTo(ox, oy + dy * ARM);
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {

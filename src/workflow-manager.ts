@@ -204,8 +204,16 @@ export class WorkflowManager {
         }
         const ok = await this.confirmFn(`Delete "${wf.name}"? This cannot be undone.`, true);
         if (!ok) return;
-        if (isTauri()) await deleteWorkflow(wf.id).catch(() => {});
-        else lsDelete(wf.id);
+        if (isTauri()) {
+          try {
+            await deleteWorkflow(wf.id);
+          } catch (err) {
+            this.onToast(`Delete failed: ${err}`, "error");
+            return;
+          }
+        } else {
+          lsDelete(wf.id);
+        }
         if (wf.id === this.currentId) this.handleNew();
         else await this.refreshWorkflowList();
       });
@@ -273,13 +281,13 @@ export class WorkflowManager {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onToast("Could not find workflow to duplicate", "error"); return; }
 
-      // S11-13: route through deserialize()/serialize() — the same pattern
+      // route through deserialize/serialize — the same pattern
       // every other load/save path in this file already uses — instead of
       // hand-editing the raw parsed JSON. deserialize() drops any edge whose
       // from_node/to_node isn't present in the node list (T1-14's
       // dangling-edge guard, CanvasSerializer.ts); the old raw-JSON approach
       // bypassed that guard entirely, so a workflow that already had a
-      // dangling edge (e.g. via the undo-sharing bug S9-3 describes)
+      // dangling edge (e.g. via the undo-sharing bug describes)
       // propagated it into the duplicate verbatim, uncaught.
       const { nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(json);
 

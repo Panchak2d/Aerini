@@ -13,7 +13,7 @@ impl Node for SlackNode {
     fn display_name(&self) -> &'static str { "Slack" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Post a message to a Slack channel using the Slack API or an incoming webhook URL." }
+    fn description(&self) -> &'static str { "Post a message to a Slack channel via the Slack API (chat.postMessage) using a Bot Token." }
 
     fn input_schema(&self) -> Value {
         json!({

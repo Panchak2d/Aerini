@@ -1,23 +1,4 @@
-/**
- * @vitest-environment jsdom
- *
- * DEVIATION NOTE: a real `Canvas` cannot be constructed in this test
- * environment — its constructor calls `new ResizeObserver(...)` (not
- * implemented by jsdom) and `canvasEl.getContext("2d")` (requires the
- * optional `canvas` npm package, not a project dependency). Matching the
- * precedent already established in workflow-manager.test.ts, these tests
- * exercise the real fixed methods directly instead of going through a full
- * Canvas instance:
- *   - `InputHandler` has no DOM dependency in its constructor, so it is
- *     constructed for real; the `Canvas` it depends on is a minimal
- *     duck-typed stub covering only what InputHandler.onKey's Escape
- *     branch touches.
- *   - `Canvas.prototype.deleteSelected` is called with `.call(fakeThis)`
- *     against a duck-typed `this` — the real prototype method, not a
- *     reimplementation, exercised without needing the rest of Canvas's
- *     constructor to run.
- *   - `serialize()` is a plain function and needs no DOM at all.
- */
+/* @vitest-environment jsdom */
 import { describe, it, expect, vi } from "vitest";
 import { InputHandler } from "../canvas/InputHandler";
 import { Canvas } from "../canvas/Canvas";
@@ -62,11 +43,11 @@ function makeConnector(id: string, fromNode: string, toNode: string): Connector 
 }
 
 // ---------------------------------------------------------------------------
-// T1-4 — Escape while repositioning/detaching a wire must restore it, not
+// Escape while repositioning/detaching a wire must restore it, not
 // permanently delete it.
 // ---------------------------------------------------------------------------
 
-describe("InputHandler — Escape during wire reconnect (T1-4)", () => {
+describe("InputHandler — Escape during wire reconnect", () => {
   function makeFakeCanvas() {
     const connectors = new Map<string, Connector>();
     const injectCalls: string[] = [];
@@ -113,12 +94,12 @@ describe("InputHandler — Escape during wire reconnect (T1-4)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T1-14 (part 1) — deleteSelected must partition connectors per node, so
+// deleteSelected must partition connectors per node, so
 // undoing one node from a multi-node delete can't resurrect a connector
 // whose other endpoint is a still-deleted sibling.
 // ---------------------------------------------------------------------------
 
-describe("Canvas.deleteSelected — per-node undo partitioning (T1-14)", () => {
+describe("Canvas.deleteSelected — per-node undo partitioning", () => {
   it("each delete_node action only carries connectors touching that node", () => {
     const nA = { data: { id: "A" } } as unknown as CanvasNode;
     const nB = { data: { id: "B" } } as unknown as CanvasNode;
@@ -156,7 +137,7 @@ describe("Canvas.deleteSelected — per-node undo partitioning (T1-14)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T1-14 (part 2) — serialize() must never emit an edge with a missing
+// serialize() must never emit an edge with a missing
 // endpoint, regardless of how it became dangling.
 // ---------------------------------------------------------------------------
 
@@ -191,11 +172,11 @@ describe("serialize — dangling edge filter (T1-14)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T1-15 — checkDangerousNodes must be scoped to the exact node set passed
+// checkDangerousNodes must be scoped to the exact node set passed
 // in, not any wider notion of "the whole workflow".
 // ---------------------------------------------------------------------------
 
-describe("checkDangerousNodes — scoped to the given node set (T1-15)", () => {
+describe("checkDangerousNodes — scoped to the given node set", () => {
   function fakeNode(id: string, typeId: string): CanvasNode {
     return { data: { id, node_type_id: typeId, name: id } } as unknown as CanvasNode;
   }
@@ -234,5 +215,88 @@ describe("checkDangerousNodes — scoped to the given node set (T1-15)", () => {
     const ok = await checkDangerousNodes("wf1", nodes, approved, confirm);
     expect(ok).toBe(false);
     expect(approved.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug B — Space also toggled #output-drawer, not just the palette, whenever
+// a role="button" control (e.g. #drawer-header) still had keyboard focus.
+// onKey is bound at `window` (Canvas.ts), so every keydown app-wide reaches
+// it; these exercise that global reach directly against real focused DOM
+// elements, same real-world path as the reported bug.
+// ---------------------------------------------------------------------------
+
+describe("InputHandler — Space palette shortcut vs. focused role=\"button\" controls", () => {
+  function makeFakeCanvas(el: HTMLElement) {
+    return {
+      el,
+      onPaletteRequest: vi.fn(),
+    };
+  }
+
+  it("normal case: Space opens the palette when focus is on the canvas itself", () => {
+    document.body.innerHTML = `<div id="fake-canvas" tabindex="0"></div>`;
+    const el = document.getElementById("fake-canvas")!;
+    el.focus();
+    const canvas = makeFakeCanvas(el);
+    const input = new InputHandler(canvas as unknown as Canvas);
+
+    input.onKey(new KeyboardEvent("keydown", { code: "Space", key: " " }));
+    expect(canvas.onPaletteRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("normal case: Space opens the palette when nothing in particular has focus (document.body)", () => {
+    document.body.innerHTML = `<div id="fake-canvas" tabindex="0"></div>`;
+    const el = document.getElementById("fake-canvas")!;
+    const canvas = makeFakeCanvas(el);
+    const input = new InputHandler(canvas as unknown as Canvas);
+
+    expect(document.activeElement).toBe(document.body);
+    input.onKey(new KeyboardEvent("keydown", { code: "Space", key: " " }));
+    expect(canvas.onPaletteRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("the bug this guards against: Space does NOT also open the palette while a role=\"button\" control (e.g. #drawer-header) has focus", () => {
+    document.body.innerHTML = `
+      <div id="fake-canvas" tabindex="0"></div>
+      <div class="drawer-header" id="drawer-header" role="button" tabindex="0"></div>
+    `;
+    const el = document.getElementById("fake-canvas")!;
+    const header = document.getElementById("drawer-header")!;
+    header.focus();
+    expect(document.activeElement).toBe(header);
+
+    const canvas = makeFakeCanvas(el);
+    const input = new InputHandler(canvas as unknown as Canvas);
+    input.onKey(new KeyboardEvent("keydown", { code: "Space", key: " " }));
+    expect(canvas.onPaletteRequest).not.toHaveBeenCalled();
+  });
+
+  it("related fix, same root cause: Space does not fire the palette while a native <button> has focus either", () => {
+    document.body.innerHTML = `
+      <div id="fake-canvas" tabindex="0"></div>
+      <button id="some-btn">Run</button>
+    `;
+    const el = document.getElementById("fake-canvas")!;
+    document.getElementById("some-btn")!.focus();
+
+    const canvas = makeFakeCanvas(el);
+    const input = new InputHandler(canvas as unknown as Canvas);
+    input.onKey(new KeyboardEvent("keydown", { code: "Space", key: " " }));
+    expect(canvas.onPaletteRequest).not.toHaveBeenCalled();
+  });
+
+  it("edge case: Ctrl/Cmd+K still opens the palette regardless of focus (no conflicting binding on any control)", () => {
+    document.body.innerHTML = `
+      <div id="fake-canvas" tabindex="0"></div>
+      <div class="drawer-header" id="drawer-header" role="button" tabindex="0"></div>
+    `;
+    const el = document.getElementById("fake-canvas")!;
+    document.getElementById("drawer-header")!.focus();
+
+    const canvas = makeFakeCanvas(el);
+    const input = new InputHandler(canvas as unknown as Canvas);
+    input.onKey(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    expect(canvas.onPaletteRequest).toHaveBeenCalledTimes(1);
   });
 });

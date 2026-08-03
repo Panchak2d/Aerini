@@ -12,7 +12,7 @@ use super::util::{ordered_node_outputs, traverse_dotpath};
 /// then feed each chunk to an AI node or embed it for vector search.
 pub struct TextSplitterNode;
 
-/// Hard cap on input text length (S3-11). Without it, and combined with an
+/// Hard cap on input text length. Without it, and combined with an
 /// `overlap >= chunk_size` misconfiguration (see the clamp in `execute()`
 /// below), a large document could produce a chunk count approaching its own
 /// character count — e.g. an uncapped 200,000-character document with
@@ -273,8 +273,8 @@ mod tests {
         }
     }
 
-    /// T2-5: source_field's resolution against real node_outputs previously
-    /// had zero test coverage (S3-4) — every pre-existing test used
+    /// source_field's resolution against real node_outputs previously
+    /// had zero test coverage — every pre-existing test used
     /// ExecutionContext::default(), which never exercises this code path.
     fn make_input_with_context(
         input: Value,
@@ -336,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_field_deterministically_picks_first_completed_match() {
-        // T2-5 / S3-4: two upstream nodes both carry a "body" field —
+        // two upstream nodes both carry a "body" field —
         // resolution must be deterministic (first in execution_order),
         // not whichever the raw HashMap happened to enumerate first.
         let mut outputs = HashMap::new();
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(data["mode"].as_str().unwrap(), "chars");
     }
 
-    // ── Memory caps (S3-11) ──────────────────────────────────────────────────
+    // ── Memory caps ──────────────────────────────────────────────────
 
     #[tokio::test]
     async fn text_over_max_chars_fails_cleanly() {

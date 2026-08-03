@@ -60,7 +60,7 @@
 .chat-bubble p { margin: 0 0 6px; } .chat-bubble p:last-child { margin-bottom: 0; }
 .chat-bubble h1, .chat-bubble h2, .chat-bubble h3 { font-size: 1.05em; margin: 6px 0 4px; font-weight: 700; }
 .chat-bubble ul, .chat-bubble ol { margin: 4px 0 6px 18px; }
-.chat-bubble code { background: var(--bg4); border-radius: 3px; padding: 1px 4px; font-family: "SF Mono","Fira Code",monospace; font-size: .92em; }
+.chat-bubble code { background: var(--bg4); border-radius: 3px; padding: 1px 4px; font-family: var(--font-mono); font-size: .92em; }
 .chat-bubble pre { background: var(--bg0); border: 1px solid var(--bd); border-radius: var(--radius-sm); padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
 .chat-bubble pre code { background: none; padding: 0; }
 .chat-bubble a { color: inherit; text-decoration: underline; }
@@ -106,7 +106,7 @@
 .chat-attach-btn:disabled { opacity: .4; cursor: not-allowed; }
 .chat-input { flex: 1; resize: none; background: var(--bg3); border: 1px solid var(--bd); border-radius: var(--radius-sm); color: var(--t1); font-size: 13px; font-family: inherit; padding: 7px 9px; max-height: 120px; line-height: 1.4; }
 .chat-input:disabled { opacity: .5; cursor: not-allowed; }
-.chat-input:focus { outline: none; border-color: var(--blue); }
+.chat-input:focus { outline: none; border-color: var(--color-focus); }
 .chat-send-btn { flex-shrink: 0; background: var(--blue); border: none; border-radius: var(--radius-sm); color: #fff; padding: 7px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: filter var(--trans); }
 .chat-send-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .chat-send-btn:disabled { opacity: .4; cursor: not-allowed; }

@@ -8,10 +8,12 @@ use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::perf_monitor::PerformanceReport;
 
 mod workflow_db;
 mod run_history;
 mod scheduler_db;
+mod performance_reports;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -24,6 +26,15 @@ pub struct RunRecord {
     pub result_json:   String,
     /// One of "running", "success", "failed", "interrupted".
     pub status:        String,
+}
+
+/// A persisted [`PerformanceReport`], linked to its `run_history` row by 'id'
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceReportRecord {
+    pub id: String,
+    #[serde(flatten)]
+    pub report: PerformanceReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +73,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 2;
+    pub(super) const SCHEMA_VERSION: i64 = 3;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -123,11 +134,13 @@ impl WorkflowDb {
         if current_version < 2 {
             Self::migrate_v2(conn)?;
         }
+        if current_version < 3 {
+            Self::migrate_v3(conn)?;
+        }
 
         Ok(())
     }
 
-    /// Version 1 — initial release baseline.
     /// All tables created with IF NOT EXISTS so this is safe to run against a
     /// pre-migration database that already has some or all tables present.
     fn migrate_v1(conn: &rusqlite::Connection) -> Result<(), String> {
@@ -198,6 +211,35 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+
+    fn migrate_v3(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS performance_reports (
+                id                   TEXT PRIMARY KEY,
+                workflow_id          TEXT NOT NULL,
+                status               TEXT NOT NULL,
+                started_at_ms        INTEGER NOT NULL,
+                finished_at_ms       INTEGER NOT NULL,
+                duration_ms          INTEGER NOT NULL,
+                sampling_interval_ms INTEGER NOT NULL,
+                baseline_bytes       INTEGER NOT NULL,
+                final_bytes          INTEGER NOT NULL,
+                peak_bytes           INTEGER NOT NULL,
+                peak_at_ms           INTEGER NOT NULL,
+                minimum_bytes        INTEGER NOT NULL,
+                average_bytes        INTEGER NOT NULL,
+                delta_bytes          INTEGER NOT NULL,
+                sample_count         INTEGER NOT NULL,
+                history_json         TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_performance_reports_workflow
+                ON performance_reports(workflow_id, started_at_ms DESC);
+            PRAGMA user_version = 3;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -228,7 +270,7 @@ mod tests {
         let db = WorkflowDb::open(&path, 8).expect("open failed");
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
 
         cleanup(&path);
     }
@@ -254,7 +296,7 @@ mod tests {
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2, "must be migrated to v2");
+        assert_eq!(v, 3, "must be migrated to v3");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))

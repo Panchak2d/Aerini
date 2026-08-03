@@ -48,22 +48,36 @@
 //!
 //! Plugins cannot access the real filesystem: `WasiCtx::builder().build()` creates an
 //! empty context with no preopened directories. Filesystem syscalls return errors.
+//!
+//! # Outbound HTTP
+//!
+//! Every request a plugin sends through `wasi:http/outgoing-handler` is checked by
+//! [`PluginHttpHooks::send_request`] against this crate's standard SSRF policy — the
+//! same `SsrfPolicy::Strict` the Database and HTTP nodes enforce — before
+//! `wasmtime_wasi_http`'s default send path is allowed to run it. See
+//! [`check_plugin_request_ssrf`] for exactly what is and isn't caught.
 
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use hyper::Request;
 use serde_json::Value;
 use wasmtime::component::ResourceTable;
 use wasmtime::{Config, Engine, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, p2::{WasiHttpView, WasiHttpCtxView}};
+use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
+use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
+use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, OutgoingRequestConfig};
+use wasmtime_wasi_http::{WasiHttpCtx, p2::{HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, default_send_request}};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodeRegistry};
+use crate::nodes::util::{SsrfPolicy, check_ssrf_ip};
 
 // ── WIT bindings ──────────────────────────────────────────────────────────────
 
@@ -102,7 +116,7 @@ pub enum PluginLoadError {
     #[error("plugin does not export the `aerini-node` world")]
     MissingInterface,
 
-    /// Kept for API compatibility; never returned by W2+ code.
+    /// Kept for API compatibility; not returned by any current code path.
     #[error("not yet implemented")]
     #[allow(dead_code)]
     NotImplemented,
@@ -120,11 +134,14 @@ pub enum PluginLoadError {
 /// - [`WasiHttpCtx`] — WASI HTTP context for outbound requests.
 /// - [`ResourceTable`] — tracks host-owned resources (shared by WASI and HTTP).
 /// - [`wasmtime::StoreLimits`] — enforces the 64 MiB memory cap per execution.
+/// - [`PluginHttpHooks`] — enforces this crate's SSRF policy on every outbound
+///   request before `wasi:http`'s default send path is allowed to run it.
 struct PluginState {
     wasi_ctx: WasiCtx,
     http_ctx: WasiHttpCtx,
     table: ResourceTable,
     limits: wasmtime::StoreLimits,
+    http_hooks: PluginHttpHooks,
 }
 
 impl WasiView for PluginState {
@@ -138,8 +155,110 @@ impl WasiHttpView for PluginState {
         WasiHttpCtxView {
             ctx: &mut self.http_ctx,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: &mut self.http_hooks,
         }
+    }
+}
+
+// ── Outbound HTTP SSRF enforcement ─────────────────────────────────────────────
+
+/// `wasi:http/outgoing-handler`'s default send path (`default_send_request`) connects
+/// straight to whatever host the guest asks for — it has no knowledge of this
+/// application's SSRF policy. `WasiHttpHooks::send_request` is the documented
+/// interception point, so plugin traffic is now checked exactly like any other
+/// node's HTTP/DB egress before `default_send_request` is allowed to run.
+struct PluginHttpHooks;
+
+impl WasiHttpHooks for PluginHttpHooks {
+    fn send_request(
+        &mut self,
+        request: Request<HyperOutgoingBody>,
+        config: OutgoingRequestConfig,
+    ) -> HttpResult<HostFutureIncomingResponse> {
+        if let Err(code) = check_plugin_request_ssrf(request.uri()) {
+            return Ok(HostFutureIncomingResponse::ready(Ok(Err(code))));
+        }
+        Ok(default_send_request(request, config))
+    }
+}
+
+/// Applies this crate's standard SSRF policy (`SsrfPolicy::Strict` — the same
+/// policy the Database and HTTP nodes enforce, see `nodes::util::check_ssrf_ip`)
+/// to a WASM plugin's outbound request URI before it is sent.
+///
+/// IP-literal hosts are checked directly (IPv6 authority brackets are stripped
+/// first — `hyper::Uri::host()` keeps them). Domain names are resolved with a
+/// blocking DNS lookup and every returned address is checked; safe to block on
+/// here since `send_request` only ever runs inside the `tokio::task::spawn_blocking`
+/// closure in `WasmPluginNode::execute`, never on an async worker thread. A missing
+/// or unparsable host, a failed resolution, or an empty result set all reject the
+/// request — fail closed, matching this crate's existing SSRF-check convention
+/// (`nodes::util::check_host_ssrf`).
+///
+/// Residual limits, same caveat `check_host_ssrf` itself documents:
+/// - A DNS-rebinding TOCTOU gap remains between this check and the connect
+///   `default_send_request` performs a moment later.
+/// - No explicit timeout on the resolution call, consistent with every other
+///   SSRF check in this crate — a stalled resolver holds one blocking-pool
+///   thread, not an async worker.
+///
+/// Both require network-level egress filtering to close fully — see the
+/// startup warning in `load_plugins`.
+fn check_plugin_request_ssrf(uri: &hyper::Uri) -> Result<(), ErrorCode> {
+    let host = uri.host().ok_or(ErrorCode::HttpRequestUriInvalid)?;
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+
+    // `hyper::Uri::host()` keeps the `[...]` brackets around an IPv6 literal;
+    // strip them before attempting to parse as an IP address.
+    let ip_candidate = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = ip_candidate.parse::<std::net::IpAddr>() {
+        return check_ssrf_ip(ip, SsrfPolicy::Strict).map_err(|_| ErrorCode::DestinationIpProhibited);
+    }
+
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower == "metadata.google.internal" {
+        return Err(ErrorCode::DestinationIpProhibited);
+    }
+
+    let addrs = (host, port).to_socket_addrs().map_err(|_| ErrorCode::DestinationNotFound)?;
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        check_ssrf_ip(addr.ip(), SsrfPolicy::Strict).map_err(|_| ErrorCode::DestinationIpProhibited)?;
+    }
+    if !resolved_any {
+        return Err(ErrorCode::DestinationNotFound);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod plugin_http_hooks_tests {
+    use super::{check_plugin_request_ssrf, ErrorCode};
+
+    #[test]
+    fn public_ip_allowed() {
+        let uri: hyper::Uri = "http://93.184.216.34/".parse().unwrap();
+        assert!(check_plugin_request_ssrf(&uri).is_ok());
+    }
+
+    #[test]
+    fn private_ip_blocked() {
+        let v4: hyper::Uri = "http://192.168.1.1/".parse().unwrap();
+        assert!(matches!(check_plugin_request_ssrf(&v4), Err(ErrorCode::DestinationIpProhibited)));
+
+        // IPv6 loopback via bracketed authority -- `hyper::Uri::host()` keeps the
+        // brackets, exercising the strip-before-parse path above.
+        let v6: hyper::Uri = "http://[::1]:8080/".parse().unwrap();
+        assert!(matches!(check_plugin_request_ssrf(&v6), Err(ErrorCode::DestinationIpProhibited)));
+    }
+
+    #[test]
+    fn relative_uri_without_host_rejected() {
+        let uri: hyper::Uri = "/no-authority".parse().unwrap();
+        assert!(matches!(check_plugin_request_ssrf(&uri), Err(ErrorCode::HttpRequestUriInvalid)));
     }
 }
 
@@ -174,6 +293,7 @@ fn make_plugin_state() -> PluginState {
         http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
+        http_hooks: PluginHttpHooks,
     }
 }
 
@@ -202,11 +322,7 @@ fn make_store(engine: &Engine, state: PluginState) -> wasmtime::Store<PluginStat
 pub struct PluginLoader {
     engine: Engine,
     /// Compiled-`Component` cache keyed by plugin path — see
-    /// `compile_and_link` for the caching/invalidation
-    /// contract. T2-8 residual: T2-8 fixed the per-call Engine/thread/leak
-    /// cost of repeated `describe_plugin` calls but left the actual `.wasm`
-    /// recompilation itself un-cached, so a caller like `list_installed_plugins`
-    /// still paid full compile cost on every panel refresh for every plugin.
+    /// `compile_and_link` for the caching/invalidation contract.
     component_cache: Mutex<HashMap<PathBuf, CachedComponent>>,
     /// Counts real (cache-miss) compiles — lets tests assert cache-hit
     /// behavior directly instead of only inferring it from timing.
@@ -224,11 +340,10 @@ pub struct PluginLoader {
 /// file fingerprint (mtime, length) it was compiled from.
 ///
 /// `Component::clone` is a cheap, `Arc`-backed shallow copy, not a
-/// recompilation (VERIFIED — wasmtime's own doc comment on `Component`:
-/// "Using clone on a Component is a cheap operation. It will not create an
-/// entirely new component, but rather just a new reference to the existing
-/// component."), so serving a cache hit costs one `stat()` plus one cheap
-/// clone, versus a full read + Cranelift compile on a miss.
+/// recompilation — it creates a new reference to the existing component
+/// rather than an entirely new one, so serving a cache hit costs one
+/// `stat()` plus one cheap clone, versus a full read + Cranelift compile
+/// on a miss.
 struct CachedComponent {
     fingerprint: (Option<SystemTime>, u64),
     component: wasmtime::component::Component,
@@ -757,17 +872,18 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
     // cannot shadow a built-in node type (e.g. "http_request", "shell_exec").
     registry.seal_builtins();
 
-    // SECURITY NOTICE: WASM plugins loaded here have unrestricted outbound HTTP
-    // access via the wasi:http/outgoing-handler interface. This bypasses the
-    // application-layer SSRF guards in check_ssrf_ip() — a plugin can reach
-    // RFC 1918 addresses, Azure IMDS (168.63.129.16), and any other internal
-    // endpoint that would otherwise be blocked. Treat the plugin directory as a
-    // trust boundary equivalent to running arbitrary native code. In server/API
-    // mode, a supply-chain-compromised .wasm file silently gains unrestricted
-    // internal network access. Enforce network-level egress filtering to block
-    // outbound connections to private IP ranges from the server process.
+    // SECURITY NOTICE: WASM plugins' outbound HTTP (wasi:http/outgoing-handler) is
+    // checked against the same SSRF policy as the Database and HTTP nodes before
+    // any request is sent (see `check_plugin_request_ssrf`) — RFC 1918, loopback,
+    // link-local, and cloud metadata addresses are rejected. That check has the
+    // same DNS-rebinding TOCTOU gap documented on `nodes::util::check_host_ssrf`,
+    // and a plugin still runs with the full trust of whatever else this process
+    // can reach once a request clears it. Treat the plugin directory as a trust
+    // boundary equivalent to running arbitrary native code, and enforce
+    // network-level egress filtering as defence-in-depth for the TOCTOU gap in
+    // server/API deployments.
     tracing::warn!(
-        "plugin_loader: loading WASM plugins from '{}'. Plugins have unrestricted outbound HTTP access (wasi:http bypasses SSRF guards). Only load plugins from trusted sources. Enforce network-level egress filtering in server/API deployments.",
+        "plugin_loader: loading WASM plugins from '{}'. Outbound HTTP is SSRF-filtered (RFC1918/loopback/link-local/cloud-metadata blocked), but only load plugins from trusted sources — a DNS-rebinding TOCTOU gap remains; enforce network-level egress filtering as defence-in-depth.",
         plugin_dir.display()
     );
 
@@ -854,9 +970,9 @@ mod tests {
     }
 
     /// `describe_plugin` must classify errors identically to `load_plugin`
-    /// for the same non-existent-path input (T2-8 regression: the new
-    /// non-leaking path must not silently swallow or misclassify an error
-    /// `load_plugin` already handles correctly).
+    /// for the same non-existent-path input — the non-leaking path must not
+    /// silently swallow or misclassify an error `load_plugin` already
+    /// handles correctly.
     #[test]
     fn describe_plugin_nonexistent_file_returns_io_error() {
         let l = loader();
@@ -889,14 +1005,16 @@ mod tests {
         );
     }
 
-    /// T2-8 regression: `PluginLoader::shared()` must return the same
+    /// `PluginLoader::shared()` must return the same
     /// process-wide instance on every call, not construct a fresh `Engine` +
-    /// epoch-ticker thread each time (which is the exact leak `list_installed_plugins`
-    /// had via its own `PluginLoader::new()` call before this fix). Pointer
-    /// equality on the returned `&'static PluginLoader` is a direct proxy for
-    /// "no second construction happened": `OnceLock::get_or_init` only ever
-    /// runs its initializer once, so two `Ok` results can only share an
-    /// address if they came from the same underlying `PluginLoader`.
+    /// epoch-ticker thread each time (each such construction is a leak if
+    /// nothing ever tears it down — the exact failure mode a call site using
+    /// its own `PluginLoader::new()` instead of `shared()` would hit).
+    /// Pointer equality on the returned `&'static PluginLoader` is a direct
+    /// proxy for "no second construction happened": `OnceLock::get_or_init`
+    /// only ever runs its initializer once, so two `Ok` results can only
+    /// share an address if they came from the same underlying
+    /// `PluginLoader`.
     #[test]
     fn shared_returns_same_instance_across_repeated_calls() {
         let a = PluginLoader::shared().expect("shared() should succeed on a normal host");
@@ -930,12 +1048,10 @@ mod tests {
         assert!(matches!(describe_err, PluginLoadError::WasmCompile(_)));
     }
 
-    /// Batch-Q-residual regression: repeated `describe_plugin` calls against
-    /// the same, unchanged file must compile the `.wasm` bytes exactly once,
-    /// not on every call (the recompile-every-call cost `list_installed_plugins`
-    /// paid on every Plugins-panel refresh even after T2-8's Engine/thread/leak
-    /// fix). Uses a per-instance compile counter (see `compile_count`) rather
-    /// than timing, so this can't be flaky.
+    /// repeated `describe_plugin` calls against the same, unchanged file must
+    /// compile the `.wasm` bytes exactly once, not on every call. Uses a
+    /// per-instance compile counter (see `compile_count`) rather than
+    /// timing, so this can't be flaky.
     #[test]
     fn describe_plugin_reuses_cached_component_for_unchanged_file() {
         let l = loader();

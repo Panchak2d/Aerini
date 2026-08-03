@@ -114,9 +114,9 @@ pub(super) async fn gen_gpt_image(client: reqwest::Client, req: GptImageRequest<
 // POST https://api.openai.com/v1/images/edits  (multipart/form-data)
 // Fields: model, prompt, n, size, quality, image[] (one part per reference image).
 // Response: same {"data":[{"b64_json":"..."}]} format as the generations endpoint.
-// VERIFIED: developers.openai.com/api/reference/resources/images/methods/edit, June 2026.
+// developers.openai.com/api/reference/resources/images/methods/edit, June 2026.
 // Supports up to 16 reference images per OpenAI spec.
-// VERIFIED: reqwest 0.13 "multipart" feature required (added to Cargo.toml in P10).
+// reqwest 0.13 "multipart" feature required (added to Cargo.toml in P10).
 async fn gen_gpt_image_edit(client: reqwest::Client, req: GptImageRequest<'_>) -> NodeOutput {
     let ts   = Utc::now().timestamp_millis();
     let mut logs: Vec<String> = Vec::new();

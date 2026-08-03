@@ -24,7 +24,7 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
-/// Caps applied while merging files across sources (S3-13): `merged_files`
+/// Caps applied while merging files across sources: `merged_files`
 /// previously grew without bound, and each entry typically embeds a file's
 /// full contents inline as base64. Both caps are checked as files are
 /// collected — the node fails fast rather than silently truncating the
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(out.output.unwrap()["count"], json!(1));
     }
 
-    // ── Memory caps (S3-13) ─────────────────────────────────────────────────
+    // ── Memory caps ─────────────────────────────────────────────────
 
     #[tokio::test]
     async fn file_count_over_cap_fails_cleanly() {

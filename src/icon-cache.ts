@@ -58,8 +58,30 @@ async function loadBitmap(typeId: string, inner: string, color: string, size: nu
   }
 }
 
-// All accent colors used in Node.ts (4 type accents + error red)
-const ACCENT_COLORS = ["#4d9eff", "#a78bfa", "#34d399", "#f59e0b", "#f87171"];
+import { getCanvasColors } from "./canvas/theme-colors";
+
+// The exact, complete set of colors Node.ts's draw() can ever pass as
+// `accent` to getIconBitmap (its one call site) — verified against
+// statusAccent()/typeMeta() in canvas/Node.ts, not assumed. Only 5 distinct
+// values despite 4 category + 3 status states existing: --cat-logic and
+// --cat-utility are literal `var(--color-action-run)` / `var(--color-warning)`
+// aliases in variables.css (:root, not re-declared per theme), so "success"
+// and "running" status colors always equal "logic" and "utility" category
+// colors — true in every theme, not a Midnight-only coincidence, confirmed
+// against variables.css directly.
+//
+// Reads the LIVE theme tokens (getCanvasColors(), same shared cache Node.ts/
+// Canvas.ts/Connector.ts/Minimap.ts use) instead of a hardcoded array — was
+// Midnight-only hex; getIconBitmap does an exact string-key lookup
+// (`${typeId}:${color}`) with no cross-theme fallback, so a static
+// Midnight-only preload list would silently degrade every node icon to its
+// plain-letter fallback the moment the active theme's accent differs from
+// what was preloaded — caught in this fix's own retrospective scan before
+// shipping (Section 5), not a separate pre-existing bug.
+export function accentColors(): string[] {
+  const c = getCanvasColors();
+  return [c.catAction, c.catAI, c.catLogic, c.catUtility, c.error];
+}
 
 // Preload at physical pixel size (dpr * 16) so bitmaps are sharp on retina displays.
 // The canvas transform (dpr * zoom) maps 16 world-coord units to exactly these pixels at zoom=1.
@@ -67,7 +89,7 @@ export async function preloadAllIcons(): Promise<void> {
   const size  = Math.round(window.devicePixelRatio * 16);
   const tasks: Promise<void>[] = [];
   for (const [typeId, inner] of Object.entries(NODE_SVG_INNER)) {
-    for (const color of ACCENT_COLORS) {
+    for (const color of accentColors()) {
       tasks.push(loadBitmap(typeId, inner, color, size));
     }
   }

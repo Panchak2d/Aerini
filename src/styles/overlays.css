@@ -17,7 +17,6 @@
   align-items: flex-start;
   justify-content: center;
   padding-top: 14vh;
-  backdrop-filter: blur(2px);
 }
 #command-palette-overlay.hidden { display: none; }
 
@@ -95,12 +94,18 @@
 .icon-svg { display: block; flex-shrink: 0; }
 .palette-result-name { font-size: 13px; color: var(--t1); font-weight: 500; }
 .palette-result-cat  { font-size: 11px; color: var(--t3); }
-.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; }
+.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono); }
+/* CSS hooks replacing palette-manager.ts's two inline .style.* writes
+   (wire-drop-mismatch dimming, mismatch-click flash). Same visual result, now
+   themeable/adjustable from CSS instead of hardcoded in JS. No transition on
+   the flash state — matches the original's instant on/off, not new motion. */
+.palette-result--disabled { opacity: .35; }
+.palette-result--flash-error { outline: 1px solid var(--red); }
 
 
 /* ── SHORTCUTS MODAL ────────────────────────────────────────────────────────── */
 
-#shortcuts-modal { position: fixed; inset: 0; background: rgba(0,0,0,.68); z-index: 500; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); }
+#shortcuts-modal { position: fixed; inset: 0; background: rgba(0,0,0,.68); z-index: 500; display: flex; align-items: center; justify-content: center; }
 #shortcuts-modal.hidden { display: none; }
 .shortcuts-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 12px; width: 440px; overflow: hidden; box-shadow: 0 28px 56px rgba(0,0,0,.5); }
 .shortcuts-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--bd); font-size: 14px; font-weight: 600; }
@@ -110,12 +115,12 @@
 .shortcut-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--t2); padding: 2px 0; }
 .shortcut-note { font-size: 10px; color: var(--t3); margin-left: 4px; }
 .shortcut-keys { display: flex; gap: 3px; }
-.shortcut-keys kbd { font-size: 11px; color: var(--t1); background: var(--bg3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: "SF Mono",monospace; }
+.shortcut-keys kbd { font-size: 11px; color: var(--t1); background: var(--bg3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono); }
 
 
 /* ── IMPORT PREVIEW MODAL ───────────────────────────────────────────────────── */
 
-#import-preview-modal { position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 500; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+#import-preview-modal { position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 500; display: flex; align-items: center; justify-content: center; }
 #import-preview-modal.hidden { display: none; }
 .import-modal-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; overflow: hidden; box-shadow: 0 36px 72px rgba(0,0,0,.6); }
 .import-modal-header { padding: 18px 22px 0; }
@@ -139,15 +144,21 @@
 
 /* ── SETTINGS MODALS ────────────────────────────────────────────────────────── */
 
-#settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+#settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; }
 #settings-modal.hidden { display: none; }
-#wf-settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+#wf-settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; }
 #wf-settings-modal.hidden { display: none; }
 .settings-toggle { width: 38px; height: 22px; appearance: none; background: var(--color-surface-3); border-radius: 11px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s; border: 1px solid var(--bd); }
 .settings-toggle:checked { background: var(--accent); border-color: var(--accent); }
 .settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .settings-toggle:checked::after { transform: translateX(16px); }
 .settings-number-input { flex: 0 0 52px; width: 52px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; }
+/* overrides base.css's global `select { width: 100% }` (higher
+   specificity, one class vs. one type selector, wins regardless of source
+   order) so the theme picker sizes to its content like the row's other
+   controls (.settings-toggle/.settings-number-input) instead of stretching
+   across the remaining flex space. */
+.settings-select { flex: 0 0 auto; width: auto; min-width: 140px; }
 .settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); }
 .settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; }
 .settings-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
@@ -243,7 +254,7 @@
   position: fixed;
   z-index: 9999;
   background: #0d1117;
-  border: 1.5px solid var(--blue);
+  border: 1.5px solid var(--color-focus);
   border-radius: 4px;
   color: var(--t1);
   font-size: 12px;
@@ -252,7 +263,7 @@
   padding: 2px 6px;
   outline: none;
   height: 22px;
-  box-shadow: 0 0 0 3px rgba(77,158,255,.15);
+  box-shadow: 0 0 0 3px rgba(var(--color-focus-rgb),.15);
 }
 
 
@@ -368,7 +379,7 @@
   border-radius: 4px;
   padding: 1px 5px;
   font-size: 11px;
-  font-family: "SF Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   color: var(--blue);
 }
 
@@ -410,7 +421,7 @@
 
 /* ── TOOLTIPS ───────────────────────────────────────────────────────────────── */
 
-/* JS-driven ARIA tooltip (P31 — WCAG 1.4.13).                                */
+/* JS-driven ARIA tooltip                               */
 /* Rendered by tooltip-manager.ts into a single reused div[role="tooltip"].   */
 /* Hoverable (criterion 2), Escape-dismissible (criterion 1), persistent.     */
 .aria-tooltip {
@@ -491,7 +502,7 @@
 
 /* ── MISC OVERRIDES & STATE ─────────────────────────────────────────────────── */
 
-/* Drawer tabs use sentence-case 12px — distinct from panel-tabs (11px uppercase) */
+/* Drawer tabs: sentence-case 12px (overrides the smaller uppercase default) */
 .drawer-tab {
   font-size: 12px;
   text-transform: none;
@@ -554,7 +565,7 @@
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-action-nav);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
@@ -595,7 +606,6 @@
   align-items: center;
   justify-content: center;
   background: rgba(0,0,0,.6);
-  backdrop-filter: blur(2px);
 }
 
 .panel-drawer {
@@ -643,6 +653,6 @@
   flex-shrink: 0;
 }
 .panel-close-btn:hover { color: var(--t1); background: var(--bg4); }
-.panel-close-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.panel-close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 /* export-server panel styles → export-server.css */

@@ -8,6 +8,8 @@ import { hideTooltipFor } from "./tooltip-manager";
 
 type Toast = (msg: string, type: "success" | "error" | "info") => void;
 
+const NO_TRIGGER_TOOLTIP = "Add a Schedule or Webhook trigger to enable Run on launch";
+
 export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManager): Promise<void> {
   const btn = document.getElementById("btn-always-on") as HTMLButtonElement | null;
   if (!btn) return;
@@ -19,7 +21,10 @@ export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManag
   const wrap = document.getElementById("always-on-wrap");
   if (!hasSchedulableTrigger) {
     btn.classList.add("hidden");
-    if (wrap) wrap.style.display = "";
+    if (wrap) {
+      wrap.style.display = "";
+      wrap.setAttribute("data-tooltip", NO_TRIGGER_TOOLTIP);
+    }
     return;
   }
 

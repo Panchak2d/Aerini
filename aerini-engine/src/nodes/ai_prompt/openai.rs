@@ -96,17 +96,7 @@ pub(super) async fn call_openai_compatible(
     )
 }
 
-/// Recovery Plan Session 3 gap 3: assert the actual request body bytes sent
-/// with no `attachments` key are byte-identical to the pre-attachment-era
-/// shape, via a real local mock HTTP server — not a diff read by eye.
-///
-/// Scope note: covers the OpenAI-compatible path only. `call_anthropic` and
-/// `call_gemini` hardcode their real endpoints so a localhost mock cannot be
-/// substituted without either live network or refactoring production
-/// endpoint-selection code (out of scope, Rule 6). `process_attachments`
-/// itself is already fully covered in `attachment_tests`. Anthropic/Gemini
-/// body-shape backward-compatibility for the no-attachments case remains a
-/// traced-not-executed claim — flagged `UNCERTAIN`, not asserted as verified.
+
 #[cfg(test)]
 mod backward_compat_tests {
     use super::*;

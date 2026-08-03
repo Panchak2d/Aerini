@@ -3,7 +3,7 @@
    ══════════════════════════════════════════ */
 
 /* ============================================================
-   MEDIA PREVIEW (Chat 6)
+   MEDIA PREVIEW 
    Classes emitted by output-renderer.ts renderMediaBatch
    ============================================================ */
 
@@ -94,7 +94,7 @@
 }
 
 /* ============================================================
-   SOCIAL UPLOAD OUTPUT (Chat 6)
+   SOCIAL UPLOAD OUTPUT 
    Classes emitted by renderSocialUploadOutput
    ============================================================ */
 
@@ -149,7 +149,7 @@
   letter-spacing: .06em;
   color: var(--red);
   margin-bottom: 3px;
-  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
 }
 
 .soc-error-filename {
@@ -180,7 +180,7 @@
 }
 
 /* ============================================================
-   SOCIAL SETUP GUIDE PANEL (Chat 6)
+   SOCIAL SETUP GUIDE PANEL 
    ============================================================ */
 
 .ssg-overlay {
@@ -190,7 +190,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
 }
 
 .ssg-overlay.hidden { display: none; }
@@ -352,7 +351,7 @@
 .ssg-step-text a:hover { text-decoration: underline; }
 
 .ssg-step-text code {
-  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   background: var(--bg4);
   border: 1px solid var(--bd);
@@ -413,7 +412,7 @@
 }
 
 .ssg-redirect-uri {
-  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--green);
   background: var(--bg3);
@@ -444,7 +443,7 @@
 .ssg-pane.hidden { display: none; }
 
 .ssg-copyable {
-  font-family: "SF Mono", "Fira Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   background: var(--bg4);
   border: 1px solid rgba(77,158,255,.25);
@@ -459,7 +458,7 @@
 
 
 
-/* ── CSP: Inline-style replacements (patch-01) ──────────────────────────── */
+/* ── CSP: Inline-style replacements  ──────────────────────────── */
 
 /* Status modifier classes for output-renderer */
 .sum-header--success { border-left: 3px solid var(--green); }
@@ -485,11 +484,13 @@
 .dbg-mark--info  { color: var(--t3); }
 .dbg-time        { color: var(--t3); }
 
-/* Palette icon category colors */
-.palette-result-icon--action  { background: #0f1f35; color: #4d9eff; }
-.palette-result-icon--ai      { background: #1a1035; color: #a78bfa; }
-.palette-result-icon--logic   { background: #0b2820; color: #34d399; }
-.palette-result-icon--utility { background: #211600; color: #f59e0b; }
+/* Palette icon category colors, was raw Midnight hex, now derived
+   from the same --cat-* tokens the sidebar/canvas already theme against, so
+   this no longer breaks under Paper. */
+.palette-result-icon--action  { background: color-mix(in srgb, var(--cat-action) 16%, var(--bg1) 84%); color: var(--cat-action); }
+.palette-result-icon--ai      { background: color-mix(in srgb, var(--cat-ai) 16%, var(--bg1) 84%); color: var(--cat-ai); }
+.palette-result-icon--logic   { background: color-mix(in srgb, var(--cat-logic) 16%, var(--bg1) 84%); color: var(--cat-logic); }
+.palette-result-icon--utility { background: color-mix(in srgb, var(--cat-utility) 16%, var(--bg1) 84%); color: var(--cat-utility); }
 
 /* run-manager inline style replacements */
 .error-detail-label--interactive { cursor: pointer; user-select: none; }

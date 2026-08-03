@@ -21,7 +21,7 @@ impl Node for WaitNode {
     fn display_name(&self) -> &'static str { "Wait" }
     fn node_type(&self)    -> NodeType     { NodeType::Utility }
     fn version(&self)      -> &'static str { "1.0.0" }
-    fn description(&self)  -> &'static str { "Pause the workflow until a specific date and time, then continue." }
+    fn description(&self)  -> &'static str { "Pause the workflow for a fixed duration, or poll a field until it matches an expected value." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -98,7 +98,9 @@ impl Node for WaitNode {
                 let field          = input.input["field"].as_str().unwrap_or("").to_string();
                 let expected       = input.input["expected"].clone();
                 let poll_secs      = input.input["poll_interval_secs"].as_f64().unwrap_or(2.0).max(0.5);
-                let timeout_secs   = input.input["timeout_secs"].as_f64().unwrap_or(60.0).max(1.0);
+                // upper-bounded to mirror duration_secs's existing 3600s
+                // hard cap (line ~88) — previously only .max(1.0), no ceiling.
+                let timeout_secs   = input.input["timeout_secs"].as_f64().unwrap_or(60.0).clamp(1.0, 3600.0);
 
                 if field.is_empty() {
                     return NodeOutput::failure(NodeError::unrecoverable(
@@ -139,6 +141,77 @@ impl Node for WaitNode {
                 "INVALID_MODE", format!("Unknown mode: '{}'. Use 'duration' or 'condition'.", other)
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+    use crate::node::Node;
+
+    fn make_input(val: Value) -> NodeInput {
+        NodeInput {
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        val,
+            context:      ExecutionContext::default(),
+        }
+    }
+
+    /// S4-9 (edge case): a `timeout_secs` far above the cap must time out at
+    /// the clamped 3600s ceiling, not the requested value — uses a paused
+    /// clock (same pattern as executor/mod.rs's timeout tests) so the test
+    /// doesn't actually wait an hour.
+    #[tokio::test]
+    async fn condition_timeout_secs_clamped_to_3600s() {
+        tokio::time::pause();
+
+        let input = make_input(json!({
+            "mode": "condition",
+            "field": "never.matches",
+            "expected": "x",
+            "poll_interval_secs": 100.0,
+            "timeout_secs": 999_999.0
+        }));
+
+        let handle = tokio::spawn(async move { WaitNode.execute(input).await });
+
+        tokio::time::advance(Duration::from_secs(3601)).await;
+        tokio::task::yield_now().await;
+
+        let out = handle.await.expect("task panicked");
+        assert!(out.success);
+        let data = out.output.expect("expected output data");
+        assert_eq!(data["timed_out"], json!(true));
+        assert_eq!(data["waited_ms"], json!(3600u64 * 1000));
+    }
+
+    /// S4-9 (normal case): a `timeout_secs` already within the cap is
+    /// unaffected by the clamp.
+    #[tokio::test]
+    async fn condition_timeout_secs_within_cap_unaffected() {
+        tokio::time::pause();
+
+        let input = make_input(json!({
+            "mode": "condition",
+            "field": "never.matches",
+            "expected": "x",
+            "poll_interval_secs": 1.0,
+            "timeout_secs": 2.0
+        }));
+
+        let handle = tokio::spawn(async move { WaitNode.execute(input).await });
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let out = handle.await.expect("task panicked");
+        assert!(out.success);
+        let data = out.output.expect("expected output data");
+        assert_eq!(data["timed_out"], json!(true));
+        assert_eq!(data["waited_ms"], json!(2000u64));
     }
 }
 

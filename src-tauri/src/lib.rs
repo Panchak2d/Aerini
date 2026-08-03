@@ -1,5 +1,6 @@
 mod commands;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -19,9 +20,249 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 
-/// Holds the active manual-run cancellation token.
-/// Replaced at the start of each run; cleared on completion.
-pub struct ActiveRunToken(pub Mutex<Option<CancellationToken>>);
+/// Bookkeeping for in-flight manual `run_workflow` invocations. Two
+/// independent concerns, deliberately keyed differently:
+///
+/// - **Cancellation** — one [`CancellationToken`] per `run_id` (a fresh id
+///   the frontend generates for *every* `run_workflow` call, including
+///   single-node test runs — see `run-manager/state-machine.ts::start`).
+///   Each `run_workflow` invocation registers its own token under its own
+///   `run_id` and removes only that entry on completion (success, error, or
+///   cancellation) — see `commands/workflow.rs::run_workflow`. `cancel_run`
+///   takes a `run_id` and cancels only that entry, so two concurrent
+///   invocations (e.g. a whole-workflow run racing a single-node test run)
+///   each hold an independent cancellation handle instead of sharing one.
+///
+/// - **Duplicate-execution guard** — one `tokio::sync::Mutex<()>` exec-lock
+///   per `workflow_id` (the workflow's own stable id parsed from the saved
+///   JSON — *not* `run_id`, which is fresh every call and would never
+///   collide with anything). A second `run_workflow` call for the *same*
+///   `workflow_id` while the first is still in flight is rejected with
+///   `SchedulerError::AlreadyRunning` rather than executing concurrently.
+///   All three of this codebase's execution surfaces serialize same-workflow
+///   runs this way: `SchedulerDaemon::exec_locks` (scheduler, skip-if-busy),
+///   `ApiState::exec_locks` (`aerini-server`, reject-if-busy after a 5s
+///   timeout), and this exec-lock for desktop. A manual Run is a direct
+///   user action, so it gets the server's reject-if-busy shape — an
+///   explicit "already running" response, not a silently dropped attempt.
+///   Per-`run_id` cancellation tracking alone would not stop two runs of
+///   the identical saved workflow from executing fully concurrently and
+///   doubling every side effect (HTTP calls, file writes, DB rows,
+///   emails); closing that gap is this exec-lock's entire job.
+///
+/// Single-node test runs build their subgraph under a distinct
+/// `${workflowId}_sub` id (`run-manager/stream-handler.ts::handleRunSingleNode`),
+/// so they use their own exec-lock bucket and do not serialize against (or
+/// get rejected by) a concurrent full run of the same open canvas — a
+/// deliberate, disclosed scope boundary. Same-canvas overlap between a full
+/// run and a single-node test run is instead prevented client-side, by both
+/// entry points sharing one `isRunning`/`activeRunId` pair on
+/// `RunStateMachine` (see `run-manager/state-machine.ts`); this exec-lock's
+/// job is specifically to stop two invocations of the *identical* saved
+/// workflow from double-executing.
+///
+/// `aerini_engine::executor::WorkflowExecutor::run()` creates fully
+/// independent internal state per call (`new_shared_state`), so concurrent
+/// runs are already independent at the engine level — this struct's locks
+/// exist purely for command-layer bookkeeping, with no engine-level
+/// counterpart needed.
+pub struct ActiveRunToken {
+    cancel_tokens: Mutex<HashMap<String, CancellationToken>>,
+    exec_locks:    Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ActiveRunToken {
+    pub fn new() -> Self {
+        Self {
+            cancel_tokens: Mutex::new(HashMap::new()),
+            exec_locks:    Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a fresh cancellation token under `run_id`. `run_id` is a
+    /// fresh id generated per invocation by the frontend, so this always
+    /// inserts a new entry rather than meaningfully overwriting one.
+    pub fn register(&self, run_id: &str, token: CancellationToken) {
+        self.cancel_tokens
+            .lock().expect("ActiveRunToken cancel_tokens lock poisoned")
+            .insert(run_id.to_string(), token);
+    }
+
+    /// Remove `run_id`'s cancellation token. Call once that run finishes —
+    /// success, error, or cancellation — so a stale id can never later be
+    /// mistaken for a still-active run.
+    pub fn unregister(&self, run_id: &str) {
+        self.cancel_tokens
+            .lock().expect("ActiveRunToken cancel_tokens lock poisoned")
+            .remove(run_id);
+    }
+
+    /// Cancel the run registered under `run_id`. No-op if that id isn't
+    /// currently active (already finished, or never existed) — matches the
+    /// pre-existing "no-op when idle" contract `cancel_run` has always had.
+    pub fn cancel(&self, run_id: &str) {
+        if let Some(token) = self.cancel_tokens
+            .lock().expect("ActiveRunToken cancel_tokens lock poisoned")
+            .get(run_id)
+        {
+            token.cancel();
+        }
+    }
+
+    /// Acquire the exec-lock for `workflow_id`, waiting up to `timeout`.
+    /// `Ok` holds the lock until the returned guard drops (i.e. for the
+    /// caller's entire run). `Err(SchedulerError::AlreadyRunning)` if
+    /// another run of the same `workflow_id` is still holding it once
+    /// `timeout` elapses.
+    ///
+    /// Locks are created lazily, one per distinct `workflow_id` ever run
+    /// this process lifetime, and never evicted. Unlike the server's
+    /// equivalent (`ApiState::exec_locks`, which sweeps once it holds over
+    /// 1000 entries — sized for arbitrary external API callers), desktop's
+    /// workflow-id set is one local user's own saved workflows; the
+    /// unbounded-growth risk the server guards against does not apply at
+    /// this scale. Revisit if that assumption stops holding.
+    pub async fn acquire_exec_lock(
+        &self,
+        workflow_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, aerini_engine::scheduler::SchedulerError> {
+        let lock = {
+            let mut locks = self.exec_locks
+                .lock().expect("ActiveRunToken exec_locks lock poisoned");
+            Arc::clone(
+                locks.entry(workflow_id.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            )
+        };
+        match tokio::time::timeout(timeout, lock.lock_owned()).await {
+            Ok(guard)     => Ok(guard),
+            Err(_elapsed) => Err(aerini_engine::scheduler::SchedulerError::AlreadyRunning),
+        }
+    }
+}
+
+impl Default for ActiveRunToken {
+    fn default() -> Self { Self::new() }
+}
+
+#[cfg(test)]
+mod active_run_token_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_targets_only_the_named_run_id() {
+        let bookkeeping = ActiveRunToken::new();
+        let token_a = CancellationToken::new();
+        let token_b = CancellationToken::new();
+        bookkeeping.register("run_a", token_a.clone());
+        bookkeeping.register("run_b", token_b.clone());
+
+        bookkeeping.cancel("run_a");
+
+        assert!(token_a.is_cancelled(), "cancel(\"run_a\") must cancel run_a's token");
+        assert!(!token_b.is_cancelled(), "cancel(\"run_a\") must not touch run_b's token");
+    }
+
+    #[tokio::test]
+    async fn cancel_of_unknown_run_id_is_a_silent_no_op() {
+        let bookkeeping = ActiveRunToken::new();
+        // Must not panic — matches cancel_run's pre-existing "no-op when idle" contract.
+        bookkeeping.cancel("never_registered");
+    }
+
+    #[tokio::test]
+    async fn unregister_then_cancel_is_a_no_op_not_a_double_cancel_of_a_reused_id() {
+        let bookkeeping = ActiveRunToken::new();
+        let first_token = CancellationToken::new();
+        bookkeeping.register("run_1", first_token.clone());
+        bookkeeping.unregister("run_1");
+
+        // A hypothetical second run reusing the same id string (ids are
+        // fresh-per-call in practice, but nothing stops the frontend from
+        // reusing a string) must only ever affect the second registration.
+        let second_token = CancellationToken::new();
+        bookkeeping.register("run_1", second_token.clone());
+        bookkeeping.cancel("run_1");
+
+        assert!(!first_token.is_cancelled(), "the unregistered, finished run must be untouched");
+        assert!(second_token.is_cancelled(), "cancel must reach the currently-registered run_1");
+    }
+
+    #[tokio::test]
+    async fn second_acquire_for_the_same_workflow_id_is_rejected_while_the_first_holds_the_lock() {
+        let bookkeeping = ActiveRunToken::new();
+        let short_timeout = std::time::Duration::from_millis(50);
+
+        let _first_guard = bookkeeping
+            .acquire_exec_lock("wf_1", short_timeout)
+            .await
+            .expect("first acquire must succeed immediately — lock is uncontended");
+
+        let second = bookkeeping.acquire_exec_lock("wf_1", short_timeout).await;
+        match second {
+            Err(aerini_engine::scheduler::SchedulerError::AlreadyRunning) => {}
+            other => panic!("expected AlreadyRunning while the first guard is held, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn acquire_succeeds_again_once_the_first_guard_is_dropped() {
+        let bookkeeping = ActiveRunToken::new();
+        let timeout = std::time::Duration::from_millis(200);
+
+        let first_guard = bookkeeping
+            .acquire_exec_lock("wf_2", timeout)
+            .await
+            .expect("first acquire must succeed");
+        drop(first_guard);
+
+        bookkeeping
+            .acquire_exec_lock("wf_2", timeout)
+            .await
+            .expect("acquire must succeed again once the prior run's guard has dropped");
+    }
+
+    #[tokio::test]
+    async fn different_workflow_ids_never_contend_with_each_other() {
+        let bookkeeping = ActiveRunToken::new();
+        let timeout = std::time::Duration::from_millis(50);
+
+        // Both held at once — must not block or reject each other; this is
+        // the case that keeps unrelated workflows running fully concurrently,
+        // matching WorkflowExecutor::run()'s own per-call independence.
+        let _guard_a = bookkeeping.acquire_exec_lock("wf_a", timeout).await
+            .expect("wf_a must acquire uncontended");
+        let _guard_b = bookkeeping.acquire_exec_lock("wf_b", timeout).await
+            .expect("wf_b must acquire uncontended even while wf_a's guard is held");
+    }
+
+    #[tokio::test]
+    async fn a_queued_second_acquire_proceeds_if_the_first_releases_before_timeout() {
+        let bookkeeping = std::sync::Arc::new(ActiveRunToken::new());
+        let generous_timeout = std::time::Duration::from_millis(500);
+
+        let first_guard = bookkeeping
+            .acquire_exec_lock("wf_3", generous_timeout)
+            .await
+            .expect("first acquire must succeed");
+
+        let waiter = {
+            let bookkeeping = std::sync::Arc::clone(&bookkeeping);
+            tokio::spawn(async move {
+                bookkeeping.acquire_exec_lock("wf_3", generous_timeout).await
+            })
+        };
+
+        // Give the waiter a moment to actually start waiting on the lock,
+        // then release it well before generous_timeout elapses.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(first_guard);
+
+        let result = waiter.await.expect("waiter task must not panic");
+        assert!(result.is_ok(), "queued acquire must succeed once the lock is released, not time out");
+    }
+}
 
 struct TauriEventSink {
     handle: tauri::AppHandle,
@@ -151,12 +392,13 @@ async fn check_nodejs_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Cancel the currently running manual workflow, if any. No-op when idle.
+/// Cancel a specific in-flight manual run by its `run_id`. No-op if that
+/// `run_id` isn't currently active — matches the previous "no-op when idle"
+/// contract, now scoped to one run instead of whatever happened to be the
+/// single global slot's contents.
 #[tauri::command]
-fn cancel_run(active_run: tauri::State<'_, Arc<ActiveRunToken>>) {
-    if let Some(ref token) = *active_run.0.lock().expect("ActiveRunToken lock poisoned") {
-        token.cancel();
-    }
+fn cancel_run(run_id: String, active_run: tauri::State<'_, Arc<ActiveRunToken>>) {
+    active_run.cancel(&run_id);
 }
 
 #[tauri::command]
@@ -265,6 +507,14 @@ fn cleanup_old_temp_files(dir: &std::path::Path) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Batch AH (PLAN_CORE.md §M): install the memory-tracking allocator's
+    // tracker before anything else — must happen before the first workflow
+    // could possibly run, and this is the earliest point in the app's
+    // lifecycle. The #[global_allocator] itself (aerini-engine/src/lib.rs)
+    // is already active from the process's first allocation regardless;
+    // this call only wires up where tracked allocations get reported to.
+    aerini_engine::mem_tracking::install();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -317,7 +567,16 @@ pub fn run() {
                 Arc::clone(&registry),
                 Arc::clone(&resolver) as Arc<dyn aerini_engine::executor::CredentialResolver>,
                 Arc::clone(&event_sink),
-            ).with_parallel_execution(parallel_execution));
+            )
+            .with_parallel_execution(parallel_execution)
+            // T4: desktop is single-tenant by definition — the
+            // person who configured this schedule is the same person whose
+            // machine runs it, same trust level as their own manual runs
+            // (see commands/workflow.rs::run_workflow's identical grant).
+            // Never set on aerini-server (main.rs / api_server/mod.rs),
+            // where a scheduled/webhook run has no per-caller token scope to
+            // derive trust from.
+            .with_caller_is_admin(true));
             daemon.start(tauri::async_runtime::handle().inner());
 
             app.manage(Arc::clone(&db));
@@ -329,7 +588,7 @@ pub fn run() {
             );
             app.manage(Arc::clone(&daemon));
             app.manage(Arc::clone(&event_sink));
-            app.manage(Arc::new(ActiveRunToken(Mutex::new(None))));
+            app.manage(Arc::new(ActiveRunToken::new()));
 
             // G5: async startup cleanup of temp media files older than 24h
             // spawn_blocking so the std::fs directory scan doesn't occupy a tokio thread
@@ -338,6 +597,62 @@ pub fn run() {
                 let _ = tokio::task::spawn_blocking(move || {
                     cleanup_old_temp_files(&temp_media_dir);
                 }).await;
+            });
+
+            // Batch AH (PLAN_CORE.md §M): periodic live memory-breakdown
+            // event, consumed by the frontend's memory indicator (Batch
+            // 13c, not part of this batch). 2s interval — frequent enough
+            // to feel live, cheap enough (a DashMap iteration over however
+            // many runs/nodes are currently in flight, realistically single
+            // digits) that this is not worth making configurable. Emits
+            // only when `snapshot()` is non-empty, i.e. only while at least
+            // one workflow is actually running — most of this product's
+            // target deployments sit idle between scheduled runs (§D), and
+            // there is nothing useful to tell a listener during that time.
+            let mem_event_sink = Arc::clone(&event_sink);
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                loop {
+                    interval.tick().await;
+                    let breakdown = aerini_engine::mem_tracking::snapshot();
+                    if !breakdown.is_empty() {
+                        if let Ok(payload) = serde_json::to_value(&breakdown) {
+                            mem_event_sink.emit("memory-breakdown", payload);
+                        }
+                    }
+                }
+            });
+
+            // Live-performance push, alongside — not replacing — the 2s
+            // memory-breakdown event above (the MEM chip stays on the slow
+            // poll; this panel is for depth). 300ms: perf_monitor's own
+            // sampler ticks every SAMPLE_INTERVAL_MS=150ms — pushing at
+            // exactly that rate would often re-emit a payload with no new
+            // sampler data since the prior tick; doubling the sampler's own
+            // interval still lands ~6.7x faster than the 2s baseline for a
+            // live-updating view without emitting more often than the
+            // underlying data can actually change. Broadcasts every
+            // currently-running workflow at once
+            // (`perf_monitor::all_live_snapshots`) — the same "all-live,
+            // frontend filters/aggregates per workflow" shape
+            // `memory-breakdown` above uses (`statusbar-fields.ts::initMemChip`
+            // filters `RunBreakdown[]` to `wfManager.currentId` and
+            // aggregates the rest into `bg-mem-badge`) — deliberately not
+            // scoped to a single "currently open" workflow_id, which would
+            // silently lose that same background-runs case. Emits only
+            // when non-empty, same idle-cost reasoning as memory-breakdown.
+            let perf_event_sink = Arc::clone(&event_sink);
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
+                loop {
+                    interval.tick().await;
+                    let live = aerini_engine::perf_monitor::all_live_snapshots();
+                    if !live.is_empty() {
+                        if let Ok(payload) = serde_json::to_value(&live) {
+                            perf_event_sink.emit("performance-live", payload);
+                        }
+                    }
+                }
             });
 
             // OS close button hides to tray rather than quitting
@@ -429,6 +744,7 @@ pub fn run() {
             commands::workflow::set_setting,
             commands::workflow::clear_chat_session,
             commands::workflow::save_run_record,
+            commands::workflow::save_performance_report,
             commands::workflow::save_run_started,
             commands::workflow::list_run_records,
             commands::workflow::delete_run_record,
@@ -455,6 +771,13 @@ pub fn run() {
             commands::plugins::list_installed_plugins,
             commands::plugins::install_plugin_from_path,
             commands::plugins::remove_plugin,
+            commands::memory::get_memory_breakdown,
+            commands::performance::get_live_performance,
+            commands::performance::get_recent_performance,
+            commands::performance::get_performance_report,
+            commands::performance::list_performance_reports,
+            commands::performance::delete_performance_report,
+            commands::performance::clear_performance_reports,
             pick_folder_dialog,
             pick_wasm_file_dialog,
             write_temp_file,

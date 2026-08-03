@@ -1,10 +1,3 @@
-/**
- * T1-9 (S10-1, CRITICAL): `localToIso` used to append ":00Z" to the raw
- * datetime-local value with no real timezone conversion — correct only for
- * UTC+0 users. These tests pin `process.env.TZ` (Node/V8 re-reads it per
- * `Date` construction, confirmed empirically) to non-UTC zones and assert
- * the stored UTC instant actually matches the intended local wall-clock time.
- */
 import { describe, it, expect, afterEach } from "vitest";
 import { isoToLocal, localToIso } from "../node-configs/schedule-config";
 
@@ -36,8 +29,6 @@ describe("localToIso", () => {
 
   it("regression: does NOT reproduce the pre-fix bug of treating local time as UTC", () => {
     process.env.TZ = "Asia/Kolkata";
-    // Pre-fix behavior would have returned "2025-06-15T09:00:00Z" (wrong —
-    // that's 2:30pm IST, not 9am IST).
     expect(localToIso("2025-06-15T09:00")).not.toBe("2025-06-15T09:00:00Z");
   });
 

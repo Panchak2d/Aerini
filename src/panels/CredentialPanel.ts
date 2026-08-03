@@ -45,7 +45,7 @@ export class CredentialPanel {
             <div class="cred-panel-subtitle">API keys and service credentials — stored encrypted on your device. Never sent anywhere.</div>
           </div>
           <button class="cred-panel-close" id="cred-close">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
@@ -53,7 +53,7 @@ export class CredentialPanel {
 
         ${isEmpty ? `
         <div class="cred-empty-state">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           <div class="cred-empty-state-title">No credentials yet</div>
           <div class="cred-empty-state-desc">Add your first API key or service credential below. Credentials are used by nodes like HTTP Request, AI Prompt, and Send Email.</div>
         </div>` : `
@@ -274,14 +274,11 @@ function credTypeLabel(value: string): string {
   return labels[value] ?? value;
 }
 
-// S10-5: render() (and therefore this function) is called fresh on every
-// panel open, save, and delete — each call used to add a brand-new
-// `document`-level "mousedown" listener with no removal, permanently
-// leaking one dead listener per render. Track the previously-registered
-// cleanup and run it before adding a new one, so at most one such
-// listener is ever attached at a time, regardless of how many times the
-// panel re-renders. Exported (previously module-private) solely so this
-// fix has direct test coverage — same precedent as Batch G/H's exports.
+// Cleanup for the currently-attached outside-click listener, if any.
+// render() is called fresh on every panel open, save, and delete, and
+// each call re-invokes this function — calling the stored cleanup before
+// registering a new listener keeps at most one attached at a time, no
+// matter how many times the panel re-renders.
 let activeCredTypeSelectCleanup: (() => void) | null = null;
 
 export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void): HTMLElement {
@@ -303,7 +300,7 @@ export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) =
 
   const arrow = document.createElement("span");
   arrow.className = "csel-arrow";
-  arrow.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  arrow.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>`;
 
   trigger.appendChild(label);
   trigger.appendChild(arrow);

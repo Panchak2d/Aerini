@@ -15,7 +15,7 @@ use super::workflows::PaginationParams;
 
 /// Returns `Ok(())` if `caller` is unrestricted (admin, or no ACL rows) or
 /// `workflow_id` is explicitly granted; `Err` (ready to return) otherwise.
-/// Mirrors `list_scheduler`/`sse_events`'s read-side ACL check (S7-1),
+/// Mirrors `list_scheduler`/`sse_events`'s read-side ACL check,
 /// extended to start/stop so a write-scoped, ACL-restricted token can't
 /// act on a workflow outside its grants just by knowing its id (T0-1e).
 fn require_workflow_acl(
@@ -47,7 +47,7 @@ pub async fn list_scheduler(
     // Per-workflow ACL (P3-2) — previously enforced only for the SSE stream
     // (sse_events), leaving this endpoint returning every workflow's job row,
     // secret included, to any read-scoped token regardless of ACL grants
-    // (AUDIT_REPORT.md S7-1). None = unrestricted (admin, or no ACL rows).
+    //. None = unrestricted (admin, or no ACL rows).
     let acl_filter = match s.token_store.acl_filter(&caller) {
         Ok(f)  => f,
         Err(e) => return (
@@ -79,7 +79,7 @@ pub async fn list_scheduler(
     match result {
         Ok(Ok((items, total))) => {
             // Never return a webhook trigger's plaintext secret over the API
-            // (AUDIT_REPORT.md S6-2 / S7-1) — the scheduler's own listener
+            // — the scheduler's own listener
             // still holds the real secret internally for HMAC comparison.
             let items: Vec<_> = items.iter().map(|row| row.redacted()).collect();
             (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": offset}))).into_response()

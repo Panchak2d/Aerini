@@ -17,24 +17,7 @@ export interface PropSchema {
 export const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
 const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
 
-// DEVIATION (Patch 19): the plan's field-renderer.ts spec lists a fifth
-// sub-function, renderBoolField(). No prop.type === "boolean" branch existed
-// in the original if/else chain — boolean-typed config fields fell through to
-// the text-input branch. renderBoolField was added in patch 26b (mini-patch
-// after P26) once confirmed that "persist" on the variables nodes reaches
-// renderConfigFieldsLoop and benefits from a real checkbox. renderArrayField
-// remains absent: all array-type input props are in CUSTOM_UI_KEYS (lifecycle.ts)
-// and never reach this loop — adding it would be dead code (Rule 25).
 
-// DEVIATION (Patch 26): The plan's FieldRenderer type specifies 4 parameters
-// (key, prop, node, onChange). Actual sub-renderers need more parameters
-// (cur, canvasEl, syncRequired). Forcing 4-param signatures would require
-// changing sub-renderer call sites, which is a behavior change. The dispatch
-// table covers the prop.type-keyed subset of the chain: "number" and "boolean"
-// have dedicated renderers. renderTextField is the explicit fallback because
-// it requires cur+canvasEl which are not in the type-keyed subset.
-// renderArrayField is absent: all array-type input props are excluded by
-// CUSTOM_UI_KEYS in lifecycle.ts and never reach this path (Rule 25).
 
 // ── Label formatter ───────────────────────────────────────────────────────────
 
@@ -150,9 +133,6 @@ function renderBoolField(
   return wrap;
 }
 
-// Cron expression — show preset picker above the input. Not part of the
-// plan's named function list, but split out for the same reason the others
-// were: it is its own branch in the original if/else chain.
 function renderCronField(
   key: string, cur: string, node: CanvasNode,
   onChange: () => void, syncRequired: () => void,
@@ -193,9 +173,6 @@ function renderCronField(
   return wrap;
 }
 
-// Multiline textarea — keys with free-form / long-form content. Same note
-// as renderCronField above: not in the plan's named list, split out anyway
-// because it is a distinct branch of the original chain.
 const MULTILINE_KEYS = ["body", "command", "prompt", "system", "condition",
   "mock_payload", "cases", "mappings", "content", "code", "goal", "tools", "context"];
 
@@ -278,7 +255,7 @@ function renderMultilineField(
 // renderArrayField is intentionally absent: no array-type input fields reach
 // renderConfigFieldsLoop — all array props in node schemas are in CUSTOM_UI_KEYS
 // and filtered out in lifecycle.ts before the field loop runs. Adding it would
-// be dead code (Rule 25).
+// be dead code.
 type FieldTypeRenderer = (
   key: string, prop: PropSchema,
   node: CanvasNode, onChange: () => void, syncRequired: () => void,

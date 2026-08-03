@@ -12,7 +12,7 @@ use crate::node::NodeRegistry;
 use crate::cron::next_cron_delay_secs;
 use crate::EventSink;
 
-use super::{SchedulerDb, SchedulerStatusEvent, TriggerKind};
+use super::{ScheduledJobRow, SchedulerDb, SchedulerStatusEvent, TriggerKind};
 
 /// Decrements `active_runs` on drop, covering success, early return, and panic.
 struct ActiveRunGuard(Arc<AtomicUsize>);
@@ -65,6 +65,43 @@ impl Drop for AbortOnDropTasks {
     }
 }
 
+/// Aborts a single wrapped task if dropped before it finishes — the
+/// single-handle counterpart to [`AbortOnDropTasks`] above, used by
+/// [`fire_once_with_vars`]'s panic-isolation wrapper (see its own doc
+/// comment) to preserve `stop_job`/`stop_all`'s documented "immediate hard
+/// abort, even mid-run" contract (see `SchedulerDaemon::drain_all`'s doc
+/// comment) across the extra task boundary that wrapper introduces.
+///
+/// Without this guard, aborting the *outer* job task while a run is
+/// in-flight would only drop the `JoinHandle` this struct wraps — which,
+/// per tokio's own docs, detaches the task rather than stopping it,
+/// leaving the in-flight run to keep executing, untracked, in the
+/// background. Aborting an already-finished task's handle is a documented
+/// no-op, so this guard's normal (non-cancelled) drop at the end of
+/// `fire_once_with_vars` is harmless.
+struct AbortOnDropSingle(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDropSingle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Extracts a human-readable message from a [`tokio::task::JoinError`]'s
+/// panic payload. Panic payloads are almost always `&'static str`
+/// (`panic!("literal")`) or `String` (`panic!("{}", x)` / `.expect("...")`
+/// / `.unwrap()`-style messages) — this covers both; any other payload
+/// type falls back to a generic message rather than failing.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_job_loop(
     workflow_id:      String,
@@ -79,6 +116,7 @@ pub(super) async fn run_job_loop(
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
     database_exec_disabled: bool,
+    caller_is_admin:      bool,
     code_sandbox_enabled: bool,
     code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
@@ -94,7 +132,7 @@ pub(super) async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -104,15 +142,15 @@ pub(super) async fn run_job_loop(
                 let next = Utc::now()
                     .checked_add_signed(chrono::Duration::seconds(secs as i64))
                     .unwrap_or_else(Utc::now);
-                update_next_run(&db, &workflow_id, &next);
-                emit_waiting(&event_sink, &db, &workflow_id, Some(next));
+                update_next_run_async(&db, &workflow_id, &next).await;
+                emit_waiting_async(&event_sink, &db, &workflow_id, Some(next)).await;
 
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
                 if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -123,7 +161,7 @@ pub(super) async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -134,23 +172,23 @@ pub(super) async fn run_job_loop(
                 let delay_secs = match next_cron_delay_secs(expr, &now) {
                     Ok(d)  => d,
                     Err(e) => {
-                        emit_error(&event_sink, &db, &workflow_id, &e);
-                        db.scheduler_set_status(&workflow_id, "error").ok();
+                        emit_error_async(&event_sink, &db, &workflow_id, &e).await;
+                        scheduler_set_status_async(&db, &workflow_id, "error").await;
                         break;
                     }
                 };
                 let next = now
                     .checked_add_signed(chrono::Duration::seconds(delay_secs as i64))
                     .unwrap_or(now);
-                update_next_run(&db, &workflow_id, &next);
-                emit_waiting(&event_sink, &db, &workflow_id, Some(next));
+                update_next_run_async(&db, &workflow_id, &next).await;
+                emit_waiting_async(&event_sink, &db, &workflow_id, Some(next)).await;
 
                 tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
                 if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -161,8 +199,8 @@ pub(super) async fn run_job_loop(
             let now   = Utc::now();
             let delay = run_at.signed_duration_since(now);
             if delay.num_milliseconds() > 0 {
-                update_next_run(&db, &workflow_id, &run_at);
-                emit_waiting(&event_sink, &db, &workflow_id, Some(run_at));
+                update_next_run_async(&db, &workflow_id, &run_at).await;
+                emit_waiting_async(&event_sink, &db, &workflow_id, Some(run_at)).await;
                 tokio::time::sleep(
                     std::time::Duration::from_millis(delay.num_milliseconds() as u64)
                 ).await;
@@ -177,10 +215,10 @@ pub(super) async fn run_job_loop(
             }
             {
                 let _permit = run_semaphore.acquire().await;
-                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
             }
-            db.scheduler_set_status(&workflow_id, "done").ok();
-            emit_done(&event_sink, &db, &workflow_id);
+            scheduler_set_status_async(&db, &workflow_id, "done").await;
+            emit_done_async(&event_sink, &db, &workflow_id).await;
         }
 
         TriggerKind::Webhook { port, path, method, secret } => {
@@ -190,13 +228,13 @@ pub(super) async fn run_job_loop(
                 Ok(l)  => l,
                 Err(e) => {
                     let msg = format!("Failed to bind port {}: {}", port, e);
-                    emit_error(&event_sink, &db, &workflow_id, &msg);
-                    db.scheduler_set_status(&workflow_id, "error").ok();
+                    emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                    scheduler_set_status_async(&db, &workflow_id, "error").await;
                     return;
                 }
             };
 
-            emit_waiting(&event_sink, &db, &workflow_id, None);
+            emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
 
             // Tracks every per-connection task spawned below, aborting any
             // still-tracked task when dropped. Held locally, not in
@@ -298,11 +336,11 @@ pub(super) async fn run_job_loop(
                     let _permit = run_semaphore.acquire().await;
                     fire_once_with_vars(
                         &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
-                        shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
+                        shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                         server_max_duration_secs, &file_sandbox_dir, &active_runs,
                     ).await;
 
-                    emit_waiting(&event_sink, &db, &workflow_id, None);
+                    emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
                 });
                 conn_tasks.push(handle);
             }
@@ -328,6 +366,7 @@ async fn fire_once(
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
     database_exec_disabled: bool,
+    caller_is_admin:      bool,
     code_sandbox_enabled: bool,
     code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
@@ -338,11 +377,42 @@ async fn fire_once(
 ) {
     fire_once_with_vars(workflow_id, db, registry, cred_store, event_sink,
         std::collections::HashMap::new(), env_allowlist,
-        shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
+        shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
         server_max_duration_secs, file_sandbox_dir, active_runs,
     ).await;
 }
 
+/// Runs a single scheduled/webhook-triggered execution **isolated in its
+/// own tokio task**, so a panic anywhere inside it — a bad node input, an
+/// unexpected output shape, any of the engine's numerous `.unwrap()` call
+/// sites reachable from a node's `execute()` (the `Node` trait's own
+/// contract says "never panic", but nothing enforces that against
+/// unexpected input) — cannot unwind past this function and kill whichever
+/// task called it.
+///
+/// Every call site in this file (`Interval`/`Cron`/`Once`'s trigger loops
+/// in `run_job_loop`, and `Webhook`'s per-connection task) calls this
+/// function inline, `.await`-ed directly. If [`fire_once_with_vars_inner`]'s
+/// body ran inline here instead of inside a spawned task, a panic inside it
+/// would propagate straight through that `.await`: for `Interval`/`Cron`,
+/// that would unwind the job's single long-lived scheduling task, silently
+/// and permanently ending the schedule, and leave `jobs_map`'s cleanup
+/// (`scheduler/mod.rs`'s post-`run_job_loop` `.remove(&wf_id)`) unreached —
+/// so a subsequent `start_job` attempt would return `AlreadyRunning`
+/// forever.
+/// 
+/// a *spawned* task's panic is isolated to that task alone — "the panic is
+/// forwarded to the task's `JoinHandle` and all spawned tasks continue
+/// running normally." Spawning the real work here and `.await`-ing its
+/// `JoinHandle` (through [`AbortOnDropSingle`], which preserves
+/// `stop_job`/`stop_all`'s hard-abort contract — see that struct's doc
+/// comment) is what claims that isolation for this function's own caller.
+///
+/// On a panic, records the run as a failure through the exact same
+/// `scheduler_update_run_async`/`emit_error_async` path a normal `Err`
+/// from `executor.run()` already takes below — a panicked run is visible
+/// to the operator exactly like any other failed run, not silently
+/// dropped.
 #[allow(clippy::too_many_arguments)]
 async fn fire_once_with_vars(
     workflow_id:          &str,
@@ -355,6 +425,83 @@ async fn fire_once_with_vars(
     shell_exec_disabled:  bool,
     code_exec_disabled:   bool,
     database_exec_disabled: bool,
+    caller_is_admin:      bool,
+    code_sandbox_enabled: bool,
+    code_max_memory_mb:   Option<u64>,
+    parallel_execution:   bool,
+    max_concurrent_nodes: usize,
+    server_max_duration_secs: Option<u64>,
+    file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
+    active_runs:          &Arc<AtomicUsize>,
+) {
+    // Owned clones for the spawned task ('static bound) — every value here
+    // is a cheap Arc/Option<Arc>/Copy clone, matching the pattern the
+    // Webhook per-connection spawn above already uses for the same reason.
+    let workflow_id_owned     = workflow_id.to_string();
+    let db_owned               = Arc::clone(db);
+    let registry_owned         = Arc::clone(registry);
+    let cred_store_owned       = Arc::clone(cred_store);
+    let event_sink_owned       = Arc::clone(event_sink);
+    let env_allowlist_owned    = env_allowlist.clone();
+    let file_sandbox_dir_owned = file_sandbox_dir.clone();
+    let active_runs_owned      = Arc::clone(active_runs);
+    // Separate clones for the panic-reporting path below — the ones above
+    // are moved into the spawned task and unavailable after that point.
+    let db_for_report          = Arc::clone(db);
+    let event_sink_for_report  = Arc::clone(event_sink);
+    let workflow_id_for_report = workflow_id.to_string();
+
+    let mut guard = AbortOnDropSingle(tokio::spawn(async move {
+        fire_once_with_vars_inner(
+            &workflow_id_owned, &db_owned, &registry_owned, &cred_store_owned, &event_sink_owned,
+            vars, &env_allowlist_owned,
+            shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin,
+            code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
+            server_max_duration_secs, &file_sandbox_dir_owned, &active_runs_owned,
+        ).await;
+    }));
+
+    match (&mut guard.0).await {
+        Ok(()) => {}
+        Err(join_err) if join_err.is_panic() => {
+            let msg = format!("Run panicked: {}", panic_message(join_err.into_panic()));
+            tracing::error!(workflow_id = %workflow_id_for_report, "scheduler: {}", msg);
+            scheduler_update_run_async(&db_for_report, &workflow_id_for_report, false, Some(msg.clone())).await;
+            emit_error_async(&event_sink_for_report, &db_for_report, &workflow_id_for_report, &msg).await;
+        }
+        Err(join_err) => {
+            // Not a panic — nothing in this codebase holds an AbortHandle to
+            // this specific inner task (only the *outer* job task is ever
+            // aborted, which cancels this whole function via `guard` above
+            // rather than reaching this arm), so this should be unreachable
+            // in practice. Logged defensively rather than silently dropped,
+            // matching the panic arm's visibility.
+            let msg = format!("Run did not complete: {}", join_err);
+            tracing::error!(workflow_id = %workflow_id_for_report, "scheduler: {}", msg);
+            scheduler_update_run_async(&db_for_report, &workflow_id_for_report, false, Some(msg.clone())).await;
+            emit_error_async(&event_sink_for_report, &db_for_report, &workflow_id_for_report, &msg).await;
+        }
+    }
+}
+
+/// The actual run logic. Only ever called from inside
+/// [`fire_once_with_vars`]'s spawned task, which is what isolates a panic
+/// in here from the caller of `fire_once_with_vars`. Do
+/// not call this directly — go through `fire_once`/`fire_once_with_vars`
+/// so panics stay isolated.
+#[allow(clippy::too_many_arguments)]
+async fn fire_once_with_vars_inner(
+    workflow_id:          &str,
+    db:                   &Arc<dyn SchedulerDb>,
+    registry:             &Arc<NodeRegistry>,
+    cred_store:           &Arc<dyn CredentialResolver>,
+    event_sink:           &Arc<dyn EventSink>,
+    vars:                 std::collections::HashMap<String, Value>,
+    env_allowlist:        &Option<Arc<std::collections::HashSet<String>>>,
+    shell_exec_disabled:  bool,
+    code_exec_disabled:   bool,
+    database_exec_disabled: bool,
+    caller_is_admin:      bool,
     code_sandbox_enabled: bool,
     code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
@@ -364,7 +511,7 @@ async fn fire_once_with_vars(
     active_runs:          &Arc<AtomicUsize>,
 ) {
     {
-        let row   = db.scheduler_get(workflow_id).ok().flatten();
+        let row   = scheduler_get_async(db, workflow_id).await;
         let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
         let name  = row.map(|r| r.workflow_name).unwrap_or_else(|| workflow_id.to_string());
         event_sink.emit("scheduler-status", serde_json::to_value(SchedulerStatusEvent {
@@ -379,14 +526,14 @@ async fn fire_once_with_vars(
         }).unwrap_or_default());
     }
 
-    let json = match db.load_workflow_json(workflow_id) {
+    let json = match load_workflow_json_async(db, workflow_id).await {
         Ok(Some(j)) => j,
         Ok(None) => {
-            emit_error(event_sink, db, workflow_id, "Workflow deleted from database");
+            emit_error_async(event_sink, db, workflow_id, "Workflow deleted from database").await;
             return;
         }
         Err(e) => {
-            emit_error(event_sink, db, workflow_id, &e);
+            emit_error_async(event_sink, db, workflow_id, &e).await;
             return;
         }
     };
@@ -394,7 +541,7 @@ async fn fire_once_with_vars(
     let workflow = match Workflow::from_json(&json) {
         Ok(w)  => w,
         Err(e) => {
-            emit_error(event_sink, db, workflow_id, &e.to_string());
+            emit_error_async(event_sink, db, workflow_id, &e.to_string()).await;
             return;
         }
     };
@@ -434,7 +581,7 @@ async fn fire_once_with_vars(
         // No entry node found: leave `vars` untouched. WebhookNode::execute()
         // will then find no matching reserved key and fall through to its
         // normal bind-and-wait path, which fails clearly (PORT_IN_USE) rather
-        // than silently — same as today's behavior, not a regression.
+        // than silently.
     }
 
     let mut executor = WorkflowExecutor::new(Arc::clone(registry), Arc::clone(cred_store))
@@ -450,6 +597,9 @@ async fn fire_once_with_vars(
     }
     if database_exec_disabled {
         executor = executor.with_database_disabled(true);
+    }
+    if caller_is_admin {
+        executor = executor.with_caller_is_admin(true);
     }
     if code_sandbox_enabled {
         executor = executor.with_code_sandbox(true);
@@ -478,9 +628,9 @@ async fn fire_once_with_vars(
         Ok(r) => {
             let success = r.success;
             let err_msg = r.error.clone();
-            db.scheduler_update_run(workflow_id, success, err_msg.as_deref(), None).ok();
+            scheduler_update_run_async(db, workflow_id, success, err_msg.clone()).await;
 
-            let row   = db.scheduler_get(workflow_id).ok().flatten();
+            let row   = scheduler_get_async(db, workflow_id).await;
             let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
             let name  = row.map(|r| r.workflow_name).unwrap_or_else(|| workflow_id.to_string());
             let result_value = serde_json::to_value(&r).ok();
@@ -497,9 +647,106 @@ async fn fire_once_with_vars(
             }).unwrap_or_default());
         }
         Err(e) => {
-            db.scheduler_update_run(workflow_id, false, Some(&e.to_string()), None).ok();
-            emit_error(event_sink, db, workflow_id, &e.to_string());
+            scheduler_update_run_async(db, workflow_id, false, Some(e.to_string())).await;
+            emit_error_async(event_sink, db, workflow_id, &e.to_string()).await;
         }
+    }
+}
+
+// ── Blocking-DB-call helpers ─────────────────────────────────────────
+//
+// `SchedulerDb` is a synchronous trait — `WorkflowDb` backs it with a
+// blocking `r2d2`/`rusqlite` connection pool, with no async-aware
+// equivalent. Calling any of its methods directly inside an `async fn` runs
+// the pool checkout + query inline on whichever tokio worker thread is
+// executing that task. `emit_waiting`/`emit_error`/`emit_done` and
+// `update_next_run` below are shared between genuinely-synchronous callers
+// (`scheduler/mod.rs`'s `start`/`replay_state`/`arm_job_internal` — see
+// `SchedulerDaemon::start`'s own doc comment for why those stay sync) and
+// this file's `run_job_loop`/`fire_once_with_vars`, which are `async fn`s
+// invoked on every scheduler tick and every webhook fire — a much higher
+// frequency than the sync, once-per-arm call sites.
+//
+// Rather than make the shared functions themselves `async` (which would
+// force every sync caller in `scheduler/mod.rs` to become `async` too — a
+// public-API change), each keeps its existing
+// synchronous form, backed by a shared pure `*_event` builder, and gets a
+// thin `*_async` sibling that offloads only the blocking DB read/write to
+// `tokio::task::spawn_blocking` before building the same event payload.
+// `run_job_loop`/`fire_once_with_vars` use the `*_async` siblings
+// exclusively; `scheduler/mod.rs` is unaffected and untouched.
+
+/// Fetches a `ScheduledJobRow` on the blocking thread pool instead of
+/// inline on the async reactor. A `spawn_blocking` panic (or, in principle,
+/// cancellation) degrades to `None`, matching every existing call site's
+/// own `.ok().flatten()` — a DB error here was always treated as "no row."
+async fn scheduler_get_async(
+    db:          &Arc<dyn SchedulerDb>,
+    workflow_id: &str,
+) -> Option<ScheduledJobRow> {
+    let db          = Arc::clone(db);
+    let workflow_id = workflow_id.to_string();
+    tokio::task::spawn_blocking(move || db.scheduler_get(&workflow_id).ok().flatten())
+        .await
+        .unwrap_or(None)
+}
+
+/// `db.scheduler_set_status`, offloaded. Errors are discarded, matching
+/// every pre-existing call site's own `.ok()`.
+async fn scheduler_set_status_async(db: &Arc<dyn SchedulerDb>, workflow_id: &str, status: &str) {
+    let db          = Arc::clone(db);
+    let workflow_id = workflow_id.to_string();
+    let status      = status.to_string();
+    let _ = tokio::task::spawn_blocking(move || db.scheduler_set_status(&workflow_id, &status)).await;
+}
+
+/// `db.scheduler_update_run`, offloaded. `next_run_at` is always `None` at
+/// both call sites in this file, matching pre-existing behavior exactly.
+async fn scheduler_update_run_async(
+    db:          &Arc<dyn SchedulerDb>,
+    workflow_id: &str,
+    success:     bool,
+    error_msg:   Option<String>,
+) {
+    let db          = Arc::clone(db);
+    let workflow_id = workflow_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        db.scheduler_update_run(&workflow_id, success, error_msg.as_deref(), None)
+    }).await;
+}
+
+/// `db.load_workflow_json`, offloaded. A `spawn_blocking` panic surfaces as
+/// an `Err`, matching this fn's `Result`-returning contract (unlike the
+/// other three helpers above, callers here already branch on `Err`).
+async fn load_workflow_json_async(
+    db:          &Arc<dyn SchedulerDb>,
+    workflow_id: &str,
+) -> Result<Option<String>, String> {
+    let db          = Arc::clone(db);
+    let workflow_id = workflow_id.to_string();
+    tokio::task::spawn_blocking(move || db.load_workflow_json(&workflow_id))
+        .await
+        .unwrap_or_else(|e| Err(format!("scheduler DB task panicked: {e}")))
+}
+
+fn waiting_event(
+    workflow_id: &str,
+    row:         Option<ScheduledJobRow>,
+    next_run_at: Option<DateTime<Utc>>,
+) -> SchedulerStatusEvent {
+    let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
+    let name  = row.as_ref().map(|r| r.workflow_name.clone())
+                   .unwrap_or_else(|| workflow_id.to_string());
+    let last  = row.and_then(|r| r.last_run_at);
+    SchedulerStatusEvent {
+        workflow_id:   workflow_id.to_string(),
+        workflow_name: name,
+        status:        "waiting".to_string(),
+        run_count:     count,
+        last_run_at:   last,
+        next_run_at:   next_run_at.map(|t| t.to_rfc3339()),
+        last_error:    None,
+        last_result:   None,
     }
 }
 
@@ -509,35 +756,27 @@ pub(super) fn emit_waiting(
     workflow_id: &str,
     next_run_at: Option<DateTime<Utc>>,
 ) {
-    let row   = db.scheduler_get(workflow_id).ok().flatten();
-    let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
-    let name  = row.as_ref().map(|r| r.workflow_name.clone())
-                   .unwrap_or_else(|| workflow_id.to_string());
-    let last  = row.and_then(|r| r.last_run_at);
-
-    event_sink.emit("scheduler-status", serde_json::to_value(SchedulerStatusEvent {
-        workflow_id:   workflow_id.to_string(),
-        workflow_name: name,
-        status:        "waiting".to_string(),
-        run_count:     count,
-        last_run_at:   last,
-        next_run_at:   next_run_at.map(|t| t.to_rfc3339()),
-        last_error:    None,
-        last_result:   None,
-    }).unwrap_or_default());
+    let row = db.scheduler_get(workflow_id).ok().flatten();
+    event_sink.emit("scheduler-status",
+        serde_json::to_value(waiting_event(workflow_id, row, next_run_at)).unwrap_or_default());
 }
 
-pub(super) fn emit_error(
+/// Async sibling of [`emit_waiting`] — see the module note above.
+pub(super) async fn emit_waiting_async(
     event_sink:  &Arc<dyn EventSink>,
     db:          &Arc<dyn SchedulerDb>,
     workflow_id: &str,
-    message:     &str,
+    next_run_at: Option<DateTime<Utc>>,
 ) {
-    let row   = db.scheduler_get(workflow_id).ok().flatten();
+    let row = scheduler_get_async(db, workflow_id).await;
+    event_sink.emit("scheduler-status",
+        serde_json::to_value(waiting_event(workflow_id, row, next_run_at)).unwrap_or_default());
+}
+
+fn error_event(workflow_id: &str, row: Option<ScheduledJobRow>, message: &str) -> SchedulerStatusEvent {
     let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
     let name  = row.map(|r| r.workflow_name).unwrap_or_else(|| workflow_id.to_string());
-
-    event_sink.emit("scheduler-status", serde_json::to_value(SchedulerStatusEvent {
+    SchedulerStatusEvent {
         workflow_id:   workflow_id.to_string(),
         workflow_name: name,
         status:        "error".to_string(),
@@ -546,21 +785,38 @@ pub(super) fn emit_error(
         next_run_at:   None,
         last_error:    Some(message.to_string()),
         last_result:   None,
-    }).unwrap_or_default());
+    }
 }
 
-fn emit_done(
+pub(super) fn emit_error(
     event_sink:  &Arc<dyn EventSink>,
     db:          &Arc<dyn SchedulerDb>,
     workflow_id: &str,
+    message:     &str,
 ) {
-    let row   = db.scheduler_get(workflow_id).ok().flatten();
+    let row = db.scheduler_get(workflow_id).ok().flatten();
+    event_sink.emit("scheduler-status",
+        serde_json::to_value(error_event(workflow_id, row, message)).unwrap_or_default());
+}
+
+/// Async sibling of [`emit_error`] — see the module note above.
+pub(super) async fn emit_error_async(
+    event_sink:  &Arc<dyn EventSink>,
+    db:          &Arc<dyn SchedulerDb>,
+    workflow_id: &str,
+    message:     &str,
+) {
+    let row = scheduler_get_async(db, workflow_id).await;
+    event_sink.emit("scheduler-status",
+        serde_json::to_value(error_event(workflow_id, row, message)).unwrap_or_default());
+}
+
+fn done_event(workflow_id: &str, row: Option<ScheduledJobRow>) -> SchedulerStatusEvent {
     let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
     let name  = row.as_ref().map(|r| r.workflow_name.clone())
                    .unwrap_or_else(|| workflow_id.to_string());
     let last  = row.and_then(|r| r.last_run_at);
-
-    event_sink.emit("scheduler-status", serde_json::to_value(SchedulerStatusEvent {
+    SchedulerStatusEvent {
         workflow_id:   workflow_id.to_string(),
         workflow_name: name,
         status:        "done".to_string(),
@@ -569,11 +825,35 @@ fn emit_done(
         next_run_at:   None,
         last_error:    None,
         last_result:   None,
-    }).unwrap_or_default());
+    }
+}
+
+// Note: no synchronous `emit_done` — unlike `emit_waiting`/`emit_error`,
+// nothing in `scheduler/mod.rs` ever called it (grep-confirmed); its only
+// pre-existing call site was this file's own (now-async) `run_job_loop`.
+// Keeping an unused sync sibling around would be dead code.
+
+/// Async — see the module note above. No sync sibling; see the note below.
+async fn emit_done_async(
+    event_sink:  &Arc<dyn EventSink>,
+    db:          &Arc<dyn SchedulerDb>,
+    workflow_id: &str,
+) {
+    let row = scheduler_get_async(db, workflow_id).await;
+    event_sink.emit("scheduler-status",
+        serde_json::to_value(done_event(workflow_id, row)).unwrap_or_default());
 }
 
 pub(super) fn update_next_run(db: &Arc<dyn SchedulerDb>, workflow_id: &str, next: &DateTime<Utc>) {
     db.scheduler_update_next_run_at(workflow_id, &next.to_rfc3339()).ok();
+}
+
+/// Async sibling of [`update_next_run`] — see the module note above.
+pub(super) async fn update_next_run_async(db: &Arc<dyn SchedulerDb>, workflow_id: &str, next: &DateTime<Utc>) {
+    let db          = Arc::clone(db);
+    let workflow_id = workflow_id.to_string();
+    let next_str    = next.to_rfc3339();
+    let _ = tokio::task::spawn_blocking(move || db.scheduler_update_next_run_at(&workflow_id, &next_str)).await;
 }
 
 fn log_skip(event_sink: &Arc<dyn EventSink>, workflow_id: &str, reason: &str) {
@@ -716,10 +996,8 @@ async fn parse_http_request(
     Ok(vars)
 }
 
-/// Live reproduction test for the webhook trigger re-execution bug (Patch
-/// R1) — `AERINI_RECOVERY_PLAN.md` Session 1 Step 2. This was previously
-/// only design-confirmed by source read, never actually run. It drives
-/// `SchedulerDaemon::start_job` for real — the same call path used by both
+/// Live reproduction test for the webhook trigger re-execution bug 
+/// it drives `SchedulerDaemon::start_job` for real — the same call path used by both
 /// `src-tauri/src/commands/scheduler.rs::start_scheduled_workflow` and
 /// `aerini-server` — binds a real `TcpListener`, fires a real HTTP POST at
 /// it, and asserts the workflow actually completes instead of failing on
@@ -810,7 +1088,7 @@ mod integration_tests {
             // Pinned to "extract" explicitly so assertions don't depend on
             // OutputNode's HashMap-iteration-order fallback when no
             // source_node is set — a separate, out-of-scope concern
-            // (Rule 6) this reproduction test must not incidentally rely on.
+            // this reproduction test must not incidentally rely on.
             config: json!({ "source_node": "extract" }),
             credentials: Default::default(),
             input_schema: json!({}),
@@ -845,13 +1123,7 @@ mod integration_tests {
         wf
     }
 
-    /// THE bug reproduction: before Patch R1, `WebhookNode::execute()`
-    /// always tried to bind its own port even when invoked from the
-    /// scheduler's `TriggerKind::Webhook` loop — which is already holding
-    /// that exact port for the life of the job. The second bind always
-    /// failed (address-in-use), so this workflow could never succeed when
-    /// started via `SchedulerDaemon::start_job`. This test fires a real HTTP
-    /// request at a really-bound listener and asserts the run completes.
+    ///This test fires a real HTTP request at a really-bound listener and asserts the run completes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scheduler_webhook_run_completes_against_real_listener() {
         const PORT: u16 = 38456;
@@ -910,8 +1182,7 @@ mod integration_tests {
         }
         let event = last_result.expect("workflow run never produced a scheduler-status event with last_result");
 
-        // THE assertion that fails pre-Patch-R1: the run must succeed, not
-        // abort on the Webhook node trying (and failing) to bind a second time.
+        // the run must succeed, not abort on the Webhook node trying (and failing) to bind a second time.
         assert_eq!(event["status"], "waiting", "expected post-run status 'waiting' (success); got: {:?}", event);
         let result = &event["last_result"];
         assert_eq!(result["success"], true, "workflow run did not succeed: {:?}", result);
@@ -931,5 +1202,380 @@ mod integration_tests {
         daemon.stop_job(&workflow.id).ok();
         cleanup_db(&db_path);
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Builds a `Schedule (once, already-due) -> Database (sqlite)` workflow.
+    /// The database node deliberately runs a `query` containing a
+    /// single-quoted literal with `allow_raw_sql: true`, the exact
+    /// precondition `sqlite.rs`'s `SQL_INJECTION_BLOCKED` gate exists to
+    /// catch, and the exact thing `__caller_is_admin` must unlock before
+    /// `allow_raw_sql` has any effect (see `sqlite.rs::execute_sqlite`).
+    fn once_trigger_database_workflow(wf_id: &str, db_path: &std::path::Path) -> Workflow {
+        let mut wf = Workflow::new(wf_id, "Caller-Is-Admin Repro");
+
+        wf.nodes.push(WorkflowNode {
+            id: "sched".to_string(),
+            node_type_id: "schedule".to_string(),
+            node_type: NodeType::Action,
+            name: "Schedule".to_string(),
+            // Already in the past -> run_job_loop's TriggerKind::Once arm
+            // fires immediately, no sleep, no network needed for this test.
+            config: json!({
+                "mode": "once",
+                "run_at": (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339(),
+            }),
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+        wf.nodes.push(WorkflowNode {
+            id: "db".to_string(),
+            node_type_id: "database".to_string(),
+            node_type: NodeType::Action,
+            name: "Database".to_string(),
+            config: json!({
+                "db_type": "sqlite",
+                "db_path": db_path.to_str().expect("temp db path must be valid UTF-8"),
+                "operation": "query",
+                // The single-quoted literal is what trips check_query_for_inline_values.
+                "query": "SELECT 1 WHERE 'x' = 'x'",
+                "allow_raw_sql": true,
+            }),
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+
+        wf.edges.push(WorkflowEdge {
+            id: "e1".to_string(),
+            from_node: "sched".to_string(),
+            from_port: "output".to_string(),
+            to_node: "db".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        });
+
+        wf
+    }
+
+    /// Polls `sink` for the scheduler-status event carrying the post-run
+    /// `WorkflowResult` (mirrors the webhook test's own identical polling
+    /// pattern above — same event, same 50ms/60-attempt budget).
+    async fn wait_for_last_result(sink: &CapturingSink) -> Value {
+        for _ in 0..60 {
+            {
+                let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+                if let Some((_, payload)) = events.iter().rev()
+                    .find(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null())
+                {
+                    return payload["last_result"].clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("workflow run never produced a scheduler-status event with last_result");
+    }
+
+    /// Normal case for a desktop-shaped scheduler (`with_caller_is_admin(true)`,
+    /// mirroring `src-tauri/src/lib.rs`'s own
+    /// call site) must actually unlock `allow_raw_sql` for a scheduled run,
+    /// not just for a manual `run_workflow` invocation — this is the whole
+    /// point of threading the flag through `run_job_loop`/`fire_once*`
+    /// instead of only setting it on the desktop manual-run executor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_run_with_caller_is_admin_unlocks_allow_raw_sql() {
+        let data_dir = temp_data_dir("caller_admin_true");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+        let sqlite_target = data_dir.join("target.db");
+        let _ = std::fs::remove_file(&sqlite_target);
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        let workflow = once_trigger_database_workflow("wf-caller-admin-true", &sqlite_target);
+        wf_db.save(&workflow).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry, &data_dir, None);
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        ).with_caller_is_admin(true);
+
+        daemon.start_job(&workflow.id, None, Some(false))
+            .expect("start_job failed to arm the once-trigger");
+
+        let result = wait_for_last_result(&sink).await;
+        assert_eq!(
+            result["success"], true,
+            "expected the query to succeed once caller_is_admin unlocks allow_raw_sql; got: {:?}",
+            result
+        );
+    }
+
+    /// Edge case / regression guard: the *default* scheduler config
+    /// (`caller_is_admin` unset, matching every `aerini-server` call site)
+    /// must still reject the identical workflow — this must not
+    /// accidentally widen the gate for anyone who doesn't opt in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_run_without_caller_is_admin_still_blocks_allow_raw_sql() {
+        let data_dir = temp_data_dir("caller_admin_false");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+        let sqlite_target = data_dir.join("target.db");
+        let _ = std::fs::remove_file(&sqlite_target);
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        let workflow = once_trigger_database_workflow("wf-caller-admin-false", &sqlite_target);
+        wf_db.save(&workflow).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry, &data_dir, None);
+
+        let sink = CapturingSink::default();
+        // Deliberately NOT calling .with_caller_is_admin(true) — default false,
+        // same as every aerini-server SchedulerDaemon::new call site.
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        daemon.start_job(&workflow.id, None, Some(false))
+            .expect("start_job failed to arm the once-trigger");
+
+        let result = wait_for_last_result(&sink).await;
+        assert_eq!(
+            result["success"], false,
+            "expected SQL_INJECTION_BLOCKED without caller_is_admin; got: {:?}",
+            result
+        );
+        let err = result["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("single-quoted"),
+            "expected the SQL_INJECTION_BLOCKED message in top-level error; got: {:?}",
+            err
+        );
+    }
+
+    // ── Regression tests ─────────────────
+
+    /// Deliberately panics on every `execute()` call — used only by the two
+    /// panic-isolation regression tests below. Violates the `Node` trait's
+    /// own "never panic" contract on purpose, standing in for one of the
+    /// engine's many production `.unwrap()`/`.expect()` call sites failing
+    /// against unexpected input.
+    struct PanicNode;
+    #[async_trait::async_trait]
+    impl crate::node::Node for PanicNode {
+        fn type_id(&self) -> &'static str { "test_panic_node" }
+        fn display_name(&self) -> &'static str { "Test Panic Node" }
+        fn node_type(&self) -> NodeType { NodeType::Action }
+        fn version(&self) -> &'static str { "0.0.0" }
+        fn input_schema(&self) -> Value { json!({}) }
+        fn output_schema(&self) -> Value { json!({}) }
+        async fn execute(&self, _input: crate::model::NodeInput) -> crate::model::NodeOutput {
+            panic!("simulated node panic for scheduler-panic-isolation-bug.md regression test");
+        }
+    }
+
+    /// `Schedule -> PanicNode`. `schedule_config` is supplied by the caller
+    /// so both regression tests below (`Once` and `Interval` triggers) can
+    /// share this one workflow shape.
+    fn panic_node_workflow(wf_id: &str, schedule_config: Value) -> Workflow {
+        let mut wf = Workflow::new(wf_id, "Panic Isolation Repro");
+
+        wf.nodes.push(WorkflowNode {
+            id: "sched".to_string(),
+            node_type_id: "schedule".to_string(),
+            node_type: NodeType::Action,
+            name: "Schedule".to_string(),
+            config: schedule_config,
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+        wf.nodes.push(WorkflowNode {
+            id: "boom".to_string(),
+            node_type_id: "test_panic_node".to_string(),
+            node_type: NodeType::Action,
+            name: "Boom".to_string(),
+            config: json!({}),
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+
+        wf.edges.push(WorkflowEdge {
+            id: "e1".to_string(),
+            from_node: "sched".to_string(),
+            from_port: "output".to_string(),
+            to_node: "boom".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        });
+
+        wf
+    }
+
+    /// Case 1 (fast): a node that panics must still produce a visible
+    /// `scheduler-status` "error" event — not be silently dropped. Uses a
+    /// `Once` trigger (already-past `run_at`, fires immediately via
+    /// `start_job`'s `fire_immediately = true`) so this resolves in well
+    /// under a second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_node_reports_visible_error_not_silent_drop() {
+        let data_dir = temp_data_dir("panic_visible_error");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+
+        let wf = panic_node_workflow("wf-panic-visible", json!({
+            "mode": "once",
+            "run_at": (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339(),
+        }));
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        wf_db.save(&wf).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(crate::nodes::schedule::ScheduleNode));
+        registry.register(Arc::new(PanicNode));
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        daemon.start_job(&wf.id, None, Some(false))
+            .expect("start_job failed to arm the once-trigger");
+
+        let mut saw_error = false;
+        for _ in 0..60 {
+            {
+                let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+                saw_error = events.iter().any(|(name, p)| {
+                    name.as_str() == "scheduler-status"
+                        && p["status"].as_str() == Some("error")
+                        && p["last_error"].as_str().unwrap_or("").contains("panicked")
+                });
+            }
+            if saw_error { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        daemon.stop_job(&wf.id).ok();
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        assert!(
+            saw_error,
+            "expected a scheduler-status 'error' event mentioning the panic within 3s"
+        );
+    }
+
+    /// Case 2: an `Interval` job whose only node panics on
+    /// every run must keep scheduling and firing subsequent runs — not die
+    /// after the first panic and silently, permanently stop: the schedule
+    /// must not stop with zero operator-visible signal, and the job must
+    /// not get stuck `AlreadyRunning` forever with `jobs_map`'s cleanup
+    /// line unreached.
+    ///
+    /// Budgeted for the enforced 10s minimum interval (`extract_trigger`,
+    /// `scheduler/mod.rs`'s `secs.max(10)`) plus slack. This test takes
+    /// >10s wall-clock by design — no mocked-time facility is used
+    /// anywhere else in this file either (e.g. `wait_for_last_result`'s own
+    /// real-time polling), so this matches existing convention rather than
+    /// introducing a new one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_node_does_not_kill_the_scheduling_loop() {
+        let data_dir = temp_data_dir("panic_loop_survives");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+
+        // interval_secs: 1 is clamped to the enforced 10s minimum by
+        // extract_trigger — set low here only to make the intent explicit.
+        let wf = panic_node_workflow("wf-panic-loop-survives", json!({
+            "mode": "interval",
+            "interval_secs": 1,
+        }));
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        wf_db.save(&wf).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(crate::nodes::schedule::ScheduleNode));
+        registry.register(Arc::new(PanicNode));
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        daemon.start_job(&wf.id, None, Some(false))
+            .expect("start_job failed to arm the interval-trigger");
+
+        let mut running_count = 0usize;
+        for _ in 0..300 { // 300 * 100ms = 30s budget
+            {
+                let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+                running_count = events.iter()
+                    .filter(|(name, p)| {
+                        name.as_str() == "scheduler-status" && p["status"].as_str() == Some("running")
+                    })
+                    .count();
+            }
+            if running_count >= 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // stop_job succeeding here alone doesn't prove the schedule survived
+        // a panic: a panic that never reaches jobs_map's cleanup line would
+        // still leave the job registered, so stop_job could succeed either
+        // way. The running_count assertion below is what actually proves
+        // the loop kept going, not this call.
+        daemon.stop_job(&wf.id).ok();
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        assert!(
+            running_count >= 2,
+            "expected at least 2 'running' events (job survives the first panic \
+             and fires again on schedule) within 30s; got {}",
+            running_count
+        );
     }
 }

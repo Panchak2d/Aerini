@@ -163,6 +163,12 @@ impl CredentialStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(EngineError::Database(e.to_string())),
             Ok((enc, nonce_bytes)) => {
+                if nonce_bytes.len() != 12 {
+                    return Err(EngineError::Encryption(format!(
+                        "credential '{id}' has a corrupt nonce: expected 12 bytes, got {}",
+                        nonce_bytes.len()
+                    )));
+                }
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 let decrypted = self.cipher
                     .decrypt(nonce, enc.as_ref())
@@ -343,14 +349,32 @@ impl CredentialStore {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
             }
-            std::fs::write(key_path, &encoded)
-                .map_err(|e| EngineError::Encryption(e.to_string()))?;
 
-            // Restrict to owner-only: prevents world-readable key file (default umask = 0644)
+            // Create the key file with owner-only (0o600) permissions atomically
+            // on Unix, via the file-creation mode itself rather than a separate
+            // fs::write + set_permissions pair. The two-call version left a
+            // window — however brief — where this file (holding the AES-256 key
+            // that decrypts every stored credential) existed on disk at the
+            // default create mode (typically 0o644 after umask, world/group
+            // readable) before the follow-up chmod call landed.
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(key_path)
+                    .map_err(|e| EngineError::Encryption(e.to_string()))?;
+                f.write_all(encoded.as_bytes())
+                    .map_err(|e| EngineError::Encryption(e.to_string()))?;
+            }
+
+            #[cfg(not(unix))]
+            {
+                std::fs::write(key_path, &encoded)
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
             }
 
@@ -477,6 +501,104 @@ pub struct StoreCredentialResolver {
 #[async_trait::async_trait]
 impl CredentialResolver for StoreCredentialResolver {
     async fn resolve(&self, credential_id: &str) -> Option<String> {
-        self.store.retrieve(credential_id).ok().flatten()
+        // `CredentialStore::retrieve` is a synchronous fn — it
+        // acquires a blocking `std::sync::Mutex<rusqlite::Connection>` and
+        // runs the query + AES-256-GCM decrypt inline. `resolve` is called
+        // on every node execution that references a credential, so running
+        // that synchronously here would hold the calling tokio worker
+        // thread for the duration of the lock + query on every such call.
+        // Offload to the blocking thread pool instead. A `spawn_blocking`
+        // panic degrades to `None` ("no credential"), matching this
+        // method's own pre-existing `.ok().flatten()` behavior on a DB
+        // error — both were already "credential unavailable" outcomes.
+        let store         = Arc::clone(&self.store);
+        let credential_id = credential_id.to_string();
+        tokio::task::spawn_blocking(move || store.retrieve(&credential_id).ok().flatten())
+            .await
+            .unwrap_or(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_from_file_generates_and_reloads_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.b64");
+
+        let generated = CredentialStore::key_from_file(&key_path).unwrap();
+        assert_eq!(generated.len(), 32, "generated key must be 32 bytes");
+
+        let reloaded = CredentialStore::key_from_file(&key_path).unwrap();
+        assert_eq!(
+            generated, reloaded,
+            "a second call against the same path must return the same key, not regenerate"
+        );
+    }
+
+    // The file holding this key must never be readable by anyone but the
+    // owner, from the moment it exists on disk. Checking the mode bits
+    // after creation can't directly prove there's no window where a
+    // separate write-then-chmod sequence would leave it briefly world/group
+    // readable (that requires a concurrent-read race harness this
+    // environment can't run), but it does lock in the end state that
+    // create-with-mode guarantees, so a future edit back to a two-step
+    // write+chmod would still leave this test passing on final permission
+    // bits alone — it isn't a substitute for a real TOCTOU race test.
+    #[cfg(unix)]
+    #[test]
+    fn key_from_file_creates_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.b64");
+
+        CredentialStore::key_from_file(&key_path).unwrap();
+
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+        // Mask to the permission bits only (mode() also carries file-type bits).
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "key file must be created with exactly owner read/write (0o600), got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[test]
+    fn retrieve_with_corrupt_nonce_returns_error_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+
+        let store = CredentialStore::open(&db_path, KeySource::File(key_path)).unwrap();
+        store.store(&CreateCredentialRequest {
+            id: "cred1".to_string(),
+            name: "Test Cred".to_string(),
+            value: "secret-value".to_string(),
+            cred_type: "api_key".to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+        }).unwrap();
+
+        // Corrupt the stored nonce to the wrong length, simulating a corrupted
+        // or tampered DB row — must not reach Nonce::from_slice, which panics
+        // on a length mismatch instead of returning an error.
+        let raw = Connection::open(&db_path).unwrap();
+        raw.execute(
+            "UPDATE credentials SET nonce = ?1 WHERE id = 'cred1'",
+            params![vec![0u8; 5]],
+        ).unwrap();
+        drop(raw);
+
+        let result = store.retrieve("cred1");
+        assert!(result.is_err(), "corrupt nonce must return Err, not panic");
+        assert!(
+            result.unwrap_err().to_string().contains("corrupt nonce"),
+            "error must identify the nonce as the corrupt field"
+        );
     }
 }

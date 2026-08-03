@@ -1,18 +1,6 @@
-/**
- * @vitest-environment jsdom
- *
- * DEVIATION NOTE: modal-manager.ts has no test file prior to this batch
- * (Rule 7 — no existing coverage found). `convertN8nWorkflow` reads
- * module-level `_allNodes`, which is only ever set via `initModals` — and
- * `initModals` reaches into a fixed set of DOM element ids with non-null
- * assertions (`getElementById(id)!`), so a minimal DOM fixture covering
- * exactly those ids is built once in `beforeEach` before calling it.
- * `convertN8nWorkflow` itself is then called directly and its return value
- * asserted against — no click-handler/modal round-trip needed for these
- * tests, since the bug (and fix) is entirely inside the conversion logic.
- */
+/* @vitest-environment jsdom */
 import { describe, it, expect, beforeEach } from "vitest";
-import { initModals, convertN8nWorkflow } from "../modal-manager";
+import { initModals, convertN8nWorkflow, showImportPreview } from "../modal-manager";
 import type { NodeDescriptor } from "../ipc/workflow";
 
 /**
@@ -59,6 +47,10 @@ function mkModalDom(): void {
     el.id = id;
     document.body.appendChild(el);
   }
+  // theme select, populated at runtime by initModals() itself.
+  const themeSelect = document.createElement("select");
+  themeSelect.id = "setting-theme";
+  document.body.appendChild(themeSelect);
 }
 
 function port(id: string, label = id) {
@@ -99,6 +91,23 @@ type ConvertedNode = { id: string; name: string; node_type_id: string; ports: { 
 
 beforeEach(() => {
   mkModalDom();
+});
+
+describe("initModals — theme select wiring (Batch 9)", () => {
+  it("populates the select from the THEMES registry and applies a change as data-theme", () => {
+    document.documentElement.removeAttribute("data-theme");
+    initModals([], () => {});
+
+    const select = document.getElementById("setting-theme") as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map(o => o.value);
+    expect(optionValues).toEqual(["midnight", "paper"]);
+    expect(select.value).toBe("midnight"); // nothing stored yet -> default
+
+    select.value = "paper";
+    select.dispatchEvent(new Event("change"));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("paper");
+    expect(localStorage.getItem("aerini_theme")).toBe("paper");
+  });
 });
 
 describe("convertN8nWorkflow — If node branch port mapping (T1-8 / S12-2)", () => {
@@ -216,5 +225,223 @@ describe("convertN8nWorkflow — non-branching node types (regression, unchanged
 
     const out = convertN8nWorkflow(n8n) as { nodes: ConvertedNode[] };
     expect(out.nodes[0].ports.outputs.map(p => p.id)).toEqual(["output"]);
+  });
+});
+
+// ── If/Switch decision-logic translation ──
+
+type ConvertedNodeWithConfig = ConvertedNode & { config: Record<string, unknown> };
+type ConvertedResult = { nodes: ConvertedNodeWithConfig[]; edges: ConvertedEdge[]; _n8n_import_warnings?: string[] };
+
+function n8nNodeParams(name: string, type: string, parameters: Record<string, unknown>) {
+  return { name, type, position: [0, 0], parameters };
+}
+
+describe("convertN8nWorkflow — If node condition translation (T1-8 residual)", () => {
+  it("translates a single v2 filter condition (string equals) against its one predecessor", () => {
+    initModals([IF_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Check", "n8n-nodes-base.if", {
+          conditions: {
+            conditions: [{ leftValue: "={{ $json.status }}", rightValue: "paid", operator: { type: "string", operation: "equals" } }],
+            combinator: "and",
+          },
+        }),
+      ],
+      connections: { Fetch: { main: [[{ node: "Check" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    const check = out.nodes.find(n => n.name === "Check")!;
+    expect(check.config.condition).toBe("{{Fetch.output.status}} == 'paid'");
+    expect(out._n8n_import_warnings).toBeUndefined();
+  });
+
+  it("translates a v2 numeric-comparison and a v1-legacy boolean condition correctly", () => {
+    initModals([IF_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("AmountCheck", "n8n-nodes-base.if", {
+          conditions: { conditions: [{ leftValue: "={{ $json.amount }}", rightValue: 100, operator: { type: "number", operation: "gt" } }], combinator: "and" },
+        }),
+        n8nNodeParams("ValidCheck", "n8n-nodes-base.if", {
+          conditions: { boolean: [{ value1: "={{ $json.valid }}", operation: "true" }] },
+        }),
+      ],
+      connections: { Fetch: { main: [[{ node: "AmountCheck" }, { node: "ValidCheck" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    expect(out.nodes.find(n => n.name === "AmountCheck")!.config.condition).toBe("{{Fetch.output.amount}} > 100");
+    expect(out.nodes.find(n => n.name === "ValidCheck")!.config.condition).toBe("{{Fetch.output.valid}} == true");
+  });
+
+  it("leaves the condition unconfigured and emits a warning for chained AND/OR conditions instead of guessing", () => {
+    initModals([IF_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Check", "n8n-nodes-base.if", {
+          conditions: {
+            conditions: [
+              { leftValue: "={{ $json.status }}", rightValue: "paid", operator: { type: "string", operation: "equals" } },
+              { leftValue: "={{ $json.amount }}", rightValue: 100, operator: { type: "number", operation: "gt" } },
+            ],
+            combinator: "and",
+          },
+        }),
+      ],
+      connections: { Fetch: { main: [[{ node: "Check" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    const check = out.nodes.find(n => n.name === "Check")!;
+    expect(check.config.condition).toBeUndefined();
+    expect(out._n8n_import_warnings).toHaveLength(1);
+    expect(out._n8n_import_warnings![0]).toContain("Check");
+    expect(out._n8n_import_warnings![0]).toContain("chained conditions");
+  });
+
+  it("emits a warning instead of guessing when the predecessor is ambiguous (two upstream nodes)", () => {
+    initModals([IF_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("A", "n8n-nodes-base.httpRequest"),
+        n8nNode("B", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Check", "n8n-nodes-base.if", {
+          conditions: { conditions: [{ leftValue: "={{ $json.status }}", rightValue: "ok", operator: { type: "string", operation: "equals" } }], combinator: "and" },
+        }),
+      ],
+      connections: { A: { main: [[{ node: "Check" }]] }, B: { main: [[{ node: "Check" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    expect(out.nodes.find(n => n.name === "Check")!.config.condition).toBeUndefined();
+    expect(out._n8n_import_warnings![0]).toContain("could not identify exactly one upstream node");
+  });
+
+  it("emits a warning for an operator Aerini's If node doesn't support (e.g. regex) rather than dropping/misrouting it", () => {
+    initModals([IF_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Check", "n8n-nodes-base.if", {
+          conditions: { conditions: [{ leftValue: "={{ $json.status }}", rightValue: "^ok$", operator: { type: "string", operation: "regex" } }], combinator: "and" },
+        }),
+      ],
+      connections: { Fetch: { main: [[{ node: "Check" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    expect(out.nodes.find(n => n.name === "Check")!.config.condition).toBeUndefined();
+    expect(out._n8n_import_warnings![0]).toContain("regex");
+  });
+});
+
+describe("convertN8nWorkflow — Switch node condition translation (T1-8 residual)", () => {
+  it("translates rules-mode equals rules into field/cases/source_node, matching the existing case_N port mapping", () => {
+    initModals([SWITCH_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Router", "n8n-nodes-base.switch", {
+          mode: "rules",
+          rules: {
+            values: [
+              { conditions: { conditions: [{ leftValue: "={{ $json.tier }}", rightValue: "bronze", operator: { type: "string", operation: "equals" } }], combinator: "and" } },
+              { conditions: { conditions: [{ leftValue: "={{ $json.tier }}", rightValue: "silver", operator: { type: "string", operation: "equals" } }], combinator: "and" } },
+            ],
+          },
+        }),
+        n8nNode("Bronze", "n8n-nodes-base.noOp"),
+        n8nNode("Silver", "n8n-nodes-base.noOp"),
+      ],
+      connections: { Fetch: { main: [[{ node: "Router" }]] }, Router: { main: [[{ node: "Bronze" }], [{ node: "Silver" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    const router = out.nodes.find(n => n.name === "Router")!;
+    expect(router.config.field).toBe("tier");
+    expect(router.config.source_node).toBe("Fetch");
+    expect(JSON.parse(router.config.cases as string)).toEqual([
+      { match: "bronze", port: "case_1" },
+      { match: "silver", port: "case_2" },
+    ]);
+    expect(out._n8n_import_warnings).toBeUndefined();
+    // The case ports this produces must agree with the edges n8nOutputPortId
+    // already wired for the same node — cross-checked so a future
+    // change to one mapping can't silently drift from the other.
+    expect(out.edges.find(e => e.to_node === out.nodes.find(n => n.name === "Bronze")!.id)!.from_port).toBe("case_1");
+    expect(out.edges.find(e => e.to_node === out.nodes.find(n => n.name === "Silver")!.id)!.from_port).toBe("case_2");
+  });
+
+  it("leaves field/cases unconfigured (loud MISSING_FIELD at run time, not a silent guess) for expression mode", () => {
+    initModals([SWITCH_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Router", "n8n-nodes-base.switch", { mode: "expression", output: "={{ $json.idx }}" }),
+      ],
+      connections: { Fetch: { main: [[{ node: "Router" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    const router = out.nodes.find(n => n.name === "Router")!;
+    expect(router.config.field).toBeUndefined();
+    expect(router.config.cases).toBeUndefined();
+    expect(out._n8n_import_warnings![0]).toContain("expression");
+  });
+
+  it("emits a warning rather than a wrong single-field guess when rules compare different fields", () => {
+    initModals([SWITCH_DESCRIPTOR], () => {});
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("Fetch", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Router", "n8n-nodes-base.switch", {
+          mode: "rules",
+          rules: {
+            values: [
+              { conditions: { conditions: [{ leftValue: "={{ $json.tier }}", rightValue: "bronze", operator: { type: "string", operation: "equals" } }], combinator: "and" } },
+              { conditions: { conditions: [{ leftValue: "={{ $json.status }}", rightValue: "vip", operator: { type: "string", operation: "equals" } }], combinator: "and" } },
+            ],
+          },
+        }),
+      ],
+      connections: { Fetch: { main: [[{ node: "Router" }]] } },
+    };
+    const out = convertN8nWorkflow(n8n) as ConvertedResult;
+    expect(out.nodes.find(n => n.name === "Router")!.config.field).toBeUndefined();
+    expect(out._n8n_import_warnings![0]).toContain("different fields");
+  });
+});
+
+describe("showImportPreview — n8n condition-translation warnings surfaced pre-import (T1-8 residual)", () => {
+  it("renders warnings in the requirements list and strips the ephemeral field before handing off to the confirm callback", () => {
+    let confirmed: Record<string, unknown> | null = null;
+    initModals([IF_DESCRIPTOR], obj => { confirmed = obj; });
+
+    const n8n = {
+      name: "wf",
+      nodes: [
+        n8nNode("A", "n8n-nodes-base.httpRequest"),
+        n8nNode("B", "n8n-nodes-base.httpRequest"),
+        n8nNodeParams("Check", "n8n-nodes-base.if", {
+          conditions: { conditions: [{ leftValue: "={{ $json.status }}", rightValue: "ok", operator: { type: "string", operation: "equals" } }], combinator: "and" },
+        }),
+      ],
+      connections: { A: { main: [[{ node: "Check" }]] }, B: { main: [[{ node: "Check" }]] } },
+    };
+    showImportPreview(n8n);
+
+    const reqList = document.getElementById("import-req-list")!;
+    expect(reqList.textContent).toContain("could not identify exactly one upstream node");
+
+    document.getElementById("import-confirm")!.click();
+    expect(confirmed).not.toBeNull();
+    expect(confirmed!._n8n_import_warnings).toBeUndefined();
   });
 });

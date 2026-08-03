@@ -191,8 +191,25 @@ impl Node for AiMemoryNode {
                     Some(r) => r,
                     None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for write")),
                 };
-                let content = input.input["content"].as_str().unwrap_or("");
-                let _ = conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]);
+                // was `input.input["content"].as_str.unwrap_or("")`,
+                // silently writing an empty-content row with no error — the
+                // "append" branch above already enforces this identical
+                // documented contract ("required for write/append").
+                let content = match input.input["content"].as_str() {
+                    Some(c) if !c.is_empty() => c,
+                    _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for write")),
+                };
+                // AM-01: this DELETE's error used to be discarded (`let _ = ...`),
+                // so a DB failure here (lock contention, I/O error) fell through
+                // to the INSERT anyway — leaving the old row(s) in place alongside
+                // the new one and reporting success, silently breaking "write
+                // replaces this session's history". Propagate it like the INSERT
+                // error below already is.
+                if let Err(e) = conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]) {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "WRITE_ERROR", format!("failed to clear previous messages: {}", e),
+                    ));
+                }
                 let now = chrono::Utc::now().to_rfc3339();
                 match conn.execute(
                     "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, 0)",
@@ -327,7 +344,7 @@ mod tests {
         cleanup(&path);
     }
 
-    /// T1-5 (S2-1): `read_messages` used to select the *oldest* N rows
+    /// `read_messages` used to select the *oldest* N rows
     /// (`ORDER BY seq ASC LIMIT`), contradicting the schema's documented
     /// "max_messages ... newest first" contract. Seed 25 messages (5 more
     /// than the default max_messages of 20) and assert the returned window
@@ -374,6 +391,89 @@ mod tests {
 
         let out = node.execute(make_input("clear", "never-existed", None, None)).await;
         assert!(out.success, "clear of nonexistent session must succeed: {:?}", out.error);
+
+        cleanup(&path);
+    }
+
+    /// S2-10 (edge case, the bug itself): "write" used to silently accept
+    /// missing/empty content (`unwrap_or("")`) with no error, unlike
+    /// "append"'s existing MISSING_CONTENT check for the identical documented
+    /// "required for write/append" contract. Both missing and explicitly-empty
+    /// content must now be rejected the same way "append" already rejects them.
+    #[tokio::test]
+    async fn write_with_missing_or_empty_content_is_rejected() {
+        let path = temp_db_path("write_missing_content");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let missing = node.execute(make_input("write", "session-w", Some("user"), None)).await;
+        assert!(!missing.success);
+        assert_eq!(missing.error.unwrap().code, "MISSING_CONTENT");
+
+        let empty = node.execute(make_input("write", "session-w", Some("user"), Some(""))).await;
+        assert!(!empty.success);
+        assert_eq!(empty.error.unwrap().code, "MISSING_CONTENT");
+
+        // Neither rejected call should have written a row.
+        let read = node.execute(make_input("read", "session-w", None, None)).await;
+        assert_eq!(read.output.unwrap()["count"], 0);
+
+        cleanup(&path);
+    }
+
+    /// S2-10 (normal case): "write" with real content is unaffected by the
+    /// new check and still works exactly as before.
+    #[tokio::test]
+    async fn write_with_real_content_still_succeeds() {
+        let path = temp_db_path("write_real_content");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let out = node.execute(make_input("write", "session-w2", Some("user"), Some("hello there"))).await;
+        assert!(out.success, "write failed: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["count"], 1);
+        assert_eq!(data["messages"], json!([{ "role": "user", "content": "hello there" }]));
+
+        cleanup(&path);
+    }
+
+    /// AM-01 (the bug itself): "write" used to discard the DELETE-before-insert
+    /// error (`let _ = conn.execute(DELETE...)`), so a DB failure on the delete
+    /// step fell through to the INSERT anyway — leaving the old row in place
+    /// alongside the new one and reporting success regardless. Force the DELETE
+    /// to fail via a trigger and assert the call now fails and the session's
+    /// prior content is left untouched, not silently duplicated.
+    #[tokio::test]
+    async fn write_reports_failure_and_preserves_data_when_delete_fails() {
+        let path = temp_db_path("write_delete_fails");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        // Seed one message via append — does not go through write's delete step.
+        let seed = node.execute(make_input("append", "session-fail", Some("user"), Some("original"))).await;
+        assert!(seed.success, "seed append failed: {:?}", seed.error);
+
+        // Force every DELETE on ai_memory to fail from this point on.
+        {
+            let pool = node.get_pool().expect("pool init");
+            let conn = pool.get().expect("get conn");
+            conn.execute_batch(
+                "CREATE TRIGGER block_delete BEFORE DELETE ON ai_memory
+                 BEGIN SELECT RAISE(ABORT, 'delete blocked for test'); END;"
+            ).expect("trigger install failed");
+        }
+
+        let write_out = node.execute(make_input("write", "session-fail", Some("user"), Some("replacement"))).await;
+        assert!(!write_out.success, "write must fail when the delete step fails");
+        assert_eq!(write_out.error.unwrap().code, "WRITE_ERROR");
+
+        // Original content must survive untouched — no silent duplicate insert.
+        let read_out = node.execute(make_input("read", "session-fail", None, None)).await;
+        assert!(read_out.success, "read failed: {:?}", read_out.error);
+        let data = read_out.output.unwrap();
+        assert_eq!(data["count"], 1);
+        assert_eq!(data["messages"], json!([{ "role": "user", "content": "original" }]));
 
         cleanup(&path);
     }

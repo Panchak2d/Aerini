@@ -4,7 +4,7 @@
 
 /* ── FIELD HINTS & INFO BANNERS ────────────────────────────────────────────── */
 
-/* [FIX-23] Informational banner inside node config popovers */
+/* Informational banner inside node config popovers */
 .popover-info-banner {
   margin: 10px 0 4px;
   padding: 8px 10px;
@@ -27,11 +27,6 @@
 
 .field-hint       { font-size:10px; color:var(--t2); margin-top:3px; line-height:1.4; }
 
-/* [Patch 6 follow-up] renderAiAttachments() in popover-config.ts references these
-   classes but Patch 6 only shipped the .ts file — no CSS was ever added for them.
-   Unstyled, not broken: a plain unstyled <div>/<button> rendered with default
-   browser styling. Added here on explicit user request, outside Patch 7's file
-   scope (panels.css was not one of Patch 7's listed files). */
 .attachment-chips        { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; }
 .attachment-chip         { display:flex; align-items:center; gap:5px; background:var(--bg3); border:1px solid var(--bd); border-radius:var(--radius-sm); padding:4px 6px 4px 8px; font-size:11px; color:var(--t2); max-width:100%; }
 .attachment-chip-label   { display:flex; align-items:center; gap:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:200px; }
@@ -43,7 +38,7 @@
 
 .cred-panel { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center; }
 .cred-panel.hidden { display:none; }
-.cred-panel-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(2px); }
+.cred-panel-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.6); }
 .cred-panel-box { position:relative; z-index:1; background:var(--bg2); border:1px solid var(--bd); border-radius:12px; width:520px; max-width:calc(100vw - 40px); max-height:80vh; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,.5); }
 
 .cred-panel-header   { display:flex; align-items:flex-start; justify-content:space-between; padding:20px; border-bottom:1px solid var(--bd); flex-shrink:0; }
@@ -137,7 +132,7 @@
 
 #confirm-modal { position:fixed; inset:0; z-index:500; display:flex; align-items:center; justify-content:center; }
 #confirm-modal.hidden { display:none; }
-.confirm-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.65); backdrop-filter:blur(2px); }
+.confirm-backdrop { position:absolute; inset:0; background:rgba(0,0,0,.65); }
 .confirm-box { position:relative; z-index:1; background:var(--bg2); border:1px solid var(--bd); border-radius:12px; padding:28px 28px 22px; width:340px; max-width:calc(100vw - 40px); box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
 .confirm-icon { font-size:28px; margin-bottom:12px; }
 .confirm-message { font-size:13px; color:var(--t1); line-height:1.6; margin-bottom:20px; }
@@ -244,7 +239,7 @@
   align-items: center;
   align-self: flex-start;
   font-size: 10px;
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
   color: var(--blue);
   background: rgba(77,158,255,.08);
   border: 1px solid rgba(77,158,255,.2);
@@ -260,7 +255,7 @@
 
 
 .code-editor {
-  font-family: "SF Mono","Fira Code","Cascadia Code",monospace !important;
+  font-family: var(--font-mono) !important;
   font-size: 11px !important;
   line-height: 1.6;
   min-height: 240px;
@@ -304,8 +299,6 @@
   gap: 6px;
 }
 .popover-section-title:first-child { border-top: none; padding-top: 0; margin-top: 0; }
-
-.popover-min-height-sentinel { display: none; }
 
 
 /* ── HISTORY PANEL ──────────────────────────────────────────────────────────── */
@@ -517,7 +510,7 @@
   line-height: 1.6;
   transition: border-color 100ms;
 }
-.note-inline-textarea:focus { border-color: var(--blue); }
+.note-inline-textarea:focus { border-color: var(--color-focus); }
 
 .note-color-row {
   display: flex;
@@ -570,7 +563,7 @@
 
 .interp-path {
   color: var(--blue);
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   flex: 1;
   overflow: hidden;
@@ -601,7 +594,7 @@
   transition: border-color 100ms;
   font-family: inherit;
 }
-.popover-search:focus { border-color: var(--blue); }
+.popover-search:focus { border-color: var(--color-focus); }
 
 /* ── POPOVER TEST ──────────────────────────────────────────────────────────── */
 
@@ -645,7 +638,7 @@
   margin: 0;
   padding: 8px 10px;
   font-size: 10px;
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
   background: var(--bg1);
   color: var(--t2);
   max-height: 260px;
@@ -682,7 +675,7 @@
 .cron-hint {
   font-size: 10px;
   color: var(--t3);
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
 }
 
 
@@ -739,7 +732,7 @@
 }
 .expr-picker-expr {
   font-size: 11px;
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
   color: var(--blue, #4d9eff);
   line-height: 1.4;
   word-break: break-all;
@@ -762,12 +755,11 @@
 .version-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,.55);
+  background: rgba(0,0,0,.6);
   z-index: 500;
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(3px);
 }
 
 .version-panel {
@@ -889,8 +881,8 @@
   transition: border-color 100ms, box-shadow 100ms;
 }
 .csel-trigger:hover         { border-color: var(--t3); }
-.csel-trigger:focus-visible { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
-.csel-trigger.open          { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
+.csel-trigger:focus-visible { outline: none; border-color: var(--color-focus); box-shadow: 0 0 0 3px rgba(var(--color-focus-rgb),.1); }
+.csel-trigger.open          { border-color: var(--color-focus); box-shadow: 0 0 0 3px rgba(var(--color-focus-rgb),.1); }
 
 .csel-label {
   flex: 1;
@@ -940,7 +932,7 @@
 .node-popover textarea { user-select: text; -webkit-user-select: text; }
 
 #output-drawer .drawer-header { user-select: none; }
-#output-drawer #output-content { user-select: text; -webkit-user-select: text; }
+#output-drawer #output-content, #output-drawer #output-content-performance { user-select: text; -webkit-user-select: text; }
 
 .workflow-item-run-state {
   display: flex;
@@ -1174,7 +1166,7 @@
   background-position: right 10px center;
   padding-right: 28px;
 }
-.res-node-select:focus { border-color: var(--blue); }
+.res-node-select:focus { border-color: var(--color-focus); }
 .res-node-select option { background: var(--bg2); color: var(--t1); }
 
 .res-display     { flex: 1; overflow-y: auto; padding-top: 4px; }
@@ -1185,7 +1177,7 @@
 
 .res-code {
   font-size: 11px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   line-height: 1.7;
   color: var(--t2);
   white-space: pre-wrap;
@@ -1444,7 +1436,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
   animation: fade-in .2s ease;
 }
 #onboarding-modal.hidden { display: none; }
@@ -1486,8 +1477,8 @@
 }
 .subfolder-del-btn:focus-visible {
   outline: none;
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(77,158,255,.15);
+  border-color: var(--color-focus);
+  box-shadow: 0 0 0 3px rgba(var(--color-focus-rgb),.15);
 }
 .subfolder-del-btn:hover {
   color: var(--red);
@@ -1531,7 +1522,7 @@
   transition: border-color 100ms;
 }
 .folder-picker-row:focus-within {
-  border-color: var(--blue);
+  border-color: var(--color-focus);
 }
 
 .folder-picker-path {
@@ -1542,7 +1533,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
 }
 .folder-picker-path:not(:has(~ *)) {
   color: var(--t3);
@@ -1581,14 +1572,14 @@
 }
 .workflow-item:hover .workflow-item-dup { opacity: 1; }
 .workflow-item-dup:hover { color: var(--blue); }
-.workflow-item-dup:focus-visible { opacity: 1; color: var(--blue); outline: 2px solid var(--color-action-nav); outline-offset: 2px; }
+.workflow-item-dup:focus-visible { opacity: 1; color: var(--blue); outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 
 /* ── MINIMAP ────────────────────────────────────────────────────────────────── */
 
 #minimap-wrap {
   position: absolute;
-  bottom: 40px;
+  bottom: calc(var(--status-h) + var(--canvas-stat-h) + 14px);
   right: 12px;
   z-index: 10;
   display: flex;
@@ -1623,7 +1614,6 @@
 .workflow-item:focus-visible,
 .history-item:focus-visible,
 
-.panel-tab:focus-visible,
 .drawer-tab:focus-visible,
 .btn-run:focus-visible,
 .btn-bg-run:focus-visible,
@@ -1631,7 +1621,7 @@
 .import-btn-cancel:focus-visible,
 .confirm-btn-ok:focus-visible,
 .confirm-btn-cancel:focus-visible {
-  outline: 2px solid var(--color-action-nav);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
@@ -1657,7 +1647,7 @@
   border-radius: 4px;
   padding: 2px 6px;
   font-size: 10px;
-  font-family: "SF Mono","Fira Code",monospace;
+  font-family: var(--font-mono);
   color: var(--blue);
   white-space: nowrap;
   transition: background 100ms, border-color 100ms;

@@ -95,10 +95,10 @@ impl Node for FileNode {
                     // exists: the target may legitimately not exist (that's a valid,
                     //   non-error "exists: false" result) — but the old lexical fallback
                     //   here trusted an unresolved suffix past a symlinked *intermediate*
-                    //   directory (S3-7). All three now resolve through the same
+                    // directory. All three now resolve through the same
                     //   walk-up-to-nearest-existing-ancestor helper, which also lets
                     //   write/append reach nested, not-yet-created directories inside the
-                    //   sandbox (S3-6) — create_dir_all runs later, after this check.
+                    // sandbox — create_dir_all runs later, after this check.
                     "write" | "append" | "exists" => {
                         match resolve_within_sandbox(&sandbox, sandbox_str, &abs) {
                             Ok(resolved) => resolved,
@@ -187,7 +187,7 @@ impl Node for FileNode {
                         format!("content is not valid base64: {}", e),
                     )),
                 };
-                // Inline fix (Rule 6): this arm never created missing parent directories,
+                // Inline fix: this arm never created missing parent directories,
                 // unlike "write" above — the same file/mechanism, small, no design call.
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = fs::create_dir_all(parent).await;
@@ -196,7 +196,15 @@ impl Node for FileNode {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
                     Ok(mut f) => match f.write_all(&bytes).await {
                         Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                        Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
+                        // tokio::fs::File's write_all can return before the write has
+                        // actually reached the OS; without an explicit flush, dropping
+                        // `f` here is not guaranteed to deliver the bytes (VERIFIED,
+                        // tokio docs). This flush is what "write" above gets for free
+                        // from fs::write's single atomic blocking call.
+                        Ok(_) => match f.flush().await {
+                            Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
+                            Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
+                        }
                     }
                 }
             }
@@ -275,7 +283,7 @@ fn resolve_within_sandbox(
 
 /// Decode `content` per `encoding` ("base64" or anything else = utf8 passthrough).
 /// Shared by the "write" and "append" arms so both honor `encoding` identically —
-/// previously neither did (T2-9): base64-encoded content was written as literal
+/// previously neither did: base64-encoded content was written as literal
 /// base64 text instead of the decoded bytes it represents.
 fn decode_write_content(content: &str, encoding: &str) -> Result<Vec<u8>, String> {
     if encoding == "base64" {

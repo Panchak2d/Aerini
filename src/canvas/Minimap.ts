@@ -1,5 +1,38 @@
 import type { Canvas } from "./Canvas";
 import { NODE_WIDTH } from "./Node";
+import { getCanvasColors, type CanvasThemeColors } from "./theme-colors";
+
+export interface MinimapColors {
+  colConn: string;
+  colNodeIdle: string;
+  colSelected: string;
+  colError: string;
+  colViewport: string;
+}
+
+// Pure function so the token → color mapping is unit-testable without a
+// real canvas 2D context (jsdom can't provide one without the optional
+// `canvas` npm package, per canvas-safety.test.ts's own documented
+// constraint). `colors` is theme-colors.ts's shared, already-resolved,
+// already-fallback-safe token set.
+//
+// colConn: previously `${colors.border}33` — reasonable while #minimap-canvas's
+// own CSS background was a hardcoded dark literal (workspace.css) regardless of
+// theme, since border+low-alpha reads fine on a background that's always dark.
+// That background is now theme-aware (same batch), which would have left this
+// line at ~1.0:1 contrast on Paper's now-light minimap — the exact border-derived-
+// wire problem already fixed on the main canvas (Connector.ts). Reuses that same
+// dedicated --color-wire token (pre-flattened solid, no alpha suffix needed) so
+// both places stay in sync by construction, not by two separately-tuned values.
+export function resolveMinimapColors(colors: CanvasThemeColors): MinimapColors {
+  return {
+    colConn:     colors.wire,
+    colNodeIdle: colors.surface3,
+    colSelected: `${colors.actionNav}44`,
+    colError:    `${colors.error}33`,
+    colViewport: `${colors.actionNav}99`,
+  };
+}
 
 export class Minimap {
   private canvas: Canvas;
@@ -34,6 +67,16 @@ export class Minimap {
     const c = this.canvas;
     if (c.nodes.size === 0) return;
 
+    // getCanvasColors() is theme-colors.ts's shared cache — cheap here even
+    // though draw() runs every frame: real work (getComputedStyle) happens
+    // once per theme switch, not once per frame. Previously this class read
+    // its own one-time, construction-only snapshot, so a live theme switch
+    // left the minimap showing stale colors until it was reconstructed —
+    // now it re-derives every frame from the same cache Node.ts/Canvas.ts/
+    // Connector.ts already share, so a switch is reflected on the very next
+    // frame like everywhere else on the canvas.
+    const mm = resolveMinimapColors(getCanvasColors());
+
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
     for (const n of c.nodes.values()) {
       mnX = Math.min(mnX, n.data.position.x - 30);
@@ -47,7 +90,7 @@ export class Minimap {
     const tx = (x: number) => (x - mnX) * s;
     const ty = (y: number) => (y - mnY) * s;
 
-    mc.strokeStyle = "#ffffff10"; mc.lineWidth = 1;
+    mc.strokeStyle = mm.colConn; mc.lineWidth = 1;
     for (const conn of c.connectors.values()) {
       const fn = c.nodes.get(conn.data.from_node), tn = c.nodes.get(conn.data.to_node);
       if (!fn || !tn) continue;
@@ -57,11 +100,11 @@ export class Minimap {
       mc.beginPath(); mc.moveTo(tx(fp.x), ty(fp.y)); mc.lineTo(tx(tp.x), ty(tp.y)); mc.stroke();
     }
     for (const n of c.nodes.values()) {
-      mc.fillStyle = n.selected ? "#4d9eff44" : n.status === "error" ? "#f8717133" : "#21262d";
+      mc.fillStyle = n.selected ? mm.colSelected : n.status === "error" ? mm.colError : mm.colNodeIdle;
       mc.fillRect(tx(n.data.position.x), ty(n.data.position.y), Math.max(NODE_WIDTH * s, 3), Math.max(n.height * s, 2));
     }
     const vpX = (-c.panX) / c.zoom, vpY = (-c.panY) / c.zoom;
-    mc.strokeStyle = "rgba(77,158,255,0.6)"; mc.lineWidth = 1.5;
+    mc.strokeStyle = mm.colViewport; mc.lineWidth = 1.5;
     mc.strokeRect(tx(vpX), ty(vpY), (vW / c.zoom) * s, (vH / c.zoom) * s);
   }
 

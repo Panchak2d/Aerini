@@ -135,6 +135,9 @@ impl Node for GetVariableNode {
                     "type": "boolean",
                     "description": "If true, fall back to DB when variable not found in this run",
                     "default": false
+                },
+                "default": {
+                    "description": "Value to return when the variable is not found (in this run, or in the DB if persist is true)."
                 }
             }
         })

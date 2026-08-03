@@ -23,7 +23,7 @@ impl Node for DatabaseNode {
     fn display_name(&self) -> &'static str { "Database" }
     fn node_type(&self)    -> NodeType     { NodeType::Action }
     fn version(&self)      -> &'static str { "2.0.0" }
-    fn description(&self)  -> &'static str { "Run SQL queries against a SQLite, PostgreSQL, or MySQL database and return the results." }
+    fn description(&self)  -> &'static str { "Run SQL queries against a SQLite, PostgreSQL, or MySQL database, or key-value operations against Redis, and return the results." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -69,6 +69,10 @@ impl Node for DatabaseNode {
                 "expire": {
                     "type": "number",
                     "description": "Redis set: optional TTL in seconds. Omit for no expiry."
+                },
+                "allow_local": {
+                    "type": "boolean",
+                    "description": "Postgres / MySQL / Redis only. Default: false — connections to localhost, 127.0.0.1, and private-network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, etc.) are blocked (SSRF protection). Set true only when connection_url intentionally targets a database you run yourself on this machine or LAN."
                 }
             }
         })
@@ -158,38 +162,35 @@ pub(super) fn check_query_for_inline_values(query: &str) -> Option<String> {
     None
 }
 
-// ── Read-only query enforcement (T1-6 / S2-3, S2-4) ────────────────────────────
+// ── Read-only query enforcement ────────────────────────────
 //
 // Shared by all three SQL backends (sqlite, postgres, mysql) so the "query"
-// operation's read-only guarantee can't drift out of sync between them again —
-// S2-3 found postgres/mysql had NO such guard at all, and S2-4 found sqlite's
-// own first-keyword-only guard was bypassable via `WITH x AS (SELECT 1) DELETE
+// operation's read-only guarantee can't drift out of sync between them: a
+// first-keyword-only check is bypassable via `WITH x AS (SELECT 1) DELETE
 // FROM users` (legal SQL: a WITH clause may prefix SELECT, INSERT, UPDATE, or
 // DELETE, per SQLite/ANSI SQL's own CTE grammar).
 //
 // Design: an allowlist, not a denylist. Only a bare SELECT, or a WITH clause
 // whose every CTE body AND final statement are (recursively) SELECT, passes.
-// Everything else is rejected — matching the pre-existing sqlite check's own
-// allowlist philosophy rather than trying to enumerate every dangerous keyword
-// (INSERT/UPDATE/DELETE/DROP/TRUNCATE/PRAGMA/ATTACH/... — an enumeration is
-// easy to leave a gap in; an allowlist of exactly one accepted shape is not).
+// Everything else is rejected — an allowlist of exactly one accepted shape
+// can't leave a gap the way enumerating every dangerous keyword
+// (INSERT/UPDATE/DELETE/DROP/TRUNCATE/PRAGMA/ATTACH/...) could.
 //
 // The recursion into each CTE body (not just the trailing keyword) exists
 // because PostgreSQL supports data-modifying CTEs — `WITH x AS (DELETE FROM t
 // RETURNING *) SELECT * FROM x` is valid, real Postgres syntax that performs a
 // DELETE even though the clause's own trailing keyword is SELECT (verified
 // against PostgreSQL's own docs: "You can use data-modifying statements
-// (INSERT, UPDATE, DELETE, or MERGE) in WITH"). Only checking the keyword after
-// the WITH clause, the way S2-4 characterized the sqlite bug, is not sufficient
-// once postgres is in scope. SQLite/MySQL don't support data-modifying CTE
-// bodies, so this recursion is a no-op for those two backends — any such body
-// would fail their own SQL parser as invalid syntax regardless of this check.
+// (INSERT, UPDATE, DELETE, or MERGE) in WITH"). Checking only the keyword
+// after the WITH clause is not sufficient once postgres is in scope.
+// SQLite/MySQL don't support data-modifying CTE bodies, so this recursion is
+// a no-op for those two backends — any such body would fail their own SQL
+// parser as invalid syntax regardless of this check.
 //
-// Recursion depth is capped (`MAX_CTE_NESTING_DEPTH`) for the same reason T0-4
-// capped the expression engine's recursion: a `query` string is workflow data,
-// which can originate from an untrusted imported file, so an unbounded parser
-// here would just be a new stack-overflow DoS replacing the one this fix closes.
-// Real CTE nesting is at most a handful of levels; 32 is generous headroom.
+// Recursion depth is capped (`MAX_CTE_NESTING_DEPTH`): a `query` string is
+// workflow data, which can originate from an untrusted imported file, so an
+// unbounded parser here would be a stack-overflow DoS. Real CTE nesting is at
+// most a handful of levels; 32 is generous headroom.
 //
 // Any parse failure while walking a WITH clause (malformed CTE list, unclosed
 // string/paren, depth exceeded) is also rejected — fail closed, since this
@@ -223,16 +224,21 @@ fn skip_ws_and_comments(s: &str) -> &str {
 }
 
 /// Returns the next bare alphanumeric/underscore token at the front of `s`
-/// (after skipping whitespace/comments), uppercased via `to_ascii_uppercase`
-/// (never `to_uppercase` — Unicode case-folding can change a string's byte
-/// length, e.g. 'İ' -> "i̇", which would desync any later byte-offset built from
-/// the uppercased copy against the original; ASCII-only folding never does),
-/// plus the remainder starting immediately after it. Returns ("", <ws-skipped
-/// s>) if the next character isn't identifier-shaped.
-fn take_word(s: &str) -> (String, &str) {
+/// (after skipping whitespace/comments), in its original case, plus the
+/// remainder starting immediately after it. Returns ("", <ws-skipped s>) if
+/// the next character isn't identifier-shaped.
+///
+/// Callers compare the returned word with `eq_ignore_ascii_case` rather than
+/// uppercasing it here — every call site only compares or checks emptiness,
+/// so an owned uppercased copy would be an allocation with no reader. ASCII
+/// case-insensitive comparison (not `to_uppercase`/`to_lowercase`) is also
+/// required for correctness: Unicode case-folding can change a string's byte
+/// length (e.g. 'İ' -> "i̇"), which would desync a byte-offset built from a
+/// folded copy against the original; ASCII-only comparison never does that.
+fn take_word(s: &str) -> (&str, &str) {
     let s = skip_ws_and_comments(s);
     let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
-    (s[..end].to_ascii_uppercase(), &s[end..])
+    (&s[..end], &s[end..])
 }
 
 /// Skips one `quote`-delimited literal (string literal `'...'`, or a quoted
@@ -308,15 +314,15 @@ fn is_read_only_statement(s: &str, depth: u32) -> Result<(), ()> {
         return Err(());
     }
     let (kw, after) = take_word(s);
-    if kw == "SELECT" {
+    if kw.eq_ignore_ascii_case("SELECT") {
         return Ok(());
     }
-    if kw != "WITH" {
+    if !kw.eq_ignore_ascii_case("WITH") {
         return Err(());
     }
     let mut rest = skip_ws_and_comments(after);
     let (maybe_recursive, after_recursive) = take_word(rest);
-    if maybe_recursive == "RECURSIVE" {
+    if maybe_recursive.eq_ignore_ascii_case("RECURSIVE") {
         rest = skip_ws_and_comments(after_recursive);
     }
     loop {
@@ -327,7 +333,7 @@ fn is_read_only_statement(s: &str, depth: u32) -> Result<(), ()> {
             rest = skip_ws_and_comments(rest);
         }
         let (as_kw, after_as) = take_word(rest);
-        if as_kw != "AS" {
+        if !as_kw.eq_ignore_ascii_case("AS") {
             return Err(());
         }
         rest = skip_ws_and_comments(after_as);
@@ -347,7 +353,7 @@ fn is_read_only_statement(s: &str, depth: u32) -> Result<(), ()> {
         break;
     }
     let (final_kw, _) = take_word(rest);
-    if final_kw == "SELECT" { Ok(()) } else { Err(()) }
+    if final_kw.eq_ignore_ascii_case("SELECT") { Ok(()) } else { Err(()) }
 }
 
 /// Entry point: rejects any query that is not provably read-only. Used by the
@@ -416,7 +422,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_ip_connection_url_rejected() {
+    async fn private_ip_connection_url_rejected_under_strict_default() {
+        use crate::nodes::util::SsrfPolicy;
         let urls = [
             "postgres://x:x@127.0.0.1:5432/db",
             "postgres://x:x@10.0.0.1:5432/db",
@@ -425,10 +432,44 @@ mod tests {
         ];
         for url in &urls {
             assert!(
-                crate::nodes::util::check_db_url_ssrf(url).await.is_err(),
+                crate::nodes::util::check_db_url_ssrf(url, SsrfPolicy::Strict).await.is_err(),
                 "Expected SSRF block for: {url}"
             );
         }
+    }
+
+    // residual: proves the new allow_local escape hatch actually
+    // opens (previously check_db_url_ssrf had no way to permit this at all).
+    #[tokio::test]
+    async fn private_ip_connection_url_allowed_when_policy_is_allow_local() {
+        use crate::nodes::util::SsrfPolicy;
+        let urls = [
+            "postgres://x:x@127.0.0.1:5432/db",
+            "postgres://x:x@10.0.0.1:5432/db",
+            "redis://192.168.1.50:6379",
+        ];
+        for url in &urls {
+            assert!(
+                crate::nodes::util::check_db_url_ssrf(url, SsrfPolicy::AllowLocal).await.is_ok(),
+                "Expected {url} to be permitted under SsrfPolicy::AllowLocal"
+            );
+        }
+    }
+
+    // Cloud-metadata / link-local targets must stay blocked even with the
+    // opt-in set — allow_local widens "my own machine/LAN", not "anything".
+    #[tokio::test]
+    async fn cloud_metadata_ip_still_rejected_even_with_allow_local() {
+        use crate::nodes::util::SsrfPolicy;
+        assert!(
+            crate::nodes::util::check_db_url_ssrf(
+                "redis://169.254.169.254:6379",
+                SsrfPolicy::AllowLocal,
+            )
+            .await
+            .is_err(),
+            "Cloud metadata IP must remain blocked under AllowLocal"
+        );
     }
 }
 
@@ -513,7 +554,7 @@ mod read_only_query_tests {
         ).is_ok());
     }
 
-    // S2-4's exact bypass: a WITH clause whose CTE body is a harmless SELECT,
+    // exact bypass: a WITH clause whose CTE body is a harmless SELECT,
     // but whose trailing statement (the thing the WITH clause actually
     // prefixes) is a DELETE. The original sqlite check only inspected the
     // first keyword ("WITH") and let this straight through.
@@ -541,7 +582,7 @@ mod read_only_query_tests {
     // PostgreSQL-specific bypass: a data-modifying CTE body (legal Postgres
     // syntax -- INSERT/UPDATE/DELETE with RETURNING inside a WITH) whose
     // trailing statement is an innocent-looking SELECT. Only checking the
-    // trailing keyword (S2-4's literal bug description) is not enough once
+    // trailing keyword is not enough once
     // postgres is in scope -- the fix must also reject the body itself.
     #[test]
     fn postgres_writable_cte_delete_rejected() {
@@ -609,9 +650,7 @@ mod read_only_query_tests {
     #[test]
     fn deeply_nested_ctes_beyond_cap_rejected_not_stack_overflowing() {
         // 40 levels of nesting exceeds MAX_CTE_NESTING_DEPTH (32) -- must
-        // reject cleanly rather than recurse without bound (the same DoS class
-        // T0-4 already closed in the expression engine, applied here so this
-        // fix doesn't reopen an equivalent hole).
+        // reject cleanly rather than recurse without bound.
         let mut q = String::new();
         for i in 0..40 {
             q.push_str(&format!("WITH c{} AS (", i));

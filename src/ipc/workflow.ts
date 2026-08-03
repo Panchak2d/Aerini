@@ -52,12 +52,22 @@ export const loadWorkflow   = (id: string) => invoke<string | null>("load_workfl
 export const deleteWorkflow = (id: string) => invoke<void>("delete_workflow", { id });
 export const getNodeTypes   = () => invoke<NodeDescriptor[]>("get_node_types");
 
+// runId: pass the id you'll later hand to cancelRun() if this run needs to
+// be independently stoppable (main run / single-node run both do — see
+// run-manager/stream-handler.ts). Omit it for fire-and-forget internal runs
+// (e.g. a popover preview) that never need to be cancelled by id — the
+// backend generates its own id in that case, matching startScheduledWorkflow's
+// existing optional-param convention (`portOverride ?? null`).
 export const runWorkflow = (
   workflowJson: string,
-  initialVariables: Record<string, unknown> = {}
-) => invoke<WorkflowResult>("run_workflow", { workflowJson, initialVariables });
+  initialVariables: Record<string, unknown> = {},
+  runId?: string
+) => invoke<WorkflowResult>("run_workflow", { workflowJson, initialVariables, runId: runId ?? null });
 
-export const cancelRun = () => invoke<void>("cancel_run");
+// Cancels only the run registered under runId — no-op if that run has
+// already finished or was never registered. Never cancels a different
+// in-flight run.
+export const cancelRun = (runId: string) => invoke<void>("cancel_run", { runId });
 
 export interface ScheduledJobRow {
   workflow_id:   string;

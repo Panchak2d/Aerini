@@ -1,23 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * Batch P — regression tests, one describe block per finding.
- *
- * DEVIATION NOTE: `WorkflowManager` is not unit-testable in isolation per
- * the existing precedent stated in workflow-manager.test.ts ("requires a
- * live Canvas, DOM, localStorage, and Tauri IPC"). S11-14's `currentId`
- * fix is therefore verified by direct source inspection (both call sites
- * now read `wf_${crypto.randomUUID()}`, confirmed in this same patch's
- * manual trace) rather than a runtime WorkflowManager test — consistent
- * with that file's own stated testing boundary, not a gap introduced here.
- * S11-14's sibling fix in this same file family (the node-config slot-id
- * generators) *is* independently testable and is covered below.
- *
- * Module-level state note: `popover-utils.ts`'s delegated-listener registry
- * is module-scoped by design (that's the whole fix). Its describe block
- * uses `vi.resetModules()` + dynamic `import()` per test so each test case
- * observes a fresh module instance instead of leaking state between cases.
- */
+/* @vitest-environment jsdom */
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CanvasNode } from "../canvas/Node";
 import type { ExtensionContext } from "../node-configs/popover-utils";
@@ -37,7 +19,7 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-// T2-14 drag-drop mocks: vi.mock() is hoisted above all imports, so any
+// drag-drop mocks: vi.mock() is hoisted above all imports, so any
 // variable a factory references must come from vi.hoisted() — a bare
 // module-scope `const` declared after the vi.mock() call would still be
 // uninitialized ("Cannot access before initialization") at the time the
@@ -90,10 +72,10 @@ function makeCtx(node: CanvasNode): ExtensionContext {
 }
 
 // ---------------------------------------------------------------------------
-// S10-5 — CredentialPanel.buildCredTypeSelect document-listener leak
+//  CredentialPanel.buildCredTypeSelect document-listener leak
 // ---------------------------------------------------------------------------
 
-describe("CredentialPanel buildCredTypeSelect — S10-5 listener leak", () => {
+describe("CredentialPanel buildCredTypeSelect, listener leak", () => {
   it("removes the previous outside-click listener before adding a new one on repeated calls", async () => {
     vi.resetModules();
     const { buildCredTypeSelect } = await import("../panels/CredentialPanel");
@@ -115,10 +97,10 @@ describe("CredentialPanel buildCredTypeSelect — S10-5 listener leak", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S10-6 — popover-utils mkCustomSelect document-listener leak
+// popover-utils mkCustomSelect document-listener leak
 // ---------------------------------------------------------------------------
 
-describe("popover-utils mkCustomSelect — S10-6 dropdown leak", () => {
+describe("popover-utils mkCustomSelect, dropdown leak", () => {
   beforeEach(() => {
     vi.resetModules();
     document.body.innerHTML = "";
@@ -168,10 +150,10 @@ describe("popover-utils mkCustomSelect — S10-6 dropdown leak", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S9-6 — Canvas.destroy() dead/incomplete code, removed (Rule 25)
+// Canvas.destroy() dead/incomplete code, removed 
 // ---------------------------------------------------------------------------
 
-describe("Canvas — S9-6 dead destroy() removed (Rule 25)", () => {
+describe("Canvas — dead destroy() removed", () => {
   it("no longer has a destroy() method", async () => {
     const { Canvas } = await import("../canvas/Canvas");
     expect("destroy" in Canvas.prototype).toBe(false);
@@ -179,10 +161,10 @@ describe("Canvas — S9-6 dead destroy() removed (Rule 25)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T2-14 / S9-5 — drag-drop.ts handleWasmDrop plugin-install confirm gate
+//  drag-drop.ts handleWasmDrop plugin-install confirm gate
 // ---------------------------------------------------------------------------
 
-describe("drag-drop handleWasmDrop — T2-14 confirm gate", () => {
+describe("drag-drop handleWasmDrop, confirm gate", () => {
   const { getSetting, installPluginFromPath, showConfirm, showRestartBanner } = dragDropMocks;
 
   beforeEach(() => {
@@ -234,10 +216,10 @@ describe("drag-drop handleWasmDrop — T2-14 confirm gate", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S11-11 — run-manager/state-machine.ts dead RunEvent/transition() (Rule 25)
+// run-manager/state-machine.ts dead RunEvent/transition() 
 // ---------------------------------------------------------------------------
 
-describe("run-manager/state-machine — S11-11 dead code removed (Rule 25)", () => {
+describe("run-manager/state-machine, dead code removed", () => {
   it("RunStateMachine no longer has a transition() method", async () => {
     const { RunStateMachine } = await import("../run-manager/state-machine");
     expect("transition" in RunStateMachine.prototype).toBe(false);
@@ -246,7 +228,7 @@ describe("run-manager/state-machine — S11-11 dead code removed (Rule 25)", () 
   it("existing named methods still work (no regression from the removal)", async () => {
     const { RunStateMachine } = await import("../run-manager/state-machine");
     const sm = new RunStateMachine();
-    sm.start();
+    sm.start("run_test");
     expect(sm.isRunning).toBe(true);
     sm.setCurrentWorkflow("wf_1", "Test", true, 4);
     expect(sm.currentWorkflowId).toBe("wf_1");
@@ -256,10 +238,10 @@ describe("run-manager/state-machine — S11-11 dead code removed (Rule 25)", () 
 });
 
 // ---------------------------------------------------------------------------
-// S12-10 — output-renderer.ts dead renderRunSummary export (Rule 25)
+// output-renderer.ts dead renderRunSummary export
 // ---------------------------------------------------------------------------
 
-describe("output-renderer — S12-10 dead code removed (Rule 25)", () => {
+describe("output-renderer, dead code removed", () => {
   it("no longer exports renderRunSummary", async () => {
     const mod: Record<string, unknown> = await import("../output-renderer");
     expect(mod.renderRunSummary).toBeUndefined();
@@ -267,12 +249,12 @@ describe("output-renderer — S12-10 dead code removed (Rule 25)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S10-8 — save-to-folder-config.ts / collect-files-config.ts slot-id entropy
+//  save-to-folder-config.ts / collect-files-config.ts slot-id entropy
 // ---------------------------------------------------------------------------
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-describe("save-to-folder-config — S10-8 subfolder slot id entropy", () => {
+describe("save-to-folder-config, subfolder slot id entropy", () => {
   it("generates distinct UUID-based ids, not a Date.now() timestamp", async () => {
     const { renderSaveToFolderFields } = await import("../node-configs/save-to-folder-config");
     const node = makeNode("n1", "save_to_folder", true);
@@ -293,7 +275,7 @@ describe("save-to-folder-config — S10-8 subfolder slot id entropy", () => {
   });
 });
 
-describe("collect-files-config — S10-8 source slot id entropy", () => {
+describe("collect-files-config, source slot id entropy", () => {
   it("generates distinct UUID-based ids, not a Date.now() timestamp", async () => {
     const { renderCollectFilesFields } = await import("../node-configs/collect-files-config");
     const node = makeNode("n1", "collect_files", true);

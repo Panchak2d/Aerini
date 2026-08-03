@@ -42,6 +42,7 @@
   width: 36px;
   height: 36px;
   margin-bottom: 8px;
+  color: var(--color-brand); 
 }
 
 .activity-btn {
@@ -67,14 +68,6 @@
   background: rgba(52, 211, 153, 0.1);
 }
 /* Left accent bar on active button */
-.activity-btn--new {
-  color: var(--green) !important;
-  margin-bottom: 6px;
-}
-.activity-btn--new:hover {
-  background: rgba(52, 211, 153, 0.12) !important;
-}
-
 .activity-btn.active::before {
   content: "";
   position: absolute;
@@ -92,7 +85,7 @@
   right: 4px;
   min-width: 14px;
   height: 14px;
-  background: #1a6bd6; /* darkened from --blue (#4d9eff) — white text contrast 4.6:1, passes WCAG AA */
+  background: #1a6bd6; 
   color: #fff;
   border-radius: 7px;
   font-size: 10px;
@@ -112,7 +105,7 @@
 
 /* Running pulse on background icon */
 .activity-btn[data-zone="bgruns"].has-running .activity-badge {
-  background: #1a9e6a; /* darkened from --green (#34d399) — white text contrast 4.5:1, passes WCAG AA */
+  background: #1a9e6a; 
   animation: wf-pulse 1.4s ease-in-out infinite;
 }
 
@@ -166,6 +159,30 @@
   letter-spacing: 0.01em;
 }
 
+.zone-header-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Aggregate memory used by everything in this zone (e.g. all background
+   runs) -- kept separate from the canvas-stat-bar MEM chip, which is
+   scoped to the currently open workflow only. Hidden via the shared
+   .hidden utility (base.css) whenever there's nothing to show. */
+.zone-mem-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--t3);
+  background: var(--bg4);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .zone-header-actions {
   display: flex;
   align-items: center;
@@ -188,6 +205,22 @@
 .zone-action-btn:hover { color: var(--t1); background: var(--bg4); }
 .zone-action-btn.active { color: var(--blue); }
 
+/* Generic scrollable zone body — Plugins zone. Other zones each
+   have their own purpose-named scroll class (.palette-scroll/.workflow-scroll/
+   .bg-jobs-list); Plugins' content is .settings-group/.settings-row markup
+   (overlays.css, relocated wholesale from the Settings modal), not a
+   repeated-item list, so it gets a plain flex-column scroll shell instead
+   of reusing one of those more specific names. */
+.zone-body-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .zone-search {
   padding: 6px 8px;
   border-bottom: 1px solid var(--bd);
@@ -207,13 +240,18 @@
   transition: border-color 120ms ease, background 120ms ease;
 }
 .zone-search input:focus {
-  border-color: var(--blue);
+  border-color: var(--color-focus);
   background: var(--bg4);
 }
 .zone-search input::placeholder { color: var(--t3); }
 
 .palette-scroll { flex: 1; overflow-y: auto; padding: 4px 6px 8px; min-height: 0; scroll-behavior: smooth; }
 .palette-category {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  font: inherit;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -221,7 +259,19 @@
   color: var(--color-text-secondary);
   padding: 12px 9px 5px;
   opacity: 0.7;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
 }
+.palette-category:hover { opacity: 1; }
+.palette-category:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; opacity: 1; }
+.palette-category-chev {
+  display: inline-flex;
+  flex-shrink: 0;
+  transition: transform 120ms ease;
+}
+.palette-category.collapsed .palette-category-chev { transform: rotate(-90deg); }
 .palette-item {
   display: flex;
   align-items: center;
@@ -236,14 +286,15 @@
 .palette-item:hover { background: var(--bg4); border-color: var(--bd); }
 .palette-item:active { opacity: .75; }
 .palette-item.hidden { display: none; }
+.palette-item.collapsed { display: none; }
 .palette-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .palette-name { font-size: 12px; color: var(--t1); }
 
 .dot-ai      { background: var(--purple); }
-.dot-action  { background: #4d9eff; }
-.dot-logic   { background: #34d399; }
-.dot-utility { background: #f59e0b; }
-.dot-trigger { background: #4d9eff; }
+.dot-action  { background: var(--cat-action); }
+.dot-logic   { background: var(--cat-logic); }
+.dot-utility { background: var(--cat-utility); }
+.dot-trigger { background: var(--cat-trigger); }
 .dot-other   { background: var(--t3); }
 
 .workflow-scroll {
@@ -286,7 +337,7 @@
 }
 .workflow-item:hover .workflow-item-del { color: var(--t3); }
 .workflow-item-del:hover { color: var(--red) !important; background: rgba(248,113,113,.1); }
-.workflow-item-del:focus-visible { color: var(--t3); outline: 2px solid var(--color-action-nav); outline-offset: 2px; }
+.workflow-item-del:focus-visible { color: var(--t3); outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 #sidebar-resize-handle {
   position: absolute;
@@ -302,6 +353,16 @@
 #sidebar-resize-handle.dragging {
   background: var(--blue);
 }
+#sidebar-resize-handle:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+/* Cursor lock for the duration of a sidebar-width drag — same convention as
+   workspace.css's body.resizing-v for the drawer, just the horizontal twin.
+   Declared here (not workspace.css) since that file is out of this batch's
+   scope; a body-class rule applies globally no matter which sheet holds it. */
+body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select: none !important; }
 
 
 /* @keyframes wf-pulse — defined here (sidebar loads first); used by sidebar, panels, and overlays */
@@ -341,7 +402,7 @@
   border-color: var(--accent);
 }
 
-/* ── Preset template preview tooltip (Patch 4) ── */
+/* ── Preset template preview tooltip ── */
 .template-preview-tooltip {
   position: fixed;
   z-index: 9999;

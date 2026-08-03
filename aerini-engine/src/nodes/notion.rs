@@ -15,7 +15,7 @@ impl Node for NotionNode {
     fn display_name(&self) -> &'static str { "Notion" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Create, read, or update pages and database entries in Notion." }
+    fn description(&self) -> &'static str { "Create or update pages and database entries in Notion." }
 
     fn input_schema(&self) -> Value {
         json!({

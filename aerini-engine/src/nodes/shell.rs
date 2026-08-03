@@ -7,6 +7,8 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
+use super::util::scrub_url_in_error;
+
 pub struct ShellExecNode;
 
 #[async_trait]
@@ -181,10 +183,12 @@ impl Node for ShellExecNode {
 
 /// Redacts sensitive patterns from a shell command before writing to run history.
 /// Applied in order: Authorization headers → URL credentials → named flags → env assignments.
+/// URL-credential redaction delegates to the shared `scrub_url_in_error` so the
+/// two code paths can't drift apart.
 /// Truncates commands over 500 chars after redaction.
 fn redact_command_log(cmd: &str) -> String {
     let s = redact_authorization_header(cmd);
-    let s = redact_url_credentials(&s);
+    let s = scrub_url_in_error(&s);
     let s = redact_after_prefix(&s, "--password=");
     let s = redact_after_prefix(&s, "--passwd=");
     let s = redact_after_prefix(&s, "--pass=");
@@ -206,7 +210,17 @@ fn redact_command_log(cmd: &str) -> String {
 /// Example: `-H "Authorization: Bearer sk-abc"` → `-H "Authorization: [REDACTED]"`
 fn redact_authorization_header(cmd: &str) -> String {
     let mut result = String::with_capacity(cmd.len());
-    let lower = cmd.to_lowercase();
+    // ASCII-only lowering: "authorization:" is a fixed ASCII literal,
+    // and `to_ascii_lowercase()` only ever remaps 'A'-'Z' to 'a'-'z' byte-for-byte
+    // -- every other byte, and therefore every char boundary, is left exactly
+    // where it was in `cmd`. Unicode-aware `to_lowercase()` can expand some
+    // characters (e.g. 'İ' U+0130, 2 bytes, lowercases to "i̇", 3 bytes),
+    // which shifts `lower`'s byte offsets out of alignment with `cmd`'s the
+    // moment such a character appears anywhere earlier in the string -- `i`
+    // below is stepped along `cmd`'s own char boundaries and used to index
+    // into `lower`, so that divergence either misses/misplaces the redaction
+    // or slices `lower` off a char boundary and panics.
+    let lower = cmd.to_ascii_lowercase();
     let mut i = 0;
     while i < cmd.len() {
         if lower[i..].starts_with("authorization:") {
@@ -235,47 +249,6 @@ fn redact_authorization_header(cmd: &str) -> String {
     result
 }
 
-/// Redacts passwords embedded in URLs: `scheme://user:password@host` → `scheme://user:[REDACTED]@host`.
-/// Only matches when '@' appears before any '/' or whitespace after '://'.
-fn redact_url_credentials(cmd: &str) -> String {
-    let marker = "://";
-    let mut result = String::new();
-    let mut haystack = cmd;
-
-    while let Some(pos) = haystack.find(marker) {
-        result.push_str(&haystack[..pos + marker.len()]);
-        let after = &haystack[pos + marker.len()..];
-
-        let at_pos    = after.find('@');
-        let slash_pos = after.find('/');
-        let space_pos = after.find(|c: char| c.is_ascii_whitespace());
-
-        // '@' must appear before any '/' or whitespace — otherwise it's not credentials.
-        let at_before_delim = at_pos.is_some_and(|a| {
-            slash_pos.is_none_or(|s| a < s) && space_pos.is_none_or(|s| a < s)
-        });
-
-        if at_before_delim {
-            let a = at_pos.expect("at_pos is Some: at_before_delim guard requires at_pos.is_some()");
-            let before_at = &after[..a];
-            if let Some(colon) = before_at.find(':') {
-                let user = &before_at[..colon];
-                if !user.is_empty() && !user.contains(|c: char| c.is_ascii_whitespace()) {
-                    result.push_str(user);
-                    result.push_str(":[REDACTED]@");
-                    haystack = &after[a + 1..];
-                    continue;
-                }
-            }
-        }
-
-        haystack = after;
-    }
-
-    result.push_str(haystack);
-    result
-}
-
 /// Redacts the value that immediately follows `prefix` (case-insensitive).
 /// Matches only at word boundaries (start of string or preceded by whitespace/quote).
 /// Value ends at the next whitespace, quote, or end of string.
@@ -283,8 +256,16 @@ fn redact_url_credentials(cmd: &str) -> String {
 /// Used for flags like `--password=VALUE` (prefix = `--password=`)
 /// and short flags like `-p VALUE` (prefix = `-p `, space included).
 fn redact_after_prefix(cmd: &str, prefix: &str) -> String {
-    let lc_cmd    = cmd.to_lowercase();
-    let lc_prefix = prefix.to_lowercase();
+    // ASCII-only lowering: every `prefix` this function is ever called
+    // with (`--password=`, `-p `, etc.) is a fixed ASCII literal, so ASCII
+    // case-insensitive matching is exactly what's needed. `to_ascii_lowercase()`
+    // never changes a string's byte length or char-boundary positions (unlike
+    // Unicode-aware `to_lowercase()`), so `abs`/`val_start` below -- computed
+    // from `lc_cmd` and then used to index directly into `cmd` -- always land
+    // on a valid position in `cmd` too. See `redact_authorization_header`'s
+    // comment above for the concrete divergence example this avoids.
+    let lc_cmd    = cmd.to_ascii_lowercase();
+    let lc_prefix = prefix.to_ascii_lowercase();
     let mut result = String::with_capacity(cmd.len());
     let mut last   = 0;
     let mut search = 0;
@@ -386,24 +367,25 @@ mod tests {
 
     // ── URL credential redaction ────────────────────────────────────────────
 
+    // Exercises the shared `scrub_url_in_error` redactor that `redact_command_log` delegates to.
     #[test]
     fn url_credentials_redacted() {
         let cmd = "mysql -h mysql://user:pass@host:3306/db";
-        let out = redact_url_credentials(cmd);
+        let out = scrub_url_in_error(cmd);
         assert_eq!(out, "mysql -h mysql://user:[REDACTED]@host:3306/db");
     }
 
     #[test]
     fn postgres_credentials_redacted() {
         let cmd = "pg_dump postgres://admin:secret@localhost/mydb";
-        let out = redact_url_credentials(cmd);
+        let out = scrub_url_in_error(cmd);
         assert_eq!(out, "pg_dump postgres://admin:[REDACTED]@localhost/mydb");
     }
 
     #[test]
     fn url_without_credentials_unchanged() {
         let cmd = "curl https://api.example.com/v1/data";
-        let out = redact_url_credentials(cmd);
+        let out = scrub_url_in_error(cmd);
         assert_eq!(out, cmd);
     }
 
@@ -445,6 +427,18 @@ mod tests {
         assert_eq!(out, cmd);
     }
 
+    // 'İ' (U+0130) is 2 bytes in `cmd` but Unicode-aware `to_lowercase()` expands
+    // it to the 3-byte "i̇" -- byte offsets computed from a Unicode-lowered copy
+    // would then misalign with `cmd`, which is indexed directly.
+    // `to_ascii_lowercase()` leaves 'İ' untouched (non-ASCII), keeping both
+    // strings byte-for-byte aligned throughout.
+    #[test]
+    fn unicode_before_flag_value_does_not_misalign_or_panic() {
+        let cmd = "echo İ && mysql --password=secret -h localhost";
+        let out = redact_after_prefix(cmd, "--password=");
+        assert_eq!(out, "echo İ && mysql --password=[REDACTED] -h localhost");
+    }
+
     // ── Env assignment redaction ────────────────────────────────────────────
 
     #[test]
@@ -478,6 +472,20 @@ mod tests {
         assert!(!out.contains("sk-abc123"), "secret should be gone, got: {}", out);
         // URL that follows the header must not be swallowed.
         assert!(out.contains("https://api.example.com"), "URL must be preserved, got: {}", out);
+    }
+
+    // Same Unicode/ASCII alignment concern as
+    // unicode_before_flag_value_does_not_misalign_or_panic above, applied to
+    // redact_authorization_header: a byte offset from a Unicode-lowered copy
+    // can slice `lower` off a char boundary and panic. Must not panic, and
+    // must still redact correctly with unrelated Unicode content preserved.
+    #[test]
+    fn unicode_before_authorization_header_does_not_panic_and_still_redacts() {
+        let cmd = "echo İ && curl -H \"Authorization: Bearer sk-abc123\" https://x";
+        let out = redact_authorization_header(cmd);
+        assert!(out.contains("[REDACTED]"), "expected redaction, got: {}", out);
+        assert!(!out.contains("sk-abc123"), "secret should be gone, got: {}", out);
+        assert!(out.contains('İ'), "unrelated unicode content must be preserved, got: {}", out);
     }
 
     // ── Full pipeline ───────────────────────────────────────────────────────

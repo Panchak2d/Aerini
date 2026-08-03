@@ -17,13 +17,14 @@ const RESPONSE_TIMEOUT_MS = 30_000;
 
 interface ChatImageFile { filename: string; data: string; mime_type: string; }
 
-/** Outgoing user attachment — same wire shape as ChatImageFile but not image-only (Patch 7). */
+/** Outgoing user attachment — same wire shape as ChatImageFile but not image-only. */
 interface ChatAttachment { filename: string; data: string; mime_type: string; }
 
-// Accepted types match Patch 6 (AI Prompt static attachments UI) exactly.
+// Accepted types match the AI Prompt node's static attachments UI (popover/extensions/ai-prompt.ts) exactly.
 const CHAT_ATTACHMENT_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md";
 
-// file.type is unreliable for non-standard extensions (e.g. .md on Windows) — same fallback as Patch 6.
+// file.type is unreliable for non-standard extensions (e.g. .md on Windows) — falls back to
+// CHAT_ATTACHMENT_MIME_MAP by extension, same approach as the AI Prompt attachments UI.
 const CHAT_ATTACHMENT_MIME_MAP: Record<string, string> = {
   ".png":  "image/png",
   ".jpg":  "image/jpeg",
@@ -35,20 +36,20 @@ const CHAT_ATTACHMENT_MIME_MAP: Record<string, string> = {
   ".md":   "text/markdown",
 };
 
-// Same icon set as Patch 6's attachment chips (popover/extensions/ai-prompt.ts) — no emoji, themeable via currentColor.
+// Same icon set as the AI Prompt attachments UI's chips (popover/extensions/ai-prompt.ts) — no emoji, themeable via currentColor.
 const CHAT_ATTACHMENT_FILE_ICON = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
-const CHAT_ATTACHMENT_X_ICON    = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+const CHAT_ATTACHMENT_X_ICON    = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 
 /**
  * Hard wire-transmissibility ceiling, not a soft "file size" warning. Mirrors
- * aerini-engine/src/nodes/webhook.rs `MAX_BODY_BYTES` (VERIFIED in source,
- * 2026-06-25) — the local webhook server rejects any request body over this
- * many bytes. handleSend()'s fetch() does not check response.ok, so a body
- * that exceeds this would not error immediately; it would silently fail and
- * surface 30s later as a misleading "No response after 30s" timeout. This is
- * therefore enforced as a hard client-side block, not a dismissible warning
- * (deliberate deviation from Patch 6's pattern — there, oversized attachments
- * only bloat the saved workflow file and never fail outright).
+ * aerini-engine/src/nodes/webhook.rs `MAX_BODY_BYTES` — the local webhook
+ * server rejects any request body over this many bytes. handleSend() never
+ * inspects the HTTP response (see the class doc above — resolution is
+ * entirely event-driven), so a request rejected for size still waits out
+ * the full 30s timeout instead of failing immediately. Enforced here as a
+ * hard client-side block rather than a dismissible warning, since an
+ * oversized request never succeeds at all — unlike a saved workflow file,
+ * which just grows.
  */
 const CHAT_WEBHOOK_BODY_CAP_BYTES = 1_000_000;
 /** Reserve for JSON structure, session_id, and per-file filename/mime_type strings. */
@@ -72,7 +73,7 @@ interface ChatSession {
 interface ChatStore { sessions: ChatSession[]; activeId: string; }
 
 /**
- * Chat Panel — Patch 5A (frontend only).
+ * Chat Panel.
  *
  * IMPORTANT — message flow does NOT use the webhook's HTTP response.
  * The Webhook node (aerini-engine/src/nodes/webhook.rs, scheduler/runner.rs)
@@ -81,8 +82,7 @@ interface ChatStore { sessions: ChatSession[]; activeId: string; }
  * actual reply arrives asynchronously as a `scheduler-status` Tauri event
  * with `last_result.node_outputs[<Output node id>]` once the background run
  * completes. `fetch()` below is fire-and-forget; resolution happens in
- * onSchedulerStatus(). See chat session notes for the full discrepancy
- * writeup against the original plan.
+ * onSchedulerStatus().
  */
 export class ChatPanel {
   private el:           HTMLElement;
@@ -96,7 +96,7 @@ export class ChatPanel {
   private chatBtn:      HTMLButtonElement | null;
   private attachBtn:    HTMLButtonElement;
   private brandingEl:   HTMLElement | null;
-  /** Container for pending-attachment chips, inserted above .chat-input-row (Patch 7). No matching static markup in index.html — created here, mirroring the existing pattern of programmatic DOM construction elsewhere in this file (session menu, lightbox). */
+  /** Container for pending-attachment chips, inserted above .chat-input-row. No matching static markup in index.html — created here, mirroring the existing pattern of programmatic DOM construction elsewhere in this file (session menu, lightbox). */
   private pendingAttachmentsEl: HTMLElement;
 
   private canvas:    Canvas;
@@ -116,7 +116,7 @@ export class ChatPanel {
   private replyPending   = false;
   private pendingTimer:  ReturnType<typeof setTimeout> | null = null;
   private lastSentText   = "";
-  /** Files attached to the next outgoing message, not yet sent (Patch 7). */
+  /** Files attached to the next outgoing message, not yet sent. */
   private pendingAttachments:  ChatAttachment[] = [];
   /** Snapshot of what was actually sent, for the error-bubble Retry button. */
   private lastSentAttachments: ChatAttachment[] = [];
@@ -138,7 +138,7 @@ export class ChatPanel {
     this.attachBtn    = document.getElementById("chat-attach-btn") as HTMLButtonElement;
     this.brandingEl   = document.getElementById("chat-branding-footer");
 
-    // No static markup for this in index.html (Patch 7) — built and inserted here,
+    // No static markup for this in index.html — built and inserted here,
     // same approach as the existing session-menu/lightbox elements in this file.
     this.pendingAttachmentsEl = document.createElement("div");
     this.pendingAttachmentsEl.className = "chat-pending-attachments";
@@ -199,12 +199,9 @@ export class ChatPanel {
   /**
    * Reads workflow-scoped Chat settings (called on every panel open — see show()).
    *
-   * Scope note: `session_persistence` is read and serialized correctly but not
-   * yet enforced here — persist()/loadStoreForCurrentWorkflow() always use
-   * localStorage regardless of this toggle. Enforcing it requires changing
-   * show()'s per-open reload pattern, which is out of this patch's listed
-   * file/behavior scope; flagging per rules.md Rule 6 rather than expanding
-   * scope silently.
+   * `session_persistence` is read here but not enforced: persist() and
+   * loadStoreForCurrentWorkflow() always use localStorage regardless of
+   * this toggle.
    */
   applyToggles(settings: ChatSettings): void {
     this.chatSettings = settings;
@@ -228,7 +225,7 @@ export class ChatPanel {
     }
   }
 
-  // ── Attachments (Patch 7) ────────────────────────────────────────────────
+  // ── Attachments  ────────────────────────────────────────────────
 
   /**
    * Remaining bytes available for attachment payload on the *next* send, after
@@ -349,7 +346,7 @@ export class ChatPanel {
   // ── Canvas inspection ────────────────────────────────────────────────────
   // Assumes one Webhook node and one Output node per workflow — the chat
   // pattern this panel implements. With multiple of either, the first one
-  // found in canvas iteration order is used; not configurable in this patch.
+  // found in canvas iteration order is used; not currently configurable.
 
   private hasWebhookAndOutput(): boolean {
     let hasWebhook = false, hasOutput = false;
@@ -467,8 +464,8 @@ export class ChatPanel {
     this.appendTypingBubble();
 
     const session = this.activeSession();
-    // `attachments` key only added when non-empty — keeps the wire shape unchanged
-    // for every workflow that doesn't use this feature (Rule 9 regression check).
+    // `attachments` key only added when non-empty — keeps the wire shape
+    // unchanged for every workflow that doesn't use this feature.
     const payload: Record<string, unknown> = { message: text, session_id: session.id };
     if (attachments.length > 0) payload.attachments = attachments;
 
@@ -821,7 +818,7 @@ export class ChatPanel {
       item.innerHTML = `<span class="chat-session-item-name">${escapeHtml(s.name)}</span>`;
       const del = document.createElement("span");
       del.className = "chat-session-item-del";
-      del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+      del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       del.addEventListener("click", (e) => { e.stopPropagation(); this.deleteSession(s.id); });
       item.appendChild(del);
       item.addEventListener("click", () => this.switchSession(s.id));
@@ -854,8 +851,14 @@ export class ChatPanel {
     this.closeSessionMenu();
   }
 
-  private deleteSession(id: string): void {
+  private async deleteSession(id: string): Promise<void> {
     if (this.store.sessions.length <= 1) { this.toast("Can't delete the only session.", "info"); return; }
+    try {
+      await clearChatSession(id);
+    } catch (e) {
+      console.error("Aerini: clearChatSession failed", e);
+      this.toast("Could not clear AI memory on the backend — session was deleted locally.", "error");
+    }
     this.store.sessions = this.store.sessions.filter(s => s.id !== id);
     if (this.store.activeId === id) this.store.activeId = this.store.sessions[0].id;
     this.persist();
@@ -875,11 +878,8 @@ export class ChatPanel {
 
   /**
    * Clears AI Memory for the active session server-side, then starts a fresh
-   * local session in its place. Note: this only covers the header "Clear"
-   * button — deleting an individual session from the session menu
-   * (deleteSession()) does not call clearChatSession, so its AI Memory rows
-   * are left orphaned under that session_id. Out of this patch's listed
-   * scope (the plan names "Clear" specifically); flagging per Rule 6.
+   * local session in its place. (deleteSession(), above, does the equivalent
+   * clearChatSession call for the session-menu delete path.)
    */
   private async handleClear(): Promise<void> {
     if (this.awaitingReply) this.cancelPending();

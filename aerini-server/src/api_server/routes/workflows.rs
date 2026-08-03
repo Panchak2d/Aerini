@@ -95,7 +95,9 @@ pub async fn delete_workflow(
     Path(id):          Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
-    let _ = s.scheduler.stop_job(&id);
+    if let Err(e) = s.scheduler.stop_job(&id) {
+        tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job failed before delete");
+    }
 
     // Acquire (or create) the per-workflow exec lock before deleting.
     // This serialises against a concurrent run_workflow: if a run is in

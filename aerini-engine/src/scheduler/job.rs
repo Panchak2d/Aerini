@@ -17,6 +17,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -102,8 +103,7 @@ impl ScheduledJobRow {
     /// requests, so they must keep reading rows straight from `SchedulerDb`.
     /// This method exists only for call sites that hand a row to something
     /// outside the engine's trust boundary — an HTTP response or an IPC
-    /// reply — where the raw secret would otherwise leak (see
-    /// AUDIT_REPORT.md S6-2 / S7-1).
+    /// reply — where the raw secret would otherwise leak.
     pub fn redacted(&self) -> Self {
         let mut row = self.clone();
         if let Ok(TriggerKind::Webhook { port, path, method, .. }) =
@@ -137,8 +137,9 @@ pub struct SchedulerStatusEvent {
     /// Full `WorkflowResult`. Populated **only** on the post-run emission inside
     /// `fire_once_with_vars` (status `"waiting"` on workflow success, `"error"`
     /// on workflow failure). `None` everywhere else this event is constructed —
-    /// `emit_waiting`, `emit_error`, `emit_done`, and `SchedulerDaemon::emit_status`
-    /// in `scheduler/mod.rs` all set it to `None` explicitly, including the
+    /// `runner.rs`'s `emit_waiting`/`emit_error`/`emit_done_async` (and their
+    /// sync/async siblings) and `SchedulerDaemon::emit_status` in
+    /// `scheduler/mod.rs` all set it to `None` explicitly, including the
     /// re-arm `"waiting"` event and the genuine one-shot `"done"` status.
     /// (Verified by reading every `SchedulerStatusEvent { .. }` construction
     /// site in `runner.rs` and `mod.rs`.)
@@ -154,13 +155,18 @@ pub struct PortConflict {
     pub held_by_workflow_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Error)]
 #[serde(tag = "error_kind", rename_all = "snake_case")]
 pub enum SchedulerError {
+    #[error("port {} is already in use by \"{}\"", .0.port, .0.held_by_workflow_name)]
     PortConflict(PortConflict),
+    #[error("workflow not found")]
     WorkflowNotFound,
+    #[error("workflow is not schedulable (no Schedule or Webhook trigger)")]
     NotSchedulable,
+    #[error("workflow is already running")]
     AlreadyRunning,
+    #[error("{message}")]
     Other { message: String },
 }
 

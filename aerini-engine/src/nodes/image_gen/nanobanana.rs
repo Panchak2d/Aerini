@@ -74,7 +74,7 @@ async fn call_nano_banana_once(
     index: usize,
 ) -> Result<Value, NodeError> {
     // Build parts array: reference images first (as inlineData), then the text prompt.
-    // VERIFIED: Gemini generateContent accepts inlineData parts alongside text parts in
+    // Gemini generateContent accepts inlineData parts alongside text parts in
     // the same content for image editing. Files API fails silently — inlineData required.
     // Source: ai.google.dev/gemini-api/docs/image-generation, June 2026.
     let mut parts: Vec<Value> = Vec::new();

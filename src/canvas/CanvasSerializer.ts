@@ -12,7 +12,7 @@ export function registerNodeDescriptors(descriptors: NodeDescriptor[]): void {
 }
 
 /**
- * Per-workflow Chat Panel feature toggles (Patch 5B). Field names and defaults
+ * Per-workflow Chat Panel feature toggles. Field names and defaults
  * mirror aerini-engine::model::ChatSettings exactly — this is the wire
  * contract for the "settings.chat" key in workflow JSON.
  */
@@ -87,7 +87,7 @@ export function serialize(
         const from = nodes.get(c.data.from_node);
         const to   = nodes.get(c.data.to_node);
         // A missing endpoint means the edge is dangling — never ship it to
-        // the engine, whatever produced it (T1-14). This is a hard filter,
+        // the engine, whatever produced it. This is a hard filter,
         // independent of the NOTE-exclusion check below.
         if (!from || !to) return false;
         return from.data.node_type_id !== NODE_IDS.NOTE && to.data.node_type_id !== NODE_IDS.NOTE;

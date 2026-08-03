@@ -115,9 +115,20 @@ impl MigrationEngine {
         }
 
         let mut current = file_version.clone();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             if current == CURRENT_VERSION {
                 return Ok(());
+            }
+
+            if !visited.insert(current.clone()) {
+                return Err(format!(
+                    "migration cycle detected: schema_version '{}' was revisited while \
+                     migrating from '{}' to '{}'. This indicates a bug in the registered \
+                     migration chain (a `from`/`to` loop), not a problem with this workflow \
+                     file.",
+                    current, file_version, CURRENT_VERSION
+                ));
             }
 
             match self.migrations.iter().find(|m| m.from == current.as_str()) {
@@ -266,5 +277,50 @@ mod tests {
         assert!(result.is_err(), "broken chain must return Err");
         let msg = result.unwrap_err();
         assert!(msg.contains("0.8"), "error must mention the file version: {}", msg);
+    }
+
+    // ── cycle detection ───────────────────────────────────────────────────
+
+    #[test]
+    fn migration_cycle_returns_err_instead_of_looping_forever() {
+        fn noop(_raw: &mut serde_json::Value) {}
+
+        // A 2-node cycle (0.8 -> 0.9 -> 0.8 -> ...) that never reaches
+        // CURRENT_VERSION ("1.0"). Pre-fix, apply()'s loop would spin forever
+        // on this input with no timeout and no error — this test would hang
+        // the test runner rather than fail cleanly if the cycle-detection
+        // guard were ever removed.
+        let eng = MigrationEngine {
+            migrations: vec![
+                Migration { from: "0.8", to: "0.9", apply: noop },
+                Migration { from: "0.9", to: "0.8", apply: noop },
+            ],
+        };
+
+        let mut raw = json!({ "schema_version": "0.8" });
+        let result = eng.apply(&mut raw);
+        assert!(result.is_err(), "a migration cycle must return Err, not hang");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("cycle"),
+            "error must clearly identify a migration cycle, not just fail generically: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn self_referential_migration_returns_err_immediately() {
+        // Degenerate 1-node cycle: from == to. Caught on the first revisit
+        // (one migration step runs, then the second loop pass sees "0.9"
+        // already in `visited` and errors) rather than looping forever.
+        fn noop(_raw: &mut serde_json::Value) {}
+
+        let eng = MigrationEngine {
+            migrations: vec![Migration { from: "0.9", to: "0.9", apply: noop }],
+        };
+
+        let mut raw = json!({ "schema_version": "0.9" });
+        let result = eng.apply(&mut raw);
+        assert!(result.is_err(), "self-referential migration must return Err, not hang");
     }
 }

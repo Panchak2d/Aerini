@@ -106,7 +106,7 @@ export async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<v
     toast("Set a plugin directory in Settings → Plugins first.", "info");
     return;
   }
-  // T2-14/S9-5: the .aerini/.json drop path already gates on
+  // the .aerini/.json drop path already gates on
   // showImportPreview before anything happens; a dropped .wasm plugin
   // previously installed with zero confirmation despite running with the
   // same trust-sensitive capabilities (S5/S8's SSRF-bypass trust

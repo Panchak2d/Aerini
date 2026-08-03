@@ -1,21 +1,6 @@
-/**
- * @vitest-environment jsdom
- *
- * DEVIATION NOTE: `WorkflowManager` (from workflow-manager.ts) requires a
- * live Canvas, DOM, localStorage, and Tauri IPC — not fully testable in unit
- * isolation. Most tests here are written against `serialize` / `deserialize`
- * directly, which is where that logic resides.
- *
- * Batch R (S11-13) adds one exception: `duplicateWorkflow` only reads
- * `this.onToast` / `this.refreshWorkflowList` from its `this` and reads/
- * writes `localStorage` directly (via module-private lsLoad/lsSave, since
- * isTauri() is false under jsdom/no Tauri globals) — so, matching the
- * `Canvas.prototype.method.call(fakeThis)` precedent already established in
- * canvas-safety.test.ts, the real prototype method is exercised directly
- * against a minimal duck-typed `this` and real jsdom `localStorage`, without
- * needing a full WorkflowManager (which would otherwise require a live
- * Canvas + `#workflow-list` DOM element neither of these tests need).
- */
+// @vitest-environment jsdom
+ 
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { serialize, deserialize, DEFAULT_CHAT_SETTINGS } from "../canvas/CanvasSerializer";
 import { CanvasNode } from "../canvas/Node";
@@ -201,7 +186,7 @@ describe("deserialize — empty canvas JSON", () => {
 });
 
 // ---------------------------------------------------------------------------
-// disabled flag (T1-3): ContextMenu's Disable/Enable toggle must survive
+// disabled flag: ContextMenu's Disable/Enable toggle must survive
 // save (serialize) and load (deserialize) — previously silently dropped.
 // ---------------------------------------------------------------------------
 
@@ -248,7 +233,7 @@ describe("deserialize — disabled flag roundtrip", () => {
 });
 
 // ---------------------------------------------------------------------------
-// duplicateWorkflow (S11-13, Batch R): must route through deserialize()/
+// duplicateWorkflow: must route through deserialize/
 // serialize() so a pre-existing dangling edge is dropped rather than
 // propagated verbatim into the copy — the old implementation hand-edited
 // the raw parsed JSON and had no such filter.
@@ -298,9 +283,9 @@ describe("duplicateWorkflow — dangling-edge filter (S11-13)", () => {
     const validConn = makeConnector("e_valid", "n1", "n2");
     const goodJson = serialize("wf_src", "Source", new Map([["n1", n1], ["n2", n2]]), new Map([["e_valid", validConn]]));
 
-    // Simulate a pre-existing dangling edge (e.g. via the undo-sharing bug
-    // S9-3 describes) by splicing one directly into the saved document —
-    // serialize()'s own filter (T1-14) would otherwise never let one exist
+    // Simulate a pre-existing dangling edge (e.g. via the undo-sharing bug)
+    // by splicing one directly into the saved document —
+    // serialize's own filter would otherwise never let one exist
     // in a freshly-serialized document.
     const doc = JSON.parse(goodJson);
     doc.edges.push({

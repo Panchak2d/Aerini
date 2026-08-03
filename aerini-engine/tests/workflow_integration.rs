@@ -1,4 +1,4 @@
-//! P28 — E2E workflow integration tests.
+//! E2E workflow integration tests.
 //!
 //! Each test builds a minimal Workflow from scratch, runs it through
 //! WorkflowExecutor, and asserts on the WorkflowResult.  No network, DB, or

@@ -189,7 +189,7 @@ impl WorkflowExecutor {
                 EngineError::NodeTypeNotRegistered { type_id: node_def.node_type_id.clone() }
             })?;
 
-            let resolved_input = match self.build_input(&workflow, node_def, &state).await {
+            let resolved_input = match self.build_input(&workflow, node_def, &state, None).await {
                 Ok(input) => input,
                 Err(failure) => {
                     let err_msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();

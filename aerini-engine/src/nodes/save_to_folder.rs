@@ -539,7 +539,7 @@ mod tests {
         json!({ "filename": name, "data": b64 })
     }
 
-    // ── sandbox containment (T0-3 / S3-1) ────────────────────────────────────
+    // ── sandbox containment ────────────────────────────────────
 
     // With __file_sandbox_dir set and a RELATIVE folder_path, the write must land
     // inside the sandbox. Before the fix, the containment check validated a

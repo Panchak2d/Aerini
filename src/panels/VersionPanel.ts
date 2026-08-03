@@ -22,7 +22,7 @@ export async function showVersionPanel(
   hdr.innerHTML = `<span class="version-panel-title">Version History</span>`;
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => overlay.remove());
   hdr.appendChild(closeBtn);
   panel.appendChild(hdr);
@@ -63,9 +63,9 @@ export async function showVersionPanel(
     restoreBtn.className = "version-restore-btn";
     restoreBtn.textContent = "Restore";
     restoreBtn.addEventListener("click", async () => {
-      overlay.remove();
       const ok = await showConfirm(`Restore to version from ${label}? Current unsaved changes will be lost.`, false, "Restore");
       if (!ok) return;
+      overlay.remove();
       try {
         const result = await wfManager.restoreVersion(v.id);
         if (result) {
@@ -81,8 +81,10 @@ export async function showVersionPanel(
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "version-delete-btn";
     deleteBtn.title = "Delete this version";
-    deleteBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+    deleteBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
     deleteBtn.addEventListener("click", async () => {
+      const ok = await showConfirm(`Delete version from ${label}? This cannot be undone.`, true, "Delete");
+      if (!ok) return;
       try {
         await wfManager.deleteVersion(v.id);
         item.remove();

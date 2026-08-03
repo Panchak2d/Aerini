@@ -83,7 +83,9 @@ impl ProviderRegistry {
                 }
             }
             AuthStyle::HeaderKey(header_name) => {
-                builder = builder.header(*header_name, api_key);
+                if !api_key.is_empty() {
+                    builder = builder.header(*header_name, api_key);
+                }
             }
             AuthStyle::BasicAuth | AuthStyle::None => {}
         }
@@ -116,7 +118,7 @@ impl ProviderRegistry {
     ///   2. `ProviderRecord.default_base_url` — used when `user_url` is empty.
     ///   3. `"https://api.openai.com/v1"` — safety fallback for unregistered ids.
     ///
-    /// **R2 normalization:** when `provider_id == "anthropic"`, a trailing `"/v1"`
+    /// when `provider_id == "anthropic"`, a trailing `"/v1"`
     /// is stripped from the resolved URL. Anthropic API paths already include
     /// `"/v1"` (e.g. `"/v1/messages"`), so a user-supplied URL ending in `"/v1"`
     /// would otherwise produce the doubled path `"/v1/v1/messages"`.
@@ -255,6 +257,55 @@ mod tests {
     }
 
     #[test]
+    fn apply_auth_header_key_sends_value_with_real_key() {
+        let record = ProviderRecord {
+            id: "test",
+            display_name: "Test",
+            capabilities: &[Capability::TextGen],
+            default_base_url: "",
+            auth_style: AuthStyle::HeaderKey("x-api-key"),
+            requires_key: true,
+            extra_headers: &[],
+        };
+        let client = reqwest::Client::new();
+        let builder = client.get("https://example.com");
+        let req = ProviderRegistry::apply_auth(&record, builder, "sk-real-key")
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("x-api-key").map(|v| v.to_str().unwrap()),
+            Some("sk-real-key"),
+            "HeaderKey branch must send the header with the real key"
+        );
+    }
+
+    #[test]
+    fn apply_auth_header_key_skips_empty_key() {
+        // HeaderKey branch previously added `x-api-key: ` (empty
+        // value) unconditionally, unlike BearerToken's own `!is_empty()`
+        // guard for the identical case. Must now omit the header entirely,
+        // matching BearerToken's behavior for an empty key.
+        let record = ProviderRecord {
+            id: "test",
+            display_name: "Test",
+            capabilities: &[Capability::TextGen],
+            default_base_url: "",
+            auth_style: AuthStyle::HeaderKey("x-api-key"),
+            requires_key: false,
+            extra_headers: &[],
+        };
+        let client = reqwest::Client::new();
+        let builder = client.get("https://example.com");
+        let req = ProviderRegistry::apply_auth(&record, builder, "")
+            .build()
+            .unwrap();
+        assert!(
+            req.headers().get("x-api-key").is_none(),
+            "HeaderKey branch must omit the header entirely for an empty key, not send it empty"
+        );
+    }
+
+    #[test]
     fn apply_auth_extra_headers_appended() {
         let record = ProviderRecord {
             id: "test",
@@ -298,7 +349,7 @@ mod tests {
 
     #[test]
     fn resolve_base_url_r2_strips_trailing_v1_for_anthropic() {
-        // R2 fix: user sets "https://api.anthropic.com/v1" — must not double-append.
+        // user sets "https://api.anthropic.com/v1" — must not double-append.
         assert_eq!(
             ProviderRegistry::resolve_base_url("anthropic", "https://api.anthropic.com/v1"),
             "https://api.anthropic.com"

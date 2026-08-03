@@ -10,6 +10,7 @@
 //! | [`executor`] | `WorkflowExecutor` — runs a workflow, resolves expressions, handles retries |
 //! | [`graph`] | petgraph wrapper: topological sort, cycle detection, BFS reachability |
 //! | [`context`] | `ExecutionState` / `SharedExecutionState` — per-run mutable state |
+//! | [`mem_tracking`] | Per-workflow/per-node live memory attribution (`#[global_allocator]`) |
 //! | [`expression`] | `{{...}}` template resolver with 40 inline functions |
 //! | [`scheduler`] | `SchedulerDaemon` — background job loop for all trigger kinds |
 //! | [`db`] | SQLite persistence: workflows, run records, versions, settings |
@@ -25,6 +26,20 @@
 //! the Tauri app wraps `tauri::AppHandle`; `aerini-server` uses an SSE broadcast channel.
 //! The executor and scheduler hold only `Arc<dyn EventSink>` and are runtime-agnostic.
 
+// global allocator for per-workflow/per-node live
+// memory attribution. Must be declared before first use, at crate root.
+// Safe to declare here rather than in either binary crate: a
+// `#[global_allocator]` applies to the whole final binary regardless of
+// which crate in its dependency graph declares it, and — confirmed via a
+// repo-wide grep this fix — no other crate in this workspace declares one,
+// so `aerini` (desktop), `aerini-server`, and this crate's own `cargo test`
+// harness each get exactly one, automatically, with no per-binary wiring
+// needed beyond calling `mem_tracking::install()` once at startup (see
+// `src-tauri/src/lib.rs`'s `.setup()` and `aerini-server/src/main.rs`).
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tracking_allocator::Allocator<std::alloc::System> =
+    tracking_allocator::Allocator::system();
+
 pub mod context;
 pub mod cron;
 pub mod db;
@@ -32,10 +47,12 @@ pub mod error;
 pub mod executor;
 pub mod expression;
 pub mod graph;
+pub mod mem_tracking;
 pub mod migration;
 pub mod model;
 pub mod node;
 pub mod nodes;
+pub mod perf_monitor;
 pub mod plugin_loader;
 pub mod provider;
 pub mod scheduler;

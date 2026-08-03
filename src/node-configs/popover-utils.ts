@@ -104,7 +104,7 @@ export const CRON_PRESETS = [
 
 let _cselIdCounter = 0;
 
-// S10-6: previously each `openDropdown()` call added its own
+// previously each `openDropdown` call added its own
 // `document`-level "mousedown" listener, removed only if that exact
 // dropdown's own outside-click handler happened to fire. Any other close
 // path (Escape, the popover being torn down, a different node's popover
@@ -157,7 +157,7 @@ export function mkCustomSelect(
   const arrow = document.createElement("span");
   arrow.className = "csel-arrow";
   arrow.setAttribute("aria-hidden", "true");
-  arrow.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  arrow.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>`;
 
   trigger.appendChild(labelEl);
   trigger.appendChild(arrow);

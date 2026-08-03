@@ -306,13 +306,6 @@ async function renderMediaBatch(
 // Typed output dispatch — sync paths only; media_batch bypasses this
 // ---------------------------------------------------------------------------
 
-// DEVIATION (Patch 26): The plan specifies a CONTENT_RENDERERS Map keyed by
-// abstract content-type strings ("markdown", "code", "image", etc.). No such
-// content-type detection logic exists in the current codebase — dispatch has
-// always been on node typeId (NODE_IDS constants). Introducing a content-type
-// detection layer would add new logic, violating "zero behavior change".
-// The Map is keyed on NODE_IDS exactly mirroring the prior switch statement.
-
 type ContentRenderer = (out: unknown, name: string) => string;
 
 const CONTENT_RENDERERS = new Map<string, ContentRenderer>([

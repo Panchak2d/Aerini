@@ -1,20 +1,3 @@
-/**
- * Batch M (T2-1 frontend, S8-1/S9-4): src/node-ids.ts's DANGEROUS_NODE_IDS had
- * drifted from the Rust canonical list (aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS,
- * Batch L) — it listed `file` instead of `database`. These tests pin the exact
- * set so a future edit to either side that breaks the sync fails loudly here
- * instead of silently drifting again.
- *
- * Node.ts's draw() is otherwise untestable in this environment — jsdom has no
- * 2D canvas context (confirmed limitation, Batch D's canvas-safety.test.ts) —
- * but the danger badge's own call chain (save/beginPath/moveTo/lineTo/closePath/
- * fill/font/fillText/restore, plus measureText for positioning) has no
- * dependency on real canvas rendering, so a duck-typed CanvasRenderingContext2D
- * mock exercises the real draw() method end to end. getIconBitmap's bitmap
- * cache is empty in this environment (nothing calls preloadAllIcons), so
- * draw() always takes its font-fallback icon branch, not ctx.drawImage — the
- * mock does not need to satisfy that path.
- */
 import { describe, it, expect, vi } from "vitest";
 import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
 import { CanvasNode, type CanvasNodeData } from "../canvas/Node";

@@ -43,7 +43,8 @@ export class InputHandler {
   }
 
   onKey(e: KeyboardEvent): void {
-    const inInput = document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement;
+    const activeEl = document.activeElement;
+    const inInput = activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
     if (e.key === "Shift") { this.shiftHeld = true; this.canvas.el.classList.add("shift-held"); }
     if (inInput) return;
 
@@ -74,16 +75,20 @@ export class InputHandler {
       for (const n of c.nodes.values()) { n.selected = true; c.selectedNodes.add(n.data.id); }
     }
     if (e.key === "Delete" || e.key === "Backspace") c.deleteSelected();
-    if (e.key === "f" || e.key === "F") c.toggleFocusMode();
-    if ((e.code === "Space" && !e.altKey && !e.ctrlKey && !e.metaKey) || ((e.metaKey || e.ctrlKey) && e.key === "k")) {
+    const isFitToScreenChord = (e.ctrlKey || e.metaKey) && e.shiftKey;
+    if ((e.key === "f" || e.key === "F") && !isFitToScreenChord) {
+      if (e.ctrlKey || e.metaKey) e.preventDefault(); // stop the browser/webview's native Find
+      c.toggleFocusMode();
+    }
+
+    const spaceKey = e.code === "Space" && !e.altKey && !e.ctrlKey && !e.metaKey;
+    const focusOwnsSpace = spaceKey && activeEl instanceof HTMLElement && activeEl !== c.el &&
+      (activeEl instanceof HTMLButtonElement || activeEl.getAttribute("role") === "button");
+    if ((spaceKey && !focusOwnsSpace) || ((e.metaKey || e.ctrlKey) && e.key === "k")) {
       e.preventDefault(); c.onPaletteRequest?.();
     }
     if (e.key === "Escape") {
-      // Cancelling a wire-endpoint drag (reroute/detach) must restore the
-      // connector it grabbed — onDown already removed it from c.connectors
-      // and cleared any dynamic-port expression it fed; _up only re-adds it
-      // on a genuine drop-in-empty-space (a delete gesture, not a cancel).
-      // Without this, Escape silently and permanently deletes the wire (T1-4).
+
       if (this.reconnEdge) {
         c.connectors.set(this.reconnEdge.conn.data.id, this.reconnEdge.conn);
         c.injectDynamicPortExpr(this.reconnEdge.conn);
@@ -409,11 +414,7 @@ export class InputHandler {
         return;
       }
     }
-    if (document.body.classList.contains("panel-open")) {
-      c.onPanelClose?.();
-    } else {
-      c.onPaletteRequest?.();
-    }
+
   }
 
   onWheel(e: WheelEvent): void {

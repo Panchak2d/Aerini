@@ -98,7 +98,7 @@ pub fn traverse_dotpath(data: &Value, path: &str) -> Value {
 /// deterministic order, instead of the raw `HashMap`'s unspecified (and
 /// empirically randomized, per `RandomState`) iteration order.
 ///
-/// Root-cause fix for the T2-5 / S3-2 / S3-3 / S3-4 / S4-6 / S4-7 family:
+/// Root-cause fix for the family:
 /// `output_node.rs`, `json_node.rs`, `text_splitter.rs`, `merge.rs`, and
 /// `loop_node.rs` each previously called `.iter()`/`.values()` directly on
 /// `node_outputs`, so "most recent", "first found", and "array order"
@@ -390,12 +390,23 @@ async fn check_host_ssrf_from_url_impl(raw_url: &str, allow_local: bool) -> Resu
 /// SSRF protection for database connection URLs (postgres, mysql, redis).
 ///
 /// Parses `raw_url`, extracts the host and port, and delegates to
-/// `check_host_ssrf` under `SsrfPolicy::Strict` (database connections never
-/// permit local/private targets via this fn). Port fallbacks: postgres →
+/// `check_host_ssrf` under the given `policy`. Port fallbacks: postgres →
 /// 5432, mysql → 3306, redis/rediss → 6379. The url crate does not know these
 /// as special schemes and returns `None` from `port()` when no port is
 /// specified.
-pub async fn check_db_url_ssrf(raw_url: &str) -> Result<(), String> {
+///
+/// T1-4 / S2-2 residual, Tier 3 pattern #8: database connections can
+/// legitimately target either a remote host (`SsrfPolicy::Strict`, the
+/// default every existing caller keeps getting) or a self-hosted local/LAN
+/// instance the caller explicitly configured (`SsrfPolicy::AllowLocal`,
+/// opt-in only). Unlike `ai_prompt`/`ai_agent`/`image_gen::a1111`/`comfyui`
+/// (nodes whose *entire* purpose is reaching a local server, so those pass
+/// `AllowLocal` unconditionally), `connection_url` here is general-purpose —
+/// it targets cloud-hosted databases far more often than local ones — so the
+/// policy is per-call, driven by the Database node's own `allow_local` input
+/// field (see `database/postgres.rs::execute_sqlx`,
+/// `database/redis.rs::execute_redis`), not hardcoded in this function.
+pub async fn check_db_url_ssrf(raw_url: &str, policy: SsrfPolicy) -> Result<(), String> {
     let parsed = url::Url::parse(raw_url)
         .map_err(|e| format!("Invalid connection URL: {}", e))?;
 
@@ -411,7 +422,7 @@ pub async fn check_db_url_ssrf(raw_url: &str) -> Result<(), String> {
         _                         => 0,
     });
 
-    check_host_ssrf_impl(host, port, false).await
+    check_host_ssrf_impl(host, port, policy.allow_local()).await
 }
 
 /// Maps a reqwest network error to a `NodeOutput`, classifying timeout and

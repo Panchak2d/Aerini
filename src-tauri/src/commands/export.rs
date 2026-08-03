@@ -107,7 +107,7 @@ pub async fn generate_server_package(
     let credentials   = collect_credentials(&wf);
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
-    // T2-1/T2-6: same canonical list every other execution entry point
+    // same canonical list every other execution entry point
     // consults. The generated package does NOT auto-pass --allow-shell/
     // --allow-code/--allow-database for these (see build_service_file's own
     // comment for why) -- this is only used to render an explicit warning so
@@ -259,7 +259,7 @@ fn credential_id_to_env_var(id: &str) -> String {
 /// returns the unique variable names, sorted. Covers nested config objects
 /// and trigger-node config alike, since it operates on the whole document.
 /// No `regex` dependency — manual scan for the literal prefix, since `regex`
-/// is not in either Cargo.toml (Rule 15).
+/// is not in either Cargo.toml.
 fn collect_vars(wf: &Workflow) -> Result<Vec<String>, String> {
     let json = wf.to_json_pretty().map_err(|e| e.to_string())?;
     const PREFIX: &str = "$vars.";
@@ -306,7 +306,7 @@ pub async fn generate_docker_package(
     let credentials   = collect_credentials(&wf);
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
-    // T2-1/T2-6: same canonical list every other execution entry point
+    // same canonical list every other execution entry point
     // consults. The generated package does NOT auto-pass --allow-shell/
     // --allow-code/--allow-database for these (see build_service_file's own
     // comment for why) -- this is only used to render an explicit warning so

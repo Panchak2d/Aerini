@@ -35,6 +35,12 @@ export async function bindSchedulerEvents(
   toast:         Toast,
   setStatus:     Status,
   refreshRunBtn: () => void,
+  refreshMem:    () => void,
+  //  optional, like initStatusBarFields' own
+  // onRunStateDetected — existing callers (and any future one that doesn't
+  // care about the Performance panel) are unaffected. See the call below
+  // for why a scheduler status transition is exactly when this is needed.
+  refreshPerf?:  () => void,
 ): Promise<void> {
   await listenNodeStatus((evt) => {
     runManager.onNodeStatusEvent(evt.workflow_id, evt.node_id, evt.status);
@@ -46,6 +52,21 @@ export async function bindSchedulerEvents(
     bgPanel.renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
     bgPanel.updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
+    // The periodic memory-breakdown push only fires while the snapshot is
+    // non-empty (lib.rs) — it never tells the frontend a run just ended.
+    // Every scheduler status transition (start or end) is exactly when that
+    // snapshot can change, so pull a fresh on-demand reading here rather
+    // than waiting for the next workflow switch to reveal it.
+    refreshMem();
+    // Same gap, same fix, for the Performance panel: listenPerformanceLive
+    // (PerformancePanel.ts) only pushes while >=1 run is in flight and
+    // can't itself signal "a run just ended" — normally covered by
+    // initStatusBarFields' #run-dropdown-wrap poll, but that element only
+    // reflects the manual Run button, never a background/scheduled run.
+    // Without this, the panel keeps showing whatever the last live push
+    // left behind (often a stale "Running" snapshot) until the *next* run's
+    // push overwrites it — visible to the user as the report vanishing.
+    refreshPerf?.();
 
     if (evt.status === "running" && evt.workflow_id === wfManager.currentId) {
       canvas.resetAllStatus();

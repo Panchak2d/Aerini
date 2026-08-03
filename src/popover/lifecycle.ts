@@ -56,6 +56,10 @@ let _activePopoverId = 0;
 let _activePopoverNode: CanvasNode | null = null;
 // Element focused before popover opened — restored on close (N-11)
 let _previousFocus: HTMLElement | null = null;
+// Removes the active popover's document-level listeners (focus trap, outside
+// click, Esc). Set by showPopover(), run unconditionally by closePopover() —
+// every close path goes through here so nothing is left registered.
+let _activePopoverCleanup: (() => void) | null = null;
 
 function _doValidateMissingFields(): void {
   if (!_activePopoverNode) return;
@@ -69,6 +73,8 @@ function _doValidateMissingFields(): void {
 export function closePopover(animated = true): void {
   if (!_activePopover) return;
   _activePopoverId++;   // invalidate any pending onOutside timers
+  _activePopoverCleanup?.();
+  _activePopoverCleanup = null;
   _doValidateMissingFields();
   const prev = _previousFocus;
   _previousFocus = null;
@@ -136,7 +142,7 @@ export async function showPopover(
   }
   const props   = rawProps as Record<string, PropSchema>;
 
-  // 3c: pre-fill model/base_url/provider from a saved credential's metadata,
+  //  pre-fill model/base_url/provider from a saved credential's metadata,
   // but only into fields that exist on this node and only when currently
   // blank — never overwrite a value the user already set. For enum fields
   // (provider), only fill if the metadata value is an actual option for THIS
@@ -191,13 +197,13 @@ export async function showPopover(
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
   closeBtn.setAttribute("aria-label", "Close");
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => closePopover());
 
   const testBtn = document.createElement("button");
   testBtn.className = "popover-test-btn";
   testBtn.title = "Test this node in isolation";
-  testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
+  testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
   testBtn.addEventListener("click", async () => {
     testBtn.disabled = true;
     testBtn.textContent = "Running…";
@@ -205,7 +211,7 @@ export async function showPopover(
       await testSingleNode(node, onChange);
     } finally {
       testBtn.disabled = false;
-      testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
+      testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
     }
   });
 
@@ -299,7 +305,7 @@ export async function showPopover(
 
   // Focus trap — keep Tab/Shift+Tab inside popover (N-11)
   const onFocusTrap = (e: KeyboardEvent) => {
-    if (e.key !== "Tab" || myId !== _activePopoverId) return;
+    if (e.key !== "Tab") return;
     const focusable = Array.from(pop.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(FOCUSABLE)).filter(el => !el.disabled);
     if (!focusable.length) return;
     const first = focusable[0];
@@ -312,29 +318,25 @@ export async function showPopover(
   };
   document.addEventListener("keydown", onFocusTrap, true);
 
-  // Close on outside click — only if this popover is still the active one.
+  // Close on outside click.
   const onOutside = (e: MouseEvent) => {
-    if (myId !== _activePopoverId) {
-      document.removeEventListener("mousedown", onOutside, true);
-      document.removeEventListener("keydown", onFocusTrap, true);
-      return;
-    }
-    if (!pop.contains(e.target as Node)) {
-      document.removeEventListener("mousedown", onOutside, true);
-      document.removeEventListener("keydown", onFocusTrap, true);
-      closePopover();
-    }
+    if (!pop.contains(e.target as Node)) closePopover();
   };
 
   // Close on Esc
   const onEsc = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && myId === _activePopoverId) {
-      document.removeEventListener("keydown", onEsc, true);
-      document.removeEventListener("keydown", onFocusTrap, true);
-      closePopover();
-    }
+    if (e.key === "Escape") closePopover();
   };
   document.addEventListener("keydown", onEsc, true);
+
+  // closePopover() removes all three listeners unconditionally, so this
+  // covers every close path (Esc, outside click, the × button, and a new
+  // popover superseding this one) — not just the two that fire here.
+  _activePopoverCleanup = () => {
+    document.removeEventListener("keydown", onFocusTrap, true);
+    document.removeEventListener("keydown", onEsc, true);
+    document.removeEventListener("mousedown", onOutside, true);
+  };
 
   // Delay slightly so the triggering dblclick doesn't immediately close the popover.
   setTimeout(() => {

@@ -147,12 +147,12 @@ impl ExecutionGraph {
         }
     }
 
-    /// Returns the `EdgeMeta` for every edge from `from` to `to` — a workflow can
+    /// Returns the `EdgeMeta` for every edge from `from` to `to`, a workflow can
     /// have more than one edge between the same node pair (e.g. a Switch node's
     /// `case_1` and `default` ports both wired to the same downstream node).
     /// `petgraph::Graph` permits such parallel edges; a single-edge lookup via
     /// `find_edge` returns only one of them and can silently miss a sibling edge's
-    /// `on_failure` (see `find_failure_route`'s use of this, AUDIT_REPORT.md S5-4).
+    /// `on_failure` (see `find_failure_route`'s use of this).
     /// Empty `Vec` (not `None`) when `from`/`to` don't exist or aren't connected.
     pub fn edge_meta(&self, from: &str, to: &str) -> Vec<&EdgeMeta> {
         let (from_idx, to_idx) = match (self.index_map.get(from), self.index_map.get(to)) {
@@ -275,8 +275,7 @@ mod tests {
         assert!(g.edge_meta("nope", "a").is_empty(), "unknown source node");
     }
 
-    // T2-3 (S5-4) — edge case: two edges between the same (from, to) pair must
-    // BOTH be returned by edge_meta, not just whichever one an internal
+    // two edges between the same (from, to) pair must BOTH be returned by edge_meta, not just whichever one an internal
     // find_edge()-style single lookup happened to pick.
     #[test]
     fn edge_meta_returns_all_parallel_edges_between_same_pair() {

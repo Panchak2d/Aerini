@@ -1,29 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * Batch R: validation.ts residuals found on re-audit of REQUIRED_FIELDS
- * against each node's own Rust-side `input_schema().required` array
- * (aerini-engine/src/nodes/*.rs):
- *
- *  - email_send checked only ["to", "subject"], but email.rs's schema
- *    requires ["smtp_host", "from", "to", "subject", "body"] — a workflow
- *    author could leave smtp_host/from/body blank, pass frontend
- *    validation, and only find out at actual execution time.
- *  - database checked a flat ["db_path", "query"] unconditionally, but the
- *    Rust database node has no unconditional required list at all — the
- *    real requirement depends on db_type (sqlite: db_path+query;
- *    postgres/mysql: connection_url+query; redis: connection_url+
- *    operation+key, per sqlite.rs/postgres.rs/redis.rs's own MISSING_*
- *    checks). The flat list falsely required db_path for every non-sqlite
- *    backend and never checked redis's actual fields at all.
- *  - ai_agent checked only ["goal"], but ai_agent.rs's schema requires
- *    ["goal", "provider"] (found via the same audit pass, Rule 6 inline fix).
- *
- * DEVIATION NOTE: matches the precedent in canvas-safety.test.ts —
- * validateWorkflow(canvas) only reads canvas.nodes, so a minimal duck-typed
- * `{ nodes }` stands in for a real Canvas instead of constructing one (a
- * real Canvas needs a 2D canvas context jsdom doesn't provide).
- */
+// @vitest-environment jsdom
+
 import { describe, it, expect } from "vitest";
 import type { Canvas } from "../canvas/Canvas";
 import { CanvasNode, type CanvasNodeData } from "../canvas/Node";
@@ -72,7 +48,7 @@ function canvasOf(...nodes: CanvasNode[]): Canvas {
 }
 
 describe("validateWorkflow — email_send required fields", () => {
-  it("flags smtp_host/from/body as missing even when to+subject are set (regression: pre-fix only checked to+subject)", () => {
+  it("flags smtp_host/from/body as missing even when to+subject are set", () => {
     const node = makeNode("n1", "email_send", { to: "a@example.com", subject: "hi" });
     const errors = validateWorkflow(canvasOf(node));
     expect(errors.some(e => e.includes("smtp host"))).toBe(true);
@@ -119,7 +95,7 @@ describe("validateWorkflow — database, db_type-conditional required fields", (
     expect(validateWorkflow(canvasOf(node))).toEqual([]);
   });
 
-  it("redis: requires connection_url + operation + key, NOT query (regression: pre-fix never checked redis's real fields)", () => {
+  it("redis: requires connection_url + operation + key, NOT query ", () => {
     const missingAll = makeNode("n1", "database", { db_type: "redis" });
     const errors = validateWorkflow(canvasOf(missingAll));
     expect(errors.some(e => e.includes("connection url is required"))).toBe(true);
@@ -135,8 +111,8 @@ describe("validateWorkflow — database, db_type-conditional required fields", (
   });
 });
 
-describe("validateWorkflow — ai_agent required fields (Rule 6 inline fix)", () => {
-  it("flags provider as missing even when goal is set (regression: pre-fix only checked goal)", () => {
+describe("validateWorkflow — ai_agent required fields", () => {
+  it("flags provider as missing even when goal is set", () => {
     const node = makeNode("n1", "ai_agent", { goal: "do the thing" });
     const errors = validateWorkflow(canvasOf(node));
     expect(errors.some(e => e.includes("provider is required"))).toBe(true);

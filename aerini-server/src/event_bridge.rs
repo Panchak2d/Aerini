@@ -1,6 +1,7 @@
 use chrono::Utc;
 use aerini_engine::db::{RunRecord, WorkflowDb};
 use aerini_engine::executor::WorkflowResult;
+use aerini_engine::perf_monitor;
 use aerini_engine::EventSink;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
@@ -152,6 +153,31 @@ impl EventSink for EventBridge {
                                 if let Err(e) = history_db.save_run(&record) {
                                     self.log.push("WARN", None,
                                         format!("Failed to persist run to history: {}", e));
+                                }
+
+                                // `executor::run()`wraps every run in `perf_monitor::monitor_run`
+                                // (by direct read of `executor/mod.rs`), which
+                                // finalizes the report into `RECENT` before `run()`
+                                // resolves, and this event only fires after that
+                                // resolution — so the report is guaranteed to exist here.
+                                // `record.id` (== `wf_result.execution_id`) is reused as
+                                // the report's row id, same run_id-linkage convention the
+                                // desktop `save_performance_report` command uses. Does not
+                                // change execution ordering — purely additive, after the
+                                // existing `save_run` call, same best-effort WARN-on-error
+                                // handling (a missing/failed report must not fail the run
+                                // itself).
+                                match perf_monitor::get_recent_report(&wf_result.workflow_id) {
+                                    Some(report) => {
+                                        if let Err(e) = history_db.save_performance_report(&record.id, &report) {
+                                            self.log.push("WARN", None,
+                                                format!("Failed to persist performance report: {}", e));
+                                        }
+                                    }
+                                    None => {
+                                        self.log.push("WARN", None,
+                                            "No recent performance report found for this workflow_id — skipping".to_string());
+                                    }
                                 }
                             }
                             Err(e) => {

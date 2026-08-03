@@ -88,9 +88,20 @@ async fn call_flux_one(
         "output_format": "png"
     });
 
-    let resp = client
-        .post(&url)
-        .header("x-key", req.api_key)
+    let record = crate::provider::ProviderRegistry::global()
+        .get(req.source)
+        .expect("flux_pro/flux_2_pro always registered");
+
+    // was a manual `.header("x-key", req.api_key)` — registry-managed
+    // now, matching every other image-gen provider file. flux_pro/flux_2_pro
+    // are already registered with AuthStyle::HeaderKey("x-key") for exactly
+    // this purpose (provider/records.rs); a future auth-scheme change there
+    // now applies here automatically instead of silently not applying.
+    let resp = crate::provider::ProviderRegistry::apply_auth(
+        record,
+        client.post(&url),
+        req.api_key,
+    )
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -123,7 +134,7 @@ async fn call_flux_one(
         .ok_or_else(|| NodeError::unrecoverable("PROTOCOL_ERROR", "BFL response missing polling_url"))?
         .to_string();
 
-    let image_url = bfl_poll(client, &polling_url, req.api_key).await?;
+    let image_url = bfl_poll(client, record, &polling_url, req.api_key).await?;
     let b64       = download_to_base64(client, &image_url).await?;
     let filename  = format!("{}_{}_{}.png", req.source, ts, index);
 
@@ -132,6 +143,7 @@ async fn call_flux_one(
 
 async fn bfl_poll(
     client: &reqwest::Client,
+    record: &crate::provider::ProviderRecord,
     polling_url: &str,
     api_key: &str,
 ) -> Result<String, NodeError> {
@@ -144,9 +156,11 @@ async fn bfl_poll(
     for _ in 0..BFL_POLL_MAX_ITERS {
         tokio::time::sleep(std::time::Duration::from_millis(BFL_POLL_INTERVAL_MS)).await;
 
-        let resp = client
-            .get(polling_url)
-            .header("x-key", api_key)
+        let resp = crate::provider::ProviderRegistry::apply_auth(
+            record,
+            client.get(polling_url),
+            api_key,
+        )
             .header("Accept", "application/json")
             .send()
             .await
@@ -186,4 +200,40 @@ async fn bfl_poll(
             BFL_POLL_MAX_ITERS as u64 * BFL_POLL_INTERVAL_MS / 1000
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::provider::{AuthStyle, ProviderRegistry};
+
+    /// S2-8 (normal case): flux_pro/flux_2_pro are registered with
+    /// AuthStyle::HeaderKey("x-key") — the precondition call_flux_one/bfl_poll
+    /// now depend on, having switched from a manual `.header("x-key", ...)`
+    /// to routing through ProviderRegistry::apply_auth().
+    #[test]
+    fn flux_pro_and_flux_2_pro_use_x_key_header_auth() {
+        let registry = ProviderRegistry::global();
+        let flux_pro = registry.get("flux_pro").expect("flux_pro must be registered");
+        let flux_2_pro = registry.get("flux_2_pro").expect("flux_2_pro must be registered");
+        assert!(matches!(flux_pro.auth_style, AuthStyle::HeaderKey("x-key")));
+        assert!(matches!(flux_2_pro.auth_style, AuthStyle::HeaderKey("x-key")));
+    }
+
+    /// S2-8 (edge case): apply_auth() actually attaches "x-key" with the real
+    /// key value when called with the flux_pro record — confirms the request
+    /// built via the new code path carries the same header the old manual
+    /// call used to, not just that the record is configured correctly.
+    #[test]
+    fn flux_apply_auth_sends_x_key_header() {
+        let record = ProviderRegistry::global().get("flux_pro").unwrap();
+        let client = reqwest::Client::new();
+        let builder = client.post("https://api.bfl.ai/v1/flux-pro-1.1");
+        let req = ProviderRegistry::apply_auth(record, builder, "bfl-test-key")
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("x-key").map(|v| v.to_str().unwrap()),
+            Some("bfl-test-key")
+        );
+    }
 }

@@ -421,6 +421,14 @@ enum TokenAction {
 
 #[tokio::main]
 async fn main() {
+    // install the memory-tracking allocator's tracker before any workflow can possibly run. 
+    // Harmless no-op for the CLI-client-only subcommands below (list/stop/start/restart/status/
+    // tokens) — those never call WorkflowExecutor::run(), so no tracked
+    // group is ever registered and this has zero observable effect for
+    // them. See aerini-engine/src/lib.rs for why the #[global_allocator]
+    // itself needs no per-binary wiring beyond this one call.
+    aerini_engine::mem_tracking::install();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -553,10 +561,10 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
 
     // Warn if the workflow contains Shell, Code, or Database nodes and the
     // operator has not explicitly opted in with --allow-shell / --allow-code /
-    // --allow-database. T2-1/T2-6: derived from the one canonical dangerous-
+    // --allow-database.: derived from the one canonical dangerous-
     // node list (aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS) instead of a
     // locally hardcoded pair of checks, so this can't independently drift
-    // from api_mode's own gate again the way it did for Database (S8-2).
+    // from api_mode's own gate again the way it did for Database.
     let dangerous_present = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
     let has_shell_node    = dangerous_present.contains(&"shell_exec");
     let has_code_node     = dangerous_present.contains(&"code");
@@ -678,11 +686,16 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     let daemon_rt  = Arc::clone(&daemon);
     let wf_id_rt   = workflow.id.clone();
     let run_trig   = Arc::clone(&run_trigger);
+    let log_rt     = log.clone();
     tokio::spawn(async move {
         loop {
             run_trig.notified().await;
-            let _ = daemon_rt.stop_job(&wf_id_rt);
-            let _ = daemon_rt.start_job(&wf_id_rt, None, Some(true));
+            if let Err(e) = daemon_rt.stop_job(&wf_id_rt) {
+                log_rt.push("ERROR", None, format!("Manual trigger: stop_job failed: {}", e));
+            }
+            if let Err(e) = daemon_rt.start_job(&wf_id_rt, None, Some(true)) {
+                log_rt.push("ERROR", None, format!("Manual trigger: start_job failed: {}", e));
+            }
         }
     });
 
@@ -1029,14 +1042,14 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
         std::process::exit(1);
     };
 
-    // Tier 1: exact ID
+    // exact ID
     if let Some(j) = jobs.iter().find(|j| j["workflow_id"].as_str() == Some(name_or_id)) {
         return j["workflow_id"].as_str()
             .expect("workflow_id is a string — confirmed by find predicate")
             .to_string();
     }
 
-    // Tier 2: exact name (case-insensitive)
+    // exact name (case-insensitive)
     let exact_name: Vec<_> = jobs.iter().filter(|j|
         j["workflow_name"].as_str().map(|n| n.to_lowercase() == lower).unwrap_or(false)
     ).collect();
@@ -1048,7 +1061,7 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
         _ => print_ambiguous("matches multiple workflows by name", &exact_name),
     }
 
-    // Tier 3: ID prefix (case-insensitive)
+    // ID prefix (case-insensitive)
     let id_prefix: Vec<_> = jobs.iter().filter(|j|
         j["workflow_id"].as_str()
             .map(|id| id.to_lowercase().starts_with(&lower))
@@ -1062,7 +1075,7 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
         _ => print_ambiguous("is an ambiguous ID prefix — matches", &id_prefix),
     }
 
-    // Tier 4: name substring (case-insensitive)
+    // name substring (case-insensitive)
     let name_sub: Vec<_> = jobs.iter().filter(|j|
         j["workflow_name"].as_str()
             .map(|n| n.to_lowercase().contains(&lower))

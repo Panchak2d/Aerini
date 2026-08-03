@@ -15,7 +15,7 @@ let _nodeStatusRegistered = false;
 export async function listenNodeStatus(
   cb: (event: NodeStatusEvent) => void
 ): Promise<() => void> {
-  // Fix #10: guard against double-registration (e.g. Vite HMR in dev).
+  // guard against double-registration (e.g. Vite HMR in dev).
   // If already registered, return the existing unlisten handle without re-registering.
   if (_nodeStatusRegistered && _unlistenNodeStatus) {
     return _unlistenNodeStatus;
@@ -74,7 +74,7 @@ let _schedulerRegistered = false;
 export async function listenSchedulerStatus(
   cb: (event: SchedulerStatusEvent) => void
 ): Promise<() => void> {
-  // Fix #10: guard against double-registration.
+  //  guard against double-registration.
   if (_schedulerRegistered && _unlistenSchedulerStatus) {
     return _unlistenSchedulerStatus;
   }
@@ -120,7 +120,7 @@ export async function listenSchedulerSkip(
 
 /// Called once after `listenSchedulerStatus` resolves.
 /// Triggers the backend to re-emit current scheduler state for all active jobs
-/// and emit `scheduler-ready`. Replaces the old 800 ms startup delay.
+/// and emit `scheduler-ready`.
 export async function requestSchedulerState(): Promise<void> {
   await invoke<void>("request_scheduler_state");
 }

@@ -37,7 +37,7 @@ interface ExportResult {
 
 type DeployTarget = "linux" | "docker";
 
-const CLOSE_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+const CLOSE_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 
 export function showExportServerPanel(
   workflowId: string | null,
@@ -49,7 +49,6 @@ export function showExportServerPanel(
   const outputDrawer = document.getElementById("output-drawer");
   if (outputDrawer && !outputDrawer.classList.contains("hidden")) {
     outputDrawer.classList.add("hidden");
-    document.documentElement.style.removeProperty("--drawer-offset");
   }
 
   const overlay = document.createElement("div");

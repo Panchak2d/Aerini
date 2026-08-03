@@ -13,7 +13,7 @@ impl Node for StripeNode {
     fn display_name(&self) -> &'static str { "Stripe" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Interact with the Stripe API: create charges, customers, payment intents, and more." }
+    fn description(&self) -> &'static str { "Create a Stripe PaymentIntent via the Stripe API." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -71,8 +71,14 @@ impl Node for StripeNode {
 
                 let description = input.input["description"].as_str().unwrap_or("");
                 let caller_key  = input.input["idempotency_key"].as_str().filter(|s| !s.is_empty());
+                // T1-13 residual: distinguishes loop-body iterations that
+                // happen to resolve identical amount/currency/description —
+                // see resolve_idempotency_key's doc comment.
+                let loop_iteration = input.context.metadata.get("__loop_iteration_index")
+                    .and_then(|v| v.as_u64());
                 let idempotency_key = resolve_idempotency_key(
                     caller_key, &input.execution_id, &input.node_id, amount, &currency, description,
+                    loop_iteration,
                 );
 
                 // Stripe API requires application/x-www-form-urlencoded, not JSON.
@@ -137,12 +143,30 @@ impl Node for StripeNode {
 /// `execution_id + node_id + amount + currency + description` satisfies both.
 ///
 /// A caller-supplied key always takes precedence (Stripe's own recommended
-/// pattern — tie it to an order/cart ID). Either way the result is hashed
-/// through blake3 (already a workspace dependency, same idiom as
-/// `database/pool.rs`) so the header value is always a fixed-length ASCII
-/// hex string, regardless of what raw text the description or a
-/// caller-supplied key contain — raw text could otherwise fail reqwest's
-/// `HeaderValue` conversion (e.g. an embedded newline).
+/// pattern — tie it to an order/cart ID) and is never combined with
+/// `loop_iteration` — an explicit caller value is the user's own choice to
+/// make unique (typically via a `{{...}}` expression resolving per-item
+/// data), matching this key's existing "caller value overrides everything
+/// else" contract. Either way the result is hashed through blake3 (already a
+/// workspace dependency, same idiom as `database/pool.rs`) so the header
+/// value is always a fixed-length ASCII hex string, regardless of what raw
+/// text the description or a caller-supplied key contain — raw text could
+/// otherwise fail reqwest's `HeaderValue` conversion (e.g. an embedded
+/// newline).
+///
+/// T1-13 residual: `execution_id + node_id + amount + currency + description`
+/// alone does not guarantee distinctness across iterations of a loop body
+/// containing this node — two iterations can resolve identical
+/// amount/currency/description (e.g. charging the same flat fee to N
+/// different customers, where only an upstream node's customer id differs
+/// and that id never enters this key). Without a per-iteration signal, that
+/// collision makes Stripe treat the second charge as a retry of the first
+/// and silently return the first PaymentIntent instead of creating a new
+/// one — a real charge silently never happens. `loop_iteration` is
+/// `Some(i)` (the current 0-based loop-body iteration) when this node
+/// executes inside a Loop, sourced from `__loop_iteration_index`
+/// (`executor/mod.rs::build_input`); folding it into the key material closes
+/// the collision instead of relying on the other fields happening to differ.
 fn resolve_idempotency_key(
     caller_supplied: Option<&str>,
     execution_id: &str,
@@ -150,10 +174,14 @@ fn resolve_idempotency_key(
     amount: u64,
     currency: &str,
     description: &str,
+    loop_iteration: Option<u64>,
 ) -> String {
     let key_material = match caller_supplied {
         Some(k) => k.to_string(),
-        None => format!("{}|{}|{}|{}|{}", execution_id, node_id, amount, currency, description),
+        None => match loop_iteration {
+            Some(i) => format!("{}|{}|{}|{}|{}|iter{}", execution_id, node_id, amount, currency, description, i),
+            None => format!("{}|{}|{}|{}|{}", execution_id, node_id, amount, currency, description),
+        },
     };
     blake3::hash(key_material.as_bytes()).to_hex().to_string()
 }
@@ -162,7 +190,7 @@ fn resolve_idempotency_key(
 mod tests {
     use super::*;
 
-    // T1-13 (S1-2): no request previously carried an Idempotency-Key header
+    // no request previously carried an Idempotency-Key header
     // at all, so a recoverable failure retried by `execute_with_retry`
     // (executor/mod.rs) created a second, distinct PaymentIntent for the
     // same purchase. These tests exercise the real `resolve_idempotency_key`
@@ -170,7 +198,7 @@ mod tests {
     // properties the fix requires: stable across retries, distinct across
     // genuinely separate invocations.
     //
-    // Scope note (Rule 6/7): `execute()` posts to the hardcoded
+    // Scope note (7): `execute` posts to the hardcoded
     // `https://api.stripe.com` — there is no injectable base_url, so
     // end-to-end header-on-the-wire coverage would require either a real
     // network call to Stripe or a refactor to make the endpoint
@@ -187,24 +215,24 @@ mod tests {
         // execute_with_retry clones the identical NodeInput (same execution_id,
         // node_id, and resolved config) across every retry attempt — so the
         // derived key must be identical for two "attempts" with the same inputs.
-        let k1 = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1");
-        let k2 = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1");
+        let k1 = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1", None);
+        let k2 = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1", None);
         assert_eq!(k1, k2, "same execution_id/node_id/params must yield the same Idempotency-Key across retries");
     }
 
     #[test]
     fn idempotency_key_distinct_for_distinct_requests() {
-        let base = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1");
-        let different_amount = resolve_idempotency_key(None, "exec-1", "stripe_node", 2000, "usd", "order #1");
-        let different_run     = resolve_idempotency_key(None, "exec-2", "stripe_node", 1000, "usd", "order #1");
-        assert_ne!(base, different_amount, "different amount must yield a different key (e.g. distinct loop iterations)");
+        let base = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "order #1", None);
+        let different_amount = resolve_idempotency_key(None, "exec-1", "stripe_node", 2000, "usd", "order #1", None);
+        let different_run     = resolve_idempotency_key(None, "exec-2", "stripe_node", 1000, "usd", "order #1", None);
+        assert_ne!(base, different_amount, "different amount must yield a different key");
         assert_ne!(base, different_run, "different execution_id must yield a different key (e.g. separate scheduled runs)");
     }
 
     #[test]
     fn caller_supplied_key_overrides_and_is_hashed() {
-        let k1 = resolve_idempotency_key(Some("order-42"), "exec-1", "stripe_node", 1000, "usd", "order #1");
-        let k2 = resolve_idempotency_key(Some("order-42"), "exec-2", "stripe_node", 9999, "eur", "different");
+        let k1 = resolve_idempotency_key(Some("order-42"), "exec-1", "stripe_node", 1000, "usd", "order #1", None);
+        let k2 = resolve_idempotency_key(Some("order-42"), "exec-2", "stripe_node", 9999, "eur", "different", None);
         assert_eq!(k1, k2, "a caller-supplied key must take precedence over execution_id/node_id/params");
         assert_ne!(k1, "order-42", "the raw caller-supplied value must be hashed, never sent as a literal header value");
         assert!(k1.chars().all(|c| c.is_ascii_hexdigit()), "hashed key must be a plain hex string, always a valid header value");
@@ -216,9 +244,54 @@ mod tests {
         // this function (`.filter(|s| !s.is_empty())`) — confirm the fallback
         // path (None) still produces the deterministic default, not a
         // caller-empty-string special case this function would need to guard.
-        let k = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "");
+        let k = resolve_idempotency_key(None, "exec-1", "stripe_node", 1000, "usd", "", None);
         assert!(!k.is_empty());
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── T1-13 residual: __loop_iteration_index folded into the auto-derived key ──
+
+    #[test]
+    fn loop_iterations_with_identical_params_get_distinct_keys() {
+        // The exact collision the residual gap describes: same node, same run,
+        // same amount/currency/description (e.g. a flat per-item fee) across
+        // two iterations — only the iteration index differs. Without folding
+        // it in, these would previously hash to the *same* key and Stripe
+        // would silently treat charge #2 as a duplicate of charge #1.
+        let iter0 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(0));
+        let iter1 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(1));
+        assert_ne!(iter0, iter1, "identical params but different loop iteration must yield different keys");
+    }
+
+    #[test]
+    fn same_loop_iteration_stable_across_retries() {
+        // execute_with_retry reuses the same NodeInput (same __loop_iteration_index)
+        // across retry attempts within one iteration — the key must stay stable,
+        // same property as idempotency_key_stable_across_retries but with a
+        // loop_iteration present.
+        let k1 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(3));
+        let k2 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(3));
+        assert_eq!(k1, k2, "same loop_iteration across retries must yield the same key");
+    }
+
+    #[test]
+    fn absent_loop_iteration_differs_from_present_zero() {
+        // None (top-level, not in a loop) and Some(0) (first loop iteration)
+        // must not collide with each other, even though "0" and "absent" could
+        // otherwise be conflated by a naive string-format implementation.
+        let top_level = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", None);
+        let iter_zero  = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(0));
+        assert_ne!(top_level, iter_zero, "no-loop-context and iteration-0 must not produce the same key");
+    }
+
+    #[test]
+    fn caller_supplied_key_ignores_loop_iteration() {
+        // Caller-supplied keys are the user's own uniqueness contract (per the
+        // existing caller_supplied_key_overrides_and_is_hashed test) and are
+        // deliberately never combined with loop_iteration.
+        let k1 = resolve_idempotency_key(Some("order-42"), "exec-1", "stripe_node", 500, "usd", "flat fee", Some(0));
+        let k2 = resolve_idempotency_key(Some("order-42"), "exec-1", "stripe_node", 500, "usd", "flat fee", Some(1));
+        assert_eq!(k1, k2, "a caller-supplied key must stay stable regardless of loop_iteration");
     }
 }
 

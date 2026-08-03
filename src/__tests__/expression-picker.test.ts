@@ -1,11 +1,5 @@
 // @vitest-environment jsdom
-/**
- * DEVIATION NOTE: expression-picker.ts exports only two functions —
- * `showExpressionPicker` and `closeExpressionPicker`. There is NO exported
- * expression token parser or `{{...}}` detector function. The expression
- * strings are built as plain template literals inside showExpressionPicker;
- * there is no parser to invoke. Tests cover the actual exported API surface.
- */
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   closeExpressionPicker,

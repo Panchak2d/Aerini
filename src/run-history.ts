@@ -51,7 +51,7 @@ export async function saveRunToHistory(
   workflowName: string,
   result:       WorkflowResult,
 ): Promise<void> {
-  await migrateFromLocalStorage(workflowId, workflowName);
+  await migrateFromLocalStorage();
   const durationMs = computeDurationMs(result.logs);
   const record: RunRecord = {
     id,
@@ -65,6 +65,13 @@ export async function saveRunToHistory(
   };
   try { await invoke("save_run_record", { record }); }
   catch (e) { console.error("Failed to save run record:", e); }
+  //  Performance Monitor Redesign: persists the report the engine
+  // already froze for this run (fetched server-side, not built here — see
+  // `save_performance_report`'s own doc comment). Not added to the
+  // localStorage-migration call site below: those legacy records predate
+  // `perf_monitor` entirely and have no report to fetch.
+  try { await invoke("save_performance_report", { runId: id, workflowId }); }
+  catch (e) { console.error("Failed to save performance report:", e); }
 }
 
 export async function deleteRunRecord(id: string): Promise<void> {
@@ -79,9 +86,26 @@ async function loadPage(workflowId: string, offset: number, filter: string): Pro
   return invoke<RunRecord[]>("list_run_records", { workflowId, offset, limit: PAGE_SIZE, filter });
 }
 
+// previously the pre-SQLite localStorage schema stored no per-record
+// workflow id at all — only a display-name string (`workflowName` below) —
+// so no per-record attribution is recoverable from the old data. Stamping
+// every migrated record with whichever real workflow happened to save the
+// first post-upgrade run (the prior behavior) silently misattributed every
+// OTHER workflow's history to that one, and the source blob was deleted
+// immediately after, making it unrecoverable. Fix: collapse all legacy
+// records into one fixed, non-real-workflow bucket instead of guessing an
+// owner. Each record still carries its own original `workflow_name` string
+// (set below, unchanged from before), so the run's real source stays
+// visible per-item even though the grouping key no longer distinguishes
+// them — this is what "single bucket" trades away (no per-workflow
+// filtering of legacy runs) to stop the misattribution. `LEGACY_HISTORY_WORKFLOW_ID`
+// can never collide with a real workflow id: `workflow-manager.ts` always
+// generates ids as `wf_${...}`.
+export const LEGACY_HISTORY_WORKFLOW_ID = "__legacy_history_import__";
+
 let _migrationDone = false;
 
-async function migrateFromLocalStorage(workflowId: string, _workflowName: string): Promise<void> {
+async function migrateFromLocalStorage(): Promise<void> {
   if (_migrationDone) return;
   _migrationDone = true;
   const LS_KEY = "aerini_run_history_v1";
@@ -94,7 +118,7 @@ async function migrateFromLocalStorage(workflowId: string, _workflowName: string
     }>;
     for (const o of old) {
       const record: RunRecord = {
-        id: o.id, workflow_id: workflowId, workflow_name: o.workflowName,
+        id: o.id, workflow_id: LEGACY_HISTORY_WORKFLOW_ID, workflow_name: o.workflowName,
         ran_at: o.ranAt, success: o.success, duration_ms: o.durationMs,
         result_json: JSON.stringify(o.result),
         status: o.success ? "success" : "failed",
@@ -152,7 +176,11 @@ export function renderHistoryPanel(
     if (!ok) return;
     clearBtn.textContent = "Clearing…";
     clearBtn.disabled = true;
-    await clearRunRecords(workflowId).catch(() => {});
+    try {
+      await clearRunRecords(workflowId);
+    } catch (err) {
+      console.error("Failed to clear run records:", err);
+    }
     currentOffset = 0;
     await loadAndRender();
     clearBtn.textContent = "Clear all";
@@ -244,8 +272,12 @@ function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void)
   });
   item.querySelector<HTMLButtonElement>(".history-del-btn")!.addEventListener("click", async (e) => {
     e.stopPropagation();
-    await deleteRunRecord(record.id).catch(() => {});
-    item.remove();
+    try {
+      await deleteRunRecord(record.id);
+      item.remove();
+    } catch (err) {
+      console.error("Failed to delete run record:", err);
+    }
   });
   return item;
 }

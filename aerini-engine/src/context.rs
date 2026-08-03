@@ -66,45 +66,13 @@ pub struct ExecutionState {
     pub execution_id: String,
     pub workflow_id: String,
     pub started_at: DateTime<Utc>,
-    // Plain HashMap, not DashMap: every mutation path here takes `&mut self`,
-    // reachable only through SharedExecutionState's outer `Arc<RwLock<...>>`
-    // write lock — access is already fully serialized before it ever reaches
-    // this field, so DashMap's fine-grained bucket locking is never actually
-    // exercised. It previously cost real allocation/indirection overhead per
-    // entry for concurrency this field can't observe (S5-2).
     node_outputs: HashMap<String, Value>,
-    // Cached clone of `node_outputs`, rebuilt once inside mark_succeeded (the
-    // only site that mutates node_outputs) rather than on every snapshot()
-    // call. snapshot() is called under a shared *read* lock (build_input:
-    // `state.read().await`), so in parallel mode several nodes can become
-    // ready and each call snapshot() before the next mark_succeeded — every
-    // one of those used to independently deep-clone the same, unchanged map,
-    // expensive when node outputs embed large payloads (files, images, HTTP
-    // bodies). Caching turns every snapshot() call after the first such call
-    // into an O(1) Arc clone instead of an O(n) deep clone of the map
-    // contents. Sequential mode is unaffected either way (already ~1
-    // snapshot() per mark_succeeded, so no reduction, but no regression).
     node_outputs_snapshot: Arc<HashMap<String, Value>>,
     node_statuses: HashMap<String, NodeExecution>,
     pub variables: HashMap<String, Value>,
-    // Loop-internal state: __loop_*_index keys.
-    // Kept separate from `variables` so user-defined variables cannot collide
-    // with or observe loop internals.
     loop_state: HashMap<String, Value>,
-    // Per-loop accumulated body results, stored outside loop_state so they are
-    // NOT included in snapshot().metadata. snapshot() clones loop_state on every
-    // node execution — storing O(n) per-iteration results there caused O(k·n²)
-    // clone cost across an n-iteration loop with k body nodes. The executor reads
-    // these directly via take_loop_results() and injects them into the done output.
     loop_results: HashMap<String, Vec<Value>>,
     pub logs: Vec<ExecutionLogEntry>,
-    // Node ids in completion order — root cause fix for the S3-2/S3-3/S4-6/S4-7
-    // family. Mutated only via mark_succeeded's move-to-end logic (see below)
-    // so a loop body node re-completing every iteration cannot grow this
-    // unboundedly — bounded by unique node count, not iteration count.
-    // T2-2 (this field) landed in Batch J; T2-5 (Batch K) has since migrated
-    // the five consumer nodes (output_node.rs, json_node.rs, text_splitter.rs,
-    // merge.rs, loop_node.rs) onto it via nodes/util.rs::ordered_node_outputs.
     execution_order: Vec<String>,
 }
 
@@ -308,9 +276,7 @@ mod execution_order_tests {
     }
 
     /// Bounded-growth guarantee: an n-iteration loop body must not grow
-    /// execution_order past the unique node count, regardless of n — this is
-    /// the specific regression this batch's design decision (move-to-end,
-    /// not append) exists to prevent.
+    /// execution_order past the unique node count, regardless of n.
     #[test]
     fn many_reexecutions_of_same_node_stay_bounded() {
         let mut s = ExecutionState::new("wf", HashMap::new());
@@ -330,7 +296,7 @@ mod execution_order_tests {
         assert_eq!(s.execution_order.last().map(String::as_str), Some("body"));
     }
 
-    // ── node_outputs snapshot caching (memory-efficiency batch) ─────────────
+    // ── node_outputs snapshot caching ─────────────
 
     #[test]
     fn repeated_snapshot_calls_reuse_same_arc_when_unmutated() {

@@ -1,4 +1,5 @@
 import type { CanvasNode } from "./Node";
+import { getCanvasColors } from "./theme-colors";
 
 export interface ConnectorData {
   id: string;
@@ -39,13 +40,14 @@ export class Connector {
 
     // Draw success/failure branch labels at wire midpoint
     if (this.data.on_success !== null || this.data.on_failure !== null) {
+      const colors = getCanvasColors();
       const dx = Math.abs(tp.x - fp.x);
       const cp = Math.max(dx * 0.55, 80);
       const mx = bez(fp.x, fp.x + cp, tp.x - cp, tp.x, 0.5);
       const my = bez(fp.y, fp.y, tp.y, tp.y, 0.5);
 
       const label = this.data.on_success !== null ? "\u2713" : "\u2717";
-      const bg    = this.data.on_success !== null ? "#34d399" : "#f87171";
+      const bg    = this.data.on_success !== null ? colors.actionRun : colors.error;
 
       ctx.save();
       ctx.font         = "bold 9px -apple-system, BlinkMacSystemFont, sans-serif";
@@ -87,13 +89,14 @@ export class Connector {
     const cp = Math.max(dx * 0.55, 80);
 
     // ── Main curve ──────────────────────────────────────────────────────────
+    const colors = getCanvasColors();
     let color: string;
-    if (overrideColor)       color = overrideColor;
-    else if (this.highlighted) color = "#f87171";
-    else if (this.selected)    color = "#4d9eff";
-    else if (this.active)      color = "#34d399";
-    else if (this.hovered)     color = "#ffffff44";
-    else                       color = "#ffffff18";
+    if (overrideColor)         color = overrideColor;
+    else if (this.highlighted) color = colors.error;
+    else if (this.selected)    color = colors.actionNav;
+    else if (this.active)      color = colors.actionRun;
+    else if (this.hovered)     color = colors.wireHover;
+    else                       color = colors.wire;
 
     ctx.save();
     ctx.beginPath();
@@ -102,7 +105,14 @@ export class Connector {
     ctx.strokeStyle = color;
     ctx.lineWidth   = this.selected || this.active ? 2 : 1.5;
     ctx.lineCap     = "round";
-    if (this.data.condition) ctx.setLineDash([5, 4]);
+    // Resting-state wires read as schematic/blueprint (dashed), matching the
+    // canvas's own dot-grid background. Active flow (moving glow-dot) and an
+    // explicit selection/cut-highlight already carry their own strong solid
+    // signal, so those stay solid rather than competing with the dash.
+    // Subsumes the old condition-only dash special case — a conditional
+    // edge is resting exactly as often as any other edge, so it no longer
+    // needs a separate check to end up dashed.
+    if (!this.active && !this.selected && !this.highlighted) ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
 
@@ -115,7 +125,7 @@ export class Connector {
 
       // Glow
       const g = ctx.createRadialGradient(bx, by, 0, bx, by, 10);
-      g.addColorStop(0, "#34d399cc");
+      g.addColorStop(0, colors.actionRun + "cc");
       g.addColorStop(1, "transparent");
       ctx.beginPath();
       ctx.arc(bx, by, 10, 0, Math.PI * 2);
@@ -125,12 +135,12 @@ export class Connector {
       // Dot
       ctx.beginPath();
       ctx.arc(bx, by, 3, 0, Math.PI * 2);
-      ctx.fillStyle = "#34d399";
+      ctx.fillStyle = colors.actionRun;
       ctx.fill();
     }
 
     // ── Arrowhead at destination ────────────────────────────────────────────
-    const arrowColor = this.selected ? "#4d9eff" : this.active ? "#34d399" : color;
+    const arrowColor = this.selected ? colors.actionNav : this.active ? colors.actionRun : color;
     this.drawArrow(ctx, x1, y1, x2, y2, cp, arrowColor);
 
     ctx.restore();
@@ -213,7 +223,7 @@ export class PendingConnector {
     ctx.beginPath();
     ctx.moveTo(this.fromX, this.fromY);
     ctx.bezierCurveTo(this.fromX+cp, this.fromY, this.toX-cp, this.toY, this.toX, this.toY);
-    ctx.strokeStyle = "#4d9eff";
+    ctx.strokeStyle = getCanvasColors().actionNav;
     ctx.lineWidth   = 1.5;
     ctx.setLineDash([5, 4]);
     ctx.stroke();

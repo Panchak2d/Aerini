@@ -12,7 +12,7 @@ export function initInterpolationAutocomplete(canvas: Canvas): void {
   document.addEventListener("input", (e) => {
     const el = e.target as HTMLElement;
     if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
-    if (!el.closest(".node-popover, #right-panel")) return;
+    if (!el.closest(".node-popover")) return;
     handleInterpolationInput(el);
   });
 

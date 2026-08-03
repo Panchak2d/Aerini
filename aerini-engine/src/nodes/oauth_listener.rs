@@ -1,13 +1,13 @@
 // OAuth 2.0 token manager for social platform authentication.
 //
 // Handles:
-//   - Token storage via OS keychain (keyring v3)                         — G1
-//   - Per-credential refresh mutex (DashMap<key, Arc<Mutex<()>>>)        — G3
-//   - OAuth redirect port 42069 preferred; falls back to OS-assigned port — G6
-//   - `probe_redirect_port()` reports that port ahead of time, without   — T2-15
+//   - Token storage via OS keychain (keyring v3)
+//   - Per-credential refresh mutex (DashMap<key, Arc<Mutex<()>>>)
+//   - OAuth redirect port 42069 preferred; falls back to OS-assigned port
+//   - `probe_redirect_port()` reports that port ahead of time, without
 //     starting a flow, so callers (e.g. the Setup Guide) can show the
-//     real redirect URI instead of an unconditional "42069" — S10-2.
-//   - TCP listener closed on every exit path (defer-style cleanup)       — G10
+//     real redirect URI instead of an unconditional "42069"
+//   - TCP listener closed on every exit path (defer-style cleanup)
 //   - 60-second callback timeout
 //
 // VERIFIED endpoints (May 2026):
@@ -25,12 +25,12 @@
 //     auth    https://www.tiktok.com/v2/auth/authorize/
 //     token   https://open.tiktokapis.com/v2/oauth/token/
 //     scope   video.publish
-//   Google Sheets (added Batch S, VERIFIED Jul 2026 — developers.google.com/workspace/sheets/api/scopes):
+// Google Sheets (added, Jul 2026 — developers.google.com/workspace/sheets/api/scopes):
 //     auth    https://accounts.google.com/o/oauth2/v2/auth
 //     token   https://oauth2.googleapis.com/token   (Google's generic token endpoint — shared with YouTube)
 //     scope   https://www.googleapis.com/auth/spreadsheets
 //
-// T2-7/S1-9/S6-6: `google_sheets.rs` previously required a raw, manually-pasted
+// `google_sheets.rs` previously required a raw, manually-pasted
 // access token with no refresh path (~1h expiry, then a silent 401). It now goes
 // through this same store/refresh/full-flow pipeline as a fourth platform,
 // "google_sheets", reusing the existing Google token-exchange/refresh functions
@@ -64,9 +64,9 @@ const TIKTOK_ACCESS_EXPIRY_SECS: u64 = 86400;
 /// both issued by the same Google OAuth2 token endpoint.
 const GOOGLE_ACCESS_EXPIRY_SECS: u64 = 3600;
 
-// ── Refresh mutex map (G3) ────────────────────────────────────────────────────
+// ── Refresh mutex map ────────────────────────────────────────────────────
 
-// Key = "{platform}:{client_id}". Ensures only one goroutine refreshes a token
+// Key = "{platform}:{client_id}". Ensures only one caller refreshes a token
 // at a time; waiters re-read the keychain after acquiring, avoiding redundant
 // refresh calls if the leader already completed.
 static REFRESH_LOCKS: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
@@ -165,7 +165,7 @@ async fn exchange_code(
     match platform {
         // "google_sheets" reuses the youtube fn: both are plain Google OAuth2 token
         // exchange against the same endpoint, with no scope hardcoded in this fn —
-        // the scope is chosen per-platform in `build_auth_url` (T2-7/S1-9/S6-6).
+        // the scope is chosen per-platform in `build_auth_url`.
         "youtube" | "google_sheets" => {
             exchange_code_youtube(code, client_id, client_secret, redirect_uri).await
         }
@@ -542,7 +542,7 @@ fn open_browser(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-// ── Local OAuth callback listener (G10: closed on every exit path) ─────────────
+// ── Local OAuth callback listener (closed on every exit path) ─────────────
 
 /// Waits for a single OAuth callback on an already-bound `TcpListener`.
 /// The caller owns the listener; it is dropped when this function returns.
@@ -627,7 +627,11 @@ async fn accept_one_callback(
     );
     let _ = stream.write_all(response.as_bytes()).await;
 
-    if state.as_deref() != Some(expected_state) {
+    let state_matches = match state.as_deref() {
+        Some(s) => constant_time_eq(s, expected_state),
+        None => false,
+    };
+    if !state_matches {
         return Err(NodeError::unrecoverable(
             "OAUTH_STATE_MISMATCH",
             "OAuth state parameter mismatch — possible CSRF. Retry.",
@@ -637,6 +641,16 @@ async fn accept_one_callback(
     code.ok_or_else(|| {
         NodeError::unrecoverable("OAUTH_NO_CODE", "No authorization code in OAuth callback.")
     })
+}
+
+/// Constant-time equality check, used to compare the OAuth CSRF `state` value
+/// so the comparison can't leak information via a short-circuiting `==`.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn extract_query_param(qs: &str, key: &str) -> Option<String> {
@@ -673,9 +687,9 @@ fn pct_decode(s: &str) -> String {
 // ── Full OAuth flow ───────────────────────────────────────────────────────────
 
 /// Binds the OAuth callback listener: preferred port first, falling back to any
-/// OS-assigned port on conflict (G6). Shared by `run_full_oauth_flow` (which keeps
+/// OS-assigned port on conflict. Shared by `run_full_oauth_flow` (which keeps
 /// and uses the listener) and `probe_redirect_port` (which reads the port and drops
-/// it immediately) so the fallback policy is defined in exactly one place — T2-15.
+/// it immediately) so the fallback policy is defined in exactly one place.
 async fn bind_oauth_listener() -> Result<TcpListener, NodeError> {
     match TcpListener::bind(("127.0.0.1", OAUTH_PORT)).await {
         Ok(l) => Ok(l),
@@ -693,7 +707,7 @@ async fn bind_oauth_listener() -> Result<TcpListener, NodeError> {
 /// OS-assigned port `bind_oauth_listener` would fall back to. Binds and immediately
 /// drops the listener; there is an inherent, small TOCTOU race against whatever binds
 /// next (another process, or a real flow started moments later) — same caveat as any
-/// "is this port free" probe. Used by the Setup Guide (T2-15/S10-2) so the redirect
+/// "is this port free" probe. Used by the Setup Guide so the redirect
 /// URI a user is told to register reflects live reality instead of an unconditional
 /// "42069" that silently stops matching once that port is ever unavailable.
 pub async fn probe_redirect_port() -> Result<u16, NodeError> {
@@ -729,7 +743,7 @@ async fn run_full_oauth_flow(
 
     open_browser(&auth_url);
 
-    // `listener` is RAII — dropped (closed) after listen_for_callback returns. (G10)
+    // `listener` is RAII — dropped (closed) after listen_for_callback returns.
     let code = listen_for_callback(&listener, &state).await?;
     drop(listener);
 
@@ -750,7 +764,7 @@ async fn run_full_oauth_flow(
 /// Flow:
 /// 1. Load stored tokens from OS keychain.
 /// 2. If access token is valid (not expired): return it.
-/// 3. If expired and refresh available: refresh under per-credential mutex (G3).
+/// 3. If expired and refresh available: refresh under per-credential mutex.
 ///    Re-read keychain after acquiring lock — another caller may have already refreshed.
 /// 4. If no stored tokens or refresh fails: run full OAuth flow (browser → callback → exchange).
 pub async fn get_tokens(
@@ -766,7 +780,7 @@ pub async fn get_tokens(
             return Ok(OAuthTokens { access_token: stored.access_token });
         }
 
-        // ── 2. Token expired — refresh under mutex (G3) ───────────────────────
+        // ── 2. Token expired — refresh under mutex ───────────────────────
         let lock = refresh_lock(platform, client_id);
         let _guard = lock.lock().await;
 
@@ -795,7 +809,7 @@ pub async fn get_tokens(
     Ok(OAuthTokens { access_token: tokens.access_token })
 }
 
-// ── Tests (T2-15/S10-2, T2-7/S1-9/S6-6) ───────────────────────────────────────
+// ── Tests ───────────────────────────────────────
 //
 // exchange_code/refresh_tokens's new "google_sheets" match arms are thin
 // delegations to the pre-existing, already-network-tested youtube functions
@@ -807,6 +821,21 @@ pub async fn get_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_for_equal_strings() {
+        assert!(constant_time_eq("abc123", "abc123"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_length() {
+        assert!(!constant_time_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_same_length_different_content() {
+        assert!(!constant_time_eq("abc123", "abc124"));
+    }
 
     #[test]
     fn build_auth_url_google_sheets_has_correct_scope_and_params() {

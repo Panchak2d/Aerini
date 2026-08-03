@@ -1,16 +1,15 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import { RunManager, getBgJobs } from "./run-manager";
-import { stopScheduledWorkflow } from "./ipc/workflow";
+import { stopScheduledWorkflow, parseSchedulerError } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
-import { switchTab, openPanel, closePanel } from "./panels/NodeConfigPanel";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
 import { bindWfSettings } from "./wf-settings";
 import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
-import { bindDrawerResize, bindPanelResize } from "./resize";
+import { bindDrawerResize } from "./resize";
 import { loadBgPanel } from "./bg-panel-loader";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
@@ -24,6 +23,100 @@ export interface IChatPanel {
 export interface ToolbarResult {
   refreshRunBtn:     () => void;
   runWithValidation: () => Promise<void>;
+}
+
+function buildIconBtn(id: string, title: string, svgInner: string): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.id = id;
+  btn.type = "button";
+  btn.className = "btn-toolbar btn-icon-only";
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.innerHTML = svgInner;
+  return btn;
+}
+
+
+export function bindZoomControls(canvas: Canvas): void {
+  const divider = document.getElementById("toolbar-divider-new-workflow")
+    ?? document.querySelector<HTMLElement>("#toolbar .toolbar-divider");
+  if (!divider?.parentElement) return; // defensive: nothing to anchor on
+
+  const group = document.createElement("div");
+  group.className = "toolbar-zoom-group";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Canvas zoom");
+
+  const zoomOutBtn = buildIconBtn("btn-zoom-out", "Zoom out",
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>`);
+  const readout = document.createElement("span");
+  readout.className = "toolbar-zoom-readout";
+  readout.textContent = `${Math.round(canvas.zoom * 100)}%`;
+  const zoomInBtn = buildIconBtn("btn-zoom-in", "Zoom in",
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`);
+  // Corner-bracket "fit" glyph — path lineage: aerini-ui-hybrid-v2.html's own
+  // verified <symbol id="i-fit"> (viewBox 16x16), coordinates scaled ×1.5 to
+  // this codebase's 24x24 icon convention.
+  const fitBtn = buildIconBtn("btn-fit-screen", "Fit to screen (Ctrl+Shift+F)",
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"/></svg>`);
+
+  zoomOutBtn.addEventListener("click", () => canvas.zoomOut());
+  zoomInBtn.addEventListener("click",  () => canvas.zoomIn());
+  fitBtn.addEventListener("click",     () => canvas.fitToScreen());
+
+  group.append(zoomOutBtn, readout, zoomInBtn, fitBtn);
+  divider.insertAdjacentElement("afterend", group);
+  group.insertAdjacentElement("afterend", divider.cloneNode(true) as HTMLElement);
+
+  // Polling, not canvas.onZoomChange: that single-callback slot is already
+  // assigned by app.ts (the N-1 zoom-percentage hint) — a second assignment
+  // here would run later (bindToolbar is called after app.ts's own
+  // assignment) and silently overwrite it, reproducing the exact
+  // onRunStateChange overwrite bug already logged from Batch 1 for a second
+  // callback. Polling is self-contained and, as a side benefit, uniformly
+  // covers every way zoom can change (wheel, pinch, zoomIn/Out, fitToScreen)
+  // without adding any wiring into InputHandler.ts (out of this batch's
+  // file scope).
+  let lastPct = Math.round(canvas.zoom * 100);
+  setInterval(() => {
+    const pct = Math.round(canvas.zoom * 100);
+    if (pct !== lastPct) { readout.textContent = `${pct}%`; lastPct = pct; }
+    zoomOutBtn.disabled = canvas.zoom <= canvas.MIN_ZOOM;
+    zoomInBtn.disabled  = canvas.zoom >= canvas.MAX_ZOOM;
+  }, 300);
+}
+
+export function bindDrawerToggle(canvas: Canvas): void {
+  const drawer = document.getElementById("output-drawer");
+  const header = document.getElementById("drawer-header");
+  const closeBtn = document.getElementById("btn-close-drawer");
+  if (!drawer || !header || !closeBtn) return; // defensive — mirrors bindZoomControls' no-throw contract
+
+  function setDrawerCollapsed(collapsed: boolean): void {
+    drawer!.classList.toggle("hidden", collapsed);
+    header!.setAttribute("aria-expanded", String(!collapsed));
+    canvas.resize();
+    // Whichever control triggered this toggle must release focus, or it
+    // keeps intercepting Space app-wide (InputHandler.ts's focusOwnsSpace
+    // guard defers Space to whatever button/role=button is focused) and
+    // keeps showing a stale focus ring.
+    header!.blur();
+    closeBtn!.blur();
+  }
+  closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); // header's own click handler below would otherwise re-toggle it back open
+    setDrawerCollapsed(true);
+  });
+  header.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest(".drawer-actions, .drawer-tabs, .drawer-tab-static")) return;
+    setDrawerCollapsed(!drawer!.classList.contains("hidden"));
+  });
+  header.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if ((e.target as HTMLElement).closest(".drawer-actions, .drawer-tabs, .drawer-tab-static")) return;
+    e.preventDefault();
+    setDrawerCollapsed(!drawer!.classList.contains("hidden"));
+  });
 }
 
 export function bindToolbar(
@@ -131,7 +224,14 @@ export function bindToolbar(
         activateZone("bgruns");
         toast("Workflow scheduled — running in background", "success");
       }
-    } catch { /* port_conflict re-throws — modal handled elsewhere */ }
+    } catch (rawError) {
+      const err = parseSchedulerError(String(rawError));
+      if (err.error_kind === "port_conflict") {
+        toast(`Port ${err.port} is already in use by "${err.held_by_workflow_name}".`, "error");
+      } else {
+        toast(`Could not start background run: ${(err as { message?: string }).message ?? rawError}`, "error");
+      }
+    }
   });
 
   $("btn-export").addEventListener("click", (e) => {
@@ -150,6 +250,7 @@ export function bindToolbar(
   document.addEventListener("click", () => closeAllDropdowns());
 
   $("btn-new-workflow").addEventListener("click", () => wfManager.handleNew());
+  $("btn-new-workflow-toolbar").addEventListener("click", () => wfManager.handleNew());
   let _credPanel: { show(): void } | null = null;
   let _credLoading = false;
   $("btn-credentials").addEventListener("click", () => {
@@ -162,22 +263,8 @@ export function bindToolbar(
     });
   });
   $("btn-chat")?.addEventListener("click", () => chatPanel.toggle());
-  $("btn-close-drawer").addEventListener("click", () => {
-    $("output-drawer").classList.add("hidden");
-    document.documentElement.style.removeProperty("--drawer-offset");
-    canvas.resize();
-    // Show the reopen button so the user can get output back without re-running
-    document.getElementById("btn-show-output")?.classList.remove("hidden");
-  });
-
-  document.getElementById("btn-show-output")?.addEventListener("click", () => {
-    const drawer = $("output-drawer");
-    drawer.classList.remove("hidden");
-    const drawerH = drawer.offsetHeight || 260;
-    document.documentElement.style.setProperty("--drawer-offset", `${drawerH}px`);
-    canvas.resize();
-    document.getElementById("btn-show-output")?.classList.add("hidden");
-  });
+  // Collapse/expand the output drawer. The drawer keeps using the existing
+  bindDrawerToggle(canvas);
   $("btn-focus-mode").addEventListener("click", () => canvas.toggleFocusMode());
 
   $("btn-settings").addEventListener("click", async () => {
@@ -216,7 +303,6 @@ export function bindToolbar(
     });
   }
 
-  $("btn-shortcuts").addEventListener("click",   () => $("shortcuts-modal").classList.remove("hidden"));
   $("btn-run-panel")?.addEventListener("click",  () => runWithValidation());
   $("btn-copy-output").addEventListener("click", () => {
     const text = document.getElementById("output-content")?.innerText ?? "";
@@ -231,17 +317,7 @@ export function bindToolbar(
     const drawer = $("output-drawer");
     const isMax  = drawer.style.height === "70vh";
     drawer.style.height = isMax ? "var(--drawer-h)" : "70vh";
-    setTimeout(() => RunManager.updateDrawerOffset(canvas), 20);
   });
-
-  document.querySelectorAll(".panel-tab").forEach(t =>
-    t.addEventListener("click", () => {
-      const tab = (t as HTMLElement).dataset.tab ?? "run";
-      switchTab(tab);
-      openPanel();
-    })
-  );
-  $("btn-close-panel").addEventListener("click", () => closePanel());
 
   const titleEl = $("workflow-name-label");
   titleEl.addEventListener("dblclick", () => wfManager.startRename(titleEl));
@@ -257,10 +333,6 @@ export function bindToolbar(
     if (e.key === "?" || e.key === "/") { $("shortcuts-modal").classList.remove("hidden"); return; }
     if (e.key === "Escape") {
       $("shortcuts-modal").classList.add("hidden");
-      const panel = document.getElementById("right-panel");
-      const otherModalIds = ["confirm-modal", "import-preview-modal", "settings-modal", "onboarding-modal"];
-      const anyModalVisible = otherModalIds.some(id => !document.getElementById(id)?.classList.contains("hidden"));
-      if (!anyModalVisible && panel && panel.offsetParent !== null) closePanel();
     }
     if (e.key === "m" || e.key === "M") {
       const w      = document.getElementById("minimap-wrap");
@@ -279,8 +351,9 @@ export function bindToolbar(
     localStorage.setItem("aerini_minimap_hidden", String(!!hidden));
   });
 
+  bindZoomControls(canvas);
+
   bindDrawerResize();
-  bindPanelResize();
 
   // Defer BgJobsPanel init — runs after first paint, invisible to the user
   const _deferBgPanel = (fn: () => void) =>

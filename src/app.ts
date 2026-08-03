@@ -1,11 +1,12 @@
 import { Canvas } from "./canvas/Canvas";
 import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
-import { closePanel } from "./panels/NodeConfigPanel";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
 import { getNodeTypes, checkNodejsAvailable } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
+import { initStatusBarFields } from "./statusbar-fields";
+import { initPerformancePanel } from "./panels/PerformancePanel";
 import {
   buildSidebarPalette, bindSidebarSearch, filterByCategory,
   initCommandPalette, openPalette,
@@ -32,6 +33,13 @@ import { bindToolbar } from "./toolbar";
 import { initTooltips } from "./tooltip-manager";
 import { loadBgPanel, getBgPanelIfLoaded } from "./bg-panel-loader";
 import type { ChatPanel as ChatPanelType } from "./panels/ChatPanel";
+import { initTheme } from "./theme";
+
+// applied as the very first thing this module does, ahead of every
+// function declaration and ahead of init()'s own call at the bottom of this
+// file — see theme.ts's own doc comment for why this (not an inline head
+// script) is the earliest point available under this app's CSP.
+initTheme();
 
 // ── App bootstrap ─────────────────────────────────────────────────────────────
 
@@ -97,15 +105,6 @@ async function init() {
     else el.textContent = "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
   }
 
-  // N-1: show zoom % briefly on scroll, then revert to normal hint
-  let _zoomHintTimer: ReturnType<typeof setTimeout> | null = null;
-  canvas.onZoomChange = (zoom) => {
-    const el = document.getElementById("status-hint"); if (!el) return;
-    el.textContent = `${Math.round(zoom * 100)}%`;
-    if (_zoomHintTimer) clearTimeout(_zoomHintTimer);
-    _zoomHintTimer = setTimeout(() => updateStatusHint(), 1500);
-  };
-
   // N-10: persist viewport per workflow so zoom/pan survive workflow switches
   canvas.onViewportChange = () => {
     if (!wfManager.currentId) return;
@@ -130,7 +129,7 @@ async function init() {
     onStatus:  setStatus,
     onToast:   toast,
     confirm:     showConfirm,
-    onPanelClose: () => { closePanel(); closePopover(); },
+    onPanelClose: () => { closePopover(); },
   });
 
   // After loading or creating a workflow, switch to Nodes zone so the
@@ -143,6 +142,8 @@ async function init() {
     getBgPanelIfLoaded()?.updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
     chatPanel.onWorkflowSwitched();
+    statusBarFields.refreshMem();
+    perfPanel.refresh();
     runManager.setCurrentWorkflow(
       wfManager.currentId,
       wfManager.currentName,
@@ -229,8 +230,10 @@ async function init() {
   };
   // canvas.onCanvasChanged is set above in the Always On block
   canvas.onPaletteRequest = openPalette;
-  canvas.onPanelClose     = () => { closePanel(); closePopover(); };
   canvas.onRunNode        = (nodeId) => runManager.handleRunSingleNode(nodeId, wfManager.currentId, wfManager.currentName);
+
+  const perfPanel = initPerformancePanel(wfManager);
+  const statusBarFields = initStatusBarFields(canvas, wfManager, perfPanel.refresh);
 
   // Wire-drop: connector released on empty space → open node picker at drop point
   canvas.onWireDropRequest = (_fromNode, _fromPort, _wx, _wy) => {
@@ -299,7 +302,7 @@ async function init() {
     });
   });
 
-  await bindSchedulerEvents(canvas, wfManager, runManager, toast, setStatus, refreshRunBtn);
+  await bindSchedulerEvents(canvas, wfManager, runManager, toast, setStatus, refreshRunBtn, statusBarFields.refreshMem, perfPanel.refresh);
 
   if (isTauri()) {
     listenCloseRequested(() => wfManager.hasUnsaved, showConfirm).catch(console.error);

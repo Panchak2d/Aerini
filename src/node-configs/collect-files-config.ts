@@ -38,7 +38,7 @@ export function renderCollectFilesFields(ctx: ExtensionContext): void {
       delBtn.type = "button";
       delBtn.className = "subfolder-del-btn";
       delBtn.setAttribute("aria-label", `Remove source ${idx + 1}`);
-      delBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+      delBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       delBtn.addEventListener("click", () => {
         (node.data.config["sources"] as SrcSlot[]).splice(idx, 1);
         renderSrcList();

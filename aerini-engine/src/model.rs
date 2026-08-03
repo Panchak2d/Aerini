@@ -14,8 +14,9 @@
 //!
 //! # RetryPolicy default
 //!
-//! The default is intentionally 1 attempt (no automatic retry). An earlier default of 3
-//! caused nodes with side effects (email, HTTP POST) to silently execute 3× on failure.
+//! The default is intentionally 1 attempt (no automatic retry): a node with side
+//! effects (email, HTTP POST) must not silently execute more than once on failure
+//! unless the workflow author explicitly opts in via the Retry UI.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -55,9 +56,9 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        // 1 attempt = no automatic retry. Users opt into retries via the Retry UI.
-        // Default of 3 caused all nodes to silently retry 3× on failure, including
-        // nodes with side effects (email, HTTP POST). See BUG-01 audit finding.
+        // 1 attempt = no automatic retry. Users opt into retries via the Retry UI —
+        // a node with side effects (email, HTTP POST) must not silently retry
+        // without the workflow author choosing that explicitly.
         Self { max_attempts: 1, backoff_ms: 500 }
     }
 }
@@ -70,7 +71,7 @@ pub struct CanvasPosition {
     pub y: f64,
 }
 
-// ── Workflow-level Chat Panel settings (Patch 5B) ─────────────────────────────
+// ── Workflow-level Chat Panel settings ────────────────────────────────────────
 
 /// Per-workflow Chat Panel feature toggles, configured in the Workflow Settings
 /// modal and enforced by `ChatPanel.applyToggles()` on the frontend.
@@ -131,7 +132,7 @@ pub struct WorkflowNode {
     pub id: String,
 
     /// Which registered node IMPLEMENTATION to use (e.g. "http_request").
-    /// FIXES the Phase 1 limitation — multiple nodes can share the same type.
+    /// Multiple `WorkflowNode`s may share the same `node_type_id`.
     pub node_type_id: String,
 
     /// UI category for display.
@@ -466,7 +467,7 @@ mod settings_tests {
         // -> serde) rather than serde_json::from_value directly, confirming the
         // migration no-op path doesn't choke on a key it doesn't know about.
         let json_str = r#"{"schema_version":"1.0","id":"wf-3","name":"Old","nodes":[],"edges":[]}"#;
-        let wf = Workflow::from_json(json_str).expect("must load a pre-Patch-5B workflow file");
+        let wf = Workflow::from_json(json_str).expect("must load a workflow file saved before the settings key existed");
         assert_eq!(wf.settings.chat.max_message_length, 2000);
         assert!(wf.settings.chat.show_branding);
     }

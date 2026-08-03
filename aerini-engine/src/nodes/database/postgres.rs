@@ -30,6 +30,14 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
     let allow_raw_sql = caller_is_admin
         && input.input["allow_raw_sql"].as_bool().unwrap_or(false);
     let inline_warning = super::check_query_for_inline_values(&query);
+    // residual: explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
+    // doc comment for why this is not gated behind __caller_is_admin the way
+    // allow_raw_sql is (that gate is never set true on desktop today).
+    let ssrf_policy = if input.input["allow_local"].as_bool().unwrap_or(false) {
+        crate::nodes::util::SsrfPolicy::AllowLocal
+    } else {
+        crate::nodes::util::SsrfPolicy::Strict
+    };
 
     if inline_warning.is_some() {
         if !allow_raw_sql {
@@ -50,7 +58,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
     }
 
     let mut output = if db_type == "mysql" {
-        if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url).await {
+        if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url, ssrf_policy).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
         match super::pool::get_mysql_pool(&url).await {
@@ -62,7 +70,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
             },
         }
     } else {
-        if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url).await {
+        if let Err(e) = crate::nodes::util::check_db_url_ssrf(&url, ssrf_policy).await {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
         match super::pool::get_pg_pool(&url).await {
@@ -285,5 +293,57 @@ mod tests {
             rewrite_pg_placeholders("SELECT * FROM t WHERE a = 'lit'?"),
             "SELECT * FROM t WHERE a = 'lit'$1"
         );
+    }
+}
+
+#[cfg(test)]
+mod multi_statement_smuggling_tests {
+    use super::pg_run_query;
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable Postgres instance — set DATABASE_URL_PG and run with `cargo test -- --ignored`"]
+    async fn semicolon_stacked_statement_does_not_execute_second_command() {
+        let url = std::env::var("DATABASE_URL_PG")
+            .expect("set DATABASE_URL_PG to a disposable Postgres instance to run this test");
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_PG");
+
+        // Belt-and-braces cleanup in case a prior failed run left this behind.
+        sqlx::query("DROP TABLE IF EXISTS __aerini_smuggle_proof")
+            .execute(&pool)
+            .await
+            .ok();
+
+        let attack = "SELECT 1; CREATE TABLE __aerini_smuggle_proof (id INT); \
+                       INSERT INTO __aerini_smuggle_proof VALUES (1);";
+        let result = pg_run_query(&pool, attack, &[]).await;
+
+        // Expected: the call fails outright (protocol-level rejection of the
+        // multi-statement string), not "succeeds but silently ran only the
+        // first statement". A hard failure is what Postgres's extended
+        // protocol actually does; asserting on it is the real regression
+        // guard here, not just the table-existence check below.
+        assert!(
+            !result.success,
+            "expected the stacked statement to be rejected by Postgres's extended protocol, \
+             but the call reported success — re-open T1-6, this is now exploitable"
+        );
+
+        let leaked = sqlx::query(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = '__aerini_smuggle_proof'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("existence check itself failed");
+        assert!(
+            leaked.is_empty(),
+            "smuggled CREATE TABLE executed — multi-statement smuggling IS exploitable, escalate immediately"
+        );
+
+        sqlx::query("DROP TABLE IF EXISTS __aerini_smuggle_proof")
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

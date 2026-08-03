@@ -29,7 +29,7 @@ impl Node for AiPromptNode {
     fn display_name(&self) -> &'static str { "AI Prompt" }
     fn node_type(&self) -> NodeType { NodeType::Ai }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Send a prompt to an AI model — Claude, GPT-4o, Gemini, or a local Ollama model — and receive a reply." }
+    fn description(&self) -> &'static str { "Send a prompt to an AI model — Claude, GPT, Gemini, or a local Ollama model — and receive a reply." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -38,7 +38,7 @@ impl Node for AiPromptNode {
             "properties": {
                 "prompt":         { "type": "string",  "description": "User prompt" },
                 "system":         { "type": "string",  "description": "System / persona instructions" },
-                "model":          { "type": "string",  "description": "Model name — e.g. gpt-4o, claude-sonnet-4-6, gemini-2.5-flash, llama3" },
+                "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3" },
                 "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini"], "description": "API provider. 'auto' detects from base_url." },
                 "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here, for local models such as Ollama." },
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },
@@ -84,8 +84,13 @@ impl Node for AiPromptNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_PROMPT", "prompt field is required")),
         };
 
+        // captured before the `.unwrap_or(...)` default below collapses
+        // "field absent" and "field present" into indistinguishable strings —
+        // gemini.rs needs this to know whether the user actually configured a
+        // system prompt, since a magic-string comparison can't tell that apart
+        // from a user who explicitly typed the exact default sentence.
+        let system_provided = input.input["system"].as_str().is_some();
         let mut system  = input.input["system"].as_str().unwrap_or("You are a helpful assistant.").to_string();
-        let model       = input.input["model"].as_str().unwrap_or("gpt-4o").to_string();
         let api_key     = input.input["api_key"].as_str().unwrap_or("").to_string();
         let temperature = input.input["temperature"].as_f64().unwrap_or(0.7);
         let max_tokens  = input.input["max_tokens"].as_u64().unwrap_or(2048);
@@ -98,6 +103,18 @@ impl Node for AiPromptNode {
             _ => crate::provider::ProviderRegistry::detect_from_url(user_url_raw),
         };
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
+
+        // Bug fix: this used to be computed before provider_id existed
+        // and was hardcoded to "gpt-4o" unconditionally, an Anthropic or Gemini
+        // call with no `model` set silently sent an OpenAI model string to that
+        // provider's API, guaranteeing a model-not-found failure. Branch by
+        // provider_id, matching ai_agent.rs's already-correct pattern.
+        let default_model = match provider_id {
+            "anthropic" => "claude-sonnet-5",
+            "gemini"    => "gemini-3.6-flash",
+            _           => "gpt-5.6",
+        };
+        let model = input.input["model"].as_str().unwrap_or(default_model).to_string();
 
         // AllowLocal (not Strict): this node's own schema advertises local-model
         // support (Ollama etc.), so loopback/private-range base_urls must be
@@ -132,7 +149,7 @@ impl Node for AiPromptNode {
 
         let mut output = match provider_id {
             "anthropic" => anthropic::call_anthropic(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
-            "gemini"    => gemini::call_gemini(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
+            "gemini"    => gemini::call_gemini(client, &base_url, &api_key, &model, &system, system_provided, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
             _           => openai::call_openai_compatible(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
         };
         if !pa.logs.is_empty() {
@@ -160,8 +177,7 @@ mod tests {
     }
 
     // NOTE: `model` and `base_url` are NOT required fields — both use `.unwrap_or` defaults.
-    // Plan section §PATCH 21 listed them as required; that was stale. The only hard check
-    // in execute() is prompt presence. Both tests below return before any async IO.
+    // The only hard check in execute() is prompt presence. Both tests below return before any async IO.
 
     #[tokio::test]
     async fn missing_prompt_field_returns_missing_prompt_error() {
@@ -181,7 +197,7 @@ mod tests {
         assert!(!err.recoverable);
     }
 
-    /// T1-11 (S2-2): `base_url` was SSRF-checked under `SsrfPolicy::Strict`,
+    /// `base_url` was SSRF-checked under `SsrfPolicy::Strict`,
     /// which blocks loopback unconditionally — despite this node's own schema
     /// advertising local-model (Ollama) support. Spin up a real local server
     /// and confirm a loopback `base_url` now reaches it (any outcome other
@@ -238,5 +254,101 @@ mod tests {
             assert_ne!(err.code, "SSRF_BLOCKED", "loopback base_url must be allowed under SsrfPolicy::AllowLocal");
         }
         assert!(out.success, "request should reach the local mock server and succeed: {:?}", out.error);
+    }
+
+    /// like `spawn_minimal_openai_mock`, but also captures the request
+    /// line + body so a test can assert which "model" value execute() chose when
+    /// the caller omitted one. Gemini puts its model in the URL path, not the
+    /// JSON body, so both are captured.
+    struct CapturedRequest { request_line: String, body: String }
+
+    async fn spawn_capturing_mock(resp_body: &'static str) -> (String, tokio::sync::oneshot::Receiver<CapturedRequest>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (r, mut w) = stream.split();
+            let mut reader = BufReader::new(r);
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line).await;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                if line.trim().is_empty() { break; }
+                if let Some((k, v)) = line.trim().split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body_bytes = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = reader.read_exact(&mut body_bytes).await;
+            }
+            let _ = tx.send(CapturedRequest {
+                request_line: req_line.trim().to_string(),
+                body: String::from_utf8_lossy(&body_bytes).to_string(),
+            });
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp_body.len(), resp_body
+            );
+            let _ = w.write_all(resp.as_bytes()).await;
+        });
+        (format!("http://127.0.0.1:{}", port), rx)
+    }
+
+    /// `model` omitted must default per-provider to the
+    /// current model, not the stale (and, for Anthropic/Gemini, provider-blind)
+    /// literal it used to fall back to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_openai_flagship() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"choices":[{"message":{"content":"hi"}}],"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1}}"#
+        ).await;
+        let _ = AiPromptNode.execute(make_input(json!({
+            "prompt": "hi", "provider": "openai", "base_url": base_url
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        assert_eq!(v["model"].as_str(), Some("gpt-5.6"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_anthropic_default() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"content":[{"type":"text","text":"hi"}]}"#
+        ).await;
+        let _ = AiPromptNode.execute(make_input(json!({
+            "prompt": "hi", "provider": "anthropic", "base_url": base_url, "api_key": "test-key"
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        assert_eq!(v["model"].as_str(), Some("claude-sonnet-5"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_gemini_flash() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}"#
+        ).await;
+        let _ = AiPromptNode.execute(make_input(json!({
+            "prompt": "hi", "provider": "gemini", "base_url": base_url, "api_key": "test-key"
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        // Gemini's model is part of the URL path, not the JSON body.
+        assert!(
+            req.request_line.contains("gemini-3.6-flash"),
+            "expected default model 'gemini-3.6-flash' in request path, got: {}",
+            req.request_line
+        );
     }
 }

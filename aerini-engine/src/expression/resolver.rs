@@ -44,8 +44,30 @@ pub fn resolve_string(
     if !template.contains("{{") {
         return (template.to_string(), vec![]);
     }
-
     let name_to_id = build_name_map(workflow);
+    resolve_string_with_map(template, workflow, &name_to_id, ctx, env_allowlist)
+}
+
+// same body as resolve_string, but takes a pre-built name_to_id map
+// instead of rebuilding it from `workflow.nodes` on every
+// call. resolve_value_recursive calls this directly, building the map once
+// per resolve_all_strings() invocation (once per node execution) instead of
+// once per templated string field inside that node's config — a node with
+// K templated fields was doing K redundant O(workflow.nodes) rebuilds per
+// execution, multiplied by loop-body iteration count inside Loop nodes.
+// resolve_string() above is kept as a thin wrapper so its public signature
+// and behavior are unchanged for existing callers/tests.
+pub(super) fn resolve_string_with_map(
+    template:      &str,
+    workflow:      &Workflow,
+    name_to_id:    &HashMap<String, String>,
+    ctx:           &ExecutionContext,
+    env_allowlist: Option<&HashSet<String>>,
+) -> (String, Vec<String>) {
+    if !template.contains("{{") {
+        return (template.to_string(), vec![]);
+    }
+
     let mut warnings = Vec::new();
     let mut result = String::with_capacity(template.len());
     let mut chars = template.char_indices().peekable();
@@ -71,7 +93,7 @@ pub fn resolve_string(
                     return (result, warnings);
                 }
                 let expr = expr.trim();
-                let (val, mut w) = resolve_expression(expr, workflow, &name_to_id, ctx, env_allowlist, 0);
+                let (val, mut w) = resolve_expression(expr, workflow, name_to_id, ctx, env_allowlist, 0);
                 warnings.append(&mut w);
                 result.push_str(&val);
                 continue;
@@ -106,14 +128,16 @@ pub fn resolve_all_strings(
         return (value.clone(), vec![]);
     }
 
+    let name_to_id = build_name_map(workflow);
     let mut warnings = Vec::new();
-    let resolved = resolve_value_recursive(value, workflow, ctx, &mut warnings, env_allowlist, 0);
+    let resolved = resolve_value_recursive(value, workflow, &name_to_id, ctx, &mut warnings, env_allowlist, 0);
     (resolved, warnings)
 }
 
 pub(super) fn resolve_value_recursive(
     value:         &Value,
     workflow:      &Workflow,
+    name_to_id:    &HashMap<String, String>,
     ctx:           &ExecutionContext,
     warnings:      &mut Vec<String>,
     env_allowlist: Option<&HashSet<String>>,
@@ -129,17 +153,17 @@ pub(super) fn resolve_value_recursive(
 
     match value {
         Value::String(s) => {
-            let (resolved, mut w) = resolve_string(s, workflow, ctx, env_allowlist);
+            let (resolved, mut w) = resolve_string_with_map(s, workflow, name_to_id, ctx, env_allowlist);
             warnings.append(&mut w);
             Value::String(resolved)
         }
         Value::Array(arr) => Value::Array(
-            arr.iter().map(|v| resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist, depth + 1)).collect(),
+            arr.iter().map(|v| resolve_value_recursive(v, workflow, name_to_id, ctx, warnings, env_allowlist, depth + 1)).collect(),
         ),
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(k.clone(), resolve_value_recursive(v, workflow, ctx, warnings, env_allowlist, depth + 1));
+                out.insert(k.clone(), resolve_value_recursive(v, workflow, name_to_id, ctx, warnings, env_allowlist, depth + 1));
             }
             Value::Object(out)
         }
@@ -269,10 +293,10 @@ fn resolve_special(
     warnings:      &mut Vec<String>,
     env_allowlist: Option<&HashSet<String>>,
 ) -> (String, Vec<String>) {
-    match segments[0] {
+    let val = match segments[0] {
         "$run" => {
             let key = segments.get(1).copied().unwrap_or("");
-            let val = match key {
+            match key {
                 "id" => ctx.metadata.get("execution_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 "timestamp" => chrono::Utc::now().to_rfc3339(),
                 "workflow_name" => workflow.name.clone(),
@@ -283,34 +307,35 @@ fn resolve_special(
                     ));
                     String::new()
                 }
-            };
-            (val, warnings.to_owned())
+            }
         }
         "$env" => {
             let var_name = segments.get(1).copied().unwrap_or("");
             if var_name.is_empty() {
                 warnings.push(format!("Expression '{{{{{}}}}}': $env requires a variable name.", expr));
-                return (String::new(), warnings.to_owned());
-            }
-            match env_allowlist {
-                None => {
-                    warnings.push(format!(
-                        "Expression '{{{{{}}}}}': $env expressions are disabled. \
-                         Pass --allow-env-vars {} to enable this variable.",
-                        expr, var_name
-                    ));
-                    (String::new(), warnings.to_owned())
-                }
-                Some(allowed) => {
-                    if !allowed.contains(var_name) {
+                String::new()
+            } else {
+                match env_allowlist {
+                    None => {
                         warnings.push(format!(
-                            "Expression '{{{{{}}}}}': $env.{} is not in the allowed list. \
-                             Add it to --allow-env-vars to enable.",
+                            "Expression '{{{{{}}}}}': $env expressions are disabled. \
+                             Pass --allow-env-vars {} to enable this variable.",
                             expr, var_name
                         ));
-                        return (String::new(), warnings.to_owned());
+                        String::new()
                     }
-                    (std::env::var(var_name).unwrap_or_default(), warnings.to_owned())
+                    Some(allowed) => {
+                        if !allowed.contains(var_name) {
+                            warnings.push(format!(
+                                "Expression '{{{{{}}}}}': $env.{} is not in the allowed list. \
+                                 Add it to --allow-env-vars to enable.",
+                                expr, var_name
+                            ));
+                            String::new()
+                        } else {
+                            std::env::var(var_name).unwrap_or_default()
+                        }
+                    }
                 }
             }
         }
@@ -318,29 +343,30 @@ fn resolve_special(
             let var_name = segments.get(1).copied().unwrap_or("");
             if var_name.is_empty() {
                 warnings.push(format!("Expression '{{{{{}}}}}': $vars requires a variable name.", expr));
-                return (String::new(), warnings.to_owned());
-            }
-            match ctx.variables.get(var_name) {
-                None => {
-                    warnings.push(format!(
-                        "Expression '{{{{{}}}}}': $vars.{} not found in workflow variables. Replaced with empty string.",
-                        expr, var_name
-                    ));
-                    (String::new(), warnings.to_owned())
-                }
-                Some(val) => {
-                    let field_path = &segments[2..];
-                    if field_path.is_empty() {
-                        (value_to_string(val), warnings.to_owned())
-                    } else {
-                        match traverse_path(val, field_path) {
-                            Some(v) => (value_to_string(&v), warnings.to_owned()),
-                            None => {
-                                warnings.push(format!(
-                                    "Expression '{{{{{}}}}}': field path '{}' not found in $vars.{}. Replaced with empty string.",
-                                    expr, field_path.join("."), var_name
-                                ));
-                                (String::new(), warnings.to_owned())
+                String::new()
+            } else {
+                match ctx.variables.get(var_name) {
+                    None => {
+                        warnings.push(format!(
+                            "Expression '{{{{{}}}}}': $vars.{} not found in workflow variables. Replaced with empty string.",
+                            expr, var_name
+                        ));
+                        String::new()
+                    }
+                    Some(val) => {
+                        let field_path = &segments[2..];
+                        if field_path.is_empty() {
+                            value_to_string(val)
+                        } else {
+                            match traverse_path(val, field_path) {
+                                Some(v) => value_to_string(&v),
+                                None => {
+                                    warnings.push(format!(
+                                        "Expression '{{{{{}}}}}': field path '{}' not found in $vars.{}. Replaced with empty string.",
+                                        expr, field_path.join("."), var_name
+                                    ));
+                                    String::new()
+                                }
                             }
                         }
                     }
@@ -352,32 +378,33 @@ fn resolve_special(
                 "Expression '{{{{{}}}}}': unknown special variable '{}'. Known: $run, $env, $vars.",
                 expr, other
             ));
-            (String::new(), warnings.to_owned())
+            String::new()
         }
-    }
+    };
+    (val, std::mem::take(warnings))
 }
 
 pub(super) fn traverse_path(root: &Value, segments: &[&str]) -> Option<Value> {
-    let mut current = root.clone();
+    let mut current = root;
     for seg in segments {
         if let Some(bracket) = seg.find('[') {
             let field = &seg[..bracket];
             let rest  = &seg[bracket..];
             if !field.is_empty() {
-                current = current.get(field)?.clone();
+                current = current.get(field)?;
             }
             let mut idx_slice = rest;
             while idx_slice.starts_with('[') {
                 let close = idx_slice.find(']')?;
                 let idx: usize = idx_slice[1..close].parse().ok()?;
-                current = current.get(idx)?.clone();
+                current = current.get(idx)?;
                 idx_slice = &idx_slice[close + 1..];
             }
         } else {
-            current = current.get(seg)?.clone();
+            current = current.get(seg)?;
         }
     }
-    Some(current)
+    Some(current.clone())
 }
 
 pub(super) fn value_to_string(v: &Value) -> String {
@@ -388,6 +415,32 @@ pub(super) fn value_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         other            => other.to_string(),
     }
+}
+
+/// Un-escapes a quoted function-argument literal after its outer quotes have
+/// already been stripped, matching the escape convention `parser::split_args`/
+/// `find_matching_close` use when deciding argument boundaries (any `\`
+/// followed by a character is treated as a literal occurrence of that
+/// character there — but those two functions only use it to avoid ending a
+/// string early; they return the still-escaped original slice unchanged).
+/// This is the second half of that same convention: `\"` -> `"`, `\'` -> `'`,
+/// `\\` -> `\`, so `{{upper("say \"hi\"")}}` resolves to `SAY "HI"` instead of
+/// leaving the literal backslashes in place.
+fn unescape_quoted(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                result.push(next);
+            }
+            // Trailing lone backslash (malformed input): dropped silently,
+            // matching the parser's own escape_next-at-EOF no-op.
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn try_resolve_function(
@@ -423,11 +476,11 @@ fn try_resolve_function(
             continue;
         }
         if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
-            resolved_args.push(arg[1..arg.len() - 1].to_string());
+            resolved_args.push(unescape_quoted(&arg[1..arg.len() - 1]));
             continue;
         }
         if arg.starts_with('\'') && arg.ends_with('\'') && arg.len() >= 2 {
-            resolved_args.push(arg[1..arg.len() - 1].to_string());
+            resolved_args.push(unescape_quoted(&arg[1..arg.len() - 1]));
             continue;
         }
         if arg.parse::<f64>().is_ok() {
@@ -830,6 +883,33 @@ mod tests {
         assert!(warns.is_empty());
     }
 
+    // name_to_id is now built once per resolve_all_strings call and
+    // threaded through every string leaf, instead of rebuilt per leaf. This
+    // exercises multiple templated fields referencing different node names in
+    // a single call, to confirm the shared map resolves every name correctly
+    // (not just the first one built against).
+    #[test]
+    fn resolve_all_strings_multiple_fields_different_node_names() {
+        let wf = make_workflow(vec![("n1", "Fetch"), ("n2", "Transform")]);
+        let ctx = make_ctx(
+            vec![
+                ("n1", json!({"body": "raw"})),
+                ("n2", json!({"result": "clean"})),
+            ],
+            vec![],
+        );
+        let config = json!({
+            "a": "{{Fetch.output.body}}",
+            "b": "{{Transform.output.result}}",
+            "c": "{{Fetch.output.body}}-{{Transform.output.result}}",
+        });
+        let (resolved, warns) = resolve_all_strings(&config, &wf, &ctx, None);
+        assert_eq!(resolved["a"], "raw");
+        assert_eq!(resolved["b"], "clean");
+        assert_eq!(resolved["c"], "raw-clean");
+        assert!(warns.is_empty());
+    }
+
     #[test]
     fn null_field_differs_from_missing_field() {
         let wf = make_workflow(vec![("n1", "Step")]);
@@ -846,7 +926,7 @@ mod tests {
         assert!(!warns_miss.is_empty(), "missing field must warn");
     }
 
-    // ── P23: expression/resolver.rs tests ─────────────────────────────────────
+    // ── expression/resolver.rs tests ─────────────────────────────────────
 
     // Undefined node reference: {{nonexistent.output.value}} → empty string + warning,
     // no panic. Verifies the "no node named" branch in resolve_expression.
@@ -914,7 +994,7 @@ mod tests {
         assert!(warns.is_empty());
     }
 
-    // T0-4: nested function calls comfortably under MAX_EXPRESSION_DEPTH still
+    // nested function calls comfortably under MAX_EXPRESSION_DEPTH still
     // resolve normally — the depth cap must not affect legitimate nesting.
     #[test]
     fn nested_function_calls_within_depth_limit_resolve_normally() {
@@ -926,8 +1006,8 @@ mod tests {
         assert!(warns.is_empty());
     }
 
-    // T0-4: a function-call expression nested past MAX_EXPRESSION_DEPTH — the
-    // {{a(b(c(...)))}} shape S6-9/S7-6/S11-2 identified as an unbounded-recursion
+    // a function-call expression nested past MAX_EXPRESSION_DEPTH — the
+    // {{a(b(c(...)))}} shape identified as an unbounded-recursion
     // crash reachable via a default write-scope API token or a plain file-drop
     // import — must degrade to empty string + warning, not overflow the stack.
     #[test]
@@ -943,9 +1023,9 @@ mod tests {
         );
     }
 
-    // T0-4a: JSON array/object structural nesting comfortably under
-    // MAX_VALUE_NESTING_DEPTH still resolves normally — a separate recursion
-    // path from T0-4's function-call nesting, keyed off config-value structure
+    // JSON array/object structural nesting comfortably under
+    // MAX_VALUE_NESTING_DEPTH still resolves normally, a separate recursion
+    // path from previous function-call nesting, keyed off config-value structure
     // rather than {{...}} expression nesting. The cap must not affect legitimate
     // nesting depths.
     #[test]
@@ -965,9 +1045,9 @@ mod tests {
         assert!(warns.is_empty());
     }
 
-    // T0-4a: a node config value whose JSON array/object nesting exceeds
+    // a node config value whose JSON array/object nesting exceeds
     // MAX_VALUE_NESTING_DEPTH — the same import-controlled attacker-reachability
-    // profile T0-4 already established (write-scope save_workflow, zero-auth
+    // profile already established before (write-scope save_workflow, zero-auth
     // .aerini file-drop import), just via structural nesting instead of
     // function-call nesting — must degrade to empty string + warning at the
     // point the cap is hit, not overflow the stack.
@@ -991,7 +1071,7 @@ mod tests {
         );
     }
 
-    // T0-4b: a node config value with no {{...}} anywhere, nested comfortably
+    // a node config value with no {{...}} anywhere, nested comfortably
     // under MAX_VALUE_NESTING_DEPTH, must still take resolve_all_strings' fast
     // path and come back unchanged — has_expressions' own depth guard must not
     // affect legitimate expression-free structures at ordinary depths.
@@ -1008,18 +1088,13 @@ mod tests {
         assert!(warns.is_empty());
     }
 
-    // T0-4b: a node config value with no {{...}} anywhere at all, but whose JSON
-    // array/object nesting exceeds MAX_VALUE_NESTING_DEPTH. Before this fix,
-    // has_expressions had no depth guard of its own — finding no expressions
-    // present, it would report `false` regardless of depth, sending the
-    // structure through resolve_all_strings' fast path, where the unguarded
-    // `value.clone()` would recurse to the same unbounded depth. This is the
-    // specific gap T0-4a's own tests never exercised, since their payload always
-    // contained an expression and so always reached resolve_value_recursive's
-    // guard on its own. has_expressions now caps its own recursion and reports
-    // `true` conservatively once the cap is exceeded, forcing the same
-    // guarded degrade-to-empty-string-plus-warning behavior even when no
-    // expression is actually present anywhere in the structure.
+    // A node config value with no {{...}} anywhere at all, but whose JSON
+    // array/object nesting exceeds MAX_VALUE_NESTING_DEPTH, must still be
+    // caught: without its own depth guard, has_expressions would report
+    // `false` regardless of depth, sending the structure through
+    // resolve_all_strings' fast path, where the unguarded `value.clone()`
+    // would recurse to the same unbounded depth.
+
     #[test]
     fn has_expressions_reports_true_past_depth_limit_even_with_no_expressions_present() {
         let wf = make_workflow(vec![]);
@@ -1038,5 +1113,32 @@ mod tests {
             warns.iter().any(|w| w.contains("nesting depth")),
             "must warn that nesting depth was exceeded; got: {:?}", warns
         );
+    }
+
+    // quoted function-argument literals must be unescaped, not just
+    // have their outer quotes stripped.
+    #[test]
+    fn fn_arg_escaped_double_quote_is_unescaped() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let (out, _) = resolve_string(r#"{{upper("say \"hi\"")}}"#, &wf, &ctx, None);
+        assert_eq!(out, r#"SAY "HI""#);
+    }
+
+    #[test]
+    fn fn_arg_escaped_backslash_is_unescaped() {
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let (out, _) = resolve_string(r#"{{upper("a\\b")}}"#, &wf, &ctx, None);
+        assert_eq!(out, "A\\B");
+    }
+
+    #[test]
+    fn fn_arg_unescaped_literal_still_works() {
+        // Normal case, no escapes present — must be unaffected by the fix.
+        let wf = make_workflow(vec![]);
+        let ctx = make_ctx(vec![], vec![]);
+        let (out, _) = resolve_string(r#"{{upper("hello")}}"#, &wf, &ctx, None);
+        assert_eq!(out, "HELLO");
     }
 }

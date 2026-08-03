@@ -5,12 +5,13 @@ import type { WorkflowResult } from "../ipc/workflow";
 // DOM, Canvas, and Tauri orchestration, which lives in stream-handler.ts.
 // No DOM access. No Tauri calls. No Canvas reference. Fully testable in isolation.
 //
-// Purity verified (Patch 26): no document., no window., no Tauri imports.
+// Purity verified: no document., no window., no Tauri imports.
 // Only external dependency is the WorkflowResult type from ../ipc/workflow —
 // a type-only import that produces zero runtime code.
 
 export class RunStateMachine {
   private _isRunning = false;
+  private _activeRunId: string | null = null;
   private _cancelRequested = false;
   private _lastResult: WorkflowResult | null = null;
   private _currentWorkflowName       = "Untitled";
@@ -19,6 +20,10 @@ export class RunStateMachine {
   private _currentMaxConcurrentNodes = 8;
 
   get isRunning(): boolean { return this._isRunning; }
+  // The run_id of the run currently in flight (main run or single-node run —
+  // both go through start()/stop() now, so this is always the right target
+  // for cancel_run regardless of which entry point started it). null when idle.
+  get activeRunId(): string | null { return this._activeRunId; }
   get lastResult(): WorkflowResult | null { return this._lastResult; }
   get currentWorkflowId(): string { return this._currentWorkflowId; }
   get currentWorkflowName(): string { return this._currentWorkflowName; }
@@ -44,8 +49,10 @@ export class RunStateMachine {
     this._currentWorkflowName = name;
   }
 
-  start(): void { this._isRunning = true; }
-  stop(): void  { this._isRunning = false; }
+  // runId must be the same id passed to runWorkflow(...) for this run, so
+  // cancelRun(activeRunId) targets the run actually in flight.
+  start(runId: string): void { this._isRunning = true; this._activeRunId = runId; }
+  stop(): void { this._isRunning = false; this._activeRunId = null; }
 
   requestCancel(): void { this._cancelRequested = true; }
 

@@ -45,8 +45,8 @@ pub(super) struct NodeTaskResult {
 ///
 /// After a node fails, activates the `on_error` port, falls back to
 /// `find_failure_route`, and returns `(should_abort, Option<failure_result>)`
-/// for the caller to apply. Extracted to eliminate the four identical routing
-/// blocks that previously appeared in each failure-outcome arm.
+/// for the caller to apply. Shared by the four failure-outcome arms below so
+/// this routing logic exists in exactly one place.
 async fn parallel_route_failure(
     node_id:      &str,
     err_msg:      String,
@@ -313,7 +313,7 @@ pub(super) async fn run_inner_parallel(
                 join_set.spawn(async move {
                     let _permit = permit;
 
-                    let resolved_input = match exec.build_input(&wf, &ndef, &st).await {
+                    let resolved_input = match exec.build_input(&wf, &ndef, &st, None).await {
                         Ok(input) => input,
                         Err(failure) => {
                             let err_msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
@@ -565,7 +565,7 @@ pub(super) async fn run_inner_parallel(
     })
 }
 
-// ── P23: parallel executor tests ──────────────────────────────────────────────
+// ── parallel executor tests ──────────────────────────────────────────────
 //
 // These tests run with parallel_execution = true to exercise the JoinSet-based
 // concurrent path. They use the same real WorkflowExecutor as integration tests,

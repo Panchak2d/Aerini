@@ -12,7 +12,7 @@ impl Node for StopNode {
     fn display_name(&self) -> &'static str { "Stop" }
     fn node_type(&self) -> NodeType { NodeType::Logic }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "End the workflow immediately. Use as a terminal node in error branches or conditional dead ends." }
+    fn description(&self) -> &'static str { "End this branch of the workflow. Downstream nodes on this path will not run; other independent branches are unaffected." }
 
     fn input_schema(&self) -> Value {
         json!({

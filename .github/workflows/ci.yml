@@ -88,12 +88,6 @@ jobs:
         run: npm ci
 
       - name: npm audit (high severity)
-        # --omit=dev excludes devDependencies (esbuild, vite) from the audit.
-        # GHSA-gv7w-rqvm-qjhr affects esbuild 0.17-0.28.0 via Deno's module loader
-        # only - not Node.js. esbuild is a build-time devDep; not present in
-        # production. The only safe version outside the advisory range (0.28.1)
-        # drops transpilation support for the browser targets this project requires,
-        # breaking vite:build. Auditing prod deps only is the correct posture here.
         run: npm audit --omit=dev --audit-level=high
 
       - name: Check dist/ is not stale

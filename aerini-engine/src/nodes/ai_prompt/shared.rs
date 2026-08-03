@@ -22,7 +22,7 @@ pub(super) async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<(u16,
 
     let status = response.status().as_u16();
 
-    // Capped read (S2-6): a provider response of unbounded size (misconfigured
+    // Capped read: a provider response of unbounded size (misconfigured
     // base_url, or a malicious local a1111/comfyui/Ollama-compatible endpoint)
     // can no longer be buffered without limit before parsing.
     match crate::nodes::util::read_json_response_capped(response).await {

@@ -18,8 +18,8 @@ export function renderWebhookBanners(ctx: ExtensionContext): void {
   tunnelNote.className = "popover-info-banner";
   tunnelNote.innerHTML =
     `<strong>ℹ Localhost only:</strong> The webhook binds to localhost. To receive requests from Stripe, GitHub, or other external services, ` +
-    `you need a public URL — use <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/" target="_blank">cloudflared</a> ` +
-    `or <a href="https://ngrok.com" target="_blank">ngrok</a>. ` +
+    `you need a public URL — use <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/" target="_blank" rel="noopener noreferrer">cloudflared</a> ` +
+    `or <a href="https://ngrok.com" target="_blank" rel="noopener noreferrer">ngrok</a>. ` +
     `See <strong>docs/webhooks-public.md</strong> for setup instructions.`;
   ctx.body.appendChild(tunnelNote);
 }

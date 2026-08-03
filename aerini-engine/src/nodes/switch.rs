@@ -20,7 +20,7 @@ impl Node for SwitchNode {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["field", "cases"],
+            "required": ["field", "cases", "source_node"],
             "properties": {
                 "field": {
                     "type": "string",
@@ -193,19 +193,27 @@ impl Node for SwitchNode {
             ));
         };
 
-        // T1-1g: source_node is schema-typed as a string (line 29-32), so a
-        // non-string, non-null value is a malformed config, not "unset" —
-        // it must not silently fall through to the all-outputs merge below,
-        // which is reserved for a genuinely absent/null source_node.
-        // Mirrors the is_null/as_str/reject shape T1-1d/T1-1e already use
-        // for case["port"]/default_port; unlike those fields, a syntactically
-        // valid but non-matching string is left untouched (still resolves to
-        // Value::Null, unchanged, out of this fix's scope).
+        // T1-1i-followup: unify further — an explicit source_node string
+        // that names no node in context used to silently resolve to
+        // Value::Null (T1-1g's original behavior), inconsistent with
+        // transform.rs's SOURCE_NOT_FOUND for the identical shape. A typo'd
+        // or stale source_node should fail loudly like every other
+        // unresolvable-reference case in this fix, not silently degrade to
+        // "no match, fall to default".
         let source_node_value = &input.input["source_node"];
         let data: Value = if source_node_value.is_null() {
-            Value::Object(input.context.node_outputs.iter().map(|(k,v)| (k.clone(), v.clone())).collect())
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "SOURCE_NODE_REQUIRED",
+                "source_node is required. Leaving it blank previously merged every upstream node's output into one object, which was ambiguous whenever more than one predecessor set the same field. Set source_node to the specific node whose output you want to switch on.",
+            ));
         } else if let Some(source_node) = source_node_value.as_str() {
-            input.context.node_outputs.get(source_node).cloned().unwrap_or(Value::Null)
+            match input.context.node_outputs.get(source_node) {
+                Some(v) => v.clone(),
+                None => return NodeOutput::failure(NodeError::unrecoverable(
+                    "SOURCE_NOT_FOUND",
+                    format!("Node '{}' has no output in context", source_node),
+                )),
+            }
         } else {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "INVALID_SOURCE_NODE",
@@ -273,12 +281,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn make_input(field: &str, cases_json: &str, outputs: HashMap<String, Value>) -> NodeInput {
+    /// T1-1i: source_node is now required, so the shared helper takes it
+    /// explicitly. Tests that error out before source_node resolution pass
+    /// a placeholder ("src") since it's never read.
+    fn make_input(field: &str, cases_json: &str, source_node: &str, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
-            input: json!({ "field": field, "cases": cases_json }),
+            input: json!({ "field": field, "cases": cases_json, "source_node": source_node }),
             context: ExecutionContext {
                 variables:    HashMap::new(),
                 node_outputs: Arc::new(outputs),
@@ -297,8 +308,9 @@ mod tests {
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
             input: json!({
-                "field": "prev.status",
-                "cases": r#"[{"match":"ok","port":"case_1"},{"match":"error","port":"case_2"}]"#
+                "field": "status",
+                "cases": r#"[{"match":"ok","port":"case_1"},{"match":"error","port":"case_2"}]"#,
+                "source_node": "prev"
             }),
             context: ExecutionContext {
                 variables:    HashMap::new(),
@@ -316,10 +328,17 @@ mod tests {
 
     #[tokio::test]
     async fn routes_to_default_on_no_match() {
+        // source_node resolves fine, its field just doesn't match any case
+        // — a genuine no-match, distinct from an unresolvable source_node
+        // (see nonexistent_string_source_node_returns_error below, T1-1i
+        // followup).
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({ "status": "nope" }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"ok","port":"case_1"}]"#,
-            HashMap::new(),
+            "src",
+            outputs,
         )).await;
         assert!(out.success);
         let o = out.output.as_ref().unwrap();
@@ -348,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_cases_json_returns_error() {
-        let out = SwitchNode.execute(make_input("status", "not-json", HashMap::new())).await;
+        let out = SwitchNode.execute(make_input("status", "not-json", "src", HashMap::new())).await;
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "INVALID_CASES");
     }
@@ -356,10 +375,11 @@ mod tests {
     #[tokio::test]
     async fn unconfigured_cases_get_distinct_index_based_default_ports() {
         let mut outputs = HashMap::new();
-        outputs.insert("status".to_string(), json!("b"));
+        outputs.insert("src".to_string(), json!({ "status": "b" }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a"},{"match":"b"},{"match":"c","port":"case_3"}]"#,
+            "src",
             outputs,
         )).await;
         assert!(out.success);
@@ -380,6 +400,7 @@ mod tests {
         let out = SwitchNode.execute(make_input(
             "status",
             &format!("[{}]", cases_json),
+            "src",
             HashMap::new(),
         )).await;
         assert!(!out.success);
@@ -391,6 +412,7 @@ mod tests {
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a"},{"match":"b","port":"case_1"}]"#,
+            "src",
             HashMap::new(),
         )).await;
         assert!(!out.success);
@@ -403,6 +425,7 @@ mod tests {
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":"case_9"}]"#,
+            "src",
             HashMap::new(),
         )).await;
         assert!(!out.success);
@@ -416,6 +439,7 @@ mod tests {
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":"Case_1"}]"#,
+            "src",
             HashMap::new(),
         )).await;
         assert!(!out.success);
@@ -427,10 +451,11 @@ mod tests {
         // "default" is a real port (SwitchNode::ports() defines it), so a case
         // may explicitly route there — this must not be rejected.
         let mut outputs = HashMap::new();
-        outputs.insert("status".to_string(), json!("a"));
+        outputs.insert("src".to_string(), json!({ "status": "a" }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":"default"}]"#,
+            "src",
             outputs,
         )).await;
         assert!(out.success);
@@ -469,6 +494,8 @@ mod tests {
     async fn explicit_default_port_set_to_valid_case_port_is_honored() {
         // default_port may point at any real port, not just the literal
         // "default" — e.g. deliberately routing unmatched values to case_3.
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({}));
         let input = NodeInput {
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -476,11 +503,12 @@ mod tests {
             input: json!({
                 "field": "status",
                 "cases": r#"[{"match":"a","port":"case_1"}]"#,
-                "default_port": "case_3"
+                "default_port": "case_3",
+                "source_node": "src"
             }),
             context: ExecutionContext {
                 variables:    HashMap::new(),
-                node_outputs: Arc::new(HashMap::new()),
+                node_outputs: Arc::new(outputs),
                 metadata:     HashMap::new(),
                 ..Default::default()
             },
@@ -499,6 +527,7 @@ mod tests {
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":5}]"#,
+            "src",
             HashMap::new(),
         )).await;
         assert!(!out.success);
@@ -511,10 +540,11 @@ mod tests {
         // "genuinely unset"), unlike a non-string value — must not be
         // rejected by the T1-1d fix above.
         let mut outputs = HashMap::new();
-        outputs.insert("status".to_string(), json!("a"));
+        outputs.insert("src".to_string(), json!({ "status": "a" }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":null}]"#,
+            "src",
             outputs,
         )).await;
         assert!(out.success);
@@ -554,10 +584,11 @@ mod tests {
         // resolves to the number 5, the same way {"match": "5"} would —
         // previously this silently coerced to "" and could never match.
         let mut outputs = HashMap::new();
-        outputs.insert("status".to_string(), json!(5));
+        outputs.insert("src".to_string(), json!({ "status": 5 }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":5,"port":"case_1"}]"#,
+            "src",
             outputs,
         )).await;
         assert!(out.success);
@@ -573,10 +604,11 @@ mod tests {
         // as before. Locks the deliberate absent/null-vs-non-string
         // boundary rather than leaving it unverified.
         let mut outputs = HashMap::new();
-        outputs.insert("status".to_string(), json!("x"));
+        outputs.insert("src".to_string(), json!({ "status": "x" }));
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"port":"case_1"}]"#,
+            "src",
             outputs,
         )).await;
         assert!(out.success);
@@ -587,10 +619,10 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_source_node_returns_error() {
-        // T1-1g: a bare number for "source_node" must not silently fall
-        // through to the all-outputs merge the way an absent key correctly
-        // does — source_node is schema-typed as a string, so this is a
-        // malformed value, not "unset".
+        // T1-1g (unchanged by T1-1i): a bare number for "source_node" is a
+        // malformed value, not "unset" — source_node is schema-typed as a
+        // string, so this must be rejected with a distinct code from the
+        // is_null() reject path (SOURCE_NODE_REQUIRED, see below).
         let input = NodeInput {
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -613,10 +645,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_null_source_node_still_merges_all_outputs() {
-        // T1-1g: explicit JSON null is treated the same as an absent key
-        // (both are "genuinely unset"), unlike a non-string value — must
-        // not be rejected by the fix above.
+    async fn explicit_null_source_node_is_rejected() {
+        // T1-1i: unify to reject — explicit JSON null used to be treated as
+        // "genuinely unset" and fall through to the all-outputs merge. That
+        // fallback is removed; null is now rejected exactly like an absent
+        // key (see missing_source_node_key_is_rejected below).
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
@@ -624,7 +657,7 @@ mod tests {
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
             input: json!({
-                "field": "prev.status",
+                "field": "status",
                 "cases": r#"[{"match":"ok","port":"case_1"}]"#,
                 "source_node": null
             }),
@@ -636,20 +669,48 @@ mod tests {
             },
         };
         let out = SwitchNode.execute(input).await;
-        assert!(out.success);
-        let o = out.output.as_ref().unwrap();
-        assert_eq!(o["matched_case"], "ok");
-        assert_eq!(o["port"], "case_1");
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "SOURCE_NODE_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn missing_source_node_key_is_rejected() {
+        // T1-1i: the key omitted entirely (the shape the canvas most
+        // commonly sends for an unconfigured field) must be rejected the
+        // same way an explicit null is — serde_json::Value indexing yields
+        // Value::Null for a missing key, which is_null() already covers,
+        // but this locks that specific real-world shape with its own test.
+        let mut outputs = HashMap::new();
+        outputs.insert("prev".to_string(), json!({ "status": "ok" }));
+        let input = NodeInput {
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({
+                "field": "status",
+                "cases": r#"[{"match":"ok","port":"case_1"}]"#
+            }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata:     HashMap::new(),
+                ..Default::default()
+            },
+        };
+        let out = SwitchNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "SOURCE_NODE_REQUIRED");
     }
 
     #[tokio::test]
     async fn matching_string_source_node_uses_that_node_only() {
-        // Batch A: the one gap in T1-1g's own test coverage — a source_node
+        // the one gap in T1-1g's own test coverage — a source_node
         // set to a string that DOES match an existing node must use ONLY
-        // that node's output as `data`, not the all-outputs merge (which is
-        // reserved for null/absent) and not Value::Null (reserved for a
-        // non-matching string, see nonexistent_string_source_node_resolves_
-        // to_null_data below).
+        // that node's output as `data`, not an error (reserved for a
+        // non-matching string, see nonexistent_string_source_node_returns_
+        // error below, T1-1i followup). (Since T1-1i, null/absent is
+        // rejected outright rather than falling back to a merge — see
+        // missing_source_node_key_is_rejected.)
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         outputs.insert("other".to_string(), json!({ "status": "should_not_be_used" }));
@@ -678,11 +739,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonexistent_string_source_node_resolves_to_null_data() {
-        // T1-1g: a syntactically-valid string that doesn't match any node in
-        // context is unchanged by this fix — it already resolved to Null
-        // before T1-1g and must keep doing so (only the non-string case,
-        // above, is new).
+    async fn nonexistent_string_source_node_returns_error() {
+        // T1-1i followup: a syntactically-valid string that names no node in
+        // context now errors (SOURCE_NOT_FOUND), matching transform.rs.
+        // Previously resolved to Value::Null and fell through to the
+        // default port, silently masking a typo'd/stale source_node.
         let input = NodeInput {
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -700,10 +761,8 @@ mod tests {
             },
         };
         let out = SwitchNode.execute(input).await;
-        assert!(out.success);
-        let o = out.output.as_ref().unwrap();
-        assert_eq!(o["data"], serde_json::Value::Null);
-        assert_eq!(o["port"], "default");
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "SOURCE_NOT_FOUND");
     }
 }
 

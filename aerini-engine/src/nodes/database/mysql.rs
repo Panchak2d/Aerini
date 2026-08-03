@@ -99,3 +99,52 @@ fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> Value {
     }
     Value::Null
 }
+
+#[cfg(test)]
+mod multi_statement_smuggling_tests {
+    use super::mysql_run_query;
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn semicolon_stacked_statement_does_not_execute_second_command() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_MYSQL");
+
+        sqlx::query("DROP TABLE IF EXISTS __aerini_smuggle_proof")
+            .execute(&pool)
+            .await
+            .ok();
+
+        let attack = "SELECT 1; CREATE TABLE __aerini_smuggle_proof (id INT); \
+                       INSERT INTO __aerini_smuggle_proof VALUES (1);";
+        let result = mysql_run_query(&pool, attack, &[]).await;
+
+        // Expected: hard failure — MySQL's own COM_STMT_PREPARE rejects a
+        // multi-statement string outright (see comment above); it does not
+        // silently execute just the first statement and ignore the rest.
+        assert!(
+            !result.success,
+            "expected the stacked statement to be rejected by MySQL's prepared-statement protocol, \
+             but the call reported success — re-open T1-6, this is now exploitable"
+        );
+
+        let leaked = sqlx::query(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = '__aerini_smuggle_proof'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("existence check itself failed");
+        assert!(
+            leaked.is_empty(),
+            "smuggled CREATE TABLE executed — multi-statement smuggling IS exploitable, escalate immediately"
+        );
+
+        sqlx::query("DROP TABLE IF EXISTS __aerini_smuggle_proof")
+            .execute(&pool)
+            .await
+            .ok();
+    }
+}

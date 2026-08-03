@@ -13,7 +13,7 @@ impl Node for EmailNode {
     fn display_name(&self) -> &'static str { "Send Email" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "2.0.0" }
-    fn description(&self) -> &'static str { "Send an email via SMTP with plain text or HTML content, attachments, and multiple recipients." }
+    fn description(&self) -> &'static str { "Send an email via SMTP with plain text or HTML content and multiple recipients." }
 
     fn input_schema(&self) -> Value {
         json!({

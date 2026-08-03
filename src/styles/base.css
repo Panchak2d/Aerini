@@ -2,12 +2,9 @@
    BASE
    ══════════════════════════════════════════ */
 
-html, body { width: 100%; height: 100vh; background: var(--bg1); color: var(--t1); font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.5; overflow: hidden; -webkit-font-smoothing: antialiased; font-feature-settings: "cv02","cv03","cv04","cv11"; user-select: none; -webkit-user-select: none; }
+html, body { width: 100%; height: 100vh; background: var(--bg1); color: var(--t1); font-family: var(--font-mono); font-size: 13px; line-height: 1.5; overflow: hidden; -webkit-font-smoothing: antialiased; font-feature-settings: "cv02","cv03","cv04","cv11"; user-select: none; -webkit-user-select: none; }
 
 body { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; transition: grid-template-columns 160ms cubic-bezier(0.16,1,0.3,1); }
-/* panel-open no longer adds a grid column — right panel is now a fixed overlay.
-   The class is kept so #output-drawer can still indent away from the panel. */
-body.panel-open { grid-template-columns: var(--sidebar-w) 1fr; }
 body.focus-mode { grid-template-columns: 0px 1fr; }
 
 
@@ -22,7 +19,7 @@ input[type="number"] { -moz-appearance: textfield; }
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
-/* [FIX-11] WebKit autofill overrides dark theme with white background.
+/* WebKit autofill overrides dark theme with white background.
    Force the correct background and text color for all autofill states. */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
@@ -34,15 +31,15 @@ input:-webkit-autofill:active {
   border-color: var(--bd) !important;
 }
 
-input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(77,158,255,.1); }
+input:focus, select:focus, textarea:focus { border-color: var(--color-focus); box-shadow: 0 0 0 3px rgba(var(--color-focus-rgb),.1); }
 textarea { resize: vertical; min-height: 62px; }
 
 /* datetime-local colour scheme must be explicitly set or the calendar picker
    renders with a white background on dark-mode Tauri/WebKit. */
 input[type="datetime-local"] { color-scheme: dark; }
 
-/* [FIX-13] Inline validation warning for interval/number fields */
-.field-hint--warn { color: var(--amber, #f59e0b) !important; font-weight: 500; }
+/* Inline validation warning for interval/number fields */
+.field-hint--warn { color: var(--amber) !important; font-weight: 500; }
 
 
 .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 100%; padding: 7px; background: var(--color-action-nav); color: #000; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity var(--trans), transform var(--trans); }
@@ -59,16 +56,6 @@ input[type="datetime-local"] { color-scheme: dark; }
 ::-webkit-scrollbar-thumb:hover { background: var(--t3); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* Firefox has no ::-webkit-scrollbar-* support; these are the real (non-vendor)
-   scrollbar properties it uses instead. PLAN_UI.md's own gap analysis claimed
-   this app "relies on the OS/browser default" for scrollbars — checked against
-   this file directly and that claim doesn't hold: the four webkit rules above
-   already themed the thumb/track with --bd/--t3, not browser default gray.
-   The one real, narrower gap is Firefox specifically, which ignores all four
-   webkit rules above and had nothing themed until this line. Elements that
-   deliberately hide their own scrollbar (.category-chips, .drawer-tabs, via
-   scrollbar-width:none) still win here — their selector is more specific than
-   this universal rule, so they're unaffected. */
 * { scrollbar-width: thin; scrollbar-color: var(--bd) transparent; }
 
 .hidden { display: none !important; }
@@ -89,3 +76,4 @@ input[type="datetime-local"] { color-scheme: dark; }
 }
 
 .toast { position: fixed; bottom: 34px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; padding: 8px 16px; border-radius: 8px; z-index: 1000; max-width: 400px; text-align: center; pointer-events: none; transition: opacity 280ms; color: #000; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+.toast--warning { background: var(--amber); }

@@ -40,8 +40,9 @@ export function showNoteEditor(
   });
 
   const NOTE_COLORS = ["default", "yellow", "blue", "green", "red"] as const;
-  const COLOR_HEX: Record<string, string> = {
-    default: "#30363d", yellow: "#f59e0b", blue: "#4d9eff", green: "#34d399", red: "#f87171",
+  const COLOR_VAR: Record<string, string> = {
+    default: "var(--color-border)", yellow: "var(--color-warning)", blue: "var(--color-action-nav)",
+    green: "var(--color-action-run)", red: "var(--color-error)",
   };
   const colorRow = document.createElement("div");
   colorRow.className = "note-color-row";
@@ -49,7 +50,7 @@ export function showNoteEditor(
   for (const c of NOTE_COLORS) {
     const btn = document.createElement("button");
     btn.className = "note-color-btn";
-    btn.style.background = COLOR_HEX[c];
+    btn.style.background = COLOR_VAR[c];
     if (node.data.config["color"] === c || (!node.data.config["color"] && c === "default")) {
       btn.classList.add("active");
     }

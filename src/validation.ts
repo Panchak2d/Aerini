@@ -71,7 +71,7 @@ export function validateWorkflow(canvas: Canvas): string[] {
 // for a normal Run, or just the ancestor subgraph for a single-node test run
 // (see run-manager/stream-handler.ts::handleRunSingleNode). Scoping to the
 // actual execution set means a dangerous node elsewhere in the workflow,
-// outside what's about to run, never triggers this warning (T1-15).
+// outside what's about to run, never triggers this warning.
 export async function checkDangerousNodes(
   workflowId: string,
   nodes: Iterable<CanvasNode>,

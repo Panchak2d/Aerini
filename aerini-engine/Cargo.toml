@@ -92,6 +92,16 @@ docx-rs    = "0.4.20"
 
 # Webhook node: RAII port-deregistration guard on all exit paths
 scopeguard = "1"
+
+# Batch AH (PLAN_CORE.md §M): per-workflow/per-node live memory attribution.
+# 0.4.0 VERIFIED current on crates.io/docs.rs this batch — GlobalAlloc-compatible
+# wrapper allocator + AllocationGroupToken/AllocationTracker for grouping
+# allocations by an arbitrary logical scope. MPL-2.0. Installed as the
+# process #[global_allocator] in lib.rs — see mem_tracking.rs for why this is
+# safe across the three binaries (src-tauri, aerini-server, and this crate's
+# own `cargo test` harness) that link this crate.
+tracking-allocator = "0.4"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 

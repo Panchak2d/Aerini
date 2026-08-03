@@ -58,13 +58,13 @@ impl Node for OutputNode {
         let label = input.input["label"].as_str().unwrap_or("Result").to_string();
         let field = input.input["field"].as_str().unwrap_or("").to_string();
 
-        // Batch A: source_node is schema-typed as a string (line 27), so a
+        // source_node is schema-typed as a string (line 27), so a
         // non-string, non-null value is a malformed config, not "unset" — it
         // must not silently fall through to the merged-context fallback
         // below, which is reserved for a genuinely absent/null source_node.
         // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern. Batch K
-        // (T2-5) since fixed the fallback branch's HashMap-iteration
-        // non-determinism (S3-2) — see ordered_node_outputs below.
+        // since fixed the fallback branch's HashMap-iteration
+        // non-determinism — see ordered_node_outputs below.
         let source_node_value = &input.input["source_node"];
         let source: Value = if source_node_value.is_null() {
             // Use all context outputs merged, preferring the most recently
@@ -137,8 +137,8 @@ impl Node for OutputNode {
 
 // ---------------------------------------------------------------------------
 // Tests — Batch A only: covers the source_node validation this batch added.
-// No test module existed in this file before this batch; scope is limited
-// to what this fix changes (Rule 7), not a full suite for pre-existing logic.
+// No test module existed in this file before this fix; scope is limited
+// to what this fix changes, not a full suite for pre-existing logic.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -188,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn null_source_node_fallback_picks_most_recently_completed_not_hashmap_order() {
-        // T2-5 / S3-2: the fallback must select the node that actually
+        // the fallback must select the node that actually
         // completed last per execution_order, not whichever node the raw
         // HashMap happens to enumerate last (non-deterministic pre-fix).
         // "z_early" would sort/hash after "a_late" under most naive

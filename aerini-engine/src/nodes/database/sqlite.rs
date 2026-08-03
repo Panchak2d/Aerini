@@ -222,9 +222,7 @@ mod sqlite_run_query_tests {
         assert!(err.contains("SELECT"), "expected read-only rejection, got: {}", err);
     }
 
-    /// S2-4's exact bypass, verified at the real call site (not just the pure
-    /// classifier tested in mod.rs's read_only_query_tests) — a WITH-prefixed
-    /// DELETE must still be rejected once wired into sqlite_run_query itself.
+    // a WITH-prefixed DELETE must still be rejected once wired into sqlite_run_query itself.
     #[test]
     fn with_prefixed_delete_rejected_by_query_operation() {
         let conn = Connection::open_in_memory().unwrap();

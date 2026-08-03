@@ -108,7 +108,7 @@ fn allow_flags_for(dangerous: &[&str]) -> String {
 
 pub(super) fn build_service_file(workflow_name: &str, port: u16, dangerous: &[&str]) -> String {
     let safe_name = workflow_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
-    // T2-1/T2-6: dangerous node types (Shell/Code/Database) are DISABLED by
+    // dangerous node types (Shell/Code/Database) are DISABLED by
     // default in the generated service, matching aerini-server's own
     // default-secure posture (see main.rs::serve_mode) -- flags are never
     // auto-injected here, since that would grant elevated execution with no
@@ -227,7 +227,7 @@ pub(super) fn build_serve_docker_compose(
         "    env_file:\n      - .env\n    environment:\n      RUST_LOG: info\n".to_string()
     };
 
-    // T2-1/T2-6: the Dockerfile's CMD never passes --allow-shell/--allow-code/
+    // the Dockerfile's CMD never passes --allow-shell/--allow-code/
     // --allow-database (disabled by default, same reasoning as
     // build_service_file). docker-compose's own `command:` override is the
     // one workflow-specific place we CAN surface the exact flags this export
@@ -334,7 +334,7 @@ pub(super) fn build_docker_readme(
 
     let safe = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
 
-    // T2-1/T2-6: replaces the old, misleading "Shell Command and Code Nodes"
+    // replaces the old, misleading "Shell Command and Code Nodes"
     // section, which implied these node types simply run — they don't,
     // unless explicitly enabled (matches aerini-server's own default-secure
     // posture; see build_serve_dockerfile/build_serve_docker_compose).
@@ -473,11 +473,10 @@ pub(super) fn build_readme(
         format!("Edit .env and set:\n{}", lines)
     };
 
-    // T2-1/T2-6: replaces the old "SHELL COMMAND NODES" section, which only
+    // replaces the old "SHELL COMMAND NODES" section, which only
     // covered Shell (never Code or Database) and never mentioned that these
     // node types are DISABLED by default — a workflow using one would
     // silently no-op that node with only a journalctl line to explain why
-    // (AUDIT_REPORT.md S8-2).
     let dangerous_section = if dangerous.is_empty() {
         "This workflow does not use any node type from the list below — nothing to enable.".to_string()
     } else {

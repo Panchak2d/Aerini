@@ -16,7 +16,7 @@ use super::util::ordered_node_outputs;
 ///       `ExecutionState::mark_succeeded` in `context.rs`). T2-5 design
 ///       decision, stated once: this was previously documented as
 ///       "insertion order" but implemented as raw, non-deterministic
-///       HashMap iteration (S4-6) — neither was true. execution_order uses
+/// HashMap iteration — neither was true. execution_order uses
 ///       move-to-end semantics (a node that completes more than once, e.g.
 ///       inside a loop body, reflects its most recent completion position,
 ///       not its first) rather than literal first-insertion order, the same
@@ -233,7 +233,7 @@ mod tests {
         assert!(data.is_array(), "expected array output, got {:?}", data);
         let arr = data.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        // T2-5: array mode is now deterministic (ordered_node_outputs), but
+        // array mode is now deterministic (ordered_node_outputs), but
         // this fixture has no execution_order seeded, so it falls back to
         // sorted-by-key order — check membership here, exact order below.
         let set: std::collections::HashSet<i64> =
@@ -244,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn array_mode_order_follows_execution_order_deterministically() {
-        // T2-5 / S4-6: array mode must reflect real completion order, not
+        // array mode must reflect real completion order, not
         // whichever order the raw HashMap happened to enumerate — same
         // input, run twice, must produce the same order every time.
         let mut outputs = HashMap::new();

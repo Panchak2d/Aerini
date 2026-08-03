@@ -18,6 +18,12 @@
 //!   GET    /api/scheduler
 //!   POST   /api/scheduler/:id/start
 //!   POST   /api/scheduler/:id/stop
+//!   GET    /api/memory
+//!   GET    /api/performance/live
+//!   GET    /api/performance/reports         (?workflow_id=&limit=&offset=)
+//!   DELETE /api/performance/reports         (?workflow_id=)
+//!   GET    /api/performance/reports/:run_id
+//!   DELETE /api/performance/reports/:run_id
 //!   GET    /api/credentials
 //!   POST   /api/credentials
 //!   DELETE /api/credentials/:id
@@ -459,6 +465,10 @@ pub async fn run(cfg: ServerConfig) {
         .route("/api/scheduler",           get(routes::scheduler::list_scheduler))
         .route("/api/scheduler/{id}/start", post(routes::scheduler::start_job))
         .route("/api/scheduler/{id}/stop",  post(routes::scheduler::stop_job))
+        .route("/api/memory",              get(routes::memory::get_memory))
+        .route("/api/performance/live",     get(routes::performance::get_live))
+        .route("/api/performance/reports",  get(routes::performance::list_reports).delete(routes::performance::clear_reports))
+        .route("/api/performance/reports/{run_id}", get(routes::performance::get_report).delete(routes::performance::delete_report))
         .route("/api/credentials",         get(routes::credentials::list_creds).post(routes::credentials::save_cred))
         .route("/api/credentials/{id}",     delete(routes::credentials::delete_cred))
         .route("/api/events",              get(routes::workflows::sse_events))

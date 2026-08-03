@@ -13,7 +13,7 @@ impl Node for SendGridNode {
     fn display_name(&self) -> &'static str { "SendGrid" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Send transactional email via the SendGrid API with template and dynamic data support." }
+    fn description(&self) -> &'static str { "Send a plain-text transactional email via the SendGrid API." }
 
     fn input_schema(&self) -> Value {
         json!({

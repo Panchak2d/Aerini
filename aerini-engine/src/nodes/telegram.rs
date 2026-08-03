@@ -13,7 +13,7 @@ impl Node for TelegramNode {
     fn display_name(&self) -> &'static str { "Telegram" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Send messages or media to a Telegram chat or channel via a bot token." }
+    fn description(&self) -> &'static str { "Send a text message to a Telegram chat or channel via a bot token." }
 
     fn input_schema(&self) -> Value {
         json!({

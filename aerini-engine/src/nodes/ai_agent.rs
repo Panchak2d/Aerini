@@ -59,7 +59,7 @@ impl Node for AiAgentNode {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model name. OpenAI: gpt-4o. Anthropic: claude-opus-4-5. Gemini: gemini-2.5-flash."
+                    "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash."
                 },
                 "base_url": {
                     "type": "string",
@@ -132,11 +132,11 @@ impl Node for AiAgentNode {
         let is_gemini    = provider_id == "gemini";
 
         let default_model = if is_anthropic {
-            "claude-opus-4-5"
+            "claude-sonnet-5"
         } else if is_gemini {
-            "gemini-2.5-flash"
+            "gemini-3.6-flash"
         } else {
-            "gpt-4o"
+            "gpt-5.6"
         };
 
         let model   = input.input["model"].as_str().unwrap_or(default_model).to_string();
@@ -144,7 +144,7 @@ impl Node for AiAgentNode {
 
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
-        // AllowLocal (not Strict): same fix as ai_prompt/mod.rs (T1-11 / S2-2) —
+        // AllowLocal (not Strict): same fix as ai_prompt/mod.rs —
         // local inference servers (Ollama etc.) must be reachable via base_url.
         // Single check site, upstream of the is_gemini branch, so it covers all
         // three providers (OpenAI-compatible, Anthropic, Gemini).
@@ -266,7 +266,7 @@ impl Node for AiAgentNode {
             };
 
             match response {
-                Err(e) => return NodeOutput::failure(NodeError::unrecoverable("API_ERROR", e)),
+                Err(e) => return e.into_node_output(),
                 Ok(resp) => {
                     let (assistant_message, content, finish_reason) = if is_anthropic {
                         let text = resp["content"][0]["text"].as_str().unwrap_or("").to_string();
@@ -367,6 +367,38 @@ impl Node for AiAgentNode {
     }
 }
 
+// ── API error classification ──────────────────────────────────────────
+//
+// `call_gemini_agent`/`call_openai_agent`/`call_anthropic_agent` duplicate
+// ai_prompt/shared.rs's send_and_parse request/response shape (send, cap-read,
+// parse) plus each ai_prompt provider file's own inline 429/529 status check —
+// but previously returned a bare `Result<Value, String>`, so both call sites
+// above always wrapped the error in `NodeError::unrecoverable`, regardless of
+// cause. A rate-limited Agent node therefore failed permanently instead of
+// being retry-eligible, unlike the otherwise-identical Prompt node hitting the
+// same API. This carries the same recoverable/unrecoverable distinction
+// ai_prompt already has: a timed-out/connection-failed send, or an HTTP 429
+// (Anthropic also 529, matching ai_prompt/anthropic.rs) is Recoverable; every
+// other failure (auth, bad request, oversized/unparseable body) stays
+// Unrecoverable.
+enum AgentApiError {
+    Recoverable(String),
+    Unrecoverable(String),
+}
+
+impl AgentApiError {
+    fn into_node_output(self) -> NodeOutput {
+        match self {
+            AgentApiError::Recoverable(msg) => {
+                NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
+            }
+            AgentApiError::Unrecoverable(msg) => {
+                NodeOutput::failure(NodeError::unrecoverable("API_ERROR", msg))
+            }
+        }
+    }
+}
+
 // ── Gemini agent loop ────────────────────────────────────────────────────────
 //
 // Gemini message format differs fundamentally from OpenAI:
@@ -432,7 +464,7 @@ async fn run_gemini_agent(
             &contents, &tools, temperature, max_tokens,
         ).await {
             Ok(r)  => r,
-            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("API_ERROR", e)),
+            Err(e) => return e.into_node_output(),
         };
 
         // Push the full model content block verbatim into history for multi-turn continuity.
@@ -550,7 +582,7 @@ async fn call_gemini_agent(
     tools: &[Value],
     temperature: f64,
     max_tokens: u64,
-) -> Result<Value, String> {
+) -> Result<Value, AgentApiError> {
     let endpoint = format!("{}/models/{}:generateContent", base_url, model);
 
     let mut body = json!({
@@ -583,15 +615,31 @@ async fn call_gemini_agent(
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let recoverable = e.is_timeout() || e.is_connect();
+            if recoverable {
+                AgentApiError::Recoverable(e.to_string())
+            } else {
+                AgentApiError::Unrecoverable(e.to_string())
+            }
+        })?;
 
-    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
+    let status = response.status().as_u16();
+    let json: Value = crate::nodes::util::read_json_response_capped(response)
+        .await
+        .map_err(AgentApiError::Unrecoverable)?;
 
     if let Some(err) = json["error"].as_object() {
-        return Err(err.get("message")
+        let msg = err.get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("Unknown Gemini API error")
-            .to_string());
+            .to_string();
+        // Matches ai_prompt/gemini.rs's own 429-only recoverable check.
+        return Err(if status == 429 {
+            AgentApiError::Recoverable(msg)
+        } else {
+            AgentApiError::Unrecoverable(msg)
+        });
     }
 
     Ok(json)
@@ -610,7 +658,7 @@ async fn call_openai_agent(
     tools: &[Value],
     temperature: f64,
     max_tokens: u64,
-) -> Result<Value, String> {
+) -> Result<Value, AgentApiError> {
     let mut all_messages = vec![json!({ "role": "system", "content": system })];
     all_messages.extend_from_slice(messages);
 
@@ -637,14 +685,31 @@ async fn call_openai_agent(
         api_key,
     ).json(&body);
 
-    let response = req.send().await.map_err(|e| e.to_string())?;
-    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
+    let response = req.send().await.map_err(|e| {
+        let recoverable = e.is_timeout() || e.is_connect();
+        if recoverable {
+            AgentApiError::Recoverable(e.to_string())
+        } else {
+            AgentApiError::Unrecoverable(e.to_string())
+        }
+    })?;
+
+    let status = response.status().as_u16();
+    let json: Value = crate::nodes::util::read_json_response_capped(response)
+        .await
+        .map_err(AgentApiError::Unrecoverable)?;
 
     if let Some(err) = json["error"].as_object() {
-        return Err(err.get("message")
+        let msg = err.get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("Unknown API error")
-            .to_string());
+            .to_string();
+        // Matches ai_prompt/openai.rs's own 429-only recoverable check.
+        return Err(if status == 429 {
+            AgentApiError::Recoverable(msg)
+        } else {
+            AgentApiError::Unrecoverable(msg)
+        });
     }
 
     Ok(json)
@@ -669,7 +734,7 @@ async fn call_anthropic_agent(
     messages: &[Value],
     temperature: f64,
     max_tokens: u64,
-) -> Result<Value, String> {
+) -> Result<Value, AgentApiError> {
     let body = serde_json::json!({
         "model": model,
         "system": system,
@@ -689,14 +754,31 @@ async fn call_anthropic_agent(
         api_key,
     ).json(&body);
 
-    let response = req.send().await.map_err(|e| e.to_string())?;
-    let json: Value = crate::nodes::util::read_json_response_capped(response).await?;
+    let response = req.send().await.map_err(|e| {
+        let recoverable = e.is_timeout() || e.is_connect();
+        if recoverable {
+            AgentApiError::Recoverable(e.to_string())
+        } else {
+            AgentApiError::Unrecoverable(e.to_string())
+        }
+    })?;
+
+    let status = response.status().as_u16();
+    let json: Value = crate::nodes::util::read_json_response_capped(response)
+        .await
+        .map_err(AgentApiError::Unrecoverable)?;
 
     if let Some(err) = json["error"].as_object() {
-        return Err(err.get("message")
+        let msg = err.get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("Unknown Anthropic API error")
-            .to_string());
+            .to_string();
+        // Matches ai_prompt/anthropic.rs's own 429-or-529 recoverable check.
+        return Err(if status == 429 || status == 529 {
+            AgentApiError::Recoverable(msg)
+        } else {
+            AgentApiError::Unrecoverable(msg)
+        });
     }
 
     Ok(json)
@@ -708,7 +790,7 @@ mod tests {
     use crate::model::ExecutionContext;
     use crate::node::Node;
 
-    /// T1-11 (S2-2): same SSRF-policy fix and same regression-proof pattern as
+    /// same SSRF-policy fix and same regression-proof pattern as
     /// ai_prompt/mod.rs's `loopback_base_url_is_no_longer_ssrf_blocked` — a
     /// loopback `base_url` must reach the local server (any outcome other than
     /// `SSRF_BLOCKED` proves the pre-flight check no longer rejects it).
@@ -752,6 +834,100 @@ mod tests {
         format!("http://127.0.0.1:{}", port)
     }
 
+    /// like `spawn_minimal_openai_agent_mock`, but also captures the
+    /// request line + body so a test can assert *what was sent* (specifically,
+    /// which "model" value the node chose when the caller omitted one) rather
+    /// than only whether a response was received. Gemini puts its model in the
+    /// URL path (`/models/<model>:generateContent`), not the JSON body, so both
+    /// are captured.
+    struct CapturedRequest { request_line: String, body: String }
+
+    async fn spawn_capturing_mock(resp_body: &'static str) -> (String, tokio::sync::oneshot::Receiver<CapturedRequest>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (r, mut w) = stream.split();
+            let mut reader = BufReader::new(r);
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line).await;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                if line.trim().is_empty() { break; }
+                if let Some((k, v)) = line.trim().split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body_bytes = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = reader.read_exact(&mut body_bytes).await;
+            }
+            let _ = tx.send(CapturedRequest {
+                request_line: req_line.trim().to_string(),
+                body: String::from_utf8_lossy(&body_bytes).to_string(),
+            });
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp_body.len(), resp_body
+            );
+            let _ = w.write_all(resp.as_bytes()).await;
+        });
+        (format!("http://127.0.0.1:{}", port), rx)
+    }
+
+    /// like `spawn_minimal_openai_agent_mock`, but returns a
+    /// caller-chosen HTTP status line instead of always "200 OK" — needed to
+    /// exercise the 429/529-recoverable classification path.
+    async fn spawn_status_mock(status_line: &'static str, resp_body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (r, mut w) = stream.split();
+            let mut reader = BufReader::new(r);
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line).await;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                if line.trim().is_empty() { break; }
+                if let Some((k, v)) = line.trim().split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = reader.read_exact(&mut body).await;
+            }
+            let resp = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                status_line, resp_body.len(), resp_body
+            );
+            let _ = w.write_all(resp.as_bytes()).await;
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
     fn make_input(val: serde_json::Value) -> NodeInput {
         NodeInput {
             node_id:      "n1".into(),
@@ -774,6 +950,95 @@ mod tests {
             assert_ne!(err.code, "SSRF_BLOCKED", "loopback base_url must be allowed under SsrfPolicy::AllowLocal");
         }
         assert!(out.success, "request should reach the local mock server and succeed: {:?}", out.error);
+    }
+
+    /// Batch AK regression: `model` omitted must default per-provider to the
+    /// current model, not the stale hardcoded literal it used to fall back to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_openai_flagship() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}"#
+        ).await;
+        let _ = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "openai", "base_url": base_url
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        assert_eq!(v["model"].as_str(), Some("gpt-5.6"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_anthropic_default() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}"#
+        ).await;
+        let _ = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "anthropic", "base_url": base_url
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        assert_eq!(v["model"].as_str(), Some("claude-sonnet-5"));
+    }
+
+    /// S2-7 (normal case for the fix): a 429 from an OpenAI-compatible
+    /// provider must now be retry-eligible, not permanently failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_429_is_recoverable() {
+        let base_url = spawn_status_mock(
+            "429 Too Many Requests",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "openai", "base_url": base_url
+        }))).await;
+        assert!(!out.success);
+        let err = out.error.expect("expected a NodeError");
+        assert!(err.recoverable, "429 must be recoverable, got: {:?}", err);
+        assert_eq!(err.code, "RATE_LIMITED");
+    }
+
+    /// S2-7 (edge case): Anthropic's 529 ("overloaded") must also be
+    /// recoverable, matching ai_prompt/anthropic.rs's own 429-or-529 check —
+    /// and a plain 400 must still be unrecoverable (no over-broadening).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anthropic_529_is_recoverable_400_is_not() {
+        let overloaded_url = spawn_status_mock(
+            "529 Overloaded",
+            r#"{"error":{"message":"overloaded"}}"#,
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "anthropic", "base_url": overloaded_url
+        }))).await;
+        let err = out.error.expect("expected a NodeError");
+        assert!(err.recoverable, "529 must be recoverable, got: {:?}", err);
+
+        let bad_request_url = spawn_status_mock(
+            "400 Bad Request",
+            r#"{"error":{"message":"invalid request"}}"#,
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "anthropic", "base_url": bad_request_url
+        }))).await;
+        let err = out.error.expect("expected a NodeError");
+        assert!(!err.recoverable, "400 must stay unrecoverable, got: {:?}", err);
+        assert_eq!(err.code, "API_ERROR");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omitted_model_defaults_to_current_gemini_flash() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#
+        ).await;
+        let _ = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "gemini", "base_url": base_url, "api_key": "test-key"
+        }))).await;
+        let req = rx.await.expect("mock never received a request");
+        // Gemini's model is part of the URL path, not the JSON body.
+        assert!(
+            req.request_line.contains("gemini-3.6-flash"),
+            "expected default model 'gemini-3.6-flash' in request path, got: {}",
+            req.request_line
+        );
     }
 }
 

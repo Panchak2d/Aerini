@@ -324,21 +324,54 @@ impl WorkflowExecutor {
             (None,     None)      => None,
         };
 
-        if let Some(secs) = limit_secs {
-            let wf_id = workflow.id.clone();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(secs),
-                self.run_inner(workflow, initial_variables),
-            ).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(EngineError::WorkflowTimeout {
-                    workflow_id: wf_id,
-                    limit_secs: secs,
-                }),
-            }
-        } else {
-            self.run_inner(workflow, initial_variables).await
-        }
+        // one run-level memory-tracking group,
+        // covering the entire run (both branches below). Keyed by
+        // `workflow.id` — safe because desktop's `ActiveRunToken` exec-lock,
+        // `aerini-server`'s `ApiState::exec_locks`, and `SchedulerDaemon`'s
+        // own exec-lock already guarantee at most one concurrent execution of a
+        // given `workflow_id` across every entry point that calls `run()`,
+        // so no separate per-call unique id is needed for the live registry
+        // to stay unambiguous while this run is in flight. Dropped (and thus
+        // removed from the live registry) on every exit path — normal
+        // completion, an `Err` return, or the `tokio::time::timeout` below
+        // dropping the future mid-poll on timeout — via ordinary `Drop`,
+        // nothing extra needed here.
+        let mem_meta = crate::mem_tracking::GroupMeta::run(workflow.id.clone());
+
+        // wraps the existing mem_tracking-tracked run in perf_monitor's aggregation layer,
+        // one level further out. Same `workflow.id` key as
+        // `mem_meta` above, same safety argument (see perf_monitor's own
+        // module doc, "Key — workflow_id, not a fresh run id"), so no
+        // additional id needs threading through here. Wraps outside the
+        // timeout — not duplicated inside both branches below — so a run
+        // that times out is still sampled for its full duration and still
+        // gets a frozen report (mapped to `Failed` below) instead of
+        // silently skipping perf tracking on that path.
+        let perf_workflow_id = workflow.id.clone();
+        crate::perf_monitor::monitor_run(
+            perf_workflow_id,
+            async move {
+                if let Some(secs) = limit_secs {
+                    let wf_id = workflow.id.clone();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(secs),
+                        crate::mem_tracking::run_tracked(mem_meta, self.run_inner(workflow, initial_variables)),
+                    ).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => Err(EngineError::WorkflowTimeout {
+                            workflow_id: wf_id,
+                            limit_secs: secs,
+                        }),
+                    }
+                } else {
+                    crate::mem_tracking::run_tracked(mem_meta, self.run_inner(workflow, initial_variables)).await
+                }
+            },
+            |r: &Result<WorkflowResult, EngineError>| match r {
+                Ok(res) if res.success => crate::perf_monitor::PerfStatus::Success,
+                _ => crate::perf_monitor::PerfStatus::Failed,
+            },
+        ).await
     }
 
     pub(super) fn resolve_taken_port(output: &NodeOutput) -> String {
@@ -391,11 +424,18 @@ impl WorkflowExecutor {
         (false, None)
     }
 
+    /// `loop_iteration`: `Some(i)` (0-based) when `node_def` is a loop-body node
+    /// executing on iteration `i`; `None` for every top-level node and for the
+    /// Loop node's own build_input call. Exposed to nodes as `__loop_iteration_index`
+    /// (see below) — Stripe folds it into its idempotency key (residual) so
+    /// two iterations that happen to resolve identical amount/currency/description
+    /// still get distinct keys instead of colliding.
     pub(super) async fn build_input(
         &self,
         workflow: &Workflow,
         node_def: &crate::model::WorkflowNode,
         state:    &SharedExecutionState,
+        loop_iteration: Option<u64>,
     ) -> Result<NodeInput, NodeOutput> {
         let (raw_input, ctx, exec_id) = {
             let s = state.read().await;
@@ -490,15 +530,28 @@ impl WorkflowExecutor {
                 }
                 ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.config.caller_is_admin));
 
+                // current loop-body iteration, 0-based. Absent (not just null)
+                // for top-level nodes and the Loop node itself,
+                // so `.get("__loop_iteration_index")` is a reliable "am I inside
+                // a loop body right now" check for any node that wants it.
+                if let Some(idx) = loop_iteration {
+                    ctx.metadata.insert("__loop_iteration_index".to_string(), Value::Number(idx.into()));
+                }
+
                 // Build name-keyed output map so Code node JS can use context["Node Name"].field
                 // instead of context["node_1234_5"] (internal IDs are not user-visible).
-                let name_outputs: serde_json::Map<String, Value> = workflow.nodes.iter()
-                    .filter_map(|n| ctx.node_outputs.get(&n.id).map(|v| (n.name.clone(), v.clone())))
-                    .collect();
-                ctx.metadata.insert(
-                    "__node_name_outputs".to_string(),
-                    Value::Object(name_outputs),
-                );
+                // Only the Code node reads `__node_name_outputs` (nodes/code_node.rs) —
+                // gated here so every other node type skips cloning every completed
+                // node's output on every single build_input call.
+                if node_def.node_type_id == "code" {
+                    let name_outputs: serde_json::Map<String, Value> = workflow.nodes.iter()
+                        .filter_map(|n| ctx.node_outputs.get(&n.id).map(|v| (n.name.clone(), v.clone())))
+                        .collect();
+                    ctx.metadata.insert(
+                        "__node_name_outputs".to_string(),
+                        Value::Object(name_outputs),
+                    );
+                }
 
                 // Inject direct upstream node output so Code node JS `input` = wired-in node's data.
                 // Use find_map over ALL incoming edges so we skip edges whose upstream node was
@@ -530,9 +583,22 @@ impl WorkflowExecutor {
         let backoff_ms   = node_def.retry.backoff_ms.min(60_000);
         let node_id      = &node_def.id;
 
+        // one node-level memory-tracking group
+        // per attempt, nested inside whichever Run group `run()` registered
+        // (nesting handled by tracking-allocator itself — see
+        // mem_tracking.rs's module doc). Built from `input`'s own
+        // `workflow_id`/`node_id` fields (every `NodeInput` already carries
+        // both, no extra `state.read().await` needed) before `input` is
+        // moved into `execute()`.
+        let mem_meta = crate::mem_tracking::GroupMeta::node(
+            input.workflow_id.clone(),
+            node_id.clone(),
+            node_def.node_type_id.clone(),
+        );
+
         // Fast path: single attempt — consume input without cloning.
         if max_attempts == 1 {
-            let output = node.execute(input).await;
+            let output = crate::mem_tracking::run_tracked(mem_meta, node.execute(input)).await;
             return (output, 1);
         }
 
@@ -563,7 +629,9 @@ impl WorkflowExecutor {
                 }
             }
 
-            let output = node.execute(input.clone()).await;
+            let output = crate::mem_tracking::run_tracked(
+                mem_meta.clone(), node.execute(input.clone()),
+            ).await;
             if output.success {
                 return (output, actual_attempts);
             }
@@ -987,7 +1055,7 @@ mod tests {
         );
     }
 
-    // ── P23 node stubs ────────────────────────────────────────────────────────
+    // ── node stubs ────────────────────────────────────────────────────────
 
     // Fires the supplied CancellationToken on execute(), then returns success.
     // Used to simulate mid-run cancellation: place upstream of another node so
@@ -1221,10 +1289,10 @@ mod tests {
         ));
     }
 
-    // ── T1-1: resolve_taken_port recognizes Switch's "port" field ─────────────
+    // ── resolve_taken_port recognizes Switch's "port" field ─────────────
     //
     // resolve_taken_port had no case for the "port" field switch.rs's output
-    // carries (case_1..case_8/default) — every Switch execution fell through
+    // carries (case_1..case_8/default), every Switch execution fell through
     // to the hardcoded "output" fallback, which matches no edge a Switch node
     // can actually have, so activate_successors dropped every branch.
 
@@ -1432,7 +1500,7 @@ mod tests {
         );
     }
 
-    // ── T2-3 (S5-4): find_failure_route across parallel edges ──────────────────
+    // ── find_failure_route across parallel edges ──────────────────
 
     // Two edges from n_src to n_mid, only one carrying on_failure. `failing_first`
     // controls insertion order so both orderings get exercised — the old

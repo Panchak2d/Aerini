@@ -83,6 +83,15 @@ pub struct SchedulerDaemon {
     shell_exec_disabled: bool,
     code_exec_disabled:  bool,
     database_exec_disabled: bool,
+    /// true = this daemon's runs are fully-trusted-operator
+    /// runs, unlocking node-level admin gates (e.g. `allow_raw_sql`). Set by
+    /// desktop (single-tenant by definition — see `src-tauri/src/lib.rs`'s
+    /// `SchedulerDaemon::new` call site); left `false` (default) on
+    /// `aerini-server`, where a scheduled/webhook run has no per-caller
+    /// token scope to derive trust from and must stay conservative. Mirrors
+    /// `WorkflowExecutor::with_caller_is_admin` — see that method's doc
+    /// comment for the full admin-gate rationale.
+    caller_is_admin: bool,
     code_sandbox_enabled: bool,
     code_max_memory_mb:   Option<u64>,
     parallel_execution:   bool,
@@ -117,6 +126,7 @@ impl SchedulerDaemon {
             shell_exec_disabled: false,
             code_exec_disabled:  false,
             database_exec_disabled: false,
+            caller_is_admin:     false,
             code_sandbox_enabled: false,
             code_max_memory_mb:   None,
             parallel_execution:   false,
@@ -152,6 +162,15 @@ impl SchedulerDaemon {
     /// Recommended for multi-tenant API deployments (SSRF surface + RUSTSEC-2023-0071).
     pub fn with_database_disabled(mut self, disabled: bool) -> Self {
         self.database_exec_disabled = disabled;
+        self
+    }
+
+    /// Grant admin-level node permissions (e.g. `allow_raw_sql`) to every
+    /// workflow run by this scheduler. Mirrors
+    /// `WorkflowExecutor::with_caller_is_admin` — only set `true` for a
+    /// single-tenant caller (desktop). Default: `false`.
+    pub fn with_caller_is_admin(mut self, is_admin: bool) -> Self {
+        self.caller_is_admin = is_admin;
         self
     }
 
@@ -437,6 +456,7 @@ impl SchedulerDaemon {
         let shell_exec_disabled = self.shell_exec_disabled;
         let code_exec_disabled  = self.code_exec_disabled;
         let database_exec_disabled = self.database_exec_disabled;
+        let caller_is_admin = self.caller_is_admin;
         let code_sandbox_enabled = self.code_sandbox_enabled;
         let code_max_memory_mb   = self.code_max_memory_mb;
         let parallel_execution   = self.parallel_execution;
@@ -457,17 +477,16 @@ impl SchedulerDaemon {
                 .map_err(|e| SchedulerError::Other { message: e.to_string() })?
         };
 
-        // T2-1/T2-6: log the same dangerous-node signal at every execution
-        // entry point, including the scheduled/always-on path — which,
-        // unlike a manual run (see `run_workflow`'s identical check), had
-        // zero signal of any kind (AUDIT_REPORT.md S8-1: "will execute that
-        // node type indefinitely with zero warning ever shown"). This funnel
-        // is reached by both `start_job` (user clicks Start) and `start()`
-        // (always_on jobs re-armed at app launch), so one check here covers
-        // both without threading a new parameter through either call site.
-        // Warn-only — does not block; desktop's full-host-access default is
-        // unchanged. One extra `load_workflow_json` + parse per arm (not per
-        // execution tick) — acceptable at this frequency.
+        // Logs the same dangerous-node signal at every execution entry point,
+        // including the scheduled/always-on path, mirroring the identical
+        // check in `run_workflow` for a manual run — so a dangerous node
+        // type never executes unattended without this warning. Reached by
+        // both `start_job` (user clicks Start) and `start()` (always_on jobs
+        // re-armed at app launch), so one check here covers both without
+        // threading a new parameter through either call site. Warn-only —
+        // does not block; desktop's full-host-access default is unchanged.
+        // One extra `load_workflow_json` + parse per arm (not per execution
+        // tick) — acceptable at this frequency.
         match db.load_workflow_json(&wf_id) {
             Ok(Some(json)) => match Workflow::from_json(&json) {
                 Ok(wf) => {
@@ -483,12 +502,10 @@ impl SchedulerDaemon {
                     }
                 }
                 Err(e) => {
-                    // Batch L residual: this used to be `if let Ok(wf) = ...`,
-                    // silently dropping the dangerous-node check with zero
-                    // trace whenever a job's stored workflow JSON failed to
-                    // parse (e.g. a corrupted row). Diagnostic-only — arming
-                    // still proceeds unchanged below — but a corrupted record
-                    // should leave a trace instead of vanishing silently.
+                    // A corrupted/unparseable stored workflow JSON must leave a
+                    // trace rather than silently skipping the dangerous-node
+                    // check with no diagnostic. Diagnostic-only — arming still
+                    // proceeds unchanged below.
                     tracing::warn!(
                         workflow_id = %wf_id,
                         error = %e,
@@ -532,7 +549,7 @@ impl SchedulerDaemon {
             runner::run_job_loop(
                 wf_id.clone(), trigger, db, registry, cred_store,
                 event_sink, exec_lock, fire_immediately, env_allowlist,
-                shell_exec_disabled, code_exec_disabled, database_exec_disabled, code_sandbox_enabled,
+                shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled,
                 code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                 server_max_duration_secs, file_sandbox_dir, run_semaphore,
                 shutting_down, active_runs,

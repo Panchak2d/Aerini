@@ -4,6 +4,7 @@ import {
 } from "./ipc/workflow";
 import type { PluginInfo } from "./ipc/workflow";
 import { escapeHtml } from "./utils";
+import { showConfirm } from "./confirm";
 
 type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
 
@@ -51,7 +52,10 @@ function renderPluginList(): void {
   `).join("");
 
   el.querySelectorAll<HTMLButtonElement>(".btn-plugin-remove").forEach(btn => {
-    btn.addEventListener("click", () => onRemovePlugin(btn.dataset.filename!, _toast));
+    btn.addEventListener("click", () => {
+      const p = _plugins.find(pl => pl.filename === btn.dataset.filename);
+      onRemovePlugin(btn.dataset.filename!, p?.display_name ?? btn.dataset.filename!, _toast);
+    });
   });
 }
 
@@ -95,8 +99,10 @@ async function onInstall(toast: ToastFn): Promise<void> {
   }
 }
 
-async function onRemovePlugin(filename: string, toast: ToastFn): Promise<void> {
+async function onRemovePlugin(filename: string, displayName: string, toast: ToastFn): Promise<void> {
   if (!_pluginDir) return;
+  const ok = await showConfirm(`Remove plugin "${displayName}"? You'll need to reinstall the .wasm file to use it again.`, true, "Remove");
+  if (!ok) return;
   try {
     await removePlugin(filename, _pluginDir);
     toast("Plugin removed. Restart to apply.", "success");
@@ -108,9 +114,13 @@ async function onRemovePlugin(filename: string, toast: ToastFn): Promise<void> {
 }
 
 /**
- * Wires up the Plugins settings group. Loads `plugin_dir` and the installed
- * plugin list the first time the settings modal is opened (and after any
+ * Wires up the Plugins zone. Loads `plugin_dir` and the installed plugin
+ * list the first time the Plugins rail zone is opened (and after any
  * install/remove); subsequent opens reuse the cached list.
+ *
+ * relocated from the Settings modal (#btn-settings) to its own
+ * rail zone (#tab-plugins) — trigger element changed, everything else
+ * (the _loaded guard, IPC calls, DOM target ids) is unchanged.
  */
 export function bindPluginSettings(toast: ToastFn): void {
   _toast = toast;
@@ -121,7 +131,7 @@ export function bindPluginSettings(toast: ToastFn): void {
   browseBtn?.addEventListener("click", () => { onBrowse(); });
   installBtn?.addEventListener("click", () => { onInstall(toast); });
 
-  document.getElementById("btn-settings")?.addEventListener("click", async () => {
+  document.getElementById("tab-plugins")?.addEventListener("click", async () => {
     if (_loaded) return;
     _loaded = true;
     try {

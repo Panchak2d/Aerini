@@ -55,7 +55,7 @@ export function renderBgJobs(
     empty.className = "bg-jobs-empty";
     empty.innerHTML = filterStatus !== "all" || filterQuery
       ? "<span>No runs match the filter</span>"
-      : "<svg width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' opacity='0.35'><circle cx='12' cy='12' r='9'/><polygon points='10 8 16 12 10 16 10 8' fill='currentColor' stroke='none'/></svg><span>No scheduled workflows running</span><small>Use <strong>Schedule Run</strong> in the toolbar to run a workflow with a Schedule or Webhook trigger in the background.</small>";
+      : "<svg width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' opacity='0.35'><circle cx='12' cy='12' r='9'/><polygon points='10 8 16 12 10 16 10 8' fill='currentColor' stroke='none'/></svg><span>No scheduled workflows running</span><small>Use <strong>Schedule Run</strong> in the toolbar to run a workflow with a Schedule or Webhook trigger in the background.</small>";
     list.appendChild(empty);
     return;
   }
@@ -134,7 +134,7 @@ export function renderBgJobs(
       const restartBtn = document.createElement("button");
       restartBtn.className = "bg-job-action-btn bg-job-action-restart";
       restartBtn.title = "Restart workflow";
-      restartBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
+      restartBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
       restartBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         restartBtn.disabled = true;
@@ -155,7 +155,7 @@ export function renderBgJobs(
       const dismissBtn = document.createElement("button");
       dismissBtn.className = "bg-job-action-btn bg-job-action-dismiss";
       dismissBtn.title = "Remove from list";
-      dismissBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+      dismissBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       dismissBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         removeBgJob(job.id);

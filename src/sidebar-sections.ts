@@ -1,8 +1,9 @@
 const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
-const MIN_W = 220;
+const MIN_W = 180;   // was 220 — widened to match the mockup's own clamp and PLAN_UI_A Batch 5
 const MAX_W = 420;
 const DEF_W = 260;
+const SIDEBAR_STEP = 24; // px per arrow-key press — same value as resize.ts's DRAWER_STEP
 
 function lsGet<T>(key: string, def: T): T {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) as T : def; }
@@ -47,6 +48,9 @@ export function initSidebarSections(): void {
  *   7. Body transition stuck — set to "none" on resize mousedown, cleared on
  *      mouseup for the same reason. A stuck "none" silently kills all CSS
  *      transitions app-wide until the next full page load.
+ *   8. Body resizing-h class (Batch 5) — same mousedown/mouseup pair as #6;
+ *      a stuck class here forces `cursor: col-resize !important` app-wide,
+ *      not just a broken transition.
  */
 function resetTransientState(): void {
   // 1 + 2 — Search bars and stale input values
@@ -96,6 +100,9 @@ function resetTransientState(): void {
   // 6 — Resize handle dragging class
   document.getElementById("sidebar-resize-handle")?.classList.remove("dragging");
 
+  // 8 — Body resizing-h class (Batch 5)
+  document.body.classList.remove("resizing-h");
+
   // 7 — Body transition: only clear the specific value we set; do not touch
   // any transition the rest of the app may have intentionally placed.
   if (document.body.style.transition === "none") {
@@ -113,13 +120,22 @@ function setWidth(w: number, save: boolean): void {
   if (save) lsSet(LS_WIDTH, clamped);
 }
 
-function bindResizeHandle(): void {
+export function bindResizeHandle(): void {
   const handle = document.getElementById("sidebar-resize-handle");
   if (!handle) return;
+
+  // Bare div has no native resize semantics — same fix resize.ts applied to
+  // the drawer handle: a real, labeled, keyboard-reachable separator instead
+  // of a mouse-only drag target.
+  handle.tabIndex = 0;
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-orientation", "vertical");
+  handle.setAttribute("aria-label", "Resize sidebar");
 
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     handle.classList.add("dragging");
+    document.body.classList.add("resizing-h");
     const startX = e.clientX;
     const startW = lsGet<number>(LS_WIDTH, DEF_W);
     document.body.style.transition = "none";
@@ -130,6 +146,7 @@ function bindResizeHandle(): void {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       handle.classList.remove("dragging");
+      document.body.classList.remove("resizing-h");
       document.body.style.transition = "";
       const w = parseInt(
         getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w"), 10
@@ -139,6 +156,24 @@ function bindResizeHandle(): void {
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  });
+
+  // Double-click: reset to the default width — persisted immediately (unlike
+  // resize.ts's drawer reset, sidebar width IS persisted across reloads via
+  // LS_WIDTH, so a non-persisted reset would silently revert on next launch).
+  handle.addEventListener("dblclick", () => setWidth(DEF_W, true));
+
+  // Arrow keys resize while the handle has focus — Right = wider, Left =
+  // narrower, matching the drag direction (moving the pointer right is what
+  // grows startW + delta above). Persisted on every press, not just on
+  // mouseup: onMove's own startW is read from LS_WIDTH (not the live
+  // --sidebar-w value), so an un-persisted keyboard resize would leave a
+  // subsequent drag silently ignoring it and snapping back to the last
+  // persisted width — same-batch-scope fix, not a new bug introduced here.
+  handle.addEventListener("keydown", (e) => {
+    const cur = parseInt(document.documentElement.style.getPropertyValue("--sidebar-w"), 10) || DEF_W;
+    if (e.key === "ArrowRight")     { e.preventDefault(); setWidth(cur + SIDEBAR_STEP, true); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); setWidth(cur - SIDEBAR_STEP, true); }
   });
 }
 

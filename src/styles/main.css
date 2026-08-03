@@ -1,8 +1,6 @@
 /* Import order matters — each file may depend on tokens declared in earlier files.
    variables → base → sidebar → workspace → panels → overlays → export-server → features */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
 @import './variables.css';
 @import './base.css';
 @import './sidebar.css';
@@ -12,3 +10,5 @@
 @import './export-server.css';
 @import './features.css';
 @import './chat.css';
+
+

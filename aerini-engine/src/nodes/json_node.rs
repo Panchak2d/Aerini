@@ -76,7 +76,7 @@ impl crate::node::Node for JsonNode {
             }
 
             "merge" => {
-                // T2-5 / S3-3: iterate in real completion order so which
+                // iterate in real completion order so which
                 // node's keys "win" a collision is deterministic (the most
                 // recently completed node wins) instead of depending on the
                 // raw HashMap's unspecified iteration order.
@@ -94,7 +94,7 @@ impl crate::node::Node for JsonNode {
             "array_get" => {
                 let idx = input.input["index"].as_u64().unwrap_or(0) as usize;
 
-                // T2-5 / S3-3: "first array found" now means first in real
+                // "first array found" now means first in real
                 // completion order, not first in the raw HashMap's
                 // unspecified iteration order.
                 for (_, output_val) in ordered_node_outputs(&input.context) {
@@ -291,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_conflicting_key_deterministically_prefers_most_recently_completed() {
-        // T2-5 / S3-3: two upstream nodes sharing a key "x" must resolve the
+        // two upstream nodes sharing a key "x" must resolve the
         // same way on every run of an identical workflow — the more
         // recently completed node's value wins, per execution_order, not
         // whichever the raw HashMap happened to enumerate last.
@@ -349,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn array_get_deterministically_picks_first_completed_array() {
-        // T2-5 / S3-3: two upstream nodes both carry an array — "first
+        // two upstream nodes both carry an array — "first
         // array found" must mean first in execution_order, deterministically,
         // not whichever the raw HashMap enumerated first.
         let mut outputs = HashMap::new();

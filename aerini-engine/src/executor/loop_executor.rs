@@ -89,7 +89,7 @@ impl WorkflowExecutor {
         topo_order:    &[String],
         state:         &SharedExecutionState,
     ) -> Result<NodeOutput, String> {
-        // Safety net against executor re-entry bugs — should never be reached in
+        // Safety net against executor re-entry bugs should never be reached in
         // normal operation because LoopNode hard-caps arrays at 10,000 items and
         // routes to "done" once current_index >= total. Set to 10,001 so it sits
         // above the node's own guard and only fires on a real executor bug.
@@ -109,10 +109,10 @@ impl WorkflowExecutor {
 
         let body_nodes = self.collect_loop_body_nodes(loop_node_id, workflow, topo_order);
 
-        // Direct loop_body successors of the loop node — these are the only body
+        // Direct loop_body successors of the loop node, these are the only body
         // nodes that unconditionally run every iteration. Everything else reachable
         // inside the body (e.g. downstream of an If/Switch node) only runs this
-        // iteration if that branching node's taken port actually activates it —
+        // iteration if that branching node's taken port actually activates it,
         // see `active_body` below. Mirrors how sequential.rs seeds `active_nodes`
         // from `graph.entry_nodes` for the outer topo walk.
         let body_set: HashSet<&str> = body_nodes.iter().map(String::as_str).collect();
@@ -124,7 +124,7 @@ impl WorkflowExecutor {
             .collect();
 
         // Body nodes that have at least one outgoing edge to anything. Used below
-        // to tell "this branch genuinely goes nowhere for the port that fired —
+        // to tell "this branch genuinely goes nowhere for the port that fired.
         // worth a warning" (e.g. an If node with only on_true wired) apart from
         // "this is an ordinary leaf action node with nothing further wired,"
         // which is the common case for a loop body and must not warn every
@@ -154,14 +154,27 @@ impl WorkflowExecutor {
 
             // Build input with current state (includes __loop_{id}_index variable
             // written at end of previous iteration, or absent on iteration 0).
-            let loop_input = match self.build_input(workflow, loop_node_def, state).await {
+            let loop_input = match self.build_input(workflow, loop_node_def, state, None).await {
                 Ok(input) => input,
                 Err(failure) => {
                     let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
                     return Err(format!("Loop node '{}' build_input failed: {}", loop_node_id, msg));
                 }
             };
-            let loop_output = loop_node_impl.execute(loop_input).await;
+            // This call bypasses `execute_with_retry` entirely
+            // (sequential.rs special-cases `node_type_id == "loop"` to drive
+            // iteration here instead), so it needs its own node-level group
+            // rather than inheriting one from there — one fresh group per
+            // iteration, matching `execute_with_retry`'s own per-attempt
+            // granularity. Built before `loop_input` moves into `execute()`.
+            let mem_meta = crate::mem_tracking::GroupMeta::node(
+                loop_input.workflow_id.clone(),
+                loop_node_id.to_string(),
+                loop_node_def.node_type_id.clone(),
+            );
+            let loop_output = crate::mem_tracking::run_tracked(
+                mem_meta, loop_node_impl.execute(loop_input),
+            ).await;
 
             if !loop_output.success {
                 let msg = loop_output
@@ -209,12 +222,9 @@ impl WorkflowExecutor {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(iteration + 1);
 
-            // Tracks this iteration's result for all_results. Original behavior (before
-            // this fix) stored each body node's output under the SAME key
-            // `__loop_{id}_result_{iteration}` — so only the LAST body node's output
-            // survived per iteration (one entry per iteration, k-body-node loops still
-            // contributed exactly one entry). Preserved here via overwrite-then-push-once,
-            // instead of pushing on every body node (which would wrongly produce k×n entries).
+            // Tracks this iteration's result for all_results — one entry per
+            // iteration via overwrite-then-push-once, not push-per-body-node
+            // (which would produce k×n entries for a k-body-node loop).
             let mut iteration_result: Option<serde_json::Value> = None;
 
             // Per-iteration active-node set, reset from the seed every iteration.
@@ -269,12 +279,22 @@ impl WorkflowExecutor {
                     format!("Body node type '{}' not registered", body_def.node_type_id)
                 })?;
 
-                let body_input = match self.build_input(workflow, body_def, state).await {
+                let body_input = match self.build_input(workflow, body_def, state, Some(iteration)).await {
                     Ok(input) => input,
                     Err(failure) => {
                         let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
                         state.write().await.mark_failed(body_id, failure, 1);
                         self.emit_node_status(&workflow.id, body_id, "error");
+                        // try on_error/on_failure routing before aborting the whole loop.
+                        let (routed, warn) = self.route_loop_body_failure(
+                            body_id, &body_def.name, workflow, &body_set, &mut active_body,
+                        );
+                        if let Some(w) = warn {
+                            state.write().await.log(Some(body_id), LogLevel::Warn, w);
+                        }
+                        if routed {
+                            continue;
+                        }
                         return Err(format!("Loop body node '{}' build_input failed: {}", body_id, msg));
                     }
                 };
@@ -293,6 +313,16 @@ impl WorkflowExecutor {
                         );
                         state.write().await.mark_failed(body_id, fail_output, 1);
                         self.emit_node_status(&workflow.id, body_id, "error");
+                        // try on_error/on_failure routing before aborting the whole loop.
+                        let (routed, warn) = self.route_loop_body_failure(
+                            body_id, &body_def.name, workflow, &body_set, &mut active_body,
+                        );
+                        if let Some(w) = warn {
+                            state.write().await.log(Some(body_id), LogLevel::Warn, w);
+                        }
+                        if routed {
+                            continue;
+                        }
                         return Err(format!(
                             "Loop body node '{}' failed schema validation on iteration {}: {}",
                             body_id, iteration, reason
@@ -323,6 +353,22 @@ impl WorkflowExecutor {
                         .unwrap_or_else(|| "unknown error".to_string());
                     state.write().await.mark_failed(body_id, body_output, _attempts);
                     self.emit_node_status(&workflow.id, body_id, "error");
+                    // Mirror the on_error/on_failure routing every top-level node
+                    // failure already gets (sequential.rs/parallel.rs) — scoped to this
+                    // iteration's active_body set — so a workflow author who wires an
+                    // explicit on_error edge or on_failure fallback on a body node (e.g.
+                    // "for each item, try X, on failure log and continue to the next
+                    // item") gets that routing honoured instead of the whole loop dying
+                    // on the first failing item.
+                    let (routed, warn) = self.route_loop_body_failure(
+                        body_id, &body_def.name, workflow, &body_set, &mut active_body,
+                    );
+                    if let Some(w) = warn {
+                        state.write().await.log(Some(body_id), LogLevel::Warn, w);
+                    }
+                    if routed {
+                        continue;
+                    }
                     return Err(format!(
                         "Loop body node '{}' failed on iteration {}: {}", body_id, iteration, msg
                     ));
@@ -337,10 +383,10 @@ impl WorkflowExecutor {
                 state.write().await.mark_succeeded(body_id, body_output);
                 self.emit_node_status(&workflow.id, body_id, "success");
 
-                // Branch gating: only the edge(s) on the node's actual taken port
+                // Only the edge(s) on the node's actual taken port
                 // (on_true/on_false, case_N/default, done/loop_body, or the plain
                 // "output" port) become active for the rest of this iteration —
-                // an If/Switch node's untaken branch no longer runs.
+                // an If/Switch node's untaken branch does not run.
                 let (fallback_fired, drop_warn) =
                     self.activate_successors(body_id, &taken_port, workflow, &mut active_body);
                 if let Some(msg) = drop_warn {
@@ -382,6 +428,106 @@ impl WorkflowExecutor {
 
         // Unreachable: the iteration == MAX_LOOP_ITERATIONS guard above returns Err first.
         Err(format!("Loop node '{}': iteration limit logic error — this is a bug", loop_node_id))
+    }
+
+    // routes a failing loop-body node's failure through the same
+    // two mechanisms a top-level node failure already gets in
+    // sequential.rs/parallel.rs — an `on_error`-port edge (activate_successors),
+    // falling back to a `WorkflowEdge.on_failure` pointer (the field
+    // executor/mod.rs::find_failure_route resolves via ExecutionGraph at the
+    // top level). Reimplemented directly against `workflow.edges` here rather
+    // than threading an `ExecutionGraph` into `execute_loop_node` — body nodes
+    // are ordinary members of `workflow.edges`, so a direct scan finds the same
+    // edges, and this keeps the logic self-contained inside loop_executor.rs
+    // rather than widening it into sequential.rs's and parallel.rs's call
+    // sites (the latter would additionally require Arc-wrapping
+    // ExecutionGraph to cross into parallel.rs's spawned per-loop tokio
+    // task).
+    //
+    // A routed target must itself be a loop-body node (`body_set` — the same
+    // membership `collect_loop_body_nodes` already computed for this loop) to
+    // be actionable: `active_body` is only ever consulted by the `for body_id
+    // in &body_nodes` loop above, so a target outside the body has no way to
+    // run this iteration no matter what is inserted into the set. Rather than
+    // silently no-op in that case — indistinguishable, from the workflow
+    // author's side, from "no route configured at all" — this returns a
+    // warning to log and falls through to the abort-the-loop outcome below.
+    //
+    // Returns `(routed, warning)`. `routed == true` means the caller should
+    // `continue` to the next body node instead of aborting the loop.
+    // `routed == false` means any loop that does not wire on_error/on_failure
+    // on its body nodes aborts on first failure.
+    pub(super) fn route_loop_body_failure(
+        &self,
+        body_id:     &str,
+        body_name:   &str,
+        workflow:    &Workflow,
+        body_set:    &HashSet<&str>,
+        active_body: &mut HashSet<String>,
+    ) -> (bool, Option<String>) {
+        // 1. on_error port.
+        let on_error_targets: Vec<&str> = workflow.edges.iter()
+            .filter(|e| e.from_node == body_id && e.from_port == "on_error")
+            .map(|e| e.to_node.as_str())
+            .collect();
+        let on_error_in_body: Vec<&str> = on_error_targets.iter()
+            .copied()
+            .filter(|t| body_set.contains(t))
+            .collect();
+        if !on_error_in_body.is_empty() {
+            for t in &on_error_in_body {
+                active_body.insert((*t).to_string());
+            }
+            // Some on_error targets may still be outside the loop body even
+            // though at least one usable (in-body) target was found — route
+            // via the usable one(s), but don't silently drop the rest.
+            let skipped: Vec<&str> = on_error_targets.iter()
+                .copied()
+                .filter(|t| !body_set.contains(t))
+                .collect();
+            let warn = if skipped.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Node '{}': on_error also routes to {} outside this loop's body — \
+                     those target(s) are skipped (only in-body targets can run \
+                     per-iteration); the in-body on_error target(s) still ran.",
+                    body_name,
+                    skipped.iter().map(|t| format!("'{}'", t)).collect::<Vec<_>>().join(", "),
+                ))
+            };
+            return (true, warn);
+        }
+
+        // 2. WorkflowEdge.on_failure pointer.
+        if let Some(target) = workflow.edges.iter()
+            .find(|e| e.from_node == body_id && e.on_failure.is_some())
+            .and_then(|e| e.on_failure.clone())
+        {
+            if body_set.contains(target.as_str()) {
+                active_body.insert(target);
+                return (true, None);
+            }
+            return (false, Some(format!(
+                "Node '{}': on_failure routes to '{}', which is outside this loop's body — \
+                 the fallback cannot run per-iteration inside the loop, so this failure still \
+                 aborts the loop. Wire the fallback node inside the loop body to keep the loop \
+                 running past this failure.",
+                body_name, target
+            )));
+        }
+
+        if !on_error_targets.is_empty() {
+            // on_error was wired but every target is outside the loop body.
+            return (false, Some(format!(
+                "Node '{}': on_error routes outside this loop's body — the fallback cannot run \
+                 per-iteration inside the loop, so this failure still aborts the loop. Wire the \
+                 fallback node inside the loop body to keep the loop running past this failure.",
+                body_name
+            )));
+        }
+
+        (false, None)
     }
 }
 
@@ -701,7 +847,8 @@ mod tests {
     // → all_results must be [] (empty), not [null, null].
     //
     // This also confirms that the `if let Some(val) = iteration_result` guard
-    // that replaced the pre-fix unconditional push is behaving correctly.
+    // is behaving correctly: only an iteration that actually produced a value
+    // pushes an entry.
     #[tokio::test]
     async fn loop_none_output_body_produces_no_null_entries_in_all_results() {
         let mut registry = NodeRegistry::new();
@@ -735,7 +882,7 @@ mod tests {
         );
     }
 
-    // ── P23: loop_executor.rs tests ───────────────────────────────────────────
+    // ── loop_executor.rs tests ───────────────────────────────────────────
 
     // Max iterations enforced: LoopNode hard-caps at 10,000 items (ARRAY_TOO_LARGE).
     // NOTE: LoopNode has no configurable max_iterations field — the limit is hardcoded
@@ -848,7 +995,7 @@ mod tests {
         assert_eq!(all_results[2]["seq"], 2, "iteration 2 output must be seq=2");
     }
 
-    // ── T1-2 / S4-2 regression: If-style branch gating inside a loop body ──────
+    // ── regression: If-style branch gating inside a loop body ──────
     //
     // Before the fix: collect_loop_body_nodes's BFS pulled every reachable node
     // into body_set with no from_port filter, and execute_loop_node ran every
@@ -1003,7 +1150,7 @@ mod tests {
         );
     }
 
-    // ── T1-2 / S4-2 regression: Switch-style ("port" field) gating in a loop ────
+    // ── regression: Switch-style ("port" field) gating in a loop ────
     //
     // Same bug, Switch's port shape instead of If's branch shape: a "switch" node
     // emitting `{"port": "case_2"}` must activate only its case_2 edge inside a
@@ -1140,5 +1287,500 @@ mod tests {
              would all have fired every iteration"
         );
         assert_eq!(default_counter.load(Ordering::SeqCst), 0, "default must never fire — switch always takes case_2");
+    }
+
+    // ── regression: on_error-port routing keeps the loop alive ────
+    //
+    // A body node wired with an `on_error` edge to an in-body recovery node
+    // must have that edge honoured on failure: the recovery node runs THIS
+    // iteration and the loop continues to the next item, instead of the whole
+    // loop aborting on the first failure.
+    #[tokio::test]
+    async fn loop_body_failure_routes_via_on_error_edge_and_loop_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for FailingNode {
+            fn type_id(&self) -> &'static str { "failing_body_on_error_test" }
+            fn display_name(&self) -> &'static str { "Failing Body" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::failure(crate::error::NodeError::unrecoverable(
+                    "SIMULATED_FAILURE", "intentional test failure",
+                ))
+            }
+        }
+
+        struct RecoveryNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for RecoveryNode {
+            fn type_id(&self) -> &'static str { "recovery_body_on_error_test" }
+            fn display_name(&self) -> &'static str { "Recovery" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({ "recovered": true }))
+            }
+        }
+
+        let fail_counter = Arc::new(AtomicUsize::new(0));
+        let recovery_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FailingNode { counter: fail_counter.clone() }));
+        registry.register(Arc::new(RecoveryNode { counter: recovery_counter.clone() }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let body = WorkflowNode {
+            id: "body".to_string(), node_type_id: "failing_body_on_error_test".to_string(),
+            node_type: NodeType::Utility, name: "Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let recovery = WorkflowNode {
+            id: "recovery".to_string(), node_type_id: "recovery_body_on_error_test".to_string(),
+            node_type: NodeType::Utility, name: "Recovery".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_loop_body".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_body_on_error".to_string(), from_node: "body".to_string(), from_port: "on_error".to_string(),
+                to_node: "recovery".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_on_error_test".to_string(),
+            name: "Loop On-Error Routing Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, body, recovery],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow must complete via on_error routing, not abort: {:?}", result.error);
+        assert_eq!(
+            fail_counter.load(Ordering::SeqCst), 3,
+            "the failing body must run once per item (3 items) — a lower count means the \
+             loop aborted early instead of being routed past the failure"
+        );
+        assert_eq!(
+            recovery_counter.load(Ordering::SeqCst), 3,
+            "on_error target must run once per failed item — pre-fix this would be 0, since \
+             the loop aborted on the very first failure before this node could ever run"
+        );
+
+        let loop_out = result.node_outputs.get("loop_node").expect("loop_node must have output");
+        let all_results = loop_out["all_results"].as_array().expect("all_results must be an array");
+        assert_eq!(all_results.len(), 3, "one all_results entry per completed iteration");
+    }
+
+    // ── regression: WorkflowEdge.on_failure field routing ─────────
+    //
+    // Same scenario as above, but via the other mechanism top-level nodes get
+    // (executor/mod.rs::find_failure_route) — an `on_failure` pointer on an
+    // ordinary edge, rather than a dedicated `on_error`-port edge. Mirrors the
+    // edge shape executor/mod.rs's own `find_failure_route` tests use: the
+    // field lives on body's normal "output" edge and is never taken via that
+    // edge's own port (body always fails, so "output" is never the taken port).
+    #[tokio::test]
+    async fn loop_body_failure_routes_via_on_failure_field_and_loop_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for FailingNode {
+            fn type_id(&self) -> &'static str { "failing_body_on_failure_test" }
+            fn display_name(&self) -> &'static str { "Failing Body" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::failure(crate::error::NodeError::unrecoverable(
+                    "SIMULATED_FAILURE", "intentional test failure",
+                ))
+            }
+        }
+
+        struct RecoveryNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for RecoveryNode {
+            fn type_id(&self) -> &'static str { "recovery_body_on_failure_test" }
+            fn display_name(&self) -> &'static str { "Recovery" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({ "recovered": true }))
+            }
+        }
+
+        let fail_counter = Arc::new(AtomicUsize::new(0));
+        let recovery_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": ["a", "b"] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FailingNode { counter: fail_counter.clone() }));
+        registry.register(Arc::new(RecoveryNode { counter: recovery_counter.clone() }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let body = WorkflowNode {
+            id: "body".to_string(), node_type_id: "failing_body_on_failure_test".to_string(),
+            node_type: NodeType::Utility, name: "Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let recovery = WorkflowNode {
+            id: "recovery".to_string(), node_type_id: "recovery_body_on_failure_test".to_string(),
+            node_type: NodeType::Utility, name: "Recovery".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_loop_body".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_body_output".to_string(), from_node: "body".to_string(), from_port: "output".to_string(),
+                to_node: "recovery".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: Some("recovery".to_string()),
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_on_failure_test".to_string(),
+            name: "Loop On-Failure Field Routing Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, body, recovery],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow must complete via on_failure routing, not abort: {:?}", result.error);
+        assert_eq!(
+            fail_counter.load(Ordering::SeqCst), 2,
+            "the failing body must run once per item (2 items)"
+        );
+        assert_eq!(
+            recovery_counter.load(Ordering::SeqCst), 2,
+            "on_failure target must run once per failed item — pre-fix this would be 0, since \
+             the loop aborted on the very first failure before this node could ever run"
+        );
+    }
+
+    // ── regression guard: unrouted failure still aborts the loop ──
+    //
+    // A body node with NEITHER an on_error edge NOR an on_failure field must
+    // still abort the whole loop on its first failure.
+    #[tokio::test]
+    async fn loop_body_failure_with_no_routing_still_aborts_whole_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for FailingNode {
+            fn type_id(&self) -> &'static str { "failing_body_unrouted_test" }
+            fn display_name(&self) -> &'static str { "Failing Body" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::failure(crate::error::NodeError::unrecoverable(
+                    "SIMULATED_FAILURE", "intentional test failure",
+                ))
+            }
+        }
+
+        let fail_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FailingNode { counter: fail_counter.clone() }));
+
+        let workflow = loop_workflow_with_bodies(vec![
+            ("failing_body_unrouted_test", false),
+        ]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "an unrouted body-node failure must still abort the whole loop, unchanged from \
+             pre-fix behavior"
+        );
+        assert_eq!(
+            fail_counter.load(Ordering::SeqCst), 1,
+            "the loop must abort on the FIRST failing item, not continue to remaining items — \
+             a count > 1 here would mean the fix started silently swallowing unrouted \
+             failures instead of preserving the original abort-on-first-failure contract"
+        );
+    }
+
+    // ── mixed in-body / out-of-body on_error targets ──────────
+    //
+    // A body node's on_error port can carry more than one edge. If one target
+    // is inside the loop body (routable) and another resolves to a node
+    // outside it (e.g. also reachable via the loop's own "done" port, so
+    // collect_loop_body_nodes correctly excludes it from the body), the
+    // in-body target must still run every iteration, and the out-of-body
+    // target must be skipped rather than silently or incorrectly re-run
+    // per-iteration.
+    #[tokio::test]
+    async fn loop_body_mixed_on_error_targets_routes_in_body_and_skips_out_of_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for FailingNode {
+            fn type_id(&self) -> &'static str { "failing_body_mixed_test" }
+            fn display_name(&self) -> &'static str { "Failing Body" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::failure(crate::error::NodeError::unrecoverable(
+                    "SIMULATED_FAILURE", "intentional test failure",
+                ))
+            }
+        }
+
+        struct CountingNode { tid: &'static str, counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for CountingNode {
+            fn type_id(&self) -> &'static str { self.tid }
+            fn display_name(&self) -> &'static str { "Counting" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({}))
+            }
+        }
+
+        let fail_counter = Arc::new(AtomicUsize::new(0));
+        let recovery_counter = Arc::new(AtomicUsize::new(0));
+        let after_loop_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FailingNode { counter: fail_counter.clone() }));
+        registry.register(Arc::new(CountingNode {
+            tid: "recovery_body_mixed_test", counter: recovery_counter.clone(),
+        }));
+        registry.register(Arc::new(CountingNode {
+            tid: "after_loop_mixed_test", counter: after_loop_counter.clone(),
+        }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let body = WorkflowNode {
+            id: "body".to_string(), node_type_id: "failing_body_mixed_test".to_string(),
+            node_type: NodeType::Utility, name: "Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let recovery = WorkflowNode {
+            id: "recovery".to_string(), node_type_id: "recovery_body_mixed_test".to_string(),
+            node_type: NodeType::Utility, name: "Recovery".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let after_loop = WorkflowNode {
+            id: "after_loop".to_string(), node_type_id: "after_loop_mixed_test".to_string(),
+            node_type: NodeType::Utility, name: "After Loop".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_loop_body".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            // Establishes after_loop as a "done"-port node — collect_loop_body_nodes
+            // excludes anything reachable via loop_node's "done" port from the body
+            // set, regardless of any other edge (body's second on_error edge, below)
+            // also pointing at it.
+            WorkflowEdge {
+                id: "e_loop_done".to_string(), from_node: "loop_node".to_string(), from_port: "done".to_string(),
+                to_node: "after_loop".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            // Two on_error targets from the same body node: one in-body
+            // (recovery), one that resolves to the done-excluded after_loop node.
+            WorkflowEdge {
+                id: "e_body_on_error_1".to_string(), from_node: "body".to_string(), from_port: "on_error".to_string(),
+                to_node: "recovery".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_body_on_error_2".to_string(), from_node: "body".to_string(), from_port: "on_error".to_string(),
+                to_node: "after_loop".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_mixed_on_error_test".to_string(),
+            name: "Loop Mixed On-Error Targets Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, body, recovery, after_loop],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "workflow must complete via the in-body on_error target, not abort: {:?}", result.error
+        );
+        assert_eq!(
+            fail_counter.load(Ordering::SeqCst), 2,
+            "the failing body must run once per item (2 items)"
+        );
+        assert_eq!(
+            recovery_counter.load(Ordering::SeqCst), 2,
+            "the in-body on_error target must still run every time despite a second, \
+             out-of-body on_error target existing on the same port"
+        );
+        assert_eq!(
+            after_loop_counter.load(Ordering::SeqCst), 1,
+            "after_loop must run exactly once — via the loop's normal top-level \"done\" \
+             routing after all iterations finish, NOT once per iteration via the body's \
+             on_error edge (which must be skipped: after_loop is outside the loop body)"
+        );
     }
 }

@@ -202,12 +202,12 @@ impl GoogleSheetsNode {
     }
 }
 
-// ── Tests (T2-7/S1-9/S6-6) ─────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────
 //
 // The client_id+client_secret path is a direct passthrough to
 // `oauth_listener::get_tokens`, which already owns its own keychain/refresh/
 // full-flow logic and is not itself re-tested here — verified by manual trace
-// only (same escape hatch used by Batch F for its postgres/mysql wiring), since
+// only (same escape hatch used by for its postgres/mysql wiring), since
 // exercising it would mean mocking a real OS keychain, which is out of this
 // batch's scope. What's new and cheaply testable without any mocking — which
 // of the two paths `resolve_access_token` picks, and its two failure cases —
