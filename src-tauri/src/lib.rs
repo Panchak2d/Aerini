@@ -507,12 +507,12 @@ fn cleanup_old_temp_files(dir: &std::path::Path) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Batch AH (PLAN_CORE.md §M): install the memory-tracking allocator's
-    // tracker before anything else — must happen before the first workflow
-    // could possibly run, and this is the earliest point in the app's
-    // lifecycle. The #[global_allocator] itself (aerini-engine/src/lib.rs)
-    // is already active from the process's first allocation regardless;
-    // this call only wires up where tracked allocations get reported to.
+    // Installs the memory-tracking allocator's tracker before anything else
+    // — must happen before the first workflow could possibly run, and this
+    // is the earliest point in the app's lifecycle. The #[global_allocator]
+    // itself (aerini-engine/src/lib.rs) is already active from the process's
+    // first allocation regardless; this call only wires up where tracked
+    // allocations get reported to.
     aerini_engine::mem_tracking::install();
 
     tauri::Builder::default()
@@ -599,15 +599,14 @@ pub fn run() {
                 }).await;
             });
 
-            // Batch AH (PLAN_CORE.md §M): periodic live memory-breakdown
-            // event, consumed by the frontend's memory indicator (Batch
-            // 13c, not part of this batch). 2s interval — frequent enough
+            // Periodic live memory-breakdown event, consumed by the
+            // frontend's memory indicator. 2s interval — frequent enough
             // to feel live, cheap enough (a DashMap iteration over however
             // many runs/nodes are currently in flight, realistically single
             // digits) that this is not worth making configurable. Emits
             // only when `snapshot()` is non-empty, i.e. only while at least
             // one workflow is actually running — most of this product's
-            // target deployments sit idle between scheduled runs (§D), and
+            // target deployments sit idle between scheduled runs, and
             // there is nothing useful to tell a listener during that time.
             let mem_event_sink = Arc::clone(&event_sink);
             tauri::async_runtime::spawn(async move {
@@ -753,6 +752,9 @@ pub fn run() {
             commands::workflow::list_versions,
             commands::workflow::get_version,
             commands::workflow::delete_version,
+            commands::chat::list_chat_sessions,
+            commands::chat::save_chat_session,
+            commands::chat::delete_chat_session,
             commands::credentials::list_credentials,
             commands::credentials::get_credential_metadata,
             commands::credentials::save_credential,

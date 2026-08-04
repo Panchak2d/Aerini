@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -13,6 +13,15 @@ vi.mock("../ipc/workflow", () => ({
     try { return JSON.parse(raw); } catch { return { error_kind: "other", message: raw }; }
   },
   clearChatSession: vi.fn().mockResolvedValue(undefined),
+  getSetting: vi.fn().mockResolvedValue(null),
+  setSetting: vi.fn().mockResolvedValue(undefined),
+}));
+
+const chatMocks = vi.hoisted(() => ({ saveChatSession: vi.fn() }));
+vi.mock("../ipc/chat", () => ({
+  listChatSessions: vi.fn().mockResolvedValue([]),
+  saveChatSession: chatMocks.saveChatSession,
+  deleteChatSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { ChatPanel } from "../panels/ChatPanel";
@@ -42,27 +51,6 @@ const CHAT_PANEL_HTML = `
   </div>
 `;
 
-function installFailingLocalStorageStub(): void {
-  const stub: Pick<Storage, "getItem" | "setItem" | "removeItem" | "clear"> = {
-    getItem: () => null,
-    setItem: () => { throw new DOMException("Quota exceeded", "QuotaExceededError"); },
-    removeItem: () => {},
-    clear: () => {},
-  };
-  globalThis.localStorage = stub as Storage;
-}
-
-function installWorkingLocalStorageStub(): void {
-  const store = new Map<string, string>();
-  const stub: Pick<Storage, "getItem" | "setItem" | "removeItem" | "clear"> = {
-    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
-    setItem: (key: string, value: string) => { store.set(key, String(value)); },
-    removeItem: (key: string) => { store.delete(key); },
-    clear: () => { store.clear(); },
-  };
-  globalThis.localStorage = stub as Storage;
-}
-
 function makePanel(toastFn: Toast): ChatPanel {
   document.body.innerHTML = CHAT_PANEL_HTML;
   const canvas = { nodes: new Map() } as unknown as Canvas;
@@ -71,35 +59,39 @@ function makePanel(toastFn: Toast): ChatPanel {
 }
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
-type PanelWithPersist = { persist(): void };
+type PanelWithPersist = { persist(): Promise<void> };
+
+beforeEach(() => {
+  chatMocks.saveChatSession.mockReset();
+});
 
 describe("ChatPanel persist() failure toast", () => {
-  it("toasts once for a run of repeated failures, not per call (normal case)", () => {
-    installFailingLocalStorageStub();
+  it("toasts once for a run of repeated failures, not per call (normal case)", async () => {
+    chatMocks.saveChatSession.mockRejectedValue(new Error("backend unreachable"));
     const toastFn = vi.fn();
     const p = makePanel(toastFn) as unknown as PanelWithPersist;
 
-    p.persist();
-    p.persist();
-    p.persist();
+    await p.persist();
+    await p.persist();
+    await p.persist();
 
     expect(toastFn).toHaveBeenCalledTimes(1);
     expect(toastFn).toHaveBeenCalledWith(expect.stringContaining("isn't saving"), "error");
   });
 
-  it("clears the one-shot flag on the next successful persist(), so a later failure toasts again (edge case)", () => {
-    installFailingLocalStorageStub();
+  it("clears the one-shot flag on the next successful persist(), so a later failure toasts again (edge case)", async () => {
+    chatMocks.saveChatSession.mockRejectedValueOnce(new Error("backend unreachable"));
     const toastFn = vi.fn();
     const p = makePanel(toastFn) as unknown as PanelWithPersist;
 
-    p.persist();
+    await p.persist();
     expect(toastFn).toHaveBeenCalledTimes(1);
 
-    installWorkingLocalStorageStub();
-    p.persist();
+    chatMocks.saveChatSession.mockResolvedValueOnce(undefined);
+    await p.persist();
 
-    installFailingLocalStorageStub();
-    p.persist();
+    chatMocks.saveChatSession.mockRejectedValueOnce(new Error("backend unreachable"));
+    await p.persist();
 
     expect(toastFn).toHaveBeenCalledTimes(2);
   });

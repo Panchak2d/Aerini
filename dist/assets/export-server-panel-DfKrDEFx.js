@@ -1,4 +1,4 @@
-import{_ as e,d as t}from"./index-BjCrXsHG.js";var n=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function r(t,r){let o=document.getElementById(`export-server-panel-overlay`);o&&o.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};if(document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),!t){l.innerHTML=`
+import{d as e,y as t}from"./index-Didvg-cR.js";var n=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function r(e,r){let o=document.getElementById(`export-server-panel-overlay`);o&&o.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};if(document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),!e){l.innerHTML=`
       <div class="panel-header">
         <h2 class="panel-title">Export for Server</h2>
         <button class="panel-close-btn" aria-label="Close">${n}</button>
@@ -15,15 +15,15 @@ import{_ as e,d as t}from"./index-BjCrXsHG.js";var n=`<svg width="12" height="12
     <div class="panel-body esp-body">
       <div id="esp-loading" class="esp-loading">Checking workflow…</div>
       <div id="esp-content" hidden></div>
-    </div>`,l.querySelector(`.panel-close-btn`)?.addEventListener(`click`,u),Promise.all([e(`validate_workflow_for_export`,{workflowId:t}),e(`list_credentials`).catch(()=>[])]).then(([e,n])=>{let i=new Set(n.map(e=>e.id));a(l,t,e,i,r)}).catch(e=>i(l,String(e)))}function i(e,n){let r=e.querySelector(`#esp-loading`),i=e.querySelector(`#esp-content`);r&&(r.hidden=!0),i&&(i.hidden=!1,i.innerHTML=`<div class="esp-callout-error">${t(n)}</div>`)}function a(n,r,i,a,s){let c=n.querySelector(`#esp-loading`),l=n.querySelector(`#esp-content`);if(c&&(c.hidden=!0),!l)return;l.hidden=!1;let u=i.credentials.some(e=>!a.has(e.credential_id)),d=i.credentials.length===0?`<p class="esp-note">This workflow uses no credentials.</p>`:`${u?`<p class="esp-cred-warning">⚠ Fill the credentials marked below before deploying.</p>`:``}
+    </div>`,l.querySelector(`.panel-close-btn`)?.addEventListener(`click`,u),Promise.all([t(`validate_workflow_for_export`,{workflowId:e}),t(`list_credentials`).catch(()=>[])]).then(([t,n])=>{let i=new Set(n.map(e=>e.id));a(l,e,t,i,r)}).catch(e=>i(l,String(e)))}function i(t,n){let r=t.querySelector(`#esp-loading`),i=t.querySelector(`#esp-content`);r&&(r.hidden=!0),i&&(i.hidden=!1,i.innerHTML=`<div class="esp-callout-error">${e(n)}</div>`)}function a(n,r,i,a,s){let c=n.querySelector(`#esp-loading`),l=n.querySelector(`#esp-content`);if(c&&(c.hidden=!0),!l)return;l.hidden=!1;let u=i.credentials.some(e=>!a.has(e.credential_id)),d=i.credentials.length===0?`<p class="esp-note">This workflow uses no credentials.</p>`:`${u?`<p class="esp-cred-warning">⚠ Fill the credentials marked below before deploying.</p>`:``}
       <table class="esp-cred-table">
         <thead><tr><th>Status</th><th>Credential</th><th>Environment variable</th><th>Used by</th></tr></thead>
         <tbody>
-          ${i.credentials.map(e=>{let n=a.has(e.credential_id);return`<tr class="${n?``:`esp-cred-row--empty`}">
+          ${i.credentials.map(t=>{let n=a.has(t.credential_id);return`<tr class="${n?``:`esp-cred-row--empty`}">
               <td class="esp-cred-status">${n?`<span class="esp-cred-ok"  title="Credential is filled">✓</span>`:`<span class="esp-cred-warn" title="Credential is empty">⚠</span>`}</td>
-              <td>${t(e.credential_id)}</td>
-              <td><code>${t(e.env_var_name)}</code></td>
-              <td class="esp-muted">${t(e.node_name)}</td>
+              <td>${e(t.credential_id)}</td>
+              <td><code>${e(t.env_var_name)}</code></td>
+              <td class="esp-muted">${e(t.node_name)}</td>
             </tr>`}).join(``)}
         </tbody>
       </table>
@@ -34,10 +34,10 @@ import{_ as e,d as t}from"./index-BjCrXsHG.js";var n=`<svg width="12" height="12
     <table class="esp-cred-table">
       <thead><tr><th>Variable</th><th>Suggested env key</th></tr></thead>
       <tbody>
-        ${i.variables.map(e=>`
+        ${i.variables.map(t=>`
           <tr>
-            <td><code>$vars.${t(e)}</code></td>
-            <td><code>AERINI_VAR_${t(e.toUpperCase())}</code></td>
+            <td><code>$vars.${e(t)}</code></td>
+            <td><code>AERINI_VAR_${e(t.toUpperCase())}</code></td>
           </tr>
         `).join(``)}
       </tbody>
@@ -54,7 +54,7 @@ import{_ as e,d as t}from"./index-BjCrXsHG.js";var n=`<svg width="12" height="12
     <div class="esp-field-row">
       <div class="esp-field">
         <span class="esp-field-label">Trigger</span>
-        <span class="esp-field-value">${t(i.trigger_desc)}</span>
+        <span class="esp-field-value">${e(i.trigger_desc)}</span>
       </div>
     </div>
 
@@ -145,7 +145,7 @@ import{_ as e,d as t}from"./index-BjCrXsHG.js";var n=`<svg width="12" height="12
           <code>docker compose up --build -d</code>
         </div>
       </div>
-    </div>`;let p=l.querySelector(`#esp-tab-linux`),m=l.querySelector(`#esp-tab-docker`),h=l.querySelector(`#esp-pane-linux`),g=l.querySelector(`#esp-pane-docker`),_=e=>{let t=e===`linux`;p?.classList.toggle(`esp-tab--active`,t),m?.classList.toggle(`esp-tab--active`,!t),p?.setAttribute(`aria-selected`,String(t)),m?.setAttribute(`aria-selected`,String(!t)),h&&(h.hidden=!t),g&&(g.hidden=t)};p?.addEventListener(`click`,()=>_(`linux`)),m?.addEventListener(`click`,()=>_(`docker`));let v=l.querySelector(`#esp-generate-linux-btn`),y=l.querySelector(`#esp-generating-linux`),b=l.querySelector(`#esp-success-linux`),x=l.querySelector(`#esp-port-linux`);v?.addEventListener(`click`,async()=>{let t=parseInt(x?.value??`7700`,10);if(isNaN(t)||t<1024||t>65535){s(`Port must be between 1024 and 65535`,`error`);return}v.disabled=!0,y&&(y.hidden=!1);try{let n=await e(`generate_server_package`,{request:{workflow_id:r,status_port:t}}),i=`aerini-server-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await e(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&b&&(b.hidden=!1),a&&(s(`Linux server package saved`,`success`),o(l,n.run_secret_plaintext))}catch(e){s(`Export failed: ${String(e)}`,`error`)}finally{v.disabled=!1,y&&(y.hidden=!0)}});let S=l.querySelector(`#esp-generate-docker-btn`),C=l.querySelector(`#esp-generating-docker`),w=l.querySelector(`#esp-success-docker`),T=l.querySelector(`#esp-port-docker`);S?.addEventListener(`click`,async()=>{let t=parseInt(T?.value??`7700`,10);if(isNaN(t)||t<1024||t>65535){s(`Port must be between 1024 and 65535`,`error`);return}S.disabled=!0,C&&(C.hidden=!1);try{let n=await e(`generate_docker_package`,{request:{workflow_id:r,status_port:t}}),i=`aerini-docker-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await e(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&w&&(w.hidden=!1),a&&(s(`Docker package saved`,`success`),o(l,n.run_secret_plaintext))}catch(e){s(`Export failed: ${String(e)}`,`error`)}finally{S.disabled=!1,C&&(C.hidden=!0)}})}function o(e,t){if(!e)return;e.querySelector(`.esp-run-secret-banner`)?.remove();let n=document.createElement(`div`);n.className=`esp-run-secret-banner`,n.innerHTML=`
+    </div>`;let p=l.querySelector(`#esp-tab-linux`),m=l.querySelector(`#esp-tab-docker`),h=l.querySelector(`#esp-pane-linux`),g=l.querySelector(`#esp-pane-docker`),_=e=>{let t=e===`linux`;p?.classList.toggle(`esp-tab--active`,t),m?.classList.toggle(`esp-tab--active`,!t),p?.setAttribute(`aria-selected`,String(t)),m?.setAttribute(`aria-selected`,String(!t)),h&&(h.hidden=!t),g&&(g.hidden=t)};p?.addEventListener(`click`,()=>_(`linux`)),m?.addEventListener(`click`,()=>_(`docker`));let v=l.querySelector(`#esp-generate-linux-btn`),y=l.querySelector(`#esp-generating-linux`),b=l.querySelector(`#esp-success-linux`),x=l.querySelector(`#esp-port-linux`);v?.addEventListener(`click`,async()=>{let e=parseInt(x?.value??`7700`,10);if(isNaN(e)||e<1024||e>65535){s(`Port must be between 1024 and 65535`,`error`);return}v.disabled=!0,y&&(y.hidden=!1);try{let n=await t(`generate_server_package`,{request:{workflow_id:r,status_port:e}}),i=`aerini-server-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await t(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&b&&(b.hidden=!1),a&&(s(`Linux server package saved`,`success`),o(l,n.run_secret_plaintext))}catch(e){s(`Export failed: ${String(e)}`,`error`)}finally{v.disabled=!1,y&&(y.hidden=!0)}});let S=l.querySelector(`#esp-generate-docker-btn`),C=l.querySelector(`#esp-generating-docker`),w=l.querySelector(`#esp-success-docker`),T=l.querySelector(`#esp-port-docker`);S?.addEventListener(`click`,async()=>{let e=parseInt(T?.value??`7700`,10);if(isNaN(e)||e<1024||e>65535){s(`Port must be between 1024 and 65535`,`error`);return}S.disabled=!0,C&&(C.hidden=!1);try{let n=await t(`generate_docker_package`,{request:{workflow_id:r,status_port:e}}),i=`aerini-docker-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await t(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&w&&(w.hidden=!1),a&&(s(`Docker package saved`,`success`),o(l,n.run_secret_plaintext))}catch(e){s(`Export failed: ${String(e)}`,`error`)}finally{S.disabled=!1,C&&(C.hidden=!0)}})}function o(e,t){if(!e)return;e.querySelector(`.esp-run-secret-banner`)?.remove();let n=document.createElement(`div`);n.className=`esp-run-secret-banner`,n.innerHTML=`
     <div class="esp-run-secret-title">⚠ Save your run secret — shown once</div>
     <div class="esp-run-secret-desc">
       This secret authenticates <code>POST /api/run</code> and <code>GET /api/logs</code>.

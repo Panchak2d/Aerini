@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod credentials;
 pub mod export;
 pub mod memory;

@@ -14,6 +14,32 @@ mod workflow_db;
 mod run_history;
 mod scheduler_db;
 mod performance_reports;
+mod chat_db;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatImageFile {
+    pub filename:  String,
+    pub data:      String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageRecord {
+    pub id:        String,
+    pub role:      String,
+    pub text:      Option<String>,
+    pub images:    Option<Vec<ChatImageFile>>,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionRecord {
+    pub id:          String,
+    pub workflow_id: String,
+    pub name:        String,
+    pub created_at:  i64,
+    pub messages:    Vec<ChatMessageRecord>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -73,7 +99,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 3;
+    pub(super) const SCHEMA_VERSION: i64 = 4;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -136,6 +162,9 @@ impl WorkflowDb {
         }
         if current_version < 3 {
             Self::migrate_v3(conn)?;
+        }
+        if current_version < 4 {
+            Self::migrate_v4(conn)?;
         }
 
         Ok(())
@@ -240,6 +269,33 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+    fn migrate_v4(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id          TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                created_at  INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id          TEXT PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                text        TEXT,
+                images_json TEXT,
+                timestamp   INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+                ON chat_messages(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_workflow
+                ON chat_sessions(workflow_id, created_at DESC);
+            PRAGMA user_version = 4;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -270,7 +326,7 @@ mod tests {
         let db = WorkflowDb::open(&path, 8).expect("open failed");
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
 
         cleanup(&path);
     }
@@ -296,7 +352,7 @@ mod tests {
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3, "must be migrated to v3");
+        assert_eq!(v, 4, "must be migrated to v4");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))

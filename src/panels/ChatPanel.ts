@@ -4,8 +4,10 @@ import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
 import { isWorkflowRunning } from "../workflow-manager";
 import { NODE_IDS } from "../node-ids";
-import { startScheduledWorkflow, getScheduledJobs, parseSchedulerError, clearChatSession } from "../ipc/workflow";
+import { startScheduledWorkflow, getScheduledJobs, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
 import type { WorkflowResult } from "../ipc/workflow";
+import { listChatSessions, saveChatSession, deleteChatSession } from "../ipc/chat";
+import type { ChatSessionWire } from "../ipc/chat";
 import type { SchedulerStatusEvent } from "../ipc/events";
 import { addSchedulerStatusListener } from "../scheduler-events";
 import { escapeHtml } from "../utils";
@@ -164,13 +166,13 @@ export class ChatPanel {
     else this.show();
   }
 
-  show(): void {
+  async show(): Promise<void> {
     if (!this.hasWebhookAndOutput()) {
       this.toast("This workflow needs a Webhook trigger and an Output node to use Chat.", "info");
       return;
     }
     this.applyToggles(this.wfManager.chatSettings);
-    this.loadStoreForCurrentWorkflow();
+    await this.loadStoreForCurrentWorkflow();
     this.renderSessionLabel();
     this.renderMessages();
     this.el.classList.add("chat-open");
@@ -201,8 +203,8 @@ export class ChatPanel {
    * Reads workflow-scoped Chat settings (called on every panel open — see show()).
    *
    * `session_persistence` is read here but not enforced: persist() and
-   * loadStoreForCurrentWorkflow() always use localStorage regardless of
-   * this toggle.
+   * loadStoreForCurrentWorkflow() always persist to the backend chat
+   * tables regardless of this toggle.
    */
   applyToggles(settings: ChatSettings): void {
     this.chatSettings = settings;
@@ -787,29 +789,110 @@ export class ChatPanel {
     return { id: crypto.randomUUID(), name: `Session ${new Date().toLocaleString()}`, messages: [], createdAt: Date.now() };
   }
 
-  private storageKey(): string {
-    return `aerini_chat_${this.wfManager.currentId}`;
+  /** Legacy localStorage key — read (and cleared) only by the one-time migration below. */
+  private storageKey(workflowId: string): string {
+    return `aerini_chat_${workflowId}`;
   }
 
-  private loadStoreForCurrentWorkflow(): void {
+  /** Per-workflow "which session is active" pointer, stored via the existing generic settings table. */
+  private activeSessionSettingKey(workflowId: string): string {
+    return `chat_active_session:${workflowId}`;
+  }
+
+  private sessionFromWire(s: ChatSessionWire): ChatSession {
+    return {
+      id: s.id,
+      name: s.name,
+      createdAt: s.created_at,
+      messages: s.messages.map((m) => ({
+        id: m.id,
+        role: m.role as ChatMessage["role"],
+        text: m.text ?? undefined,
+        images: m.images ?? undefined,
+        timestamp: m.timestamp,
+      })),
+    };
+  }
+
+  private sessionToWire(s: ChatSession, workflowId: string): ChatSessionWire {
+    return {
+      id: s.id,
+      workflow_id: workflowId,
+      name: s.name,
+      created_at: s.createdAt,
+      messages: s.messages.map((m) => ({
+        id: m.id, role: m.role, text: m.text, images: m.images, timestamp: m.timestamp,
+      })),
+    };
+  }
+
+  /**
+   * One-time migration for a workflow that has legacy localStorage chat data
+   * but no rows in the backend yet. Reads the old blob, saves each session
+   * through the same backend calls persist() now uses, then removes the old
+   * key. Returns the migrated store, or null if there was nothing to migrate.
+   */
+  private async migrateLegacyLocalStorage(workflowId: string): Promise<ChatStore | null> {
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(this.storageKey(workflowId)); } catch { return null; }
+    if (!raw) return null;
+
+    let parsed: ChatStore | null = null;
     try {
-      const raw = localStorage.getItem(this.storageKey());
-      if (raw) {
-        const parsed = JSON.parse(raw) as ChatStore;
-        if (parsed && Array.isArray(parsed.sessions)) { this.store = parsed; return; }
+      const p = JSON.parse(raw) as ChatStore;
+      if (p && Array.isArray(p.sessions) && p.sessions.length > 0) parsed = p;
+    } catch { /* corrupt legacy blob — nothing worth migrating */ }
+    if (!parsed) return null;
+
+    for (const session of parsed.sessions) {
+      await saveChatSession(this.sessionToWire(session, workflowId));
+    }
+    if (parsed.activeId) {
+      await setSetting(this.activeSessionSettingKey(workflowId), parsed.activeId);
+    }
+    try { localStorage.removeItem(this.storageKey(workflowId)); } catch { /* best-effort cleanup only */ }
+    return parsed;
+  }
+
+  /**
+   * `workflowId` is captured once at the top and threaded through every
+   * awaited call below instead of re-reading `wfManager.currentId` after
+   * each `await` — if the user switches workflows while this is in flight,
+   * every `this.store = ...` assignment below is guarded so a late-resolving
+   * load for the OLD workflow can't clobber a newer load that already won.
+   */
+  private async loadStoreForCurrentWorkflow(): Promise<void> {
+    const workflowId = this.wfManager.currentId;
+    try {
+      const sessions = await listChatSessions(workflowId);
+      if (sessions.length > 0) {
+        const activeId = (await getSetting(this.activeSessionSettingKey(workflowId))) ?? sessions[0].id;
+        if (this.wfManager.currentId === workflowId) {
+          this.store = { sessions: sessions.map((s) => this.sessionFromWire(s)), activeId };
+        }
+        return;
       }
-    } catch { /* corrupt or unavailable storage — fall through to a fresh store */ }
-    this.store = { sessions: [], activeId: "" };
+      const migrated = await this.migrateLegacyLocalStorage(workflowId);
+      if (migrated) {
+        if (this.wfManager.currentId === workflowId) this.store = migrated;
+        return;
+      }
+    } catch (e) {
+      console.error("Aerini: failed to load chat sessions from backend", e);
+    }
+    if (this.wfManager.currentId === workflowId) this.store = { sessions: [], activeId: "" };
   }
 
-  private persist(): void {
+  private async persist(): Promise<void> {
+    const workflowId = this.wfManager.currentId;
     try {
-      localStorage.setItem(this.storageKey(), JSON.stringify(this.store));
+      await saveChatSession(this.sessionToWire(this.activeSession(), workflowId));
+      await setSetting(this.activeSessionSettingKey(workflowId), this.store.activeId);
       this.persistFailureToasted = false;
     } catch {
       if (!this.persistFailureToasted) {
         this.persistFailureToasted = true;
-        this.toast("Chat history isn't saving — device storage may be full.", "error");
+        this.toast("Chat history isn't saving — check the app's connection to its backend.", "error");
       }
     }
   }
@@ -869,6 +952,12 @@ export class ChatPanel {
     }
     this.store.sessions = this.store.sessions.filter(s => s.id !== id);
     if (this.store.activeId === id) this.store.activeId = this.store.sessions[0].id;
+    try {
+      await deleteChatSession(id);
+    } catch (e) {
+      console.error("Aerini: deleteChatSession failed", e);
+      this.toast("Could not remove the session from storage — it may reappear after restart.", "error");
+    }
     this.persist();
     this.renderSessionLabel();
     this.renderMessages();
@@ -903,6 +992,11 @@ export class ChatPanel {
     fresh.name = current.name;
     this.store.sessions[idx] = fresh;
     this.store.activeId = fresh.id;
+    try {
+      await deleteChatSession(current.id);
+    } catch (e) {
+      console.error("Aerini: deleteChatSession failed", e);
+    }
     this.persist();
     this.renderSessionLabel();
     this.renderMessages();
