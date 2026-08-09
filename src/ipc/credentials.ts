@@ -30,6 +30,10 @@ export async function getCredentialMetadata(id: string): Promise<CredentialMetad
   return invoke("get_credential_metadata", { id });
 }
 
+export async function getCredentialSecret(id: string): Promise<string | null> {
+  return invoke("get_credential_secret", { id });
+}
+
 export async function saveCredential(req: CreateCredentialRequest): Promise<void> {
   return invoke("save_credential", { req });
 }

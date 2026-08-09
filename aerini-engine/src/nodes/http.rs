@@ -288,6 +288,7 @@ mod tests {
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "n1".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),

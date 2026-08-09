@@ -26,6 +26,19 @@
   --color-error:      #f87171;
   --color-ai:         #a78bfa;
 
+  /* Derived surfaces (tinted panel backgrounds) */
+  --color-error-bg:   color-mix(in srgb, var(--color-error) 8%, var(--color-surface-0) 92%);
+  --color-warning-bg: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface-0) 92%);
+  --color-success-bg: color-mix(in srgb, var(--color-action-run) 8%, var(--color-surface-0) 92%);
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
   /* Backward-compat aliases */
   --bg0: var(--color-canvas);
   --bg1: var(--color-surface-0);
@@ -49,7 +62,7 @@
   --color-wire-hover: #858d97;
 
   /* Layout */
-  --sidebar-w: 260px; --activity-bar-w: 44px;
+  --sidebar-w: 260px; --activity-bar-w: 44px; --chat-w: 360px;
   --toolbar-h: 44px;  --status-h: 26px;       --canvas-stat-h: 26px; --drawer-h: 260px;
   --radius-sm: 2px;
   --radius:    3px;

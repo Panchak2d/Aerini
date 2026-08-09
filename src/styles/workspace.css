@@ -25,7 +25,7 @@
 .btn-run    { background: var(--color-action-run) !important; border-color: var(--color-action-run) !important; color: #000 !important; font-weight: 600; }
 .btn-run:hover { filter: brightness(1.08); }
 .btn-bg-run { background: transparent !important; border-color: var(--color-action-run) !important; color: var(--color-action-run) !important; font-weight: 500; border-width: 1px !important; }
-.btn-bg-run:hover { background: rgba(52,211,153,.12) !important; }
+.btn-bg-run:hover { background: color-mix(in srgb, var(--color-action-run) 12%, transparent) !important; }
 .btn-run:hover { opacity: .88; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
 .btn-connections { background: rgba(77,158,255,.08) !important; border-color: rgba(77,158,255,.28) !important; color: var(--blue) !important; font-weight: 500; }
@@ -64,6 +64,7 @@
 #output-drawer { position: fixed; bottom: calc(var(--status-h) + var(--canvas-stat-h)); left: var(--sidebar-w); right: 0; height: var(--drawer-h); min-height: 120px; max-height: 70vh; background: var(--bg2); border-top: 1px solid var(--bd); display: flex; flex-direction: column; z-index: 80; transition: height 180ms ease; }
 
 body.focus-mode #output-drawer { left: 0; right: 0; }
+body.chat-panel-open #output-drawer { right: var(--chat-w); }
 
 
 #output-drawer.hidden {
@@ -104,10 +105,10 @@ body.resizing-v #output-drawer { transition: none; }
 .drawer-header-spacer { flex: 1; }
 .drawer-tabs { display: flex; gap: 2px; overflow-x: auto; flex: 0 1 auto; position: relative; mask-image: linear-gradient(to right, black calc(100% - 32px), transparent 100%); -webkit-mask-image: linear-gradient(to right, black calc(100% - 32px), transparent 100%); }
 .drawer-tabs::-webkit-scrollbar { display: none; }
-.drawer-tab { padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; color: var(--color-text-muted); background: none; border: 1px solid transparent; white-space: nowrap; transition: color var(--trans), background var(--trans); font-weight: 500; }
+.drawer-tab { padding: 3px 11px; border-radius: 4px; cursor: pointer; font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--color-text-muted); background: none; border: 1px solid transparent; white-space: nowrap; transition: color var(--trans), background var(--trans); font-weight: 500; }
 .drawer-tab:hover { color: var(--color-text-secondary); background: var(--bg4); }
 .drawer-tab.active { color: var(--color-text-primary); background: var(--bg3); border-color: var(--bd); font-weight: 600; }
-.drawer-tab[data-tab="summary"].active { color: var(--color-action-run); border-color: rgba(52,211,153,.3); background: rgba(52,211,153,.06); }
+.drawer-tab[data-tab="summary"].active { color: var(--color-action-run); border-color: color-mix(in srgb, var(--color-action-run) 30%, transparent); background: color-mix(in srgb, var(--color-action-run) 6%, transparent); }
 .drawer-tab.tab-success { color: var(--color-action-run); }
 .drawer-tab.tab-error { color: var(--color-error); }
 .drawer-tab-static { flex-shrink: 0; margin-left: 4px; }
@@ -143,8 +144,9 @@ body.resizing-v #output-drawer { transition: none; }
 .node-card { background:var(--bg3); border:1px solid var(--bd); border-radius:var(--radius); margin:6px 0; overflow:hidden; }
 .node-card-json    { padding:10px 12px; font-size:11px; font-family:var(--font-mono); line-height:1.6; color:var(--t2); overflow-x:auto; }
 
-.run-error-card  { background:#2a0a0a; border:1px solid rgba(248,113,113,.3); border-radius:var(--radius); padding:12px 14px; margin:8px 0; }
-.run-error-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--red); margin-bottom:4px; }
+.run-error-card  { background:var(--color-error-bg); border:1px solid rgba(248,113,113,.3); border-radius:var(--radius); padding:var(--space-3) var(--space-4); margin:var(--space-2) 0; }
+.run-error-label { display:flex; align-items:center; gap:6px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--red); margin-bottom:4px; }
+.run-error-label svg { flex-shrink:0; }
 
 .run-error-msg   { font-size:12px; color:var(--t2); line-height:1.6; white-space:pre-wrap; word-break:break-word; margin-bottom:8px; }
 .run-error-copy  { background:rgba(248,113,113,.12); border:1px solid rgba(248,113,113,.3); border-radius:5px; color:var(--red); font-size:11px; padding:3px 10px; cursor:pointer; transition:background var(--trans); }
@@ -163,7 +165,7 @@ body.resizing-v #output-drawer { transition: none; }
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 32px 16px;
+  padding: var(--space-6) var(--space-4);
 }
 .run-spinner {
   width: 22px;
@@ -182,9 +184,13 @@ body.resizing-v #output-drawer { transition: none; }
   to { transform: rotate(360deg); }
 }
 
-.run-notice { background:var(--bg3); border-radius:var(--radius); padding:16px; font-size:12px; color:var(--t2); line-height:1.7; }
-.run-notice strong { color:var(--t1); display:block; margin-bottom:4px; }
+.run-notice { background:var(--bg3); border-radius:var(--radius); padding:var(--space-4); font-size:12px; color:var(--t2); line-height:1.7; }
+.run-notice strong { color:var(--t1); display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.run-notice strong svg { flex-shrink:0; }
 .run-notice code { background:var(--bg4); border-radius:4px; padding:1px 6px; font-family:var(--font-mono); font-size:11px; }
+
+.run-notice--warning { background:var(--color-warning-bg); border:1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); }
+.run-notice--warning strong { color:var(--color-warning); }
 
 /* Log view */
 .log-line  { display:flex; gap:8px; padding:3px 0; font-size:11px; align-items:baseline; }
@@ -337,7 +343,7 @@ body.resizing-v #output-drawer { transition: none; }
   border-color: var(--color-error) !important;
 }
 
-/* ── Batch 2: canvas zoom controls (toolbar.ts) ─────────────────────────── */
+/* ── canvas zoom controls (toolbar.ts) ────────────────────────────────── */
 .toolbar-zoom-group { display: flex; align-items: center; gap: 2px; padding: 0 2px; }
 .toolbar-zoom-readout {
   font-size: 11px; color: var(--t3); min-width: 34px; text-align: center;
@@ -348,7 +354,7 @@ body.resizing-v #output-drawer { transition: none; }
   background: transparent; border-color: transparent; color: var(--color-text-muted);
 }
 
-/* ── Batch 2: structured status-bar fields (statusbar-fields.ts, S1) ─────── */
+/* ── structured status-bar fields (statusbar-fields.ts) ───────────────── */
 .statusbar-field { font-size: 10px; color: var(--t3); letter-spacing: .05em; text-transform: uppercase; }
 .statusbar-field b { color: var(--t2); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
 .statusbar-sep { width: 1px; height: 10px; background: var(--bd); flex-shrink: 0; }
@@ -425,7 +431,7 @@ body.resizing-v #output-drawer { transition: none; }
 .perf-graph-svg { width: 100%; height: 100%; overflow: visible; }
 .perf-graph-svg polyline { fill: none; stroke: var(--blue); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 
-/* ── REDUCED MOTION (Batch 11) ─────────────────────────────────────────── */
+/* ── reduced motion ────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   #run-dropdown-wrap[data-run-state="running"] .btn-run-main,  /* run-pulse, infinite */
   .run-spinner {                                               /* run-spin,  infinite */

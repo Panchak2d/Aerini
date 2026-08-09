@@ -1,5 +1,7 @@
 import {
   listCredentials,
+  getCredentialMetadata,
+  getCredentialSecret,
   saveCredential,
   deleteCredential,
 } from "../ipc/credentials";
@@ -8,9 +10,38 @@ import { escapeHtml as escHtml } from "../utils";
 
 interface Credential { id: string; name: string; cred_type: string; }
 
+interface CredType { value: string; label: string; hint: string; placeholder: string; }
+
+const CRED_TYPES: CredType[] = [
+  { value: "api_key", label: "API Key",        hint: "A plain API key passed as a header or query param", placeholder: "sk-… or your API key"       },
+  { value: "bearer",  label: "Bearer Token",   hint: "Will be sent as Authorization: Bearer <value>",     placeholder: "eyJ… or your token"          },
+  { value: "basic",   label: "Basic Auth",     hint: "Enter as username:password",                        placeholder: "username:password"           },
+  { value: "oauth",   label: "OAuth Token",    hint: "An OAuth access or refresh token",                  placeholder: "ya29.… or your OAuth token"  },
+  { value: "other",   label: "Other / Custom", hint: "Any custom secret value",                           placeholder: "Your secret value"           },
+];
+
+// Prefill snapshot loaded into the form when re-opening a saved credential
+// for editing. `value` is the decrypted secret — held in memory only for the
+// life of this edit, same as anything else typed into the form.
+interface EditingCredential {
+  id: string;
+  name: string;
+  cred_type: string;
+  value: string;
+  provider: string;
+  model: string;
+  base_url: string;
+}
+
 export class CredentialPanel {
   private el: HTMLElement;
   private creds: Credential[] = [];
+  private editing: EditingCredential | null = null;
+  // Guards the async gap in startEdit/delete (before any confirm dialog is
+  // up) — without it, clicking Edit on a second item while the first is
+  // still loading can let whichever IPC call resolves last silently
+  // clobber the edit session the user is actually looking at.
+  private busy = false;
 
   constructor() {
     this.el = document.getElementById("cred-panel")!;
@@ -23,6 +54,7 @@ export class CredentialPanel {
   }
 
   async show(): Promise<void> {
+    this.editing = null;
     this.el.classList.remove("hidden");
     await this.refresh();
   }
@@ -44,29 +76,39 @@ export class CredentialPanel {
             <div class="cred-panel-title">Credentials</div>
             <div class="cred-panel-subtitle">API keys and service credentials — stored encrypted on your device. Never sent anywhere.</div>
           </div>
-          <button class="cred-panel-close" id="cred-close">
+          <button class="cred-panel-close" id="cred-close" aria-label="Close">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
         </div>
 
-        ${isEmpty ? `
-        <div class="cred-empty-state">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-          <div class="cred-empty-state-title">No credentials yet</div>
-          <div class="cred-empty-state-desc">Add your first API key or service credential below. Credentials are used by nodes like HTTP Request, AI Prompt, and Send Email.</div>
-        </div>` : `
-        <div class="cred-list" id="cred-list">
-          ${this.renderList()}
-        </div>`}
+        <div class="cred-panel-body" id="cred-panel-body">
+          ${isEmpty ? `
+          <div class="cred-empty-state">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            <div class="cred-empty-state-title">No credentials yet</div>
+            <div class="cred-empty-state-desc">Add your first API key or service credential below. Credentials are used by nodes like HTTP Request, AI Prompt, and Send Email.</div>
+          </div>` : `
+          <div class="cred-list" id="cred-list">
+            ${this.renderList()}
+          </div>`}
 
-        <div class="cred-add-section">
-          <div class="cred-add-header">
-            <div class="cred-add-title">${isEmpty ? "Add your first credential" : "Add a credential"}</div>
+          <div class="cred-add-section${this.editing ? " is-editing" : ""}">
+            <div class="cred-add-header">
+              <div class="cred-add-title">${this.formTitle()}</div>
+            </div>
+            <div class="cred-form" id="cred-form">
+              ${this.renderForm()}
+            </div>
           </div>
-          <div class="cred-form" id="cred-form">
-            ${this.renderForm()}
+        </div>
+
+        <div class="cred-panel-footer">
+          <div class="cred-save-error hidden" id="cred-save-error"></div>
+          <div class="cred-footer-actions">
+            ${this.editing ? `<button type="button" class="cred-cancel-btn" id="cred-cancel">Cancel</button>` : ""}
+            <button class="btn-primary cred-save-btn" id="cred-save">${this.editing ? "Save Changes" : "Save Credential"}</button>
           </div>
         </div>
       </div>`;
@@ -77,6 +119,11 @@ export class CredentialPanel {
     this.bindList();
   }
 
+  private formTitle(): string {
+    if (this.editing) return `Editing — ${escHtml(this.editing.name)}`;
+    return this.creds.length === 0 ? "Add your first credential" : "Add a credential";
+  }
+
   private renderList(): string {
     if (!this.creds.length) {
       return `<div class="cred-empty">
@@ -84,39 +131,44 @@ export class CredentialPanel {
       </div>`;
     }
     return this.creds.map(c => `
-      <div class="cred-item" data-id="${escHtml(c.id)}">
+      <div class="cred-item${this.editing?.id === c.id ? " editing" : ""}" data-id="${escHtml(c.id)}">
         <div class="cred-item-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg></div>
         <div class="cred-item-info">
           <div class="cred-item-name">${escHtml(c.name)}</div>
           <div class="cred-item-id">${escHtml(c.id)}</div>
         </div>
         <span class="cred-item-type">${escHtml(credTypeLabel(c.cred_type))}</span>
-        <button class="cred-item-del" data-id="${escHtml(c.id)}" title="Delete this credential">Delete</button>
+        <div class="cred-item-actions">
+          <button class="cred-item-edit" data-id="${escHtml(c.id)}" title="View / edit this credential">Edit</button>
+          <button class="cred-item-del" data-id="${escHtml(c.id)}" title="Delete this credential">Delete</button>
+        </div>
       </div>`).join("");
   }
 
   private renderForm(): string {
+    const e = this.editing;
+    const activeType = CRED_TYPES.find(t => t.value === e?.cred_type) ?? CRED_TYPES[0];
     return `
       <div class="field-group">
         <label class="field-label">Type</label>
         <div id="cred-type-wrap"></div>
-        <div class="field-hint" id="cred-type-hint">A plain API key passed as a header or query param</div>
+        <div class="field-hint" id="cred-type-hint">${escHtml(activeType.hint)}</div>
       </div>
       <div class="field-group">
         <label class="field-label">Name</label>
-        <input id="cred-name" type="text" placeholder="e.g. OpenAI Production Key" autocomplete="off" />
+        <input id="cred-name" type="text" placeholder="e.g. OpenAI Production Key" autocomplete="off" value="${escHtml(e?.name ?? "")}" />
         <div class="field-hint">A label to identify this credential in the UI</div>
       </div>
       <div class="field-group">
         <label class="field-label">ID / Key</label>
-        <input id="cred-id" type="text" placeholder="e.g. openai_prod (no spaces)" autocomplete="off" />
-        <div class="field-hint">Short identifier used in nodes — auto-filled from name</div>
+        <input id="cred-id" type="text" placeholder="e.g. openai_prod (no spaces)" autocomplete="off" value="${escHtml(e?.id ?? "")}" ${e ? "readonly" : ""} />
+        <div class="field-hint">${e ? "ID can't be changed after creation — delete and re-add to use a different one" : "Short identifier used in nodes — auto-filled from name"}</div>
       </div>
       <div class="field-group">
         <label class="field-label">Secret Value</label>
         <div class="cred-secret-wrap">
-          <input id="cred-value" type="password" placeholder="sk-… or your API key" autocomplete="new-password" />
-          <button type="button" class="cred-show-btn" id="cred-show" title="Show / hide">
+          <input id="cred-value" type="password" placeholder="${escHtml(activeType.placeholder)}" autocomplete="new-password" value="${escHtml(e?.value ?? "")}" />
+          <button type="button" class="cred-show-btn" id="cred-show" title="Show / hide" aria-label="Show or hide secret value">
             <svg id="cred-eye-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
             </svg>
@@ -124,30 +176,27 @@ export class CredentialPanel {
         </div>
         <div class="field-hint">Stored encrypted on your device. Never sent to Aerini servers.</div>
       </div>
-      <details class="cred-advanced">
+      <details class="cred-advanced"${e && (e.provider || e.model || e.base_url) ? " open" : ""}>
         <summary class="cred-advanced-summary">Advanced (optional) — provider, model, base URL</summary>
         <div class="field-group">
           <label class="field-label">Provider</label>
-          <input id="cred-meta-provider" type="text" placeholder="e.g. openai, anthropic, gemini" autocomplete="off" />
+          <input id="cred-meta-provider" type="text" placeholder="e.g. openai, anthropic, gemini" autocomplete="off" value="${escHtml(e?.provider ?? "")}" />
         </div>
         <div class="field-group">
           <label class="field-label">Model</label>
-          <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" />
+          <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
         </div>
         <div class="field-group">
           <label class="field-label">Base URL</label>
-          <input id="cred-meta-base-url" type="text" placeholder="Leave blank for provider default" autocomplete="off" />
+          <input id="cred-meta-base-url" type="text" placeholder="Leave blank for provider default" autocomplete="off" value="${escHtml(e?.base_url ?? "")}" />
         </div>
         <div class="field-hint">Not secret — used to auto-fill matching fields on AI nodes when this credential is selected.</div>
-      </details>
-      <div class="cred-form-actions">
-        <div class="cred-save-error hidden" id="cred-save-error"></div>
-        <button class="btn-primary cred-save-btn" id="cred-save">Save Credential</button>
-      </div>`;
+      </details>`;
   }
 
   private bindForm(): void {
     const saveBtn  = this.el.querySelector("#cred-save")     as HTMLButtonElement;
+    const cancelBtn = this.el.querySelector("#cred-cancel")  as HTMLButtonElement | null;
     const errDiv   = this.el.querySelector("#cred-save-error") as HTMLElement;
     const nameInp  = this.el.querySelector("#cred-name")     as HTMLInputElement;
     const idInp    = this.el.querySelector("#cred-id")       as HTMLInputElement;
@@ -160,24 +209,17 @@ export class CredentialPanel {
     const modelInp    = this.el.querySelector("#cred-meta-model")    as HTMLInputElement;
     const baseUrlInp  = this.el.querySelector("#cred-meta-base-url") as HTMLInputElement;
 
-    const TYPES = [
-      { value: "api_key", label: "API Key",        hint: "A plain API key passed as a header or query param", placeholder: "sk-… or your API key"       },
-      { value: "bearer",  label: "Bearer Token",   hint: "Will be sent as Authorization: Bearer <value>",     placeholder: "eyJ… or your token"          },
-      { value: "basic",   label: "Basic Auth",     hint: "Enter as username:password",                        placeholder: "username:password"           },
-      { value: "oauth",   label: "OAuth Token",    hint: "An OAuth access or refresh token",                  placeholder: "ya29.… or your OAuth token"  },
-      { value: "other",   label: "Other / Custom", hint: "Any custom secret value",                           placeholder: "Your secret value"           },
-    ];
-
     // Build custom select — avoids WebKitGTK Linux native <select> rendering bug
-    let selectedCredType = TYPES[0].value;
-    typeWrap.appendChild(buildCredTypeSelect(TYPES, (t) => {
+    let selectedCredType = this.editing?.cred_type ?? CRED_TYPES[0].value;
+    typeWrap.appendChild(buildCredTypeSelect(CRED_TYPES, (t) => {
       hintEl.textContent = t.hint;
       valInp.placeholder = t.placeholder;
       selectedCredType   = t.value;
-    }));
+    }, selectedCredType));
 
-    // Auto-slug ID from name
-    let idEdited = false;
+    // Auto-slug ID from name — skipped entirely while editing, since the ID
+    // field is read-only and re-deriving it would fight the locked value.
+    let idEdited = !!this.editing;
     idInp.addEventListener("input", () => { idEdited = true; });
     nameInp.addEventListener("input", () => {
       if (!idEdited) {
@@ -199,6 +241,8 @@ export class CredentialPanel {
           `<path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>` +
           `<line x1="1" y1="1" x2="23" y2="23"/>`;
     });
+
+    cancelBtn?.addEventListener("click", () => this.cancelEdit());
 
     saveBtn.addEventListener("click", async () => {
       const name  = nameInp.value.trim();
@@ -226,11 +270,12 @@ export class CredentialPanel {
           model:    model    || undefined,
           base_url: baseUrl  || undefined,
         });
+        this.editing = null;
         await this.refresh();
       } catch (e) {
         this.showFormError(`Save failed: ${e}`);
         saveBtn.disabled = false;
-        saveBtn.textContent = "Save Credential";
+        saveBtn.textContent = this.editing ? "Save Changes" : "Save Credential";
       }
     });
   }
@@ -242,26 +287,79 @@ export class CredentialPanel {
   }
 
   private bindList(): void {
+    this.el.querySelectorAll<HTMLButtonElement>(".cred-item-edit").forEach(btn => {
+      btn.addEventListener("click", () => this.startEdit(btn.dataset.id!, btn));
+    });
     this.el.querySelectorAll<HTMLButtonElement>(".cred-item-del").forEach(btn => {
       btn.addEventListener("click", async () => {
-        const id = btn.dataset.id!;
-        const cred = this.creds.find(c => c.id === id);
-        const ok = await showConfirm(`Delete credential "${cred?.name ?? id}"? Nodes using it will stop working.`, true, "Delete");
-        if (!ok) return;
-        btn.disabled = true; btn.textContent = "Deleting…";
+        if (this.busy) return;
+        this.busy = true;
         try {
-          await deleteCredential(id);
-          await this.refresh();
-        } catch (e) {
-          btn.disabled = false; btn.textContent = "Delete";
-          await showConfirm(`Delete failed: ${e}`);
+          const id = btn.dataset.id!;
+          const cred = this.creds.find(c => c.id === id);
+          const ok = await showConfirm(`Delete credential "${cred?.name ?? id}"? Nodes using it will stop working.`, true, "Delete");
+          if (!ok) return;
+          btn.disabled = true; btn.textContent = "Deleting…";
+          try {
+            await deleteCredential(id);
+            if (this.editing?.id === id) this.editing = null;
+            await this.refresh();
+          } catch (e) {
+            btn.disabled = false; btn.textContent = "Delete";
+            await showConfirm(`Delete failed: ${e}`);
+          }
+        } finally {
+          this.busy = false;
         }
       });
     });
   }
-}
 
-interface CredType { value: string; label: string; hint: string; placeholder: string; }
+  // Loads the decrypted secret + metadata for a saved credential into the
+  // form so it can be viewed (masked, same as the password field) and
+  // re-edited. The ID input stays locked: `saveCredential` upserts by ID, so
+  // an edited ID would create a second, orphaned credential instead of
+  // updating this one.
+  private async startEdit(id: string, btn: HTMLButtonElement): Promise<void> {
+    if (this.busy) return;
+    const cred = this.creds.find(c => c.id === id);
+    if (!cred) return;
+
+    this.busy = true;
+    btn.disabled = true;
+    const originalLabel = btn.textContent;
+    btn.textContent = "Loading…";
+    try {
+      const [value, meta] = await Promise.all([
+        getCredentialSecret(id),
+        getCredentialMetadata(id).catch(() => null),
+      ]);
+      if (value == null) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        await showConfirm(`Could not load credential "${cred.name}" — it may have been deleted.`);
+        await this.refresh();
+        return;
+      }
+      this.editing = {
+        id: cred.id, name: cred.name, cred_type: cred.cred_type, value,
+        provider: meta?.provider ?? "", model: meta?.model ?? "", base_url: meta?.base_url ?? "",
+      };
+      this.render();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+      await showConfirm(`Failed to load credential: ${e}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private cancelEdit(): void {
+    this.editing = null;
+    this.render();
+  }
+}
 
 function credTypeLabel(value: string): string {
   const labels: Record<string, string> = {
@@ -281,11 +379,11 @@ function credTypeLabel(value: string): string {
 // matter how many times the panel re-renders.
 let activeCredTypeSelectCleanup: (() => void) | null = null;
 
-export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void): HTMLElement {
+export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) => void, initialValue?: string): HTMLElement {
   activeCredTypeSelectCleanup?.();
   activeCredTypeSelectCleanup = null;
 
-  let current = types[0];
+  let current = types.find(t => t.value === initialValue) ?? types[0];
 
   const wrap    = document.createElement("div");
   wrap.className = "csel-wrap";

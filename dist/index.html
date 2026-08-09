@@ -6,8 +6,10 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-Didvg-cR.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/style-tOh4XxCP.css">
+  <script type="module" crossorigin src="./assets/index-3oJz8OCW.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-BzEEpTu2.js">
+  <link rel="modulepreload" crossorigin href="./assets/core-CdvzL0T1.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-DfYBtucG.css">
 </head>
 <body>
 
@@ -397,7 +399,8 @@
   <div id="confirm-modal" class="hidden">
     <div class="confirm-backdrop"></div>
     <div class="confirm-box">
-      <div class="confirm-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+      <div class="confirm-icon confirm-icon--danger"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+      <div class="confirm-icon confirm-icon--neutral hidden"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg></div>
       <div class="confirm-message" id="confirm-message">Are you sure?</div>
       <div class="confirm-actions">
         <button class="confirm-btn-cancel" id="confirm-cancel">Cancel</button>
@@ -543,6 +546,13 @@
             Built with Tauri · Rust · TypeScript<br>
             <a href="https://github.com/Panchak2d/aerini" target="_blank" class="settings-support-link">View on GitHub</a>
           </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Updates</div>
+              <div class="settings-desc" id="update-check-status">Check GitHub for a newer release.</div>
+            </div>
+            <button id="btn-check-updates" class="btn-sm">Check for Updates</button>
+          </div>
         </div>
       </div>
     </div>
@@ -558,6 +568,13 @@
         </button>
       </div>
       <div class="settings-body">
+        <div class="settings-group">
+          <div class="settings-group-title">Tags</div>
+          <div class="wf-tags-editor">
+            <div class="wf-tags-chips" id="wf-setting-tags-chips"></div>
+            <input type="text" id="wf-setting-tags-input" class="settings-text-input" placeholder="Add a tag, press Enter" maxlength="32" autocomplete="off">
+          </div>
+        </div>
         <div class="settings-group">
           <div class="settings-group-title">Execution</div>
           <div class="settings-row">

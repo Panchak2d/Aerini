@@ -21,6 +21,14 @@ pub async fn get_credential_metadata(
 }
 
 #[tauri::command]
+pub async fn get_credential_secret(
+    id:    String,
+    store: tauri::State<'_, Arc<CredentialStore>>,
+) -> Result<Option<String>, String> {
+    store.retrieve(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn save_credential(
     req:   CreateCredentialRequest,
     store: tauri::State<'_, Arc<CredentialStore>>,

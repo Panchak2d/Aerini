@@ -96,6 +96,16 @@ pub struct WorkflowExecutor {
     pub(super) config:              WorkflowExecutorConfig,
 }
 
+// `NodeError.code` value set on the `NodeOutput` produced when a run is
+// cancelled mid-node (see `execute_with_retry` below). Matched by string
+// equality in sequential.rs/parallel.rs/loop_executor.rs's failure-routing
+// to bypass on_error/failure-route and surface as `EngineError::ExecutionCancelled`
+// instead of being treated like an ordinary node failure. pub(crate): also
+// used directly by nodes/webhook.rs's own internal cancellation branch, so
+// its output carries the same code that failure-routing checks for instead
+// of a second, driftable literal.
+pub(crate) const CANCEL_ERROR_CODE: &str = "CANCELLED";
+
 impl WorkflowExecutor {
     /// Create an executor with the minimum required components.
     ///
@@ -497,6 +507,7 @@ impl WorkflowExecutor {
             workflow_id:  workflow.id.clone(),
             execution_id: exec_id,
             input:        resolved_input,
+            cancel_token: self.config.cancel_token.clone(),
             context:      {
                 let mut ctx = ctx;
                 if let Some(ref sandbox) = self.config.file_sandbox_dir {
@@ -596,8 +607,18 @@ impl WorkflowExecutor {
             node_def.node_type_id.clone(),
         );
 
-        // Fast path: single attempt — consume input without cloning.
+        // Fast path: single attempt — consume input without cloning. Races
+        // execute() itself against cancellation so a long-running node is
+        // interrupted directly instead of only being checked between nodes.
         if max_attempts == 1 {
+            if let Some(ref token) = self.config.cancel_token {
+                return tokio::select! {
+                    output = crate::mem_tracking::run_tracked(mem_meta, node.execute(input)) => (output, 1),
+                    _ = token.cancelled() => (NodeOutput::failure(NodeError::unrecoverable(
+                        CANCEL_ERROR_CODE, "Run cancelled by user",
+                    )), 1),
+                };
+            }
             let output = crate::mem_tracking::run_tracked(mem_meta, node.execute(input)).await;
             return (output, 1);
         }
@@ -620,7 +641,7 @@ impl WorkflowExecutor {
                         _ = sleep(Duration::from_millis(backoff_ms)) => {}
                         _ = token.cancelled() => {
                             return (NodeOutput::failure(NodeError::unrecoverable(
-                                "CANCELLED", "Run cancelled by user",
+                                CANCEL_ERROR_CODE, "Run cancelled by user",
                             )), attempt);
                         }
                     }
@@ -629,9 +650,25 @@ impl WorkflowExecutor {
                 }
             }
 
-            let output = crate::mem_tracking::run_tracked(
-                mem_meta.clone(), node.execute(input.clone()),
-            ).await;
+            // Races this attempt's execute() against cancellation too — a retry
+            // attempt can run just as long as a first attempt and must be
+            // interruptible the same way as the fast path above.
+            let output = if let Some(ref token) = self.config.cancel_token {
+                tokio::select! {
+                    output = crate::mem_tracking::run_tracked(
+                        mem_meta.clone(), node.execute(input.clone()),
+                    ) => output,
+                    _ = token.cancelled() => {
+                        return (NodeOutput::failure(NodeError::unrecoverable(
+                            CANCEL_ERROR_CODE, "Run cancelled by user",
+                        )), attempt);
+                    }
+                }
+            } else {
+                crate::mem_tracking::run_tracked(
+                    mem_meta.clone(), node.execute(input.clone()),
+                ).await
+            };
             if output.success {
                 return (output, actual_attempts);
             }
@@ -918,16 +955,13 @@ mod tests {
 
     // ── __direct_input propagation ────────────────────────────────────────────
     //
-    // Regression test for the bug where find().and_then() picked the first
-    // matching edge but returned None if that edge's upstream hadn't produced
-    // output yet, silently leaving __direct_input unset and the Code node JS
-    // `input` variable as an empty object.
+    // __direct_input must reflect the matching upstream edge's actual output,
+    // not stay unset (empty object) if that edge's upstream hadn't produced
+    // output yet when the matching edge was located.
     //
     // This test builds a two-node workflow: EchoNode (upstream) → InspectorNode
     // (downstream). EchoNode emits { "ping": "pong" }. InspectorNode reads
     // __direct_input from its NodeInput and asserts the value is correct.
-    // The test fails before the fix (InspectorNode sees {} instead of the
-    // echo output) and passes after.
 
     use std::sync::Mutex;
 
@@ -1164,7 +1198,7 @@ mod tests {
         }
     }
 
-    // ── P23: executor/mod.rs tests ────────────────────────────────────────────
+    // ── Additional executor tests ───────────────────────────────────────────
 
     // Cancel token fired mid-run: executor stops between nodes and returns
     // Err(ExecutionCancelled). CancellingNode fires the token on execute();
@@ -1183,6 +1217,43 @@ mod tests {
         let workflow = two_node_typed_workflow("cancelling_test", "instant_test");
         let result = executor.run(Arc::new(workflow), HashMap::new()).await;
 
+        assert!(
+            matches!(result, Err(EngineError::ExecutionCancelled)),
+            "expected ExecutionCancelled; got {:?}", result
+        );
+    }
+
+    // Cancel token fired while a node is mid-execute, not between nodes: the
+    // fast-path select! in execute_with_retry must interrupt SlowNode's 60s
+    // sleep directly rather than waiting for it to return on its own. Bounded
+    // by an outer timeout so a regression (falling back to awaiting execute()
+    // directly) fails this test fast instead of hanging the suite for 60s.
+    #[tokio::test]
+    async fn cancel_token_interrupts_in_flight_node_execute() {
+        let token = CancellationToken::new();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+            .with_cancel_token(token.clone());
+
+        let workflow = single_node_workflow("slow_test", None);
+
+        let cancel_token = token.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(20)).await;
+            cancel_token.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            executor.run(Arc::new(workflow), HashMap::new()),
+        ).await;
+
+        let result = result.expect(
+            "run() did not return within 5s — cancellation did not interrupt the in-flight node"
+        );
         assert!(
             matches!(result, Err(EngineError::ExecutionCancelled)),
             "expected ExecutionCancelled; got {:?}", result

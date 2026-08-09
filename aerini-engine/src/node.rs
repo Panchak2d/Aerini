@@ -108,6 +108,10 @@ pub trait Node: Send + Sync {
     /// - The executor retries on *recoverable* failures up to `RetryPolicy::max_attempts`.
     ///   Mark an error unrecoverable when retrying would have no effect
     ///   (invalid config, auth rejection, etc.).
+    /// - `input.cancel_token`, when `Some`, resolves when the run is cancelled. A node
+    ///   with a long-running wait (listening for a callback, polling a remote job)
+    ///   should race it with `tokio::select!` so cancellation interrupts the wait
+    ///   instead of running until the node's own timeout elapses.
     async fn execute(&self, input: NodeInput) -> NodeOutput;
 }
 

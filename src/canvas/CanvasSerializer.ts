@@ -11,6 +11,11 @@ export function registerNodeDescriptors(descriptors: NodeDescriptor[]): void {
   _nodeRegistry = new Map(descriptors.map(d => [d.type_id, d]));
 }
 
+/** True when `typeId` was loaded from a WASM plugin rather than built in. */
+export function isPluginNodeType(typeId: string): boolean {
+  return _nodeRegistry.get(typeId)?.is_plugin === true;
+}
+
 /**
  * Per-workflow Chat Panel feature toggles. Field names and defaults
  * mirror aerini-engine::model::ChatSettings exactly — this is the wire
@@ -70,6 +75,7 @@ export function serialize(
   parallelExecution?: boolean,
   maxConcurrentNodes?: number,
   chatSettings?: ChatSettings,
+  tags?: string[],
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -98,7 +104,7 @@ export function serialize(
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       version: "1.0.0",
-      tags: [],
+      tags: tags ?? [],
     },
   };
   if (parallelExecution) {
@@ -126,6 +132,7 @@ export function deserialize(json: string): {
   parallelExecution: boolean;
   maxConcurrentNodes: number;
   chatSettings: ChatSettings;
+  tags: string[];
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
@@ -133,6 +140,7 @@ export function deserialize(json: string): {
     parallel_execution?: boolean;
     max_concurrent_nodes?: number;
     settings?: { chat?: Partial<ChatSettings> };
+    metadata?: { tags?: string[] };
   };
 
   const id   = doc.id   ?? `wf_${Date.now()}`;
@@ -192,5 +200,6 @@ export function deserialize(json: string): {
     parallelExecution: doc.parallel_execution ?? false,
     maxConcurrentNodes: doc.max_concurrent_nodes ?? 8,
     chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
+    tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
   };
 }

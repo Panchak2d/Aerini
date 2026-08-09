@@ -187,8 +187,7 @@ impl Node for FileNode {
                         format!("content is not valid base64: {}", e),
                     )),
                 };
-                // Inline fix: this arm never created missing parent directories,
-                // unlike "write" above — the same file/mechanism, small, no design call.
+                // Append must create missing parent directories too, matching "write" above.
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = fs::create_dir_all(parent).await;
                 }
@@ -198,8 +197,8 @@ impl Node for FileNode {
                         Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
                         // tokio::fs::File's write_all can return before the write has
                         // actually reached the OS; without an explicit flush, dropping
-                        // `f` here is not guaranteed to deliver the bytes (VERIFIED,
-                        // tokio docs). This flush is what "write" above gets for free
+                        // `f` here is not guaranteed to deliver the bytes (per tokio's
+                        // own docs). This flush is what "write" above gets for free
                         // from fs::write's single atomic blocking call.
                         Ok(_) => match f.flush().await {
                             Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
@@ -232,8 +231,8 @@ impl Node for FileNode {
 /// rejoins the non-existent suffix lexically. That rejoin is safe: a path component
 /// that doesn't exist yet cannot itself be a symlink pointing elsewhere.
 ///
-/// Mirrors save_to_folder.rs's canonical_parent/suffix pattern exactly (S3-1's fix
-/// for that file used the same shape) — see AUDIT_REPORT.md S3-6/S3-7.
+/// Mirrors save_to_folder.rs's canonical_parent/suffix pattern exactly — keep the
+/// two in sync if either changes.
 fn resolve_within_sandbox(
     sandbox: &std::path::Path,
     sandbox_str: &str,
@@ -282,9 +281,7 @@ fn resolve_within_sandbox(
 }
 
 /// Decode `content` per `encoding` ("base64" or anything else = utf8 passthrough).
-/// Shared by the "write" and "append" arms so both honor `encoding` identically —
-/// previously neither did: base64-encoded content was written as literal
-/// base64 text instead of the decoded bytes it represents.
+/// Shared by the "write" and "append" arms so both honor `encoding` identically.
 fn decode_write_content(content: &str, encoding: &str) -> Result<Vec<u8>, String> {
     if encoding == "base64" {
         use base64::Engine;
@@ -305,7 +302,7 @@ mod tests {
     use std::collections::HashMap;
 
     /// A symlink inside the sandbox whose target resolves outside must be rejected.
-    /// The canonicalize-based check in Patch 1 makes this detectable.
+    /// The canonicalize-based check makes this detectable.
     #[cfg(unix)]
     #[tokio::test]
     async fn symlink_inside_sandbox_is_rejected() {
@@ -327,6 +324,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
@@ -351,6 +349,7 @@ mod tests {
 
     fn no_sandbox_input(op_json: Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
@@ -364,7 +363,7 @@ mod tests {
         }
     }
 
-    // T2-9 — normal case: base64-encoded, non-UTF8 binary content must round-trip
+    // Normal case: base64-encoded, non-UTF8 binary content must round-trip
     // through "write" as decoded bytes, not literal base64 text.
     #[tokio::test]
     async fn write_base64_encoding_decodes_before_write() {
@@ -392,7 +391,7 @@ mod tests {
         );
     }
 
-    // T2-9 — normal case: base64-encoded content must be decoded on "append" too.
+    // Normal case: base64-encoded content must be decoded on "append" too.
     #[tokio::test]
     async fn append_base64_encoding_decodes_before_append() {
         use base64::Engine;
@@ -416,7 +415,7 @@ mod tests {
         assert_eq!(on_disk, vec![0x01, 0x02, 0xFE, 0xFF]);
     }
 
-    // T2-9 — edge case: malformed base64 content must fail cleanly, not silently
+    // Edge case: malformed base64 content must fail cleanly, not silently
     // write garbage or panic.
     #[tokio::test]
     async fn write_invalid_base64_returns_error() {
@@ -436,9 +435,9 @@ mod tests {
         assert!(!path.exists(), "no file should be written on decode failure");
     }
 
-    // T2-13 (S3-6) — normal case: sandboxed write to a relative path whose parent
-    // directories don't exist yet must create them, matching desktop/no-sandbox
-    // behaviour, instead of failing with INVALID_PATH.
+    // Normal case: sandboxed write to a relative path whose parent directories
+    // don't exist yet must create them, matching desktop/no-sandbox behaviour,
+    // instead of failing with INVALID_PATH.
     #[tokio::test]
     async fn sandboxed_write_creates_missing_nested_parent_dirs() {
         let sandbox_dir = tempfile::tempdir().unwrap();
@@ -450,6 +449,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
@@ -472,9 +472,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "hello");
     }
 
-    // T2-13 (S3-7) — edge case: a symlink inside the sandbox pointing outside it,
-    // used as an *intermediate* directory (the final path component under it does
-    // NOT exist), must be rejected by "exists" rather than falling back to a
+    // Edge case: a symlink inside the sandbox pointing outside it, used as an
+    // *intermediate* directory (the final path component under it does NOT
+    // exist), must be rejected by "exists" rather than falling back to a
     // lexical starts_with check that trusts the unresolved suffix.
     #[cfg(unix)]
     #[tokio::test]
@@ -492,12 +492,13 @@ mod tests {
         );
 
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
             // "nonexistent.txt" doesn't exist under the symlinked dir, so a full
-            // canonicalize(abs) fails and the old code fell back to a lexical
-            // starts_with(sandbox) check that incorrectly passed.
+            // canonicalize(abs) fails; the check must not fall back to a lexical
+            // starts_with(sandbox) check that trusts the unresolved suffix.
             input: json!({ "operation": "exists", "path": "escapelink/nonexistent.txt" }),
             context: ExecutionContext {
                 variables:    HashMap::new(),
@@ -512,9 +513,9 @@ mod tests {
         assert_eq!(result.error.unwrap().code, "PATH_OUTSIDE_SANDBOX");
     }
 
-    // T2-13 (S3-7) — normal case, guards against an overzealous fix: a genuinely
-    // missing file inside a real (non-symlinked) sandboxed directory must still
-    // return exists:false, not an error.
+    // Normal case, guards against over-rejection: a genuinely missing file
+    // inside a real (non-symlinked) sandboxed directory must still return
+    // exists:false, not an error.
     #[tokio::test]
     async fn sandboxed_exists_missing_file_in_real_dir_returns_false() {
         let sandbox_dir = tempfile::tempdir().unwrap();
@@ -527,6 +528,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),

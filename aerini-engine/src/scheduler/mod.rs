@@ -305,21 +305,8 @@ impl SchedulerDaemon {
         let trigger = match trigger {
             TriggerKind::Webhook { port, path, method, secret } => {
                 let effective_port = port_override.unwrap_or(port);
-                let ports = self.webhook_ports.lock().expect("scheduler webhook_ports mutex poisoned");
-                if let Some(holder_id) = ports.get(&effective_port) {
-                    if holder_id != workflow_id {
-                        let holder_name = self.db.scheduler_get(holder_id)
-                            .ok().flatten()
-                            .map(|r| r.workflow_name)
-                            .unwrap_or_else(|| holder_id.clone());
-                        return Err(SchedulerError::PortConflict(PortConflict {
-                            port: effective_port,
-                            held_by_workflow_id:   holder_id.clone(),
-                            held_by_workflow_name: holder_name,
-                        }));
-                    }
-                }
-                drop(ports);
+                check_webhook_port(&*self.db, &self.webhook_ports, workflow_id, effective_port)?;
+                probe_port_is_free(effective_port)?;
                 TriggerKind::Webhook { port: effective_port, path, method, secret }
             }
             other => other,
@@ -347,7 +334,15 @@ impl SchedulerDaemon {
         self.db.scheduler_upsert(&row)
             .map_err(|e| SchedulerError::Other { message: e })?;
 
-        self.arm_job_internal(workflow_id, Some(trigger), true, &tokio::runtime::Handle::current())
+        let armed = self.arm_job_internal(workflow_id, Some(trigger), true, &tokio::runtime::Handle::current());
+        if armed.is_err() {
+            // arm_job_internal re-checks the same port (covers its other caller,
+            // start()'s launch-time re-arm) and can still fail here even though
+            // the checks above just passed — don't leave the row claiming
+            // "active" for a job that never actually armed.
+            let _ = self.db.scheduler_set_status(workflow_id, "stopped");
+        }
+        armed
     }
 
     pub fn stop_job(&self, workflow_id: &str) -> Result<(), String> {
@@ -368,6 +363,10 @@ impl SchedulerDaemon {
 
     pub fn list_jobs(&self) -> Result<Vec<ScheduledJobRow>, String> {
         self.db.scheduler_list_all()
+    }
+
+    pub fn get_job(&self, workflow_id: &str) -> Result<Option<ScheduledJobRow>, String> {
+        self.db.scheduler_get(workflow_id)
     }
 
     pub fn list_jobs_paginated(&self, offset: usize, limit: usize) -> Result<(Vec<ScheduledJobRow>, usize), String> {
@@ -535,7 +534,7 @@ impl SchedulerDaemon {
         }
 
         if let TriggerKind::Webhook { port, .. } = &trigger {
-            ports_map.lock().expect("scheduler webhook_ports mutex poisoned").insert(*port, wf_id.clone());
+            claim_webhook_port(&*db, &ports_map, &wf_id, *port)?;
         }
 
         let exec_lock = {
@@ -626,6 +625,98 @@ impl SchedulerDaemon {
     }
 }
 
+/// Checks the webhook port registry for a conflict with a workflow other
+/// than `workflow_id`. A port already held by `workflow_id` itself is not a
+/// conflict — re-claiming its own port (e.g. on re-arm) is expected. Used by
+/// both `start_job` (interactive start) and `arm_job_internal` (covers both
+/// that same call and the launch-time re-arm path in `start()`), so a port
+/// conflict is caught the same way regardless of caller.
+fn check_webhook_port(
+    db:          &dyn SchedulerDb,
+    ports:       &Mutex<HashMap<u16, String>>,
+    workflow_id: &str,
+    port:        u16,
+) -> Result<(), SchedulerError> {
+    let ports = ports.lock().expect("scheduler webhook_ports mutex poisoned");
+    if let Some(holder_id) = ports.get(&port) {
+        if holder_id != workflow_id {
+            let holder_name = db.scheduler_get(holder_id)
+                .ok().flatten()
+                .map(|r| r.workflow_name)
+                .unwrap_or_else(|| holder_id.clone());
+            return Err(SchedulerError::PortConflict(PortConflict {
+                port,
+                held_by_workflow_id:   holder_id.clone(),
+                held_by_workflow_name: holder_name,
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// Real OS-level probe for whether `port` can actually be bound right now —
+/// not just absent from our own in-memory `webhook_ports` registry (see
+/// `check_webhook_port` above, which only catches a conflict between two of
+/// *our own* scheduled jobs). Two things `check_webhook_port` alone cannot
+/// see: an ad-hoc `run_workflow` execution of the Webhook node itself
+/// (aerini-engine/src/nodes/webhook.rs, tracked in its own process-global
+/// `ACTIVE_PORTS` set, entirely separate from this module), and any
+/// unrelated process on the machine.
+///
+/// Binding here and dropping immediately doesn't fully close the race —
+/// another process could still grab the port in the moment between this
+/// probe and `run_job_loop`'s real bind — but it converts the common case
+/// (the port is already held when Start is clicked) into an immediate,
+/// synchronous error the caller can act on right away, the same way a
+/// `check_webhook_port` conflict already is. `claim_webhook_port` below
+/// calls this while still holding the registry lock, closing that same gap
+/// against a second *scheduler-side* claim the way its own insert already
+/// does — only an external, non-scheduler process can still win the
+/// remaining, narrower race.
+fn probe_port_is_free(port: u16) -> Result<(), SchedulerError> {
+    std::net::TcpListener::bind(("127.0.0.1", port))
+        .map(|_| ())
+        .map_err(|e| SchedulerError::PortConflict(PortConflict {
+            port,
+            held_by_workflow_id:   String::new(),
+            held_by_workflow_name: format!("another process on this machine ({e})"),
+        }))
+}
+
+/// Checks the in-memory registry for a conflict with another workflow,
+/// probes that the port is actually free at the OS level, and claims it for
+/// `workflow_id` — all under one lock acquisition, so two concurrent arms
+/// targeting the same free port can't both pass the checks before either
+/// inserts. Used only by `arm_job_internal`, which always needs the insert
+/// to follow a clean check; `start_job`'s own earlier pre-check has no
+/// insert and keeps using `check_webhook_port` (plus its own, separately
+/// non-atomic `probe_port_is_free` call — a fail-fast UX hint doesn't need
+/// this function's stronger guarantee).
+fn claim_webhook_port(
+    db:          &dyn SchedulerDb,
+    ports:       &Mutex<HashMap<u16, String>>,
+    workflow_id: &str,
+    port:        u16,
+) -> Result<(), SchedulerError> {
+    let mut ports = ports.lock().expect("scheduler webhook_ports mutex poisoned");
+    if let Some(holder_id) = ports.get(&port) {
+        if holder_id != workflow_id {
+            let holder_name = db.scheduler_get(holder_id)
+                .ok().flatten()
+                .map(|r| r.workflow_name)
+                .unwrap_or_else(|| holder_id.clone());
+            return Err(SchedulerError::PortConflict(PortConflict {
+                port,
+                held_by_workflow_id:   holder_id.clone(),
+                held_by_workflow_name: holder_name,
+            }));
+        }
+    }
+    probe_port_is_free(port)?;
+    ports.insert(port, workflow_id.to_string());
+    Ok(())
+}
+
 pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
     let has_incoming: std::collections::HashSet<&str> = workflow.edges
         .iter()
@@ -680,5 +771,174 @@ pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
              Add a Schedule, Webhook, or Manual Trigger node as the first node.",
             other
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockDb {
+        rows: HashMap<String, ScheduledJobRow>,
+    }
+
+    impl MockDb {
+        fn with_row(workflow_id: &str, workflow_name: &str) -> Self {
+            let mut rows = HashMap::new();
+            rows.insert(workflow_id.to_string(), ScheduledJobRow {
+                workflow_id:   workflow_id.to_string(),
+                workflow_name: workflow_name.to_string(),
+                trigger_kind:  "{}".to_string(),
+                status:        "active".to_string(),
+                always_on:     false,
+                run_count:     0,
+                last_run_at:   None,
+                next_run_at:   None,
+                last_error:    None,
+                created_at:    "2026-01-01T00:00:00Z".to_string(),
+            });
+            MockDb { rows }
+        }
+    }
+
+    impl SchedulerDb for MockDb {
+        fn scheduler_list_active(&self) -> Result<Vec<ScheduledJobRow>, String> { Ok(vec![]) }
+        fn scheduler_list_all(&self) -> Result<Vec<ScheduledJobRow>, String> { Ok(vec![]) }
+        fn scheduler_upsert(&self, _row: &ScheduledJobRow) -> Result<(), String> { Ok(()) }
+        fn scheduler_update_run(
+            &self,
+            _workflow_id: &str,
+            _success:     bool,
+            _error_msg:   Option<&str>,
+            _next_run_at: Option<&str>,
+        ) -> Result<(), String> { Ok(()) }
+        fn scheduler_set_status(&self, _workflow_id: &str, _status: &str) -> Result<(), String> { Ok(()) }
+        fn scheduler_clear_next_run(&self, _workflow_id: &str) -> Result<(), String> { Ok(()) }
+        fn scheduler_update_next_run_at(&self, _workflow_id: &str, _next_run_at: &str) -> Result<(), String> { Ok(()) }
+        fn scheduler_get(&self, workflow_id: &str) -> Result<Option<ScheduledJobRow>, String> {
+            Ok(self.rows.get(workflow_id).cloned())
+        }
+        fn load_workflow_json(&self, _workflow_id: &str) -> Result<Option<String>, String> { Ok(None) }
+    }
+
+    #[test]
+    fn check_webhook_port_allows_free_port() {
+        let db = MockDb::with_row("wf-a", "Workflow A");
+        let ports: Mutex<HashMap<u16, String>> = Mutex::new(HashMap::new());
+        assert!(check_webhook_port(&db, &ports, "wf-a", 4000).is_ok());
+    }
+
+    #[test]
+    fn check_webhook_port_allows_reclaiming_own_port() {
+        let db = MockDb::with_row("wf-a", "Workflow A");
+        let mut map = HashMap::new();
+        map.insert(4000u16, "wf-a".to_string());
+        let ports = Mutex::new(map);
+        assert!(check_webhook_port(&db, &ports, "wf-a", 4000).is_ok());
+    }
+
+    #[test]
+    fn check_webhook_port_rejects_conflict_with_other_workflow() {
+        let db = MockDb::with_row("wf-b", "Workflow B");
+        let mut map = HashMap::new();
+        map.insert(4000u16, "wf-b".to_string());
+        let ports = Mutex::new(map);
+        match check_webhook_port(&db, &ports, "wf-a", 4000) {
+            Err(SchedulerError::PortConflict(conflict)) => {
+                assert_eq!(conflict.port, 4000);
+                assert_eq!(conflict.held_by_workflow_id, "wf-b");
+                assert_eq!(conflict.held_by_workflow_name, "Workflow B");
+            }
+            other => panic!("expected PortConflict, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn claim_webhook_port_claims_free_port_and_updates_registry() {
+        // Real bind now happens inside claim_webhook_port (the OS-level
+        // probe) — get a port the OS confirms is free right now rather than
+        // a hardcoded number, so this doesn't flake if something else on the
+        // machine happens to hold it.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("failed to bind an ephemeral port for the test")
+            .local_addr().expect("failed to read local_addr").port();
+        let db = MockDb::with_row("wf-a", "Workflow A");
+        let ports: Mutex<HashMap<u16, String>> = Mutex::new(HashMap::new());
+        assert!(claim_webhook_port(&db, &ports, "wf-a", port).is_ok());
+        assert_eq!(
+            ports.lock().unwrap().get(&port),
+            Some(&"wf-a".to_string()),
+            "a successful claim must actually insert — this only holds if the check \
+             and the insert happen under the same lock acquisition"
+        );
+    }
+
+    #[test]
+    fn claim_webhook_port_conflict_does_not_insert() {
+        let db = MockDb::with_row("wf-b", "Workflow B");
+        let mut map = HashMap::new();
+        map.insert(4000u16, "wf-b".to_string());
+        let ports = Mutex::new(map);
+        match claim_webhook_port(&db, &ports, "wf-a", 4000) {
+            Err(SchedulerError::PortConflict(conflict)) => {
+                assert_eq!(conflict.held_by_workflow_id, "wf-b");
+            }
+            other => panic!("expected PortConflict, got {:?}", other),
+        }
+        assert_eq!(
+            ports.lock().unwrap().get(&4000),
+            Some(&"wf-b".to_string()),
+            "a rejected claim must not overwrite the existing holder"
+        );
+    }
+
+    /// Normal case: a port nothing is listening on passes the probe. Uses
+    /// port 0 (OS picks a free one) rather than a hardcoded port number —
+    /// this test suite may run in parallel with others on the same machine.
+    #[test]
+    fn probe_port_is_free_accepts_a_genuinely_free_port() {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("failed to bind an ephemeral port for the test")
+            .local_addr().expect("failed to read local_addr").port();
+        assert!(probe_port_is_free(port).is_ok());
+    }
+
+    /// Edge case check_webhook_port alone can never catch: a port genuinely
+    /// held by a real listener (standing in for the ad-hoc Run path's own
+    /// listener, or any other process) — not just one recorded in our own
+    /// in-memory `webhook_ports` map.
+    #[test]
+    fn probe_port_is_free_rejects_a_port_held_by_a_real_listener() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("failed to bind an ephemeral port for the test");
+        let port = listener.local_addr().expect("failed to read local_addr").port();
+
+        match probe_port_is_free(port) {
+            Err(SchedulerError::PortConflict(conflict)) => assert_eq!(conflict.port, port),
+            other => panic!("expected PortConflict for a port a live listener already holds, got {:?}", other),
+        }
+    }
+
+    /// Proves the two merged mechanisms are actually wired together: a port
+    /// absent from the in-memory registry (so `check_webhook_port` alone
+    /// would pass it) but genuinely held by a real listener must still be
+    /// rejected by `claim_webhook_port`, and rejection must not insert.
+    #[test]
+    fn claim_webhook_port_rejects_when_os_level_probe_fails_and_does_not_insert() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("failed to bind an ephemeral port for the test");
+        let port = listener.local_addr().expect("failed to read local_addr").port();
+
+        let db = MockDb::with_row("wf-a", "Workflow A");
+        let ports: Mutex<HashMap<u16, String>> = Mutex::new(HashMap::new());
+        match claim_webhook_port(&db, &ports, "wf-a", port) {
+            Err(SchedulerError::PortConflict(conflict)) => assert_eq!(conflict.port, port),
+            other => panic!("expected PortConflict for a port a live listener already holds, got {:?}", other),
+        }
+        assert_eq!(
+            ports.lock().unwrap().get(&port),
+            None,
+            "a claim rejected by the OS-level probe must not insert into the registry"
+        );
     }
 }

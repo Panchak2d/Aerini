@@ -46,5 +46,9 @@ base64 = "0.22"
 # Structured logging — used for plugin_dir warnings in setup
 tracing = "0.1"
 
+# HTTP client for the manual "Check for Updates" GitHub Releases lookup (About section)
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+url     = "2"
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

@@ -52,8 +52,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # src-tauri excluded: requires Tauri-specific system GUI deps not available on ubuntu-latest.
-      # Build and smoke-test locally with: npm run build
+      # src-tauri excluded here: this job's runner has no Tauri GUI deps installed.
+      # It's covered by the tauri-build job below instead.
       - name: Build
         run: cargo build -p aerini-engine -p aerini-server --locked
         env:
@@ -90,6 +90,9 @@ jobs:
       - name: npm audit (high severity)
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Frontend tests (vitest)
+        run: npm test
+
       - name: Check dist/ is not stale
         # Rebuilds the Vite frontend bundle and fails if dist/ differs from what is committed.
         # Uses `vite:build` (not `build`) because the `build` script invokes `tauri build`,
@@ -98,3 +101,75 @@ jobs:
         run: |
           npm run vite:build
           git diff --exit-code dist/ || (echo "ERROR: dist/ is stale — run 'npm run vite:build' and commit the result" && exit 1)
+
+  tauri-build:
+    name: Build desktop app (src-tauri)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+          - platform: ubuntu-22.04-arm
+          - platform: windows-latest
+          - platform: macos-latest
+    runs-on: ${{ matrix.platform }}
+    env:
+      HUSKY: '0'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        if: startsWith(matrix.platform, 'ubuntu')
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - name: Add swap space
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+      # GTK/WebKit bundling deps, same list release.yml uses for its ubuntu-22.04 leg.
+      # ubuntu-22.04-arm carries the same package set in the arm64 partner image.
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tauri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tauri-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Full `tauri build` (not vite:build) — this is the check the desktop binary
+      # itself, not just the frontend bundle, actually compiles and packages on
+      # every platform it ships for. Unsigned, same as release.yml; nothing here
+      # is uploaded or published.
+      - name: Build desktop app
+        run: npm run build

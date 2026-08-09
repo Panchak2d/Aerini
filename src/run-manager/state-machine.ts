@@ -1,9 +1,9 @@
 import type { WorkflowResult } from "../ipc/workflow";
 
-// Pure run-state container — extracted from RunManager (Patch 19) so the
-// "what is the run doing / what did it last produce" state is isolated from
-// DOM, Canvas, and Tauri orchestration, which lives in stream-handler.ts.
-// No DOM access. No Tauri calls. No Canvas reference. Fully testable in isolation.
+// Pure run-state container — isolates "what is the run doing / what did it
+// last produce" state from DOM, Canvas, and Tauri orchestration, which lives
+// in stream-handler.ts. No DOM access. No Tauri calls. No Canvas reference.
+// Fully testable in isolation.
 //
 // Purity verified: no document., no window., no Tauri imports.
 // Only external dependency is the WorkflowResult type from ../ipc/workflow —
@@ -21,7 +21,7 @@ export class RunStateMachine {
 
   get isRunning(): boolean { return this._isRunning; }
   // The run_id of the run currently in flight (main run or single-node run —
-  // both go through start()/stop() now, so this is always the right target
+  // both go through start()/stop(), so this is always the right target
   // for cancel_run regardless of which entry point started it). null when idle.
   get activeRunId(): string | null { return this._activeRunId; }
   get lastResult(): WorkflowResult | null { return this._lastResult; }
@@ -40,10 +40,10 @@ export class RunStateMachine {
   }
 
   // Updates only id/name, leaving parallelExecution/maxConcurrentNodes as
-  // previously set. Mirrors the direct two-field assignment that handleRun()
-  // and handleRunSingleNode() used to perform — calling setCurrentWorkflow()
-  // there would silently reset parallelExecution/maxConcurrentNodes to their
-  // default parameter values (false / 8), which is a behavior change.
+  // previously set. Deliberately distinct from setCurrentWorkflow(): calling
+  // that here instead would silently reset parallelExecution/
+  // maxConcurrentNodes to their default parameter values (false / 8) on
+  // every handleRun()/handleRunSingleNode() call.
   setWorkflowIdentity(id: string, name: string): void {
     this._currentWorkflowId   = id;
     this._currentWorkflowName = name;
@@ -56,8 +56,9 @@ export class RunStateMachine {
 
   requestCancel(): void { this._cancelRequested = true; }
 
-  // Returns true (and clears the flag) if a cancel was requested — matches
-  // the original check-then-reset pattern previously inlined in handleRun().
+  // Returns true (and clears the flag) if a cancel was requested — a
+  // check-then-reset pattern; callers use this to discard a run's result
+  // silently once Stop has already reset the UI.
   consumeCancelRequest(): boolean {
     const wasRequested = this._cancelRequested;
     this._cancelRequested = false;

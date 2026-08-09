@@ -8,7 +8,7 @@ import {
   renderSummaryTab, renderResultsTab, renderErrorsTab,
   renderLogsView, renderDebugView,
   syntaxHighlight, extractPreview,
-  wireCopyButtons,
+  wireCopyButtons, ICON_CIRCLE_ALERT,
 } from "../output-renderer";
 import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel } from "../run-history";
 import { setWorkflowRunning } from "../workflow-manager";
@@ -38,6 +38,21 @@ export class RunManager {
 
   onRunStateChange: ((running: boolean) => void) | null = null;
   onRunResult: ((success: boolean) => void) | null = null;
+  // Direct assignment to onRunStateChange only supports one registrant — a
+  // second `runManager.onRunStateChange = ...` silently replaces the first
+  // (this bit app.ts's status-hint updater, clobbered by toolbar.ts's
+  // Run/Stop button toggle since bindToolbar() runs later in app.ts's init
+  // order). Additional consumers (e.g. ChatPanel) must use this instead.
+  private runStateListeners: Array<(running: boolean) => void> = [];
+
+  addRunStateListener(fn: (running: boolean) => void): void {
+    this.runStateListeners.push(fn);
+  }
+
+  private emitRunState(running: boolean): void {
+    this.onRunStateChange?.(running);
+    for (const fn of this.runStateListeners) fn(running);
+  }
 
   get isRunning(): boolean { return this.state.isRunning; }
 
@@ -131,6 +146,7 @@ export class RunManager {
     content.innerHTML = `
       <div class="error-detail-card">
         <div class="error-detail-header">
+          ${ICON_CIRCLE_ALERT}
           <span class="error-detail-badge">FAILED</span>
           <span class="error-detail-name">${escapeHtml(nodeName)}</span>
         </div>
@@ -257,9 +273,8 @@ export class RunManager {
   }
 
   // Force-reset the run button. Called externally (e.g. on handleNew, or Stop click).
-  // Now also correctly stops a single-node test run — handleRunSingleNode
-  // shares this same isRunning/activeRunId pair, so this is no longer a
-  // silent no-op during one.
+  // Also stops a single-node test run — handleRunSingleNode shares this same
+  // isRunning/activeRunId pair, so forceReset's guard sees it as an active run.
   forceReset(): void {
     if (!this.state.isRunning) return;
     const runId = this.state.activeRunId;
@@ -269,7 +284,7 @@ export class RunManager {
     const panelBtn = document.getElementById("btn-run-panel") as HTMLButtonElement | null;
     if (panelBtn) { panelBtn.disabled = false; panelBtn.textContent = "Run Workflow"; }
     this.state.stop();
-    this.onRunStateChange?.(false);
+    this.emitRunState(false);
     this.onStatus("Run cancelled");
   }
 
@@ -284,16 +299,15 @@ export class RunManager {
       return;
     }
 
-    // Generated up front (was generated later, only for the history record) —
-    // this is now also the run's identity for cancellation:
-    // the same id is passed to runWorkflow() below and to cancelRun() from
-    // forceReset() or the timeout path, so Stop/timeout always targets this
-    // specific run rather than a shared global slot.
+    // runId doubles as this run's identity for cancellation: the same id is
+    // passed to runWorkflow() below and to cancelRun() from forceReset() or
+    // the timeout path, so Stop/timeout always targets this specific run
+    // rather than a shared global slot.
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
     const panelBtn = document.getElementById("btn-run-panel") as HTMLButtonElement | null;
     this.state.start(runId);
-    this.onRunStateChange?.(true);
+    this.emitRunState(true);
     setWorkflowRunning(currentId, true);   // mark in sidebar
     if (panelBtn) { panelBtn.disabled = true; panelBtn.textContent = "Running…"; }
 
@@ -406,16 +420,16 @@ export class RunManager {
       // does this in forceReset(), this only covers the timeout path.
       if (timedOut) cancelRun(runId).catch(() => {});
       this.onRunResult?.(false);
-      // run_workflow can now reject with the same already_running JSON shape
-      // the scheduler uses (Batch V's per-workflow exec-lock) if this exact
-      // workflow is somehow already running from another invocation — show
-      // the friendly message instead of the raw {"error_kind":...} string.
+      // run_workflow rejects with the same already_running JSON shape the
+      // scheduler uses (per-workflow exec-lock) if this exact workflow is
+      // somehow already running from another invocation — show the friendly
+      // message instead of the raw {"error_kind":...} string.
       const parsed = parseSchedulerError(String(e));
       const errMsg = parsed.error_kind === "already_running"
         ? `"${currentName}" is already running from another action. Wait for it to finish, then try again.`
         : String(e);
       content.innerHTML = `<div class="run-error-card">
-        <div class="run-error-label">Execution error</div>
+        <div class="run-error-label">${ICON_CIRCLE_ALERT}Execution error</div>
         <div class="run-error-msg">${escapeHtml(errMsg)}</div>
         <button class="run-error-copy" id="run-catch-copy-btn">Copy error</button>
       </div>`;
@@ -439,10 +453,9 @@ export class RunManager {
 
     // shares handleRun's own isRunning guard — checked synchronously,
     // before any await, so this and handleRun() (or two rapid single-node
-    // runs) can't both pass the check before either sets it. This is also
-    // what makes Stop (forceReset) work for a single-node run: previously
-    // isRunning was never set here at all, so forceReset's own guard saw
-    // "not running" and did nothing.
+    // runs) can't both pass the check before either sets it. Setting
+    // isRunning here is also what makes Stop (forceReset) work for a
+    // single-node run — forceReset only acts when isRunning is true.
     if (this.state.isRunning) {
       this.onToast("A workflow is already running. Wait for it to finish.", "info");
       return;
@@ -451,7 +464,7 @@ export class RunManager {
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     this.state.setWorkflowIdentity(currentId, currentName);
     this.state.start(runId);
-    this.onRunStateChange?.(true);
+    this.emitRunState(true);
     setWorkflowRunning(currentId, true);
 
     // Walk connectors backwards to collect all ancestor nodes
@@ -506,8 +519,8 @@ export class RunManager {
     if (tabsEl)  tabsEl.innerHTML  = `<span class="drawer-tab tab-neutral active">Running…</span>`;
     if (content) content.innerHTML = `<div class="run-spinner-wrap"><div class="run-spinner"></div><div class="run-spinner-label">Running node…</div></div>`;
 
-    // Same race-against-timeout shape as handleRun() (S11-3's own recommended
-    // fix), scaled down for a single-node test (SINGLE_NODE_TIMEOUT_MS).
+    // Same race-against-timeout shape as handleRun(), scaled down for a
+    // single-node test (SINGLE_NODE_TIMEOUT_MS).
     let timedOut = false;
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => {
@@ -758,7 +771,7 @@ export class RunManager {
 
   private resetBtns(p: HTMLButtonElement | null): void {
     this.state.stop();
-    this.onRunStateChange?.(false);
+    this.emitRunState(false);
     setWorkflowRunning(this.state.currentWorkflowId, false);
     if (p) { p.disabled = false; p.textContent = "Run Workflow"; }
   }
@@ -822,10 +835,8 @@ export class RunManager {
       const err = parseSchedulerError(String(rawError));
       switch (err.error_kind) {
         case "port_conflict":
-          // Re-thrown for the caller to handle. NOTE: the only current
-          // caller is toolbar.ts's "Run in background" handler, which today
-          // swallows this in an empty catch with no modal — that's a toolbar.ts
-          // bug, out of this file's scope; flagged, not fixed, here.
+          // Re-thrown for the caller to handle — the response differs by
+          // caller (toolbar.ts's "Run in background" handler shows a toast).
           throw rawError;
         case "already_running":
           this.onToast(`"${name}" is already running in the background.`, "info");
@@ -935,7 +946,7 @@ export function updateBgJobStoreFromEvent(evt: {
     case "running":  status = "running"; break;
     case "done":     status = "done";    break;
     case "error":    status = "failed";  break;
-    // Fix #8: "stopped" is a user-initiated stop — not a failure. Map to its own
+    // "stopped" is a user-initiated stop — not a failure. Map to its own
     // status so it renders with a neutral dot instead of a red failure dot.
     case "stopped":  status = "stopped"; break;
     // "waiting" = between runs — show as running so the dot stays green/pulsing

@@ -305,6 +305,9 @@ impl WorkflowExecutor {
                     }
                 }
             } else {
+                let is_cancelled = output.error.as_ref()
+                    .map(|e| e.code == super::CANCEL_ERROR_CODE)
+                    .unwrap_or(false);
                 let err_msg = output
                     .error
                     .as_ref()
@@ -313,6 +316,10 @@ impl WorkflowExecutor {
 
                 state.write().await.mark_failed(node_id, output, actual_attempts);
                 self.emit_node_status(&workflow.id, node_id, "error");
+
+                if is_cancelled {
+                    return Err(EngineError::ExecutionCancelled);
+                }
 
                 let before = active_nodes.len();
                 let (_, _) = self.activate_successors(node_id, "on_error", &workflow, &mut active_nodes);

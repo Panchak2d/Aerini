@@ -275,7 +275,9 @@ pub(super) async fn run_job_loop(
                 // (unaffected by this wrapper once detached).
                 if shutting_down.load(Ordering::SeqCst) {
                     use tokio::io::AsyncWriteExt;
-                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
+                    let _ = stream.write_all(
+                        format!("HTTP/1.1 503 Service Unavailable\r\n{CORS_HEADER_LINES}\r\n").as_bytes()
+                    ).await;
                     conn_tasks.detach_all();
                     break;
                 }
@@ -313,7 +315,7 @@ pub(super) async fn run_job_loop(
                         Err(_) => {
                             use tokio::io::AsyncWriteExt;
                             let _ = stream.write_all(
-                                b"HTTP/1.1 408 Request Timeout\r\n\r\n"
+                                format!("HTTP/1.1 408 Request Timeout\r\n{CORS_HEADER_LINES}\r\n").as_bytes()
                             ).await;
                             return;
                         }
@@ -322,7 +324,7 @@ pub(super) async fn run_job_loop(
                     {
                         use tokio::io::AsyncWriteExt;
                         let _ = stream.write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+                            format!("HTTP/1.1 200 OK\r\n{CORS_HEADER_LINES}Content-Length: 2\r\n\r\nOK").as_bytes()
                         ).await;
                     }
 
@@ -896,6 +898,19 @@ async fn read_line_capped(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Header lines shared by every webhook HTTP response — success, preflight,
+/// and error alike — each already terminated with its own `\r\n`. See
+/// `with_cors` in `nodes::webhook` for why the origin is a wildcard rather
+/// than an echoed `Origin` header: this endpoint accepts arbitrary
+/// third-party callers, not just the app's own UI.
+const CORS_HEADER_LINES: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: content-type, x-webhook-secret, x-webhook-timestamp\r\n";
+
+/// Full response for an OPTIONS preflight — see the `OPTIONS` check in
+/// `parse_http_request`.
+fn cors_preflight_response() -> String {
+    format!("HTTP/1.1 204 No Content\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n")
+}
+
 async fn parse_http_request(
     stream:          &mut tokio::net::TcpStream,
     expected_path:   &str,
@@ -918,18 +933,29 @@ async fn parse_http_request(
 
     let req_line = match read_line_capped(&mut reader, MAX_LINE_BYTES).await {
         Ok(Some(line)) => line,
-        _ => return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string()),
+        _ => return Err(format!("HTTP/1.1 400 Bad Request\r\n{CORS_HEADER_LINES}\r\n")),
     };
 
     let parts: Vec<&str> = req_line.split_whitespace().collect();
     let req_method = parts.first().copied().unwrap_or("GET");
     let req_path   = parts.get(1).copied().unwrap_or("/");
 
+    // A browser preflights any cross-origin request whose Content-Type isn't
+    // form-encoded (the desktop Chat panel sends application/json) with an
+    // OPTIONS request before it will send the real one. Answered here,
+    // ahead of the method/path checks below, and via the same `Err` path
+    // those checks use — the caller (run_job_loop's accept loop) writes it
+    // straight back and keeps waiting, so a preflight never counts as the
+    // request this listener is waiting for.
+    if req_method == "OPTIONS" {
+        return Err(cors_preflight_response());
+    }
+
     if expected_method != "ANY" && req_method != expected_method {
-        return Err("HTTP/1.1 405 Method Not Allowed\r\n\r\n".to_string());
+        return Err(format!("HTTP/1.1 405 Method Not Allowed\r\n{CORS_HEADER_LINES}\r\n"));
     }
     if req_path != expected_path {
-        return Err("HTTP/1.1 404 Not Found\r\n\r\n".to_string());
+        return Err(format!("HTTP/1.1 404 Not Found\r\n{CORS_HEADER_LINES}\r\n"));
     }
 
     let mut headers = serde_json::Map::new();
@@ -960,7 +986,7 @@ async fn parse_http_request(
             .unwrap_or("");
         let secrets_match = provided.as_bytes().ct_eq(secret.as_bytes()).unwrap_u8() == 1;
         if !secrets_match {
-            return Err("HTTP/1.1 401 Unauthorized\r\n\r\n".to_string());
+            return Err(format!("HTTP/1.1 401 Unauthorized\r\n{CORS_HEADER_LINES}\r\n"));
         }
     }
 
@@ -971,18 +997,18 @@ async fn parse_http_request(
     let content_length = match content_length {
         Some(n) => n,
         None if body_methods => {
-            return Err("HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\n\r\n".to_string());
+            return Err(format!("HTTP/1.1 411 Length Required\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n"));
         }
         None => 0,
     };
 
     if content_length > MAX_BODY_BYTES {
-        return Err("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n".to_string());
+        return Err(format!("HTTP/1.1 413 Payload Too Large\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n"));
     }
 
     let mut body_bytes = vec![0u8; content_length];
     if content_length > 0 && reader.read_exact(&mut body_bytes).await.is_err() {
-        return Err("HTTP/1.1 400 Bad Request\r\n\r\n".to_string());
+        return Err(format!("HTTP/1.1 400 Bad Request\r\n{CORS_HEADER_LINES}\r\n"));
     }
     let body_str   = String::from_utf8_lossy(&body_bytes).to_string();
     let body_value: Value = serde_json::from_str(&body_str)
@@ -1204,6 +1230,96 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// A browser (including the desktop Chat panel's own webview) preflights
+    /// a JSON POST with an OPTIONS request first. This asserts that
+    /// preflight (a) gets CORS headers back so the browser will actually
+    /// send the real request, and (b) does not itself get treated as the
+    /// request the listener is waiting for — the workflow must still be
+    /// waiting, untriggered, afterward, and the real POST that follows must
+    /// still complete normally.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduler_webhook_options_preflight_gets_cors_and_does_not_trigger_run() {
+        const PORT: u16 = 38466;
+        let data_dir = temp_data_dir("cors-repro");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        let workflow = webhook_repro_workflow(PORT);
+        wf_db.save(&workflow).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry, &data_dir, None);
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        daemon.start_job(&workflow.id, Some(PORT), Some(false))
+            .expect("start_job failed to arm the webhook listener");
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/hook", PORT);
+
+        // Listener binding happens in a just-spawned background task — retry
+        // briefly instead of guessing a fixed sleep duration (same pattern
+        // as the POST test above).
+        let mut preflight = None;
+        for _ in 0..40 {
+            match client.request(reqwest::Method::OPTIONS, &url).send().await {
+                Ok(r) => { preflight = Some(r); break; }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+        let preflight = preflight.expect("webhook listener never accepted the OPTIONS preflight");
+        assert!(preflight.status().is_success(), "preflight response was not success: {}", preflight.status());
+        let allow_origin = preflight.headers().get("access-control-allow-origin")
+            .expect("preflight response missing access-control-allow-origin");
+        assert_eq!(allow_origin, "*");
+
+        // The preflight must not have consumed the wait: give a real run
+        // a brief window to (wrongly) appear, and confirm it doesn't.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        {
+            let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+            assert!(
+                !events.iter().any(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null()),
+                "OPTIONS preflight incorrectly triggered a workflow run"
+            );
+        }
+
+        // The listener must still be waiting for the real request afterward.
+        let body = json!({ "hello": "world" });
+        let response = client.post(&url).json(&body).send().await
+            .expect("real POST after preflight failed to reach the still-waiting listener");
+        assert!(response.status().is_success(), "post-preflight POST was not success: {}", response.status());
+
+        let mut last_result: Option<Value> = None;
+        for _ in 0..60 {
+            {
+                let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+                if let Some((_, payload)) = events.iter().rev()
+                    .find(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null())
+                {
+                    last_result = Some(payload.clone());
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let event = last_result.expect("workflow run never produced a scheduler-status event after the real POST");
+        assert_eq!(event["last_result"]["success"], true, "workflow run did not succeed: {:?}", event["last_result"]);
+
+        daemon.stop_job(&workflow.id).ok();
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// Builds a `Schedule (once, already-due) -> Database (sqlite)` workflow.
     /// The database node deliberately runs a `query` containing a
     /// single-quoted literal with `allow_raw_sql: true`, the exact
@@ -1391,7 +1507,7 @@ mod integration_tests {
         fn input_schema(&self) -> Value { json!({}) }
         fn output_schema(&self) -> Value { json!({}) }
         async fn execute(&self, _input: crate::model::NodeInput) -> crate::model::NodeOutput {
-            panic!("simulated node panic for scheduler-panic-isolation-bug.md regression test");
+            panic!("simulated node panic for panic-isolation test");
         }
     }
 

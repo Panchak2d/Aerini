@@ -19,6 +19,9 @@ vi.mock("../ipc/workflow", () => ({
 import { ChatPanel } from "../panels/ChatPanel";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
+import type { RunManager } from "../run-manager";
+
+const runManagerStub = { addRunStateListener: vi.fn() } as unknown as RunManager;
 
 const CHAT_PANEL_HTML = `
   <div id="chat-panel">
@@ -51,7 +54,7 @@ function makePanel(): ChatPanel {
   document.body.innerHTML = CHAT_PANEL_HTML;
   const canvas = { nodes: new Map() } as unknown as Canvas;
   const wfManager = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
-  return new ChatPanel(canvas, wfManager, vi.fn());
+  return new ChatPanel(canvas, wfManager, vi.fn(), runManagerStub);
 }
 
 beforeEach(() => {
@@ -78,7 +81,7 @@ describe("ChatPanel.deleteSession, orphaned AI-memory rows", () => {
     document.body.innerHTML = CHAT_PANEL_HTML;
     const canvas = { nodes: new Map() } as unknown as Canvas;
     const wfManager = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
-    const panel = new ChatPanel(canvas, wfManager, toastFn);
+    const panel = new ChatPanel(canvas, wfManager, toastFn, runManagerStub);
     const p = panel as unknown as { store: { sessions: unknown[]; activeId: string }; deleteSession(id: string): Promise<void> };
     p.store = { sessions: [makeSession("s1", "A"), makeSession("s2", "B")], activeId: "s1" };
 

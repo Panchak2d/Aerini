@@ -9,7 +9,7 @@ This guide covers Aerini's security model end to end — what it protects you fr
 If you just want to know the essentials before reading further:
 
 - Credentials are encrypted with AES-256-GCM. The encryption key is stored in your OS keychain (not in the same file as the credentials).
-- Workflows, run history, and credentials never leave your machine in desktop mode. Aerini makes no telemetry calls, analytics calls, or update pings. The one fixed exception: the desktop UI loads the Inter typeface from Google Fonts over HTTPS at startup. Beyond that, the only outbound connections are what your workflow nodes explicitly do.
+- Workflows, run history, and credentials never leave your machine in desktop mode. Aerini makes no telemetry calls, no analytics calls, and no automatic update pings. Two fixed exceptions: the desktop UI loads the Inter typeface from Google Fonts over HTTPS at startup, and Settings → About has a "Check for Updates" button that queries GitHub's public releases API only when you click it. Beyond that, the only outbound connections are what your workflow nodes explicitly do.
 - Shell Command and Code (JS) nodes can execute arbitrary code on your machine. Aerini warns you before running a workflow containing them.
 - The HTTP node blocks requests to internal/private IP addresses to prevent SSRF attacks — but this protection has a known DNS-timing gap that only an egress firewall can fully close.
 - Server deployments need additional hardening. There's a checklist at the end of [Server Deployment](server-deploy.md).
@@ -48,9 +48,11 @@ The desktop app is designed for a single user on their own machine. Its security
 - Run history and logs
 - Node outputs
 
-The only outbound traffic is from your workflow nodes — HTTP requests, Slack messages, and similar actions you explicitly configured. Aerini itself has no telemetry, no analytics, no update pings, and no license checks.
+The only outbound traffic is from your workflow nodes — HTTP requests, Slack messages, and similar actions you explicitly configured. Aerini itself has no telemetry, no analytics, no automatic update pings, and no license checks.
 
-**Exception: the Inter font.** The desktop UI's stylesheet (`src/styles/main.css`) imports the Inter typeface from Google Fonts (`fonts.googleapis.com`) over HTTPS when the UI loads. This is a fixed, code-level exception — it fires regardless of which workflows you run, sends only a font request (no workflow data, credentials, or identifying information), and is not configurable. It's the only built-in outbound connection beyond what your workflow nodes themselves make.
+**Exception: the Inter font.** The desktop UI's stylesheet (`src/styles/main.css`) imports the Inter typeface from Google Fonts (`fonts.googleapis.com`) over HTTPS when the UI loads. This is a fixed, code-level exception — it fires regardless of which workflows you run, sends only a font request (no workflow data, credentials, or identifying information), and is not configurable.
+
+**Exception: the update check.** Settings → About has a "Check for Updates" button. Clicking it sends a single unauthenticated request to GitHub's public releases API (`api.github.com/repos/Panchak2d/aerini/releases/latest`) to compare your version against the latest tag, and opens the release page in your browser if you follow the link. It never fires on its own — nothing schedules, polls, or runs it at launch — and it sends nothing beyond the HTTP request itself (no workflow data, credentials, or telemetry). It does not download or install anything; you get a link, not an auto-update.
 
 **A note on dev mode:** running `npm run dev` without Tauri opens Aerini in your browser. In that mode, execution is fully disabled — the Run button does nothing. No credentials, scheduling, Code (JS), or Shell Command nodes are available. This mode is for frontend development only.
 

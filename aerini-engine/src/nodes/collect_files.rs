@@ -8,7 +8,7 @@
 // After expression resolution by the executor, source_expr is a JSON string
 // containing a serialized media contract object or files array.
 //
-// Output: standard media contract (PLAN.md DATA CONTRACT)
+// Output: standard media contract
 //   { "files": [...merged], "count": N, "source": "collect_files" }
 //
 // Filename collision: files from source N that collide with earlier filenames
@@ -24,12 +24,12 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
-/// Caps applied while merging files across sources: `merged_files`
-/// previously grew without bound, and each entry typically embeds a file's
-/// full contents inline as base64. Both caps are checked as files are
-/// collected — the node fails fast rather than silently truncating the
-/// batch (a truncated file set handed to a downstream Save-to-Folder/S3
-/// node would look like a successful, complete run).
+/// Caps applied while merging files across sources: `merged_files` must stay
+/// bounded since each entry typically embeds a file's full contents inline
+/// as base64. Both caps are checked as files are collected — the node fails
+/// fast rather than silently truncating the batch (a truncated file set
+/// handed to a downstream Save-to-Folder/S3 node would look like a
+/// successful, complete run).
 const MAX_MERGED_FILES: usize = 10_000;
 const MAX_MERGED_BYTES: usize = 10 * 1024 * 1024;
 
@@ -269,6 +269,7 @@ mod tests {
 
     fn make_input(sources_json: Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -294,6 +295,7 @@ mod tests {
     #[tokio::test]
     async fn no_sources_returns_empty_files() {
         let input = NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),

@@ -36,6 +36,9 @@ vi.mock("../ipc/chat", () => ({
 import { ChatPanel } from "../panels/ChatPanel";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
+import type { RunManager } from "../run-manager";
+
+const runManagerStub = { addRunStateListener: vi.fn() } as unknown as RunManager;
 
 const CHAT_PANEL_HTML = `
   <div id="chat-panel">
@@ -77,7 +80,7 @@ function makePanel(): PanelInternals {
   document.body.innerHTML = CHAT_PANEL_HTML;
   const canvas = { nodes: new Map() } as unknown as Canvas;
   const wfManager = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
-  return new ChatPanel(canvas, wfManager, vi.fn()) as unknown as PanelInternals;
+  return new ChatPanel(canvas, wfManager, vi.fn(), runManagerStub) as unknown as PanelInternals;
 }
 
 beforeEach(() => {

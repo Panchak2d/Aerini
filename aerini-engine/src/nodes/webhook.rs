@@ -11,6 +11,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use blake3;
 use tokio::sync::{oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 use once_cell::sync::Lazy;
 use dashmap::DashSet;
 
@@ -177,7 +178,7 @@ impl Node for WebhookNode {
         let method             = input.input["method"].as_str().unwrap_or("ANY").to_uppercase();
         let secret             = input.input["secret"].as_str().unwrap_or("").to_string();
         let validate_timestamp = input.input["validate_timestamp"].as_bool().unwrap_or(false);
-        let timeout_secs       = input.input["timeout_secs"].as_u64().unwrap_or(60);
+        let timeout_secs       = clamp_timeout_secs(input.input["timeout_secs"].as_u64().unwrap_or(60));
 
         let (tx, rx) = oneshot::channel::<Result<Value, String>>();
 
@@ -207,82 +208,25 @@ impl Node for WebhookNode {
         let port_for_log = port;
         let path_for_log = path;
 
-        tokio::spawn(async move {
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_secs(timeout_secs);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(timeout_secs);
 
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    let mut st = state.lock().await;
-                    if let Some(s) = st.tx.take() {
-                        let _ = s.send(Err("TIMEOUT".into()));
-                    }
-                    return;
-                }
-
-                let accept_result =
-                    match tokio::time::timeout(remaining, listener.accept()).await {
-                        Err(_) => {
-                            let mut st = state.lock().await;
-                            if let Some(s) = st.tx.take() {
-                                let _ = s.send(Err("TIMEOUT".into()));
-                            }
-                            return;
-                        }
-                        Ok(r) => r,
-                    };
-
-                let (stream, _) = match accept_result {
-                    Err(e) => {
-                        let mut st = state.lock().await;
-                        if let Some(s) = st.tx.take() {
-                            let _ = s.send(Err(e.to_string()));
-                        }
-                        return;
-                    }
-                    Ok(s) => s,
-                };
-
-                // Per-connection read budget: capped at global deadline and 30s hard max.
-                // Prevents a stalled sender from blocking the loop after a connection is accepted.
-                let per_conn = deadline
-                    .saturating_duration_since(std::time::Instant::now())
-                    .min(std::time::Duration::from_secs(30));
-
-                let io      = TokioIo::new(stream);
-                let state_c = Arc::clone(&state);
-
-                // serve_connection drives the full HTTP/1.1 request/response exchange.
-                // Chunked encoding, pipelining, large headers, and malformed requests are
-                // all handled by hyper's parser — no manual byte slicing.
-                let conn = http1::Builder::new().serve_connection(
-                    io,
-                    service_fn(move |req: Request<Incoming>| {
-                        let state_i = Arc::clone(&state_c);
-                        async move { handle_request(req, state_i).await }
-                    }),
-                );
-
-                // Drive the connection under the per-connection deadline. Errors and
-                // timeouts are discarded — invalid/dropped connections just cause the
-                // loop to accept the next one.
-                let _ = tokio::time::timeout(per_conn, conn).await;
-
-                // tx being None means a valid request was handled inside service_fn.
-                if state.lock().await.tx.is_none() {
-                    return;
-                }
-                // tx still Some: method/path/secret mismatch or connection error.
-                // Keep accepting.
-            }
-        });
+        // Owned in place — not tokio::spawn'ed — so `listener` shares this future's
+        // drop timing with `_port_guard` above. If this future is dropped (cancellation
+        // at the executor level), both the registry entry and the real OS socket release
+        // together instead of the socket staying bound in an orphaned detached task.
+        // Mirrors oauth_listener.rs's listen_for_callback/accept_one_callback pair.
+        run_accept_loop(&listener, Arc::clone(&state), deadline, input.cancel_token.clone()).await;
 
         match rx.await {
             Err(_) => NodeOutput::failure(NodeError::unrecoverable("CHANNEL_ERR", "Internal error")),
             Ok(Err(e)) if e == "TIMEOUT" => NodeOutput::failure(NodeError::recoverable(
                 "TIMEOUT",
                 format!("No request in {}s", timeout_secs),
+            )),
+            Ok(Err(e)) if e == "CANCELLED" => NodeOutput::failure(NodeError::unrecoverable(
+                crate::executor::CANCEL_ERROR_CODE,
+                "Run cancelled by user",
             )),
             Ok(Err(e)) => NodeOutput::failure(NodeError::unrecoverable("WEBHOOK_ERR", e)),
             Ok(Ok(data)) => NodeOutput::success_with_logs(
@@ -291,6 +235,125 @@ impl Node for WebhookNode {
             ),
         }
     }
+}
+
+/// Clamps a user-supplied `timeout_secs` to the same 1-3600s bounds
+/// `wait_node.rs`'s condition-mode timeout uses. Scheduler-driven runs never
+/// reach this — they return via the reserved-payload short-circuit above —
+/// so this only bounds the ad-hoc/manual bind-and-wait path.
+fn clamp_timeout_secs(raw: u64) -> u64 {
+    raw.clamp(1, 3600)
+}
+
+/// Drives the accept loop for one Webhook node invocation, owned in place by
+/// the caller rather than `tokio::spawn`'ed — see the call site's comment.
+///
+/// Races each wait for the next connection against `cancel_token` (when set)
+/// so a cancelled run stops promptly instead of running until `timeout_secs`
+/// elapses, per `Node::execute`'s cancellation contract (node.rs). An
+/// already-in-flight connection (accepted, being served) is not raced against
+/// cancellation — it is already bounded by its own per-connection deadline
+/// below, and this is the wrapper-level fix; per-connection handling stays
+/// as-is.
+async fn run_accept_loop(
+    listener:     &tokio::net::TcpListener,
+    state:        Arc<Mutex<HandlerState>>,
+    deadline:     std::time::Instant,
+    cancel_token: Option<CancellationToken>,
+) {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let mut st = state.lock().await;
+            if let Some(s) = st.tx.take() {
+                let _ = s.send(Err("TIMEOUT".into()));
+            }
+            return;
+        }
+
+        let accept_result = if let Some(ref token) = cancel_token {
+            tokio::select! {
+                r = tokio::time::timeout(remaining, listener.accept()) => r,
+                _ = token.cancelled() => {
+                    let mut st = state.lock().await;
+                    if let Some(s) = st.tx.take() {
+                        let _ = s.send(Err("CANCELLED".into()));
+                    }
+                    return;
+                }
+            }
+        } else {
+            tokio::time::timeout(remaining, listener.accept()).await
+        };
+
+        let (stream, _) = match accept_result {
+            Err(_) => {
+                let mut st = state.lock().await;
+                if let Some(s) = st.tx.take() {
+                    let _ = s.send(Err("TIMEOUT".into()));
+                }
+                return;
+            }
+            Ok(Err(e)) => {
+                let mut st = state.lock().await;
+                if let Some(s) = st.tx.take() {
+                    let _ = s.send(Err(e.to_string()));
+                }
+                return;
+            }
+            Ok(Ok(s)) => s,
+        };
+
+        // Per-connection read budget: capped at global deadline and 30s hard max.
+        // Prevents a stalled sender from blocking the loop after a connection is accepted.
+        let per_conn = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(std::time::Duration::from_secs(30));
+
+        let io      = TokioIo::new(stream);
+        let state_c = Arc::clone(&state);
+
+        // serve_connection drives the full HTTP/1.1 request/response exchange.
+        // Chunked encoding, pipelining, large headers, and malformed requests are
+        // all handled by hyper's parser — no manual byte slicing.
+        let conn = http1::Builder::new().serve_connection(
+            io,
+            service_fn(move |req: Request<Incoming>| {
+                let state_i = Arc::clone(&state_c);
+                async move { handle_request(req, state_i).await }
+            }),
+        );
+
+        // Drive the connection under the per-connection deadline. Errors and
+        // timeouts are discarded — invalid/dropped connections just cause the
+        // loop to accept the next one.
+        let _ = tokio::time::timeout(per_conn, conn).await;
+
+        // tx being None means a valid request was handled inside service_fn.
+        if state.lock().await.tx.is_none() {
+            return;
+        }
+        // tx still Some: method/path/secret mismatch or connection error.
+        // Keep accepting.
+    }
+}
+
+/// Every response this handler returns — success, preflight, or error — must
+/// carry these, or a browser-based caller's `fetch()` (the desktop Chat
+/// panel's own webview, or any other in-browser integration) is rejected by
+/// CORS before the caller ever sees a status code, indistinguishable from
+/// the port not being reachable at all. Wildcard origin is deliberate: this
+/// endpoint accepts arbitrary third-party callers (Stripe, GitHub, ...), not
+/// just the app's own UI, so there is no single origin to allow instead.
+/// Takes the already-built `Response` rather than a `Builder` so the header
+/// values can be inferred from `HeaderMap::insert`'s own signature instead
+/// of naming hyper's re-exported `http` builder type directly.
+fn with_cors(mut resp: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    let headers = resp.headers_mut();
+    headers.insert("access-control-allow-origin", "*".parse().expect("static header value"));
+    headers.insert("access-control-allow-methods", "GET, POST, PUT, OPTIONS".parse().expect("static header value"));
+    headers.insert("access-control-allow-headers", "content-type, x-webhook-secret, x-webhook-timestamp".parse().expect("static header value"));
+    resp
 }
 
 /// Validates and processes a single HTTP request for the webhook.
@@ -306,6 +369,19 @@ async fn handle_request(
     let req_method = req.method().as_str().to_string();
     let req_path   = req.uri().path().to_string();
 
+    // A browser preflights any cross-origin request whose Content-Type isn't
+    // form-encoded (the Chat panel sends application/json) with an OPTIONS
+    // request before it will send the real one. Answered here, ahead of the
+    // method/path/secret checks below, and without touching `state.tx` —
+    // this is not a trigger attempt, so it must not consume the wait or
+    // count as the request the caller is waiting for.
+    if req_method == "OPTIONS" {
+        return Ok(with_cors(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .expect("static response builder parameters are infallible")));
+    }
+
     // Build headers map before consuming the request with into_body().
     let mut headers = Map::new();
     for (name, value) in req.headers() {
@@ -320,16 +396,16 @@ async fn handle_request(
     const MAX_BODY_BYTES: usize = 1_000_000;
     let body_bytes = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
         Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => {
-            return Ok(Response::builder()
+            return Ok(with_cors(Response::builder()
                 .status(StatusCode::PAYLOAD_TOO_LARGE)
                 .body(Full::new(Bytes::new()))
-                .expect("static response builder parameters are infallible"));
+                .expect("static response builder parameters are infallible")));
         }
         Err(_) => {
-            return Ok(Response::builder()
+            return Ok(with_cors(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::new()))
-                .expect("static response builder parameters are infallible"));
+                .expect("static response builder parameters are infallible")));
         }
         Ok(b) => b.to_bytes(),
     };
@@ -340,19 +416,19 @@ async fn handle_request(
 
     // Method mismatch: 405. Keep listening — caller used the wrong method.
     if st.method != "ANY" && req_method != st.method {
-        return Ok(Response::builder()
+        return Ok(with_cors(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::new()))
-            .expect("static response builder parameters are infallible"));
+            .expect("static response builder parameters are infallible")));
     }
 
     // Path mismatch: 401 (not 404). Returning 404 would confirm the port is
     // active and reveal that the guessed path did not match.
     if req_path != st.path {
-        return Ok(Response::builder()
+        return Ok(with_cors(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body(Full::new(Bytes::new()))
-            .expect("static response builder parameters are infallible"));
+            .expect("static response builder parameters are infallible")));
     }
 
     // Secret validation via constant-time comparison to prevent timing attacks.
@@ -374,10 +450,10 @@ async fn handle_request(
         let expected_hash = blake3::hash(st.secret.as_bytes());
         let provided_hash = blake3::hash(provided.as_bytes());
         if expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() != 1 {
-            return Ok(Response::builder()
+            return Ok(with_cors(Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Full::new(Bytes::new()))
-                .expect("static response builder parameters are infallible"));
+                .expect("static response builder parameters are infallible")));
         }
     }
 
@@ -396,10 +472,10 @@ async fn handle_request(
             .and_then(|v| v.parse::<i64>().ok());
         match provided_ts {
             None => {
-                return Ok(Response::builder()
+                return Ok(with_cors(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(Full::new(Bytes::from_static(b"x-webhook-timestamp required")))
-                    .expect("static response builder parameters are infallible"));
+                    .expect("static response builder parameters are infallible")));
             }
             Some(ts) => {
                 let now = std::time::SystemTime::now()
@@ -407,10 +483,10 @@ async fn handle_request(
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 if (now - ts).abs() > WINDOW_SECS {
-                    return Ok(Response::builder()
+                    return Ok(with_cors(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Full::new(Bytes::from_static(b"Timestamp too old or too far in future")))
-                        .expect("static response builder parameters are infallible"));
+                        .expect("static response builder parameters are infallible")));
                 }
             }
         }
@@ -431,11 +507,11 @@ async fn handle_request(
         let _ = s.send(Ok(result));
     }
 
-    Ok(Response::builder()
+    Ok(with_cors(Response::builder()
         .status(StatusCode::OK)
         .header("content-length", "2")
         .body(Full::new(Bytes::from_static(b"OK")))
-        .expect("static response builder parameters are infallible"))
+        .expect("static response builder parameters are infallible")))
 }
 
 #[cfg(test)]
@@ -447,6 +523,7 @@ mod tests {
 
     fn make_input(node_id: &str, port: u64, path: &str, variables: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      node_id.to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -460,11 +537,11 @@ mod tests {
         }
     }
 
-    /// The bug this patch fixes: a scheduler-driven webhook run used to make
-    /// `WebhookNode::execute()` try to bind the port a second time while the
-    /// daemon's own listener was still holding it. This asserts the reserved
-    /// context-variable short-circuit fires instead — completes immediately
-    /// with the handed-off payload, no bind attempt at all.
+    /// A scheduler-driven webhook run must not let `WebhookNode::execute()` try
+    /// to bind the port a second time while the daemon's own listener is still
+    /// holding it. This asserts the reserved context-variable short-circuit
+    /// fires instead — completes immediately with the handed-off payload, no
+    /// bind attempt at all.
     #[tokio::test]
     async fn scheduler_handoff_short_circuits_without_binding() {
         let mut vars = HashMap::new();
@@ -532,10 +609,10 @@ mod tests {
     /// therefore requires an integration test that spins up a real local
     /// listener. That is deferred to a separate integration test suite.
     ///
-    /// PLAN DISCREPANCY (flagged, not fixed):
-    /// PLAN §P20 lists HMAC-SHA256/SHA1 tests. The actual code uses BLAKE3 for
+    /// Design-spec discrepancy (flagged, not fixed): the original design called
+    /// for HMAC-SHA256/SHA1 tests, but the actual code uses BLAKE3 for
     /// constant-time shared-secret comparison (`x-webhook-secret` header), not
-    /// HMAC. The plan was written before implementation. Tests above and below
+    /// HMAC — the spec predates the implementation. Tests above and below
     /// cover the real implementation.
     #[tokio::test]
     async fn port_already_held_in_registry_returns_port_in_use() {
@@ -551,5 +628,56 @@ mod tests {
         ACTIVE_PORTS.remove(&TEST_PORT);
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "PORT_IN_USE");
+    }
+
+    /// A `timeout_secs` far above the cap must clamp to the 3600s ceiling —
+    /// same convention as wait_node.rs's condition-mode timeout.
+    #[test]
+    fn timeout_secs_clamped_to_3600_ceiling() {
+        assert_eq!(clamp_timeout_secs(999_999), 3600);
+    }
+
+    /// A `timeout_secs` already within bounds is unaffected by the clamp.
+    #[test]
+    fn timeout_secs_within_bounds_unaffected() {
+        assert_eq!(clamp_timeout_secs(45), 45);
+    }
+
+    /// Cancelling a run while `execute()` is waiting for a connection must
+    /// return promptly with the shared cancellation error code, instead of
+    /// running until `timeout_secs` elapses — and must release the real OS
+    /// socket, not just the port registry entry, so a bind on the same port
+    /// immediately afterward succeeds instead of hitting a raw address-in-use
+    /// error. This is the behavior the detached tokio::spawn accept loop
+    /// broke: the registry entry released on this future's drop while the
+    /// orphaned spawned task kept the socket bound.
+    #[tokio::test]
+    async fn cancel_during_wait_returns_cancelled_and_releases_port() {
+        // Real free ephemeral port: bind then drop, same technique
+        // oauth_listener.rs's own bind_oauth_listener fallback uses. Avoids a
+        // hardcoded port literal colliding with the other tests in this file.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test setup: must be able to bind an OS-assigned port");
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let token = CancellationToken::new();
+        token.cancel(); // pre-cancelled: deterministic, no sleep-then-cancel race
+
+        let mut input = make_input("n1", port as u64, "/hook", HashMap::new());
+        input.input["timeout_secs"] = json!(60);
+        input.cancel_token = Some(token);
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), WebhookNode.execute(input))
+            .await
+            .expect("execute() did not return promptly after cancellation");
+
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, crate::executor::CANCEL_ERROR_CODE);
+
+        tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("port must be free immediately after a cancelled run");
     }
 }

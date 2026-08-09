@@ -128,13 +128,10 @@ impl Node for TextToFileNode {
 // ---------------------------------------------------------------------------
 // PDF / DOCX export
 //
-// API usage verified against pdf-writer 0.15.0's actual published source
-// (downloaded from static.crates.io and inspected directly, 2026-06-28 —
-// every method signature below was read out of src/*.rs, not assumed from
-// docs) and against docx-rs 0.4.20 (docs.rs, 2026-06-24). Neither crate could
-// be compiled in this session (no Rust toolchain available in this
-// environment) — mark UNCERTAIN at the build/runtime level until
-// `cargo check` is run; the API *shapes* used below are VERIFIED, not guessed.
+// Uses pdf_writer (0.15.0) and docx_rs (0.4.20). No Rust toolchain is
+// available in this environment, so the calls below have not been compiled
+// against the actual crate sources — run `cargo check` before relying on
+// them.
 // ---------------------------------------------------------------------------
 mod export {
     use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
@@ -214,7 +211,7 @@ mod export {
     /// quotes, en/em dash, ellipsis). Those are mapped explicitly below;
     /// anything outside Latin-1 (CJK, emoji, etc.) becomes '?' — the same
     /// pre-existing limit any non-embedded standard font has (only 256
-    /// glyphs, no Unicode coverage), not a new regression from this patch.
+    /// glyphs, no Unicode coverage).
     fn encode_winansi(s: &str) -> Vec<u8> {
         s.chars()
             .map(|c| match c {
@@ -472,6 +469,7 @@ mod tests {
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),

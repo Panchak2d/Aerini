@@ -89,17 +89,19 @@ pub struct WorkflowSummary {
     pub id:         String,
     pub name:       String,
     pub updated_at: String,
+    pub tags:       Vec<String>,
 }
 
 pub struct WorkflowDb {
-    pub(super) pool:          Pool<SqliteConnectionManager>,
-    pub(super) history_limit: i64,
+    pub(super) pool:                    Pool<SqliteConnectionManager>,
+    pub(super) history_limit:           i64,
+    pub(super) version_retention_limit: i64,
 }
 
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 4;
+    pub(super) const SCHEMA_VERSION: i64 = 6;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -136,13 +138,32 @@ impl WorkflowDb {
                 |row| row.get::<_, String>(0),
             );
             match result {
-                Ok(v) => v.parse::<i64>().unwrap_or(500),
+                Ok(v) => v.parse::<i64>().unwrap_or(500).max(1),
                 Err(rusqlite::Error::QueryReturnedNoRows) => 500,
                 Err(e) => return Err(e.to_string()),
             }
         };
 
-        Ok(Self { pool, history_limit })
+        // Separate from history_limit (unlike performance_reports, which
+        // deliberately reuses it): versions already shipped with their own
+        // distinct default (50, see old MAX_VERSIONS), so reusing
+        // history_limit's default of 500 here would silently change
+        // established retention behavior for existing users.
+        let version_retention_limit = {
+            let conn = pool.get().map_err(|e| e.to_string())?;
+            let result = conn.query_row(
+                "SELECT value FROM settings WHERE key = 'version_retention_limit'",
+                [],
+                |row| row.get::<_, String>(0),
+            );
+            match result {
+                Ok(v) => v.parse::<i64>().unwrap_or(50).max(1),
+                Err(rusqlite::Error::QueryReturnedNoRows) => 50,
+                Err(e) => return Err(e.to_string()),
+            }
+        };
+
+        Ok(Self { pool, history_limit, version_retention_limit })
     }
 
     fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
@@ -165,6 +186,12 @@ impl WorkflowDb {
         }
         if current_version < 4 {
             Self::migrate_v4(conn)?;
+        }
+        if current_version < 5 {
+            Self::migrate_v5(conn)?;
+        }
+        if current_version < 6 {
+            Self::migrate_v6(conn)?;
         }
 
         Ok(())
@@ -296,6 +323,30 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+    fn migrate_v5(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow
+                ON workflow_versions(workflow_id, created_at DESC);
+            PRAGMA user_version = 5;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
+
+    /// Version 6 — adds `tags` to `workflows` as a JSON-encoded string array,
+    /// mirroring the `run_history.status` pattern from migrate_v2. Populated
+    /// from `WorkflowMetadata.tags` at save time (already in memory there —
+    /// no JSON-extraction from the `json` column needed). Existing rows
+    /// default to an empty array.
+    fn migrate_v6(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            ALTER TABLE workflows ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+            PRAGMA user_version = 6;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -326,7 +377,7 @@ mod tests {
         let db = WorkflowDb::open(&path, 8).expect("open failed");
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 6);
 
         cleanup(&path);
     }
@@ -352,12 +403,17 @@ mod tests {
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4, "must be migrated to v4");
+        assert_eq!(v, 6, "must be migrated to v6");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))
             .unwrap();
         assert_eq!(count, 1, "pre-existing row must survive migration");
+
+        let tags: String = conn
+            .query_row("SELECT tags FROM workflows WHERE id = 'wf-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tags, "[]", "legacy row predating the tags column must default to an empty array");
 
         cleanup(&path);
     }

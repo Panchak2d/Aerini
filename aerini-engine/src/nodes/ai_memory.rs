@@ -199,12 +199,10 @@ impl Node for AiMemoryNode {
                     Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for write")),
                 };
-                // AM-01: this DELETE's error used to be discarded (`let _ = ...`),
-                // so a DB failure here (lock contention, I/O error) fell through
-                // to the INSERT anyway — leaving the old row(s) in place alongside
-                // the new one and reporting success, silently breaking "write
-                // replaces this session's history". Propagate it like the INSERT
-                // error below already is.
+                // This DELETE's error must propagate like the INSERT error below does —
+                // discarding it would let a DB failure (lock contention, I/O error) fall
+                // through to the INSERT, leaving old row(s) in place alongside the new one
+                // while reporting success, silently breaking "write replaces this session's history".
                 if let Err(e) = conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]) {
                     return NodeOutput::failure(NodeError::unrecoverable(
                         "WRITE_ERROR", format!("failed to clear previous messages: {}", e),
@@ -291,6 +289,7 @@ mod tests {
         if let Some(r) = role    { body["role"]    = json!(r); }
         if let Some(c) = content { body["content"] = json!(c); }
         NodeInput {
+            cancel_token: None,
             node_id:      "test_node".to_string(),
             workflow_id:  String::new(),
             execution_id: "exec".to_string(),
@@ -344,8 +343,7 @@ mod tests {
         cleanup(&path);
     }
 
-    /// `read_messages` used to select the *oldest* N rows
-    /// (`ORDER BY seq ASC LIMIT`), contradicting the schema's documented
+    /// `read_messages` returns the newest N rows per the schema's documented
     /// "max_messages ... newest first" contract. Seed 25 messages (5 more
     /// than the default max_messages of 20) and assert the returned window
     /// is msg-5..msg-24 (the newest 20), not msg-0..msg-19 (the oldest 20).
@@ -395,11 +393,9 @@ mod tests {
         cleanup(&path);
     }
 
-    /// S2-10 (edge case, the bug itself): "write" used to silently accept
-    /// missing/empty content (`unwrap_or("")`) with no error, unlike
-    /// "append"'s existing MISSING_CONTENT check for the identical documented
-    /// "required for write/append" contract. Both missing and explicitly-empty
-    /// content must now be rejected the same way "append" already rejects them.
+    /// Missing and explicitly-empty content on "write" must both be rejected the
+    /// same way "append" already rejects them, per the shared "required for
+    /// write/append" contract.
     #[tokio::test]
     async fn write_with_missing_or_empty_content_is_rejected() {
         let path = temp_db_path("write_missing_content");
@@ -421,8 +417,6 @@ mod tests {
         cleanup(&path);
     }
 
-    /// S2-10 (normal case): "write" with real content is unaffected by the
-    /// new check and still works exactly as before.
     #[tokio::test]
     async fn write_with_real_content_still_succeeds() {
         let path = temp_db_path("write_real_content");
@@ -438,12 +432,9 @@ mod tests {
         cleanup(&path);
     }
 
-    /// AM-01 (the bug itself): "write" used to discard the DELETE-before-insert
-    /// error (`let _ = conn.execute(DELETE...)`), so a DB failure on the delete
-    /// step fell through to the INSERT anyway — leaving the old row in place
-    /// alongside the new one and reporting success regardless. Force the DELETE
-    /// to fail via a trigger and assert the call now fails and the session's
-    /// prior content is left untouched, not silently duplicated.
+    /// A DB failure on the DELETE-before-insert step must not let the INSERT
+    /// proceed. Force the DELETE to fail via a trigger and assert the write call
+    /// fails, with the session's prior content left untouched, not duplicated.
     #[tokio::test]
     async fn write_reports_failure_and_preserves_data_when_delete_fails() {
         let path = temp_db_path("write_delete_fails");

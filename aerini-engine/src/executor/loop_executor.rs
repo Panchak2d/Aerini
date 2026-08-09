@@ -172,9 +172,14 @@ impl WorkflowExecutor {
                 loop_node_id.to_string(),
                 loop_node_def.node_type_id.clone(),
             );
-            let loop_output = crate::mem_tracking::run_tracked(
-                mem_meta, loop_node_impl.execute(loop_input),
-            ).await;
+            let loop_output = if let Some(ref token) = self.config.cancel_token {
+                tokio::select! {
+                    output = crate::mem_tracking::run_tracked(mem_meta, loop_node_impl.execute(loop_input)) => output,
+                    _ = token.cancelled() => return Err("Run cancelled by user".to_string()),
+                }
+            } else {
+                crate::mem_tracking::run_tracked(mem_meta, loop_node_impl.execute(loop_input)).await
+            };
 
             if !loop_output.success {
                 let msg = loop_output
@@ -346,6 +351,9 @@ impl WorkflowExecutor {
                     self.execute_with_retry(body_impl, body_input, body_def, state).await;
 
                 if !body_output.success {
+                    let is_cancelled = body_output.error.as_ref()
+                        .map(|e| e.code == super::CANCEL_ERROR_CODE)
+                        .unwrap_or(false);
                     let msg = body_output
                         .error
                         .as_ref()
@@ -353,6 +361,17 @@ impl WorkflowExecutor {
                         .unwrap_or_else(|| "unknown error".to_string());
                     state.write().await.mark_failed(body_id, body_output, _attempts);
                     self.emit_node_status(&workflow.id, body_id, "error");
+
+                    // A cancelled body node must stop the run, not be routed like an
+                    // ordinary failure — an on_error edge here would otherwise mask
+                    // the cancel and let the loop keep going. No structured error
+                    // code survives past this fn's `Result<_, String>` return, so
+                    // the caller (sequential.rs) re-derives the cancellation from
+                    // the token's own state once it sees any Err here.
+                    if is_cancelled {
+                        return Err(msg);
+                    }
+
                     // Mirror the on_error/on_failure routing every top-level node
                     // failure already gets (sequential.rs/parallel.rs) — scoped to this
                     // iteration's active_body set — so a workflow author who wires an
@@ -547,12 +566,14 @@ impl WorkflowExecutor {
 #[cfg(test)]
 mod tests {
     use super::super::{CredentialResolver, WorkflowExecutor};
+    use crate::error::EngineError;
     use crate::migration::CURRENT_VERSION;
     use crate::model::{NodeInput, NodeOutput, NodeType, Workflow, WorkflowEdge, WorkflowNode};
     use crate::node::{Node, NodeRegistry};
     use crate::nodes::loop_node::LoopNode;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     // ── Credentials stub ──────────────────────────────────────────────────────
 
@@ -885,9 +906,10 @@ mod tests {
     // ── loop_executor.rs tests ───────────────────────────────────────────
 
     // Max iterations enforced: LoopNode hard-caps at 10,000 items (ARRAY_TOO_LARGE).
-    // NOTE: LoopNode has no configurable max_iterations field — the limit is hardcoded
-    // at 10,000 items in LoopNode.execute() and 10,001 iterations in execute_loop_node.
-    // This test exercises the accessible cap: 10,001-item array → ARRAY_TOO_LARGE.
+    // This is the raw array-size cap, separate from the optional per-node
+    // max_iterations config field (which can only lower the effective bound,
+    // never raise it past this one). This test exercises the raw cap itself:
+    // a 10,001-item array → ARRAY_TOO_LARGE, regardless of max_iterations.
     // The error propagates as success=false in WorkflowResult (not Err from run()).
     #[tokio::test]
     async fn loop_max_iterations_enforced_via_array_size_cap() {
@@ -912,6 +934,88 @@ mod tests {
         assert!(
             err.contains("10,000") || err.contains("ARRAY_TOO_LARGE"),
             "error must reference the array size limit; got: {}", err
+        );
+    }
+
+    // max_iterations config (distinct from the raw array-size cap above): a
+    // 5-item array with max_iterations: 2 must run the body exactly twice,
+    // not five times, and the loop node's own "total" output must show 2.
+    #[tokio::test]
+    async fn loop_max_iterations_config_stops_body_execution_early() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3, 4, 5] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(FixedOutputNode {
+            tid: "body_max_iter_test",
+            out: serde_json::json!({ "ran": true }),
+        }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({
+                "array_field": "items", "source_node": "data_source", "max_iterations": 2
+            }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let body = WorkflowNode {
+            id: "body_0".to_string(), node_type_id: "body_max_iter_test".to_string(),
+            node_type: NodeType::Utility, name: "Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_loop_body".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "body_0".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_max_iterations_test".to_string(),
+            name: "Loop Max Iterations Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, body],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let loop_out = result.node_outputs.get("loop_node").unwrap();
+        assert_eq!(
+            loop_out["total"], serde_json::json!(2),
+            "total must reflect the max_iterations cap (2), not the array's full length (5)"
+        );
+        let all_results = loop_out["all_results"].as_array().unwrap();
+        assert_eq!(
+            all_results.len(), 2,
+            "body must run exactly max_iterations times (2), not once per array item (5)"
         );
     }
 
@@ -1422,6 +1526,227 @@ mod tests {
         let loop_out = result.node_outputs.get("loop_node").expect("loop_node must have output");
         let all_results = loop_out["all_results"].as_array().expect("all_results must be an array");
         assert_eq!(all_results.len(), 3, "one all_results entry per completed iteration");
+    }
+
+    // Cancel fired mid-execute on a loop body node that has an on_error edge
+    // wired: the whole run must stop (Err(ExecutionCancelled)), not be routed
+    // to the recovery node and continue to the next iteration. No prior test
+    // in this module exercised cancellation of a loop body node at all.
+    #[tokio::test]
+    async fn loop_body_cancel_mid_execute_bypasses_on_error_route() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SlowBodyNode;
+        #[async_trait::async_trait]
+        impl Node for SlowBodyNode {
+            fn type_id(&self) -> &'static str { "slow_body_cancel_test" }
+            fn display_name(&self) -> &'static str { "Slow Body" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                NodeOutput::success(serde_json::json!({}))
+            }
+        }
+
+        struct RecoveryNode { counter: Arc<AtomicUsize> }
+        #[async_trait::async_trait]
+        impl Node for RecoveryNode {
+            fn type_id(&self) -> &'static str { "recovery_cancel_test" }
+            fn display_name(&self) -> &'static str { "Recovery" }
+            fn node_type(&self) -> NodeType { NodeType::Utility }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                NodeOutput::success(serde_json::json!({ "recovered": true }))
+            }
+        }
+
+        let recovery_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(SlowBodyNode));
+        registry.register(Arc::new(RecoveryNode { counter: recovery_counter.clone() }));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let body = WorkflowNode {
+            id: "body".to_string(), node_type_id: "slow_body_cancel_test".to_string(),
+            node_type: NodeType::Utility, name: "Body".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let recovery = WorkflowNode {
+            id: "recovery".to_string(), node_type_id: "recovery_cancel_test".to_string(),
+            node_type: NodeType::Utility, name: "Recovery".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_loop_body".to_string(), from_node: "loop_node".to_string(), from_port: "loop_body".to_string(),
+                to_node: "body".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+            WorkflowEdge {
+                id: "e_body_on_error".to_string(), from_node: "body".to_string(), from_port: "on_error".to_string(),
+                to_node: "recovery".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_cancel_test".to_string(),
+            name: "Loop Body Cancel Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node, body, recovery],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_token.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+                .with_cancel_token(token)
+                .run(Arc::new(workflow), HashMap::new()),
+        ).await;
+
+        let result = result.expect(
+            "run() did not return within 5s — cancellation did not interrupt the in-flight body node"
+        );
+        assert!(
+            matches!(result, Err(EngineError::ExecutionCancelled)),
+            "expected ExecutionCancelled (on_error route must not mask a cancel); got {:?}", result
+        );
+        assert_eq!(
+            recovery_counter.load(Ordering::SeqCst), 0,
+            "recovery must never run — a cancelled body node must not be routed like an ordinary failure"
+        );
+    }
+
+    // Cancel fired mid-execute on the loop node's own execute() call (the
+    // condition/iteration-control call, not a body node) must interrupt
+    // promptly instead of waiting for that call to return. No prior test in
+    // this module exercised cancellation at this call site — only the
+    // between-iteration check (line 142) and body-node cancellation
+    // (previous test) had coverage.
+    #[tokio::test]
+    async fn loop_node_execute_cancel_mid_call_returns_cancelled() {
+        struct SlowLoopNode;
+        #[async_trait::async_trait]
+        impl Node for SlowLoopNode {
+            fn type_id(&self) -> &'static str { "loop" }
+            fn display_name(&self) -> &'static str { "Slow Loop" }
+            fn node_type(&self) -> NodeType { NodeType::Logic }
+            fn version(&self) -> &'static str { "1.0" }
+            fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: NodeInput) -> NodeOutput {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                NodeOutput::success(serde_json::json!({ "done": true, "all_results": [] }))
+            }
+        }
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2, 3] }),
+        }));
+        registry.register(Arc::new(SlowLoopNode));
+
+        let data_source = WorkflowNode {
+            id: "data_source".to_string(), node_type_id: "data_source_loop_test".to_string(),
+            node_type: NodeType::Utility, name: "Data Source".to_string(),
+            config: serde_json::json!({}), credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+        let loop_node = WorkflowNode {
+            id: "loop_node".to_string(), node_type_id: "loop".to_string(),
+            node_type: NodeType::Logic, name: "Loop".to_string(),
+            config: serde_json::json!({ "array_field": "items", "source_node": "data_source" }),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}), output_schema: serde_json::json!({}),
+            retry: Default::default(), fallback_node: None, disabled: false,
+            position: Default::default(),
+        };
+
+        let edges = vec![
+            WorkflowEdge {
+                id: "e_src_loop".to_string(), from_node: "data_source".to_string(), from_port: "output".to_string(),
+                to_node: "loop_node".to_string(), to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            },
+        ];
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_node_cancel_test".to_string(),
+            name: "Loop Node Execute Cancel Test".to_string(), description: String::new(),
+            nodes: vec![data_source, loop_node],
+            edges, metadata: Default::default(), max_duration_secs: None,
+            parallel_execution: false, max_concurrent_nodes: None, settings: Default::default(),
+        };
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_token.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+                .with_cancel_token(token)
+                .run(Arc::new(workflow), HashMap::new()),
+        ).await;
+
+        let result = result.expect(
+            "run() did not return within 5s — cancellation did not interrupt the loop node's own execute() call"
+        );
+        assert!(
+            matches!(result, Err(EngineError::ExecutionCancelled)),
+            "expected ExecutionCancelled; got {:?}", result
+        );
     }
 
     // ── regression: WorkflowEdge.on_failure field routing ─────────

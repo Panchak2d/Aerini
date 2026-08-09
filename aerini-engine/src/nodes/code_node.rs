@@ -516,6 +516,7 @@ mod tests {
             metadata.insert("__code_disabled".to_string(), serde_json::Value::Bool(true));
         }
         NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -541,6 +542,7 @@ mod tests {
     #[tokio::test]
     async fn missing_code_returns_error() {
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),

@@ -104,7 +104,7 @@ impl crate::node::Node for JsonNode {
                     }
                     // Check one level deeper. serde_json::Map is BTreeMap-backed
                     // (no `preserve_order` feature in Cargo.toml), so this inner
-                    // iteration is already deterministic — no fix needed here.
+                    // iteration is already deterministic.
                     if let Some(obj) = output_val.as_object() {
                         for v in obj.values() {
                             if let Some(arr) = v.as_array() {
@@ -140,6 +140,7 @@ mod tests {
 
     fn make_input(input: Value, node_outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -154,10 +155,11 @@ mod tests {
     }
 
     /// Same as make_input, but also seeds execution_order — needed for the
-    /// T2-5 determinism tests, which assert on *which* node's data wins,
-    /// not just that some deterministic winner exists.
+    /// determinism tests, which assert on *which* node's data wins, not just
+    /// that some deterministic winner exists.
     fn make_input_ordered(input: Value, node_outputs: HashMap<String, Value>, order: Vec<&str>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),

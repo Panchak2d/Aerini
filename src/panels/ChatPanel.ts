@@ -2,10 +2,10 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
-import { isWorkflowRunning } from "../workflow-manager";
+import type { RunManager } from "../run-manager";
 import { NODE_IDS } from "../node-ids";
-import { startScheduledWorkflow, getScheduledJobs, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
-import type { WorkflowResult } from "../ipc/workflow";
+import { startScheduledWorkflow, stopScheduledWorkflow, getScheduledJobs, getScheduledJob, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
+import type { WorkflowResult, ScheduledJobRow } from "../ipc/workflow";
 import { listChatSessions, saveChatSession, deleteChatSession } from "../ipc/chat";
 import type { ChatSessionWire } from "../ipc/chat";
 import type { SchedulerStatusEvent } from "../ipc/events";
@@ -92,6 +92,7 @@ export class ChatPanel {
   private inputEl:      HTMLTextAreaElement;
   private sendBtn:      HTMLButtonElement;
   private bannerEl:     HTMLElement;
+  private bannerTextEl: HTMLElement | null;
   private startBtn:     HTMLButtonElement;
   private sessionLabel: HTMLElement;
   private sessionMenu:  HTMLElement;
@@ -123,8 +124,29 @@ export class ChatPanel {
   /** Snapshot of what was actually sent, for the error-bubble Retry button. */
   private lastSentAttachments: ChatAttachment[] = [];
   private persistFailureToasted = false;
+  /** Port the workflow's Webhook trigger is actually bound to right now —
+   *  distinct from the node's static config port, since startOnFreePort()
+   *  may have fallen back to a different one. Null until start/sync learns
+   *  it; cleared on workflow switch. */
+  private activeWebhookPort: number | null = null;
+  /** True only while the scheduler/Start-button path (onSchedulerStatus's
+   *  "running"/"waiting", or a synced DB row's "active") reports this
+   *  workflow live. Deliberately not sourced from isWorkflowRunning() /
+   *  _runningWorkflows: that shared flag is also set true by RunManager's
+   *  ad-hoc "Run" button (see mainRunActive below), which never emits
+   *  scheduler-status events — a reply can only ever resolve through one of
+   *  those events, so gating send/banner on the shared flag would let the
+   *  UI promise a reply that never arrives. */
+  private schedulerRunning = false;
+  /** True while the main Run button's ad-hoc, one-shot execution is in
+   *  flight for the current workflow (see onMainRunStateChange). Distinct
+   *  from schedulerRunning above — the ad-hoc path never emits
+   *  scheduler-status events, so without this, refreshRunningState() had no
+   *  way to know a Run was active and would show a stale/misleading "Start
+   *  this workflow" prompt. */
+  private mainRunActive = false;
 
-  constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast) {
+  constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast, runManager: RunManager) {
     this.canvas    = canvas;
     this.wfManager = wfManager;
     this.toast     = toast;
@@ -134,6 +156,7 @@ export class ChatPanel {
     this.inputEl      = document.getElementById("chat-input") as HTMLTextAreaElement;
     this.sendBtn      = document.getElementById("chat-send-btn") as HTMLButtonElement;
     this.bannerEl     = document.getElementById("chat-not-running-banner")!;
+    this.bannerTextEl = this.bannerEl.querySelector("span");
     this.startBtn     = document.getElementById("btn-chat-start") as HTMLButtonElement;
     this.sessionLabel = document.getElementById("chat-session-label")!;
     this.sessionMenu  = document.getElementById("chat-session-menu")!;
@@ -157,6 +180,12 @@ export class ChatPanel {
     // caller (scheduler-events.ts, registered at app init) — this fan-out
     // subscription is the supported way for anything else to observe events.
     addSchedulerStatusListener((evt) => this.onSchedulerStatus(evt));
+
+    // RunManager only ever runs one workflow at a time and keeps its
+    // currentWorkflowId synced on every navigation (see app.ts's onNavigate),
+    // so any event here always pertains to whatever is currently loaded —
+    // same assumption toolbar.ts's own listener already relies on.
+    runManager.addRunStateListener((running) => this.onMainRunStateChange(running));
   }
 
   // ── Public API ───────────────────────────────────────────────────────────
@@ -166,6 +195,17 @@ export class ChatPanel {
     else this.show();
   }
 
+  isOpen(): boolean {
+    return this.el.classList.contains("chat-open");
+  }
+
+  /** Same effect as clicking the in-panel Start button — for external
+   *  callers (e.g. the toolbar's Run-button redirect) that want to trigger
+   *  it without going through the DOM. */
+  startForChat(): void {
+    void this.handleStart();
+  }
+
   async show(): Promise<void> {
     if (!this.hasWebhookAndOutput()) {
       this.toast("This workflow needs a Webhook trigger and an Output node to use Chat.", "info");
@@ -173,15 +213,18 @@ export class ChatPanel {
     }
     this.applyToggles(this.wfManager.chatSettings);
     await this.loadStoreForCurrentWorkflow();
+    await this.syncActiveWebhookPort();
     this.renderSessionLabel();
     this.renderMessages();
     this.el.classList.add("chat-open");
+    document.body.classList.add("chat-panel-open");
     this.refreshRunningState();
     this.inputEl.focus();
   }
 
   hide(): void {
     this.el.classList.remove("chat-open");
+    document.body.classList.remove("chat-panel-open");
     this.closeSessionMenu();
   }
 
@@ -195,6 +238,9 @@ export class ChatPanel {
   /** Call on workflow navigation — the open session and pending request belong to the old workflow. */
   onWorkflowSwitched(): void {
     this.cancelPending();
+    this.activeWebhookPort = null;
+    this.schedulerRunning = false;
+    this.mainRunActive = false;
     if (this.el.classList.contains("chat-open")) this.hide();
     this.refreshButtonVisibility();
   }
@@ -382,16 +428,44 @@ export class ChatPanel {
 
   // ── Running state ────────────────────────────────────────────────────────
 
+  /**
+   * Reacts to the main Run button's ad-hoc, one-shot execution (RunManager) —
+   * distinct from the scheduler/Start-button path this panel otherwise
+   * tracks via onSchedulerStatus. A Run-button execution never emits
+   * scheduler-status events, and per this class's doc comment above, a
+   * reply can only ever resolve through that event — so this does not
+   * enable the input (that would promise a reply that can never arrive).
+   * It only keeps the banner from going stale/misleading while a Run is
+   * in flight or has just ended.
+   */
+  private onMainRunStateChange(running: boolean): void {
+    this.mainRunActive = running;
+    if (this.el.classList.contains("chat-open")) this.refreshRunningState();
+  }
+
   private refreshRunningState(): void {
-    const running = isWorkflowRunning(this.wfManager.currentId);
+    const running = this.schedulerRunning;
     this.bannerEl.classList.toggle("hidden", running);
+    if (this.bannerTextEl) {
+      this.bannerTextEl.textContent = !running && this.mainRunActive
+        ? "Running as a one-time test (Run button) \u2014 replies aren't available this way. Stop it, then use Start below for an interactive chat session."
+        : "Start this workflow to begin chatting";
+    }
     this.inputEl.disabled = !running || this.awaitingReply;
     this.sendBtn.disabled = this.inputEl.disabled || this.inputEl.value.trim().length === 0;
   }
 
   private onSchedulerStatus(evt: SchedulerStatusEvent): void {
     if (evt.workflow_id !== this.wfManager.currentId) return;
+    this.schedulerRunning = evt.status === "running" || evt.status === "waiting";
     if (this.el.classList.contains("chat-open")) this.refreshRunningState();
+    // Unlike a timeout (workflow may still reply late — replyPending stays true
+    // on purpose, see its declaration above), a user-initiated stop guarantees
+    // no reply is coming: the workflow process is gone. Clear immediately
+    // instead of leaving the typing bubble to expire via the 30s timer.
+    if (this.replyPending && evt.status === "stopped") {
+      this.cancelPending();
+    }
     if (this.replyPending && (evt.status === "waiting" || evt.status === "error")) {
       this.resolvePending(evt);
     }
@@ -404,17 +478,18 @@ export class ChatPanel {
       if (!snapshot) return;
       const jobs = await getScheduledJobs();
       const existing = jobs.find(j => j.workflow_id === snapshot.id);
-      if (existing?.status === "active") { this.refreshRunningState(); return; }
-      await startScheduledWorkflow(snapshot.id);
-      this.toast("Workflow started — you can chat now", "success");
+      if (existing?.status === "active") {
+        this.activeWebhookPort = this.extractWebhookPort(existing);
+        this.refreshRunningState();
+        return;
+      }
+      const usedFallback = await this.startOnFreePort(snapshot.id);
+      if (!usedFallback) this.toast("Workflow started — you can chat now", "success");
     } catch (rawError) {
       const err = parseSchedulerError(String(rawError));
       switch (err.error_kind) {
         case "already_running":
           this.refreshRunningState();
-          break;
-        case "port_conflict":
-          this.toast(`Port ${err.port} is already in use by "${err.held_by_workflow_name}".`, "error");
           break;
         case "not_schedulable":
           this.toast("This workflow needs a Webhook trigger to use Chat.", "error");
@@ -430,6 +505,115 @@ export class ChatPanel {
     }
   }
 
+  /**
+   * Starts the workflow's webhook job on its configured port; on a port
+   * conflict, falls back to the next few ports instead of failing outright.
+   * Safe specifically for Chat — the panel always looks up whatever port
+   * actually got bound (see activeWebhookPort/extractWebhookPort) rather
+   * than assuming the static config, unlike an external integration
+   * (Stripe, GitHub, ...) that's hard-coded to call one fixed URL and would
+   * break if this silently moved its port instead.
+   */
+  private async startOnFreePort(id: string): Promise<boolean> {
+    const basePort = this.findWebhookConfig()?.port ?? 3456;
+    const MAX_ATTEMPTS = 10;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      const candidate = basePort + i;
+      try {
+        await startScheduledWorkflow(id, i === 0 ? undefined : candidate);
+        this.activeWebhookPort = candidate;
+        if (i > 0) this.toast(`Port ${basePort} was busy — started on ${candidate} instead.`, "info");
+        return i > 0;
+      } catch (rawError) {
+        if (parseSchedulerError(String(rawError)).error_kind !== "port_conflict") throw rawError;
+      }
+    }
+    throw new Error(`Ports ${basePort}–${basePort + MAX_ATTEMPTS - 1} are all in use — free one up or change the Webhook node's port.`);
+  }
+
+  /** start_job() persists the *effective* port (after any fallback) into
+   *  trigger_kind — the only place guaranteed to reflect what's actually
+   *  bound right now, since the node's own config never changes. */
+  private extractWebhookPort(row: ScheduledJobRow): number | null {
+    try {
+      const trigger = JSON.parse(row.trigger_kind) as { port?: unknown };
+      return typeof trigger.port === "number" ? trigger.port : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Refreshes schedulerRunning from the DB on every call — a background
+   *  job's status can change while this panel is closed, so a value cached
+   *  from a prior open would go stale. Also learns the real bound port for
+   *  a job that was already running before this panel session ever called
+   *  startOnFreePort() itself — e.g. started earlier via the Always-On
+   *  toggle. Only fills the cache when it's still empty; a live restart's
+   *  new port is instead picked up by refreshActiveWebhookPort() at send
+   *  time, below. Checks the DB row's own status rather than
+   *  isWorkflowRunning() — that flag doesn't distinguish this background-job
+   *  path from an ad-hoc Run-button execution (see schedulerRunning above),
+   *  and only flips once the post-bind scheduler-status event arrives, so
+   *  relying on it here could also skip this lookup entirely if Chat opens
+   *  before that event lands. */
+  private async syncActiveWebhookPort(): Promise<void> {
+    try {
+      const jobs = await getScheduledJobs();
+      const row = jobs.find(j => j.workflow_id === this.wfManager.currentId);
+      this.schedulerRunning = row?.status === "active";
+      if (this.activeWebhookPort === null && row?.status === "active") {
+        this.activeWebhookPort = this.extractWebhookPort(row);
+      }
+    } catch (e) {
+      console.error("Aerini: failed to sync active webhook port", e);
+    }
+  }
+
+  /** Unlike syncActiveWebhookPort() above, overwrites the cache unconditionally
+   *  rather than only filling it when empty — so a workflow restarted on a
+   *  different port (BgJobsPanel, Always-On, or a port-conflict fallback)
+   *  while Chat stayed open still resolves to wherever it's actually bound
+   *  now. Uses getScheduledJob() (one row) rather than getScheduledJobs()
+   *  (the full list) since this runs on every send. Leaves schedulerRunning
+   *  untouched: a row that isn't "active" just leaves the last-known port
+   *  in place and lets the fetch below fail into the existing "can't reach
+   *  the webhook" recovery path instead. */
+  private async refreshActiveWebhookPort(): Promise<void> {
+    try {
+      const row = await getScheduledJob(this.wfManager.currentId);
+      if (row?.status === "active") {
+        const port = this.extractWebhookPort(row);
+        if (port !== null) this.activeWebhookPort = port;
+      }
+    } catch (e) {
+      console.error("Aerini: failed to refresh active webhook port before send", e);
+    }
+  }
+
+  /**
+   * Recovery action for the "Could not reach the workflow's webhook" error —
+   * the DB/UI believe the job is active but the actual listener isn't
+   * answering. Forces a real stop+start (not just a resend) so a dead
+   * listener gets a fresh bind before retrying the message.
+   */
+  private async handleRestartAndRetry(): Promise<void> {
+    const id = this.wfManager.currentId;
+    try {
+      await stopScheduledWorkflow(id);
+    } catch {
+      // Already stopped/unbound on the backend — fine, proceed to start.
+    }
+    try {
+      await this.startOnFreePort(id);
+    } catch (rawError) {
+      const err = parseSchedulerError(String(rawError));
+      this.toast(`Restart failed: ${(err as { message?: string }).message ?? rawError}`, "error");
+      return;
+    }
+    this.refreshRunningState();
+    this.handleSend(this.lastSentText, this.lastSentAttachments);
+  }
+
   // ── Sending ──────────────────────────────────────────────────────────────
 
   private async handleSend(overrideText?: string, overrideAttachments?: ChatAttachment[]): Promise<void> {
@@ -440,7 +624,7 @@ export class ChatPanel {
       return;
     }
     if (this.awaitingReply) return;
-    if (!isWorkflowRunning(this.wfManager.currentId)) { this.refreshRunningState(); return; }
+    if (!this.schedulerRunning) { this.refreshRunningState(); return; }
 
     const webhook = this.findWebhookConfig();
     if (!webhook) { this.toast("No Webhook node found on this workflow.", "error"); return; }
@@ -472,15 +656,18 @@ export class ChatPanel {
     const payload: Record<string, unknown> = { message: text, session_id: session.id };
     if (attachments.length > 0) payload.attachments = attachments;
 
+    await this.refreshActiveWebhookPort();
+
     try {
-      await fetch(`http://127.0.0.1:${webhook.port}${webhook.path}`, {
+      const port = this.activeWebhookPort ?? webhook.port;
+      await fetch(`http://127.0.0.1:${port}${webhook.path}`, {
         method:  "POST",
         headers: { "content-type": "application/json" },
         body:    JSON.stringify(payload),
       });
     } catch {
       this.replyPending = false; // request never sent — no event will ever resolve it
-      this.failPending("Could not reach the workflow's webhook. Is it still running?");
+      this.failPending("Could not reach the workflow's webhook. Is it still running?", true);
       return;
     }
 
@@ -512,11 +699,11 @@ export class ChatPanel {
     this.renderAiReply(raw);
   }
 
-  private failPending(message: string): void {
+  private failPending(message: string, restartRetry = false): void {
     this.clearPendingTimer();
     this.awaitingReply = false;
     this.refreshRunningState();
-    this.replaceTypingBubbleWithError(message, true);
+    this.replaceTypingBubbleWithError(message, true, restartRetry);
   }
 
   private cancelPending(): void {
@@ -753,7 +940,7 @@ export class ChatPanel {
     document.getElementById("chat-typing-row")?.remove();
   }
 
-  private replaceTypingBubbleWithError(message: string, withRetry = false): void {
+  private replaceTypingBubbleWithError(message: string, withRetry = false, restartRetry = false): void {
     this.removeTypingBubble();
     const row = document.createElement("div");
     row.className = "chat-bubble-row chat-bubble-row--ai";
@@ -764,8 +951,13 @@ export class ChatPanel {
       bubble.appendChild(document.createElement("br"));
       const retry = document.createElement("button");
       retry.className = "chat-retry-btn";
-      retry.textContent = "Retry";
-      retry.addEventListener("click", () => { row.remove(); this.handleSend(this.lastSentText, this.lastSentAttachments); });
+      if (restartRetry) {
+        retry.textContent = "Restart & Retry";
+        retry.addEventListener("click", () => { row.remove(); this.handleRestartAndRetry(); });
+      } else {
+        retry.textContent = "Retry";
+        retry.addEventListener("click", () => { row.remove(); this.handleSend(this.lastSentText, this.lastSentAttachments); });
+      }
       bubble.appendChild(retry);
     }
     row.appendChild(bubble);

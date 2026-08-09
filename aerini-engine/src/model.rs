@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 // ── Node type category ────────────────────────────────────────────────────────
 
@@ -337,6 +338,11 @@ pub struct NodeInput {
     /// Merged config + resolved credential values.
     pub input: Value,
     pub context: ExecutionContext,
+    /// `Some` when the run carries a cancellation token; resolves when the run is
+    /// cancelled. `CancellationToken` has no `Serialize`/`Deserialize` impl, hence
+    /// the skip — safe here since this type is never (de)serialized in practice.
+    #[serde(skip)]
+    pub cancel_token: Option<CancellationToken>,
 }
 
 /// Read-only snapshot of workflow execution state at the moment a node is about to run.

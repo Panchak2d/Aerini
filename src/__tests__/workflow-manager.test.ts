@@ -6,6 +6,7 @@ import { serialize, deserialize, DEFAULT_CHAT_SETTINGS } from "../canvas/CanvasS
 import { CanvasNode } from "../canvas/Node";
 import { Connector } from "../canvas/Connector";
 import { WorkflowManager } from "../workflow-manager";
+import { invoke } from "@tauri-apps/api/core";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
 vi.mock("@tauri-apps/api/core", () => ({
@@ -121,7 +122,7 @@ describe("deserialize — roundtrip", () => {
   const nodes = new Map([["n1", n1], ["n2", n2]]);
   const edges = new Map([["e1", c1]]);
 
-  const json = serialize("wf_rt", "Roundtrip", nodes, edges);
+  const json = serialize("wf_rt", "Roundtrip", nodes, edges, undefined, undefined, undefined, ["prod", "webhook"]);
   const rt   = deserialize(json);
 
   it("restores correct node count", () => {
@@ -148,6 +149,10 @@ describe("deserialize — roundtrip", () => {
     expect(rt.id).toBe("wf_rt");
     expect(rt.name).toBe("Roundtrip");
   });
+
+  it("restores tags through a full serialize → deserialize cycle", () => {
+    expect(rt.tags).toEqual(["prod", "webhook"]);
+  });
 });
 
 describe("deserialize — defaults", () => {
@@ -163,6 +168,10 @@ describe("deserialize — defaults", () => {
 
   it("defaults chatSettings to DEFAULT_CHAT_SETTINGS", () => {
     expect(deserialize(emptyJson).chatSettings).toEqual(DEFAULT_CHAT_SETTINGS);
+  });
+
+  it("defaults tags to []", () => {
+    expect(deserialize(emptyJson).tags).toEqual([]);
   });
 });
 
@@ -335,5 +344,87 @@ describe("duplicateWorkflow — dangling-edge filter (S11-13)", () => {
     expect(copyNodeIds).not.toContain("n2");
     expect(copyDoc.edges[0].id).not.toBe("e1");
     expect(fakeThis.onToast).toHaveBeenCalledWith(expect.stringContaining("Duplicated as"), "success");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleExport: must carry metadata.author/tags from the serialized document
+// instead of building the exported file object from scratch.
+// ---------------------------------------------------------------------------
+
+describe("handleExport", () => {
+  it("carries author and tags from the serialized metadata instead of dropping them", () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue("workspace/export-me.aerini");
+
+    const fakeThis = {
+      canvas: { nodes: new Map([["n1", makeNode("n1", 0, 0)]]), connectors: new Map() },
+      currentId: "wf_exp", currentName: "Export Me",
+      parallelExecution: false, maxConcurrentNodes: 8,
+      chatSettings: DEFAULT_CHAT_SETTINGS, currentTags: ["prod", "webhook"],
+      onToast: vi.fn(),
+    };
+
+    WorkflowManager.prototype.handleExport.call(fakeThis as never);
+
+    const call = invokeMock.mock.calls.find(c => c[0] === "save_file_dialog");
+    expect(call).toBeDefined();
+    const file = JSON.parse((call![1] as { content: string }).content);
+    expect(file.tags).toEqual(["prod", "webhook"]);
+    expect(file.author).toBe("user");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleNew: must reset currentTags along with the other per-workflow state.
+// ---------------------------------------------------------------------------
+
+describe("handleNew", () => {
+  it("resets currentTags to [] along with id/name/execution settings", async () => {
+    document.body.innerHTML = '<div id="output-drawer"></div>';
+    const fakeThis = {
+      hasUnsaved: false,
+      currentId: "wf_old", currentName: "Old Name", currentTags: ["stale"],
+      parallelExecution: true, maxConcurrentNodes: 16,
+      chatSettings: { ...DEFAULT_CHAT_SETTINGS, show_branding: false },
+      canvas: { nodes: new Map([["n1", makeNode("n1", 0, 0)]]), connectors: new Map(), clearSelection: vi.fn() },
+      markUnsaved: vi.fn(),
+      onPanelClose: undefined, onTitleChange: vi.fn(),
+      onStatusChange: vi.fn(), refreshWorkflowList: vi.fn(async () => {}),
+      onNavigate: undefined, confirmFn: vi.fn(),
+    };
+
+    await WorkflowManager.prototype.handleNew.call(fakeThis as never);
+
+    expect(fakeThis.currentTags).toEqual([]);
+    expect(fakeThis.currentName).toBe("Untitled");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prepareForBgRun: the browser (non-Tauri) save path went through lsSave()
+// with a hardcoded 3-arg call that silently dropped tags.
+// ---------------------------------------------------------------------------
+
+describe("prepareForBgRun — browser (non-Tauri) path", () => {
+  beforeEach(() => {
+    installLocalStorageStub();
+  });
+
+  it("persists via lsSave with the current tags", async () => {
+    const fakeThis = {
+      canvas: { nodes: new Map([["n1", makeNode("n1", 0, 0)]]), connectors: new Map() },
+      currentId: "wf_bg", currentName: "Bg Run",
+      parallelExecution: false, maxConcurrentNodes: 8, chatSettings: DEFAULT_CHAT_SETTINGS,
+      currentTags: ["scheduled"],
+      markUnsaved: vi.fn(), refreshWorkflowList: vi.fn(async () => {}), onToast: vi.fn(),
+    };
+
+    const result = await WorkflowManager.prototype.prepareForBgRun.call(fakeThis as never);
+
+    expect(result?.id).toBe("wf_bg");
+    const stored = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    expect(stored["wf_bg"].tags).toEqual(["scheduled"]);
   });
 });

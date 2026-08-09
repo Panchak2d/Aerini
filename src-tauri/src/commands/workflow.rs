@@ -26,18 +26,16 @@ pub async fn save_run_record(
 
 /// Persists the just-finished run's performance report, linking it to the
 /// same `run_id` its `RunRecord` was saved under. Deliberately does not
-/// accept a caller-supplied report (PLAN.md, Batch 2 §3) — it fetches the
-/// frozen report itself via `perf_monitor::get_recent_report`, the same
-/// non-destructive read the MEM chip/popover will use once repointed
-/// (Batch 5), so the frontend never sees or plumbs a `PerformanceReport`.
-/// Called immediately after `run_workflow` resolves — `executor::run()`
-/// (VERIFIED by direct read of `executor/mod.rs`: every `run()` call is
-/// wrapped in `perf_monitor::monitor_run`) finalizes the report into
-/// `RECENT` before returning, and the same `workflow_id` exec-lock
-/// `run_workflow` already holds guarantees no other run can overwrite it
-/// in between — so a `None` here means no run of this `workflow_id` has
-/// completed since process start (stale/duplicate call), not a real
-/// failure. Treated as a no-op, not an error, for that reason.
+/// accept a caller-supplied report — it fetches the frozen report itself
+/// via `perf_monitor::get_recent_report`, so the frontend never sees or
+/// plumbs a `PerformanceReport`. Called immediately after `run_workflow`
+/// resolves — `executor::run()` finalizes the report into `RECENT` before
+/// returning (every `run()` call is wrapped in `perf_monitor::monitor_run`),
+/// and the same `workflow_id` exec-lock `run_workflow` already holds
+/// guarantees no other run can overwrite it in between — so a `None` here
+/// means no run of this `workflow_id` has completed since process start
+/// (stale/duplicate call), not a real failure. Treated as a no-op, not an
+/// error, for that reason.
 #[tauri::command]
 pub async fn save_performance_report(
     run_id:      String,
@@ -149,8 +147,8 @@ pub async fn delete_workflow(
     // Stop any running job for this workflow first.
     // stop_job can fail on a genuine DB write error, not just when the
     // workflow isn't scheduled (that case returns Ok — see scheduler/mod.rs).
-    // Deletion still proceeds either way; the failure is now logged instead
-    // of silently discarded.
+    // Deletion still proceeds either way; the failure is logged rather than
+    // silently discarded.
     if let Err(e) = daemon.stop_job(&id) {
         tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job failed before delete");
     }
@@ -211,6 +209,12 @@ pub async fn delete_version(
     tokio::task::spawn_blocking(move || db.delete_version(&id))
         .await.map_err(|e| e.to_string())?
 }
+
+/// Defense-in-depth ceiling for a manually-started run only. Scheduler-driven
+/// runs (including always-on webhook jobs) build their own `WorkflowExecutor`
+/// in `aerini_engine::scheduler::runner` and never call this function, so
+/// they are unaffected by this constant regardless of its value.
+const SERVER_MAX_DURATION_SECS: u64 = 86_400; // 24h — the executor's own clamp ceiling
 
 #[tauri::command]
 pub async fn run_workflow(
@@ -273,7 +277,8 @@ pub async fn run_workflow(
     .with_parallel_execution(workflow.parallel_execution)
     .with_max_concurrent_nodes(workflow.max_concurrent_nodes.unwrap_or(8))
     .with_cancel_token(token)
-    // T4: desktop is single-tenant — the person running this
+    .with_server_max_duration_secs(Some(SERVER_MAX_DURATION_SECS))
+    // Desktop is single-tenant — the person running this
     // workflow is the same person who owns the machine and its data.
     // Unlocks node-level admin gates (e.g. `allow_raw_sql`) the same way
     // aerini-server does for a `write`+`admin`-scoped token
@@ -284,9 +289,7 @@ pub async fn run_workflow(
     let result = executor.run(Arc::new(workflow), initial_variables).await;
 
     // Remove only this run's own token — never a different, still-in-flight
-    // run's. (Previously a single shared `Option<CancellationToken>` slot was
-    // unconditionally cleared here, which could wipe out a concurrent run's
-    // still-active cancellation handle — see ActiveRunToken's doc comment.)
+    // run's (see ActiveRunToken's doc comment).
     active_run.unregister(&run_id);
     // _exec_guard drops here (end of scope), releasing this workflow_id's lock.
 
@@ -360,6 +363,7 @@ pub async fn clear_chat_session(
         execution_id: uuid::Uuid::new_v4().to_string(),
         input:        serde_json::json!({ "operation": "clear", "session_id": session_id }),
         context:      ExecutionContext::default(),
+        cancel_token: None,
     };
 
     let output = node.execute(input).await;

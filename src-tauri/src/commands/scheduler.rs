@@ -26,10 +26,19 @@ pub async fn get_scheduled_jobs(
     daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
 ) -> Result<Vec<ScheduledJobRow>, String> {
     // Never return a webhook trigger's plaintext secret over IPC to the
-    // frontend (AUDIT_REPORT.md S6-2, extended to the desktop IPC boundary
-    // per T0-1d) — the scheduler's own listener still holds the real secret
+    // frontend — the scheduler's own listener still holds the real secret
     // internally for HMAC comparison.
     Ok(daemon.list_jobs()?.iter().map(|row| row.redacted()).collect())
+}
+
+#[tauri::command]
+pub async fn get_scheduled_job(
+    workflow_id: String,
+    daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
+) -> Result<Option<ScheduledJobRow>, String> {
+    // Same redaction as get_scheduled_jobs, above — this is still the IPC
+    // boundary to the frontend, just scoped to one row instead of the list.
+    Ok(daemon.get_job(&workflow_id)?.map(|row| row.redacted()))
 }
 
 #[tauri::command]

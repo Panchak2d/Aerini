@@ -144,7 +144,7 @@ impl Node for AiAgentNode {
 
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
-        // AllowLocal (not Strict): same fix as ai_prompt/mod.rs —
+        // AllowLocal (not Strict): same policy as ai_prompt/mod.rs —
         // local inference servers (Ollama etc.) must be reachable via base_url.
         // Single check site, upstream of the is_gemini branch, so it covers all
         // three providers (OpenAI-compatible, Anthropic, Gemini).
@@ -371,16 +371,15 @@ impl Node for AiAgentNode {
 //
 // `call_gemini_agent`/`call_openai_agent`/`call_anthropic_agent` duplicate
 // ai_prompt/shared.rs's send_and_parse request/response shape (send, cap-read,
-// parse) plus each ai_prompt provider file's own inline 429/529 status check —
-// but previously returned a bare `Result<Value, String>`, so both call sites
-// above always wrapped the error in `NodeError::unrecoverable`, regardless of
-// cause. A rate-limited Agent node therefore failed permanently instead of
-// being retry-eligible, unlike the otherwise-identical Prompt node hitting the
-// same API. This carries the same recoverable/unrecoverable distinction
-// ai_prompt already has: a timed-out/connection-failed send, or an HTTP 429
-// (Anthropic also 529, matching ai_prompt/anthropic.rs) is Recoverable; every
-// other failure (auth, bad request, oversized/unparseable body) stays
-// Unrecoverable.
+// parse) plus each ai_prompt provider file's own inline 429/529 status check,
+// and carry the same recoverable/unrecoverable distinction ai_prompt already
+// has: a timed-out/connection-failed send, or an HTTP 429 (Anthropic also 529,
+// matching ai_prompt/anthropic.rs) is Recoverable; every other failure (auth,
+// bad request, oversized/unparseable body) stays Unrecoverable. Both call
+// sites below must preserve this distinction rather than wrapping every
+// error in `NodeError::unrecoverable` regardless of cause — a rate-limited
+// Agent node must stay retry-eligible like the otherwise-identical Prompt
+// node hitting the same API.
 enum AgentApiError {
     Recoverable(String),
     Unrecoverable(String),
@@ -790,10 +789,9 @@ mod tests {
     use crate::model::ExecutionContext;
     use crate::node::Node;
 
-    /// same SSRF-policy fix and same regression-proof pattern as
-    /// ai_prompt/mod.rs's `loopback_base_url_is_no_longer_ssrf_blocked` — a
-    /// loopback `base_url` must reach the local server (any outcome other than
-    /// `SSRF_BLOCKED` proves the pre-flight check no longer rejects it).
+    /// Same SSRF policy as ai_prompt/mod.rs's `loopback_base_url_is_no_longer_ssrf_blocked`
+    /// — a loopback `base_url` must reach the local server (any outcome other than
+    /// `SSRF_BLOCKED` proves the pre-flight check permits it).
     async fn spawn_minimal_openai_agent_mock() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -930,6 +928,7 @@ mod tests {
 
     fn make_input(val: serde_json::Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "n1".into(),
             workflow_id:  "w1".into(),
             execution_id: "e1".into(),
@@ -952,8 +951,6 @@ mod tests {
         assert!(out.success, "request should reach the local mock server and succeed: {:?}", out.error);
     }
 
-    /// Batch AK regression: `model` omitted must default per-provider to the
-    /// current model, not the stale hardcoded literal it used to fall back to.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn omitted_model_defaults_to_current_openai_flagship() {
         let (base_url, rx) = spawn_capturing_mock(
@@ -980,8 +977,7 @@ mod tests {
         assert_eq!(v["model"].as_str(), Some("claude-sonnet-5"));
     }
 
-    /// S2-7 (normal case for the fix): a 429 from an OpenAI-compatible
-    /// provider must now be retry-eligible, not permanently failed.
+    /// A 429 from an OpenAI-compatible provider is retry-eligible, not a permanent failure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn openai_429_is_recoverable() {
         let base_url = spawn_status_mock(
@@ -997,9 +993,8 @@ mod tests {
         assert_eq!(err.code, "RATE_LIMITED");
     }
 
-    /// S2-7 (edge case): Anthropic's 529 ("overloaded") must also be
-    /// recoverable, matching ai_prompt/anthropic.rs's own 429-or-529 check —
-    /// and a plain 400 must still be unrecoverable (no over-broadening).
+    /// Anthropic's 529 ("overloaded") is recoverable, matching ai_prompt/anthropic.rs's
+    /// 429-or-529 check; a plain 400 stays unrecoverable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn anthropic_529_is_recoverable_400_is_not() {
         let overloaded_url = spawn_status_mock(

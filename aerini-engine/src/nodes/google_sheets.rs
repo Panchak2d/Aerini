@@ -168,8 +168,8 @@ impl GoogleSheetsNode {
     /// Prefers `client_id`/`client_secret` (OAuth app credentials): the token is
     /// then obtained via `oauth_listener::get_tokens`, which transparently stores,
     /// checks expiry, and refreshes under a per-credential mutex — the same
-    /// mechanism `SocialUploadNode` already uses for YouTube/Instagram/TikTok
-    /// (T2-7/S1-9/S6-6). Falls back to a raw, caller-supplied `api_key` (this
+    /// mechanism `SocialUploadNode` already uses for YouTube/Instagram/TikTok.
+    /// Falls back to a raw, caller-supplied `api_key` (this
     /// node's original behavior) when `client_id`/`client_secret` are absent, so
     /// existing workflows configured with a manually-pasted access token keep
     /// working unchanged — no breaking change.
@@ -206,12 +206,11 @@ impl GoogleSheetsNode {
 //
 // The client_id+client_secret path is a direct passthrough to
 // `oauth_listener::get_tokens`, which already owns its own keychain/refresh/
-// full-flow logic and is not itself re-tested here — verified by manual trace
-// only (same escape hatch used by for its postgres/mysql wiring), since
-// exercising it would mean mocking a real OS keychain, which is out of this
-// batch's scope. What's new and cheaply testable without any mocking — which
-// of the two paths `resolve_access_token` picks, and its two failure cases —
-// is covered below.
+// full-flow logic and is not itself re-tested here — verified by manual
+// trace only, since exercising it would require mocking a real OS keychain.
+// What's cheaply testable without any mocking — which of the two paths
+// `resolve_access_token` picks, and its two failure cases — is covered
+// below.
 #[cfg(test)]
 mod tests {
     use super::*;

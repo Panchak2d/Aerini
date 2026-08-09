@@ -478,8 +478,7 @@ mod tests {
 
     // R2 is always a remote Cloudflare-hosted endpoint — the AllowLocal
     // escape hatch is minio-only. A loopback R2 endpoint (never a
-    // legitimate R2 URL) must stay blocked exactly as before this fix, so
-    // this fix didn't accidentally widen the check for both providers.
+    // legitimate R2 URL) must stay blocked for both providers.
     #[tokio::test]
     async fn r2_endpoint_still_rejects_loopback() {
         let cfg = cfg_for("r2", "http://127.0.0.1:9000");

@@ -173,9 +173,10 @@ Iterates over an array, running downstream nodes once per item.
 | Parameter | Type | Notes |
 |---|---|---|
 | `array_field` | string | **required.** Dot-path to the array to iterate, e.g. `items` or `response.results` |
-| `source_node` | string | Node ID to read the array from. Searches all previous outputs if blank. |
+| `source_node` | string | **required.** Node ID to read the array from. |
 | `item_var` | string | Variable name for the current item. Default: `item` |
 | `index_var` | string | Variable name for the current index. Default: `index` |
+| `max_iterations` | number | Stop after this many items instead of the full array. Default: no limit. 0 or blank also means no limit. Can only lower the effective bound, never raise it past the array's own length or the 10,000-item cap below. |
 
 Ports: `loop_body` (fires once per item) and `done` (fires after all items are processed).
 
@@ -194,6 +195,8 @@ When all items are processed, the `done` port fires with `all_results` populated
 The full array is not included in per-iteration output to avoid memory overhead on large arrays. Downstream nodes that need the full array should reference the loop node's context directly rather than the per-iteration `item` output.
 
 **Array size limit: 10,000 items.** If the resolved array exceeds this, the loop node fails immediately with error code `ARRAY_TOO_LARGE` before any body node runs — no items are processed, and no partial results are produced. The error message is: `Array has N items — maximum is 10,000 per loop. Split your data into smaller batches.`
+
+This is separate from `max_iterations` above: the 10,000-item limit is a hard failure on oversized *source* data, while `max_iterations` is an optional, user-set early stop that ends the loop normally (`done: true`, with whatever results were collected) once it's reached — not an error.
 
 To process more than 10,000 items, paginate at the source: fetch items in pages of ≤10,000 via the HTTP node's pagination config (or a Loop-over-pages pattern), then run a nested loop over each page's items.
 

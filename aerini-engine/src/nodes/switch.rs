@@ -57,8 +57,8 @@ impl Node for SwitchNode {
         // 8 static case ports + 1 default.
         // Labels here are generic; the canvas reads the actual case config to show
         // user-defined labels (e.g. "Payment success") alongside the port ID.
-        // Long-term fix: dynamic ports via a ports_for_config() method on Node trait
-        // — see PLAN.md item 35. This near-term fix unblocks the majority of use cases.
+        // Long-term fix: dynamic ports via a ports_for_config() method on Node trait.
+        // This near-term fix unblocks the majority of use cases.
         NodePorts {
             inputs: vec![PortDefinition {
                 id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
@@ -100,8 +100,8 @@ impl Node for SwitchNode {
         // set (case_1..case_8, default) so a typo or out-of-range case number
         // fails loudly instead of routing to a port no edge can ever be wired
         // to. Validated before matching so the result doesn't depend on
-        // which case happens to match at runtime (Rule 6/S4-1: silent
-        // misrouting is worse than a loud config error).
+        // which case happens to match at runtime — silent misrouting is
+        // worse than a loud config error.
         let valid_ports: HashSet<String> = self.ports().outputs.into_iter().map(|p| p.id).collect();
 
         let mut resolved_ports: Vec<String> = Vec::with_capacity(cases.len());
@@ -134,11 +134,11 @@ impl Node for SwitchNode {
                 }
                 p.to_string()
             } else {
-                // T1-1d: a non-string, non-null value (bare number, boolean,
-                // array, object) reaches here. .as_str() alone can't tell
-                // this apart from the key being absent, so it must be
-                // checked explicitly — otherwise it silently falls through
-                // to the auto-default path above instead of being rejected.
+                // A non-string, non-null value (bare number, boolean, array,
+                // object) reaches here. .as_str() alone can't tell this
+                // apart from the key being absent, so it must be checked
+                // explicitly — otherwise it silently falls through to the
+                // auto-default path above instead of being rejected.
                 return NodeOutput::failure(NodeError::unrecoverable(
                     "INVALID_CASE_PORT",
                     format!(
@@ -157,18 +157,15 @@ impl Node for SwitchNode {
         }
 
         // default_port is checked against the same valid_ports set the loop
-        // above already validates each case's explicit port against (T1-1c
-        // — identical defect shape to the case["port"] check one field
-        // over: an unvalidated arbitrary string here would route the
-        // no-match fallback to a port no edge can ever be wired to,
-        // previously caught only by the executor's generic drop-warning).
-        // Validated up front, before the match loop, so the result doesn't
-        // depend on whether any case ends up matching at runtime.
+        // above already validates each case's explicit port against — an
+        // unvalidated arbitrary string here would route the no-match
+        // fallback to a port no edge can ever be wired to. Validated up
+        // front, before the match loop, so the result doesn't depend on
+        // whether any case ends up matching at runtime.
         //
         // Same absent/null-vs-non-string distinction as the case["port"]
-        // check above (T1-1e, mirroring T1-1d): a non-string, non-null
-        // value must be rejected explicitly rather than silently treated
-        // as unset.
+        // check above: a non-string, non-null value must be rejected
+        // explicitly rather than silently treated as unset.
         let default_port_value = &input.input["default_port"];
         let default_port = if default_port_value.is_null() {
             "default".to_string()
@@ -193,13 +190,10 @@ impl Node for SwitchNode {
             ));
         };
 
-        // T1-1i-followup: unify further — an explicit source_node string
-        // that names no node in context used to silently resolve to
-        // Value::Null (T1-1g's original behavior), inconsistent with
-        // transform.rs's SOURCE_NOT_FOUND for the identical shape. A typo'd
-        // or stale source_node should fail loudly like every other
-        // unresolvable-reference case in this fix, not silently degrade to
-        // "no match, fall to default".
+        // An explicit source_node string that names no node in context
+        // fails loudly (SOURCE_NOT_FOUND), matching transform.rs's behavior
+        // for the identical shape, rather than silently degrading to "no
+        // match, fall to default".
         let source_node_value = &input.input["source_node"];
         let data: Value = if source_node_value.is_null() {
             return NodeOutput::failure(NodeError::unrecoverable(
@@ -236,22 +230,18 @@ impl Node for SwitchNode {
         for (i, case) in cases.iter().enumerate() {
             let match_value = &case["match"];
             let match_val = if match_value.is_null() {
-                // Key absent or explicit null — unchanged from pre-existing
-                // behavior (this case simply won't match unless the field's
-                // own resolved value is also the literal empty string).
-                // Deliberately out of T1-1f's scope: a missing "match" key
-                // has no equivalent to port's "auto-default to position",
-                // and changing its meaning wasn't part of what was found.
+                // Key absent or explicit null — this case simply won't
+                // match unless the field's own resolved value is also the
+                // literal empty string. A missing "match" key has no
+                // equivalent to port's "auto-default to position".
                 String::new()
             } else if let Some(s) = match_value.as_str() {
                 s.to_string()
             } else {
-                // T1-1f: a non-string, non-null match value (bare number or
-                // boolean) is now coerced the same way value_str itself is
-                // coerced below, so {"match": 5} correctly matches a field
-                // that resolves to the number 5. Previously this silently
-                // collapsed to "" via .as_str().unwrap_or(""), making the
-                // case unreachable except when the field resolves to "".
+                // A non-string, non-null match value (bare number or
+                // boolean) is coerced the same way value_str is coerced
+                // below, so {"match": 5} matches a field that resolves to
+                // the number 5.
                 match match_value {
                     Value::Number(n) => n.to_string(),
                     Value::Bool(b)   => b.to_string(),
@@ -281,11 +271,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// T1-1i: source_node is now required, so the shared helper takes it
-    /// explicitly. Tests that error out before source_node resolution pass
-    /// a placeholder ("src") since it's never read.
+    /// source_node is required, so the shared helper takes it explicitly.
+    /// Tests that error out before source_node resolution pass a
+    /// placeholder ("src") since it's never read.
     fn make_input(field: &str, cases_json: &str, source_node: &str, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -304,6 +295,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -330,8 +322,7 @@ mod tests {
     async fn routes_to_default_on_no_match() {
         // source_node resolves fine, its field just doesn't match any case
         // — a genuine no-match, distinct from an unresolvable source_node
-        // (see nonexistent_string_source_node_returns_error below, T1-1i
-        // followup).
+        // (see nonexistent_string_source_node_returns_error below).
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({ "status": "nope" }));
         let out = SwitchNode.execute(make_input(
@@ -349,6 +340,7 @@ mod tests {
     #[tokio::test]
     async fn missing_field_returns_error() {
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -384,9 +376,6 @@ mod tests {
         )).await;
         assert!(out.success);
         let o = out.output.as_ref().unwrap();
-        // Before the fix both unconfigured cases ("a", "b") defaulted to the
-        // same literal "case_1" — matching "b" would have wrongly reported
-        // "case_1" instead of its own distinct port.
         assert_eq!(o["matched_case"], "b");
         assert_eq!(o["port"], "case_2");
     }
@@ -470,6 +459,7 @@ mod tests {
         // silently routing the no-match fallback to a port no edge can ever
         // be wired to on the canvas.
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -497,6 +487,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({}));
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -522,8 +513,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_case_port_returns_error() {
-        // T1-1d: a bare number for "port" must not silently fall through to
-        // the positional auto-default the way an absent key correctly does.
+        // A bare number for "port" must not silently fall through to the
+        // positional auto-default the way an absent key correctly does.
         let out = SwitchNode.execute(make_input(
             "status",
             r#"[{"match":"a","port":5}]"#,
@@ -537,8 +528,8 @@ mod tests {
     #[tokio::test]
     async fn explicit_null_case_port_still_gets_auto_default() {
         // Explicit JSON null is treated the same as an absent key (both are
-        // "genuinely unset"), unlike a non-string value — must not be
-        // rejected by the T1-1d fix above.
+        // "genuinely unset"), unlike a non-string value, which is rejected
+        // by the check above.
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({ "status": "a" }));
         let out = SwitchNode.execute(make_input(
@@ -555,9 +546,10 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_default_port_returns_error() {
-        // T1-1e: mirror of T1-1d for default_port — a bare number must not
-        // silently fall through to the literal "default" fallback.
+        // Mirrors the case["port"] check for default_port — a bare number
+        // must not silently fall through to the literal "default" fallback.
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -580,9 +572,8 @@ mod tests {
 
     #[tokio::test]
     async fn numeric_case_match_value_is_coerced_and_matches() {
-        // T1-1f: {"match": 5} (a JSON number) must match a field that
-        // resolves to the number 5, the same way {"match": "5"} would —
-        // previously this silently coerced to "" and could never match.
+        // {"match": 5} (a JSON number) must match a field that resolves to
+        // the number 5, the same way {"match": "5"} would.
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({ "status": 5 }));
         let out = SwitchNode.execute(make_input(
@@ -598,11 +589,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_case_match_key_is_unaffected_by_t1_1f() {
-        // A case with no "match" key at all is untouched by the T1-1f fix
-        // — it stays inert (never matches a non-empty field value), exactly
-        // as before. Locks the deliberate absent/null-vs-non-string
-        // boundary rather than leaving it unverified.
+    async fn absent_case_match_key_is_unaffected() {
+        // A case with no "match" key at all stays inert — it never matches
+        // a non-empty field value. Locks the deliberate absent/null-vs-
+        // non-string boundary.
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({ "status": "x" }));
         let out = SwitchNode.execute(make_input(
@@ -619,11 +609,12 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_source_node_returns_error() {
-        // T1-1g (unchanged by T1-1i): a bare number for "source_node" is a
-        // malformed value, not "unset" — source_node is schema-typed as a
-        // string, so this must be rejected with a distinct code from the
-        // is_null() reject path (SOURCE_NODE_REQUIRED, see below).
+        // A bare number for "source_node" is a malformed value, not "unset"
+        // — source_node is schema-typed as a string, so this must be
+        // rejected with a distinct code from the is_null() reject path
+        // (SOURCE_NODE_REQUIRED, see below).
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -646,13 +637,12 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_null_source_node_is_rejected() {
-        // T1-1i: unify to reject — explicit JSON null used to be treated as
-        // "genuinely unset" and fall through to the all-outputs merge. That
-        // fallback is removed; null is now rejected exactly like an absent
-        // key (see missing_source_node_key_is_rejected below).
+        // Explicit JSON null for source_node is rejected exactly like an
+        // absent key (see missing_source_node_key_is_rejected below).
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -675,14 +665,15 @@ mod tests {
 
     #[tokio::test]
     async fn missing_source_node_key_is_rejected() {
-        // T1-1i: the key omitted entirely (the shape the canvas most
-        // commonly sends for an unconfigured field) must be rejected the
-        // same way an explicit null is — serde_json::Value indexing yields
-        // Value::Null for a missing key, which is_null() already covers,
-        // but this locks that specific real-world shape with its own test.
+        // The key omitted entirely (the shape the canvas most commonly
+        // sends for an unconfigured field) is rejected the same way an
+        // explicit null is — serde_json::Value indexing yields Value::Null
+        // for a missing key, which is_null() already covers; this locks
+        // that specific real-world shape with its own test.
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -704,17 +695,16 @@ mod tests {
 
     #[tokio::test]
     async fn matching_string_source_node_uses_that_node_only() {
-        // the one gap in T1-1g's own test coverage — a source_node
-        // set to a string that DOES match an existing node must use ONLY
-        // that node's output as `data`, not an error (reserved for a
+        // A source_node set to a string that matches an existing node uses
+        // ONLY that node's output as `data`, not an error (reserved for a
         // non-matching string, see nonexistent_string_source_node_returns_
-        // error below, T1-1i followup). (Since T1-1i, null/absent is
-        // rejected outright rather than falling back to a merge — see
-        // missing_source_node_key_is_rejected.)
+        // error below). null/absent is rejected outright rather than
+        // falling back to a merge — see missing_source_node_key_is_rejected.
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         outputs.insert("other".to_string(), json!({ "status": "should_not_be_used" }));
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -740,11 +730,11 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_string_source_node_returns_error() {
-        // T1-1i followup: a syntactically-valid string that names no node in
-        // context now errors (SOURCE_NOT_FOUND), matching transform.rs.
-        // Previously resolved to Value::Null and fell through to the
-        // default port, silently masking a typo'd/stale source_node.
+        // A syntactically-valid string that names no node in context errors
+        // (SOURCE_NOT_FOUND), matching transform.rs's behavior for the same
+        // case.
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),

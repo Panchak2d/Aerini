@@ -6,6 +6,11 @@ import { escapeHtml } from "./utils";
 
 type NodeMap = Map<string, CanvasNode>;
 
+// Reused by scheduler-events.ts and stream-handler.ts for the same error icon —
+// keep those call sites in sync if this changes.
+export const ICON_CIRCLE_ALERT =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>';
+
 interface MediaFile {
   filename: string;
   data: string;       // raw base64, no data: URI prefix
@@ -67,7 +72,7 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
       const suggestion = errorSuggestion(err.message, err.node_id ? (nodes.get(err.node_id)?.data.node_type_id ?? "") : "");
       html += `
         <div class="sum-error-card">
-          <div class="sum-error-title">What went wrong</div>
+          <div class="sum-error-title">${ICON_CIRCLE_ALERT}What went wrong</div>
           <div class="sum-error-msg">${escapeHtml(err.message)}</div>
           ${suggestion ? `<div class="sum-error-hint">${escapeHtml(suggestion)}</div>` : ""}
           <button class="sum-error-copy" data-copy-text="${escapeHtml(err.message)}">Copy error</button>
@@ -159,7 +164,7 @@ export function renderErrorsTab(result: WorkflowResult, nodes: NodeMap): string 
     return `
       <div class="err-card">
         <div class="err-card-header">
-          <span class="err-node-name">${escapeHtml(nodeName)}</span>
+          <span class="err-card-title">${ICON_CIRCLE_ALERT}<span class="err-node-name">${escapeHtml(nodeName)}</span></span>
           <span class="err-time">${t}</span>
         </div>
         <div class="err-msg">${escapeHtml(err.message)}</div>
@@ -287,7 +292,7 @@ async function renderMediaBatch(
         item.appendChild(caption);
         item.appendChild(dl);
       } catch (err) {
-        item.innerHTML = `<div class="res-media-error">Failed to load ${escapeHtml(file.filename)}: ${escapeHtml(String(err))}</div>`;
+        item.innerHTML = `<div class="res-media-error">${ICON_CIRCLE_ALERT}Failed to load ${escapeHtml(file.filename)}: ${escapeHtml(String(err))}</div>`;
       }
     } else {
       const dl = document.createElement("a");
@@ -461,7 +466,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
     ? `<div class="res-section-label res-section-label--error">Errors</div>
        ${errors.map(e => `
          <div class="soc-error-card">
-           <div class="soc-error-code">${escapeHtml(String(e.code ?? "ERROR"))}</div>
+           <div class="soc-error-code">${ICON_CIRCLE_ALERT}${escapeHtml(String(e.code ?? "ERROR"))}</div>
            <div class="soc-error-filename">${escapeHtml(String(e.filename ?? ""))}</div>
            <div class="soc-error-explanation">${escapeHtml(String(e.explanation ?? e.message ?? ""))}</div>
            ${e.action ? `<div class="soc-error-action">${escapeHtml(String(e.action))}</div>` : ""}

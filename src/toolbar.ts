@@ -4,6 +4,7 @@ import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow, parseSchedulerError } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
+import { checkForUpdate } from "./ipc/update";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
 import { bindWfSettings } from "./wf-settings";
@@ -11,6 +12,7 @@ import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
 import { bindDrawerResize } from "./resize";
 import { loadBgPanel } from "./bg-panel-loader";
+import { NODE_IDS, findTriggerNodeTypeId } from "./node-ids";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
@@ -18,6 +20,8 @@ export interface IChatPanel {
   toggle(): void;
   refreshButtonVisibility(): void;
   onWorkflowSwitched(): void;
+  isOpen(): boolean;
+  startForChat(): void;
 }
 
 export interface ToolbarResult {
@@ -69,14 +73,11 @@ export function bindZoomControls(canvas: Canvas): void {
   group.insertAdjacentElement("afterend", divider.cloneNode(true) as HTMLElement);
 
   // Polling, not canvas.onZoomChange: that single-callback slot is already
-  // assigned by app.ts (the N-1 zoom-percentage hint) — a second assignment
+  // assigned by app.ts (the zoom-percentage hint) — a second assignment
   // here would run later (bindToolbar is called after app.ts's own
-  // assignment) and silently overwrite it, reproducing the exact
-  // onRunStateChange overwrite bug already logged from Batch 1 for a second
-  // callback. Polling is self-contained and, as a side benefit, uniformly
-  // covers every way zoom can change (wheel, pinch, zoomIn/Out, fitToScreen)
-  // without adding any wiring into InputHandler.ts (out of this batch's
-  // file scope).
+  // assignment) and silently overwrite it. Polling is self-contained and,
+  // as a side benefit, uniformly covers every way zoom can change (wheel,
+  // pinch, zoomIn/Out, fitToScreen) without adding wiring into InputHandler.ts.
   let lastPct = Math.round(canvas.zoom * 100);
   setInterval(() => {
     const pct = Math.round(canvas.zoom * 100);
@@ -138,6 +139,16 @@ export function bindToolbar(
       toast(`Fix before running:\n${errors.slice(0, 3).join("\n")}`, "error");
       return;
     }
+    const triggerIsWebhook = findTriggerNodeTypeId(canvas.nodes.values()) === NODE_IDS.WEBHOOK;
+    if (triggerIsWebhook && chatPanel.isOpen()) {
+      const startInstead = await showConfirm(
+        "This runs once and waits up to 60s for a single webhook call \u2014 Chat won't get a reply this way. Start the workflow instead for an interactive session?",
+        false,
+        "Start Instead",
+        "neutral",
+      );
+      if (startInstead) { chatPanel.startForChat(); return; }
+    }
     if (!await checkDangerousNodes(wfManager.currentId, canvas.nodes.values(), approvedForExecution, showConfirm)) return;
     runManager.handleRun(wfManager.currentId, wfManager.currentName);
   };
@@ -152,15 +163,18 @@ export function bindToolbar(
     runMainBtn.disabled = false;
     runMainBtn.textContent = isRunning ? "Stop" : "Run";
     runMainBtn.classList.toggle("btn-run-stop", isRunning);
+    const triggerIsWebhook = findTriggerNodeTypeId(canvas.nodes.values()) === NODE_IDS.WEBHOOK;
     runMainBtn.title = schedulerRunning && !runManager.isRunning
       ? "Stop this scheduled background run"
+      : !isRunning && triggerIsWebhook
+      ? "Runs once — waits up to 60s for a single webhook request, then stops. For Chat or a persistent listener, use Start in the Chat panel instead."
       : "";
   };
 
   const runWrap = document.getElementById("run-dropdown-wrap");
   let _flashTimer: ReturnType<typeof setTimeout> | null = null;
 
-  runManager.onRunStateChange = (running: boolean) => {
+  runManager.addRunStateListener((running: boolean) => {
     refreshRunBtn();
     if (running) {
       if (_flashTimer) { clearTimeout(_flashTimer); _flashTimer = null; }
@@ -168,7 +182,7 @@ export function bindToolbar(
     } else if (!_flashTimer) {
       runWrap?.setAttribute("data-run-state", "idle");
     }
-  };
+  });
 
   runManager.onRunResult = (success: boolean) => {
     runWrap?.setAttribute("data-run-state", success ? "success" : "error");
@@ -189,6 +203,7 @@ export function bindToolbar(
         .then(() => {
           refreshRunBtn();
           loadBgPanel().then(m => m.updateBgRunButton(wfManager.currentId));
+          toast("Workflow stopped", "success");
         })
         .catch(e => toast(`Could not stop: ${e}`, "error"));
     } else {
@@ -286,6 +301,38 @@ export function bindToolbar(
         (e.target as HTMLInputElement).checked = !enabled;
       }
     });
+
+  $("btn-check-updates")?.addEventListener("click", async () => {
+    if (!isTauri()) return;
+    const btn = $("btn-check-updates") as HTMLButtonElement;
+    const statusEl = document.getElementById("update-check-status");
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = "Checking…";
+    try {
+      const result = await checkForUpdate();
+      if (!statusEl) return;
+      statusEl.textContent = "";
+      if (result.is_newer) {
+        const msg = document.createElement("span");
+        msg.textContent = `Update available: v${result.latest_version} — `;
+        const link = document.createElement("a");
+        link.textContent = "View release";
+        link.href = result.release_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "settings-support-link";
+        statusEl.appendChild(msg);
+        statusEl.appendChild(link);
+      } else {
+        statusEl.textContent = `You're up to date (v${result.current_version}).`;
+      }
+    } catch (err) {
+      if (statusEl) statusEl.textContent = "Could not check for updates.";
+      toast(`Update check failed: ${err}`, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;
   if (gridSnapEl) {

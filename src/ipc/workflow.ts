@@ -44,6 +44,7 @@ export interface WorkflowSummary {
   id: string;
   name: string;
   updated_at: string;
+  tags: string[];
 }
 
 export const listWorkflows  = () => invoke<WorkflowSummary[]>("list_workflows");
@@ -68,6 +69,22 @@ export const runWorkflow = (
 // already finished or was never registered. Never cancels a different
 // in-flight run.
 export const cancelRun = (runId: string) => invoke<void>("cancel_run", { runId });
+
+/** Local reads only (scheduler job lookups below) — never wrap a mutating
+ *  command with this: rejecting on the frontend can't cancel a write
+ *  already in flight on the backend, so doing that would desync UI state
+ *  from what actually happened server-side. */
+const SCHEDULER_QUERY_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err)   => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 export interface ScheduledJobRow {
   workflow_id:   string;
@@ -106,7 +123,16 @@ export const stopScheduledWorkflow = (workflowId: string) =>
   invoke<void>("stop_scheduled_workflow", { workflowId });
 
 export const getScheduledJobs = () =>
-  invoke<ScheduledJobRow[]>("get_scheduled_jobs");
+  withTimeout(invoke<ScheduledJobRow[]>("get_scheduled_jobs"), SCHEDULER_QUERY_TIMEOUT_MS, "get_scheduled_jobs");
+
+/** Scoped equivalent of getScheduledJobs() for callers that only need one
+ *  workflow's row — avoids fetching and scanning the full job list. */
+export const getScheduledJob = (workflowId: string) =>
+  withTimeout(
+    invoke<ScheduledJobRow | null>("get_scheduled_job", { workflowId }),
+    SCHEDULER_QUERY_TIMEOUT_MS,
+    "get_scheduled_job",
+  );
 
 export const setAlwaysOn = (workflowId: string, alwaysOn: boolean) =>
   invoke<void>("set_always_on", { workflowId, alwaysOn });

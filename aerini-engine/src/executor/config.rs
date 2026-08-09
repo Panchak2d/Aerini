@@ -30,7 +30,9 @@ pub(crate) struct WorkflowExecutorConfig {
     pub(super) parallel_execution: bool,
     // Maximum simultaneous node tasks when parallel_execution is true. Default: 8.
     pub(super) max_concurrent_nodes: usize,
-    // When set, the executor checks this token between nodes and short-circuits retry backoff sleeps.
+    // When set, the executor checks this token between nodes, short-circuits retry
+    // backoff sleeps, and races it against every execute() attempt so an in-flight
+    // node is interrupted directly rather than only checked between nodes.
     pub(super) cancel_token: Option<CancellationToken>,
     // Server-level ceiling applied to every workflow regardless of per-workflow max_duration_secs.
     pub(super) server_max_duration_secs: Option<u64>,

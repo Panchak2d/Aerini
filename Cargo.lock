@@ -36,6 +36,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",
@@ -47,6 +48,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "zip",
 ]

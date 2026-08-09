@@ -105,7 +105,7 @@ async function init() {
     else el.textContent = "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
   }
 
-  // N-10: persist viewport per workflow so zoom/pan survive workflow switches
+  // Persist viewport per workflow so zoom/pan survive workflow switches
   canvas.onViewportChange = () => {
     if (!wfManager.currentId) return;
     localStorage.setItem(
@@ -170,15 +170,17 @@ async function init() {
   const runManager = new RunManager(canvas, setStatus, toast);
 
   // Lazy ChatPanel proxy — defers loading marked + DOMPurify until first use.
-  // btn-chat is `hidden` by default in HTML, so no-op refreshButtonVisibility()
-  // is safe until the module loads and sets correct visibility on first toggle.
+  // btn-chat is `hidden` by default in HTML; refreshButtonVisibility() and
+  // onWorkflowSwitched() below run the same Webhook+Output check the real
+  // ChatPanel would, so the button still un-hides pre-load — only opening
+  // the panel itself (toggle()) pulls in the heavy module.
   let _chatPanelPromise: Promise<ChatPanelType> | null = null;
   let _chatPanelInst:    ChatPanelType | null = null;
 
   function _loadChat() {
     if (!_chatPanelPromise) {
       _chatPanelPromise = import("./panels/ChatPanel").then(({ ChatPanel: CP }) => {
-        _chatPanelInst = new CP(canvas, wfManager, toast);
+        _chatPanelInst = new CP(canvas, wfManager, toast, runManager);
         _chatPanelInst.refreshButtonVisibility();
         return _chatPanelInst;
       });
@@ -186,18 +188,38 @@ async function init() {
     return _chatPanelPromise;
   }
 
+  function _hasWebhookAndOutput(): boolean {
+    let hasWebhook = false, hasOutput = false;
+    for (const n of canvas.nodes.values()) {
+      if (n.data.node_type_id === NODE_IDS.WEBHOOK) hasWebhook = true;
+      if (n.data.node_type_id === NODE_IDS.OUTPUT)   hasOutput  = true;
+      if (hasWebhook && hasOutput) return true;
+    }
+    return false;
+  }
+
   const chatPanel = {
-    toggle()                  { _loadChat().then(p => p.toggle()); },
-    refreshButtonVisibility() { _chatPanelInst?.refreshButtonVisibility(); },
-    onWorkflowSwitched()      { _chatPanelInst?.onWorkflowSwitched(); },
+    toggle() { _loadChat().then(p => p.toggle()); },
+    refreshButtonVisibility() {
+      if (_chatPanelInst) { _chatPanelInst.refreshButtonVisibility(); return; }
+      document.getElementById("btn-chat")?.classList.toggle("hidden", !_hasWebhookAndOutput());
+    },
+    onWorkflowSwitched() {
+      if (_chatPanelInst) { _chatPanelInst.onWorkflowSwitched(); return; }
+      document.getElementById("btn-chat")?.classList.toggle("hidden", !_hasWebhookAndOutput());
+    },
+    isOpen() {
+      return _chatPanelInst ? _chatPanelInst.isOpen() : false;
+    },
+    startForChat() { _loadChat().then(p => p.startForChat()); },
   };
 
-  // N-8: update status hint when run starts/ends
-  runManager.onRunStateChange = (running) => {
+  // Update status hint when run starts/ends
+  runManager.addRunStateListener((running) => {
     const el = document.getElementById("status-hint"); if (!el) return;
     if (running) el.textContent = "Workflow running\u2026 Ctrl+. to stop";
     else updateStatusHint();
-  };
+  });
 
   // Init variable interpolation autocomplete (fires on {{ in any config field)
   initInterpolationAutocomplete(canvas);

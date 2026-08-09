@@ -457,8 +457,16 @@ pub(super) async fn run_inner_parallel(
             }
 
             NodeOutcome::Failed { output, attempts, err_msg } => {
+                let is_cancelled = output.error.as_ref()
+                    .map(|e| e.code == super::CANCEL_ERROR_CODE)
+                    .unwrap_or(false);
                 state.write().await.mark_failed(&node_id, output, attempts);
                 executor.emit_node_status(&workflow.id, &node_id, "error");
+
+                if is_cancelled {
+                    while join_set.join_next().await.is_some() {}
+                    return Err(EngineError::ExecutionCancelled);
+                }
 
                 let (should_abort, result) = parallel_route_failure(
                     &node_id, format!("Node '{}' failed: {}", node_id, err_msg),
@@ -521,6 +529,15 @@ pub(super) async fn run_inner_parallel(
                     completed.insert(body_id);
                 }
 
+                // execute_loop_node returns a plain String on error — no structured
+                // error code survives to check against CANCEL_ERROR_CODE here, so
+                // (matching sequential.rs's equivalent loop-Err handling) fall back
+                // to the token's own state directly.
+                if executor.config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+                    while join_set.join_next().await.is_some() {}
+                    return Err(EngineError::ExecutionCancelled);
+                }
+
                 let (should_abort, result) = parallel_route_failure(
                     &node_id, format!("Node '{}' failed: {}", node_id, err_msg),
                     &executor, &workflow, &graph, &mut active_nodes, &state,
@@ -573,11 +590,13 @@ pub(super) async fn run_inner_parallel(
 #[cfg(test)]
 mod tests {
     use super::super::{CredentialResolver, WorkflowExecutor};
+    use crate::error::EngineError;
     use crate::migration::CURRENT_VERSION;
     use crate::model::{NodeInput, NodeOutput, NodeType, Workflow, WorkflowEdge, WorkflowNode};
     use crate::node::{Node, NodeRegistry};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     struct NoopCreds;
     #[async_trait::async_trait]
@@ -612,6 +631,23 @@ mod tests {
             NodeOutput::failure(
                 crate::error::NodeError::unrecoverable("PARALLEL_FAIL", "parallel test failure"),
             )
+        }
+    }
+
+    // Sleeps 60s — only used to prove a mid-execute cancel interrupts it long
+    // before that, not to exercise the sleep duration itself.
+    struct SlowNode;
+    #[async_trait::async_trait]
+    impl Node for SlowNode {
+        fn type_id(&self)        -> &'static str { "parallel_slow_test" }
+        fn display_name(&self)   -> &'static str { "Slow" }
+        fn node_type(&self)      -> NodeType     { NodeType::Utility }
+        fn version(&self)        -> &'static str { "1.0" }
+        fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _: NodeInput) -> NodeOutput {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            NodeOutput::success(serde_json::json!({}))
         }
     }
 
@@ -723,6 +759,66 @@ mod tests {
         assert!(
             !r.node_outputs.contains_key("n_after"),
             "downstream node must not appear in node_outputs when upstream failed without routing"
+        );
+    }
+
+    // Cancel fired mid-execute in parallel mode, on a node with an on_error
+    // edge wired: the run must stop (Err(ExecutionCancelled)), not silently
+    // route through on_error and keep going. No prior test in this module
+    // exercised parallel-mode cancellation at all.
+    #[tokio::test]
+    async fn parallel_cancel_mid_execute_bypasses_on_error_route() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+        registry.register(Arc::new(InstantNode));
+
+        let token = CancellationToken::new();
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .with_parallel_execution(true)
+            .with_cancel_token(token.clone());
+
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_parallel_cancel".to_string(),
+            name: "Parallel Cancel".to_string(),
+            description: String::new(),
+            nodes: vec![
+                make_node("n_slow", "parallel_slow_test"),
+                make_node("n_recover", "parallel_instant_test"),
+            ],
+            edges: vec![WorkflowEdge {
+                id: "e_slow_on_error".to_string(),
+                from_node: "n_slow".to_string(),
+                from_port: "on_error".to_string(),
+                to_node: "n_recover".to_string(),
+                to_port: "input".to_string(),
+                condition: None, on_success: None, on_failure: None,
+            }],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            parallel_execution: true,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+
+        let cancel_token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_token.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            executor.run(Arc::new(workflow), HashMap::new()),
+        ).await;
+
+        let result = result.expect(
+            "run() did not return within 5s — cancellation did not interrupt the in-flight node"
+        );
+        assert!(
+            matches!(result, Err(EngineError::ExecutionCancelled)),
+            "expected ExecutionCancelled (on_error route must not mask a cancel); got {:?}", result
         );
     }
 }

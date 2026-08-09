@@ -135,6 +135,7 @@ mod tests {
 
     fn make_input(condition: &str) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -198,6 +199,7 @@ mod tests {
     #[tokio::test]
     async fn no_condition_defaults_false() {
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),

@@ -57,17 +57,15 @@ impl Node for TransformNode {
             ),
         };
 
-        // T1-1i: unify to reject — a null/absent source_node used to merge
-        // every upstream node's output into one object keyed by node id.
-        // Every "from" JSON pointer in mappings is written assuming direct
-        // access to a single node's shape (e.g. "/body/name"); against the
-        // merged object those pointers actually need an extra "/node_id"
-        // prefix, so the merge silently produced null for every ordinarily-
-        // written mapping unless the author knew to account for the
-        // wrapping. That fallback is removed; source_node is now required,
-        // matching switch.rs/loop_node.rs in this same batch. An explicit-
-        // but-unresolvable string is unchanged (still SOURCE_NOT_FOUND
-        // below).
+        // A null/absent source_node must be rejected, not merge every upstream
+        // node's output into one object keyed by node id. Every "from" JSON
+        // pointer in mappings is written assuming direct access to a single
+        // node's shape (e.g. "/body/name"); against a merged object those
+        // pointers would need an extra "/node_id" prefix, so the merge would
+        // silently produce null for every ordinarily-written mapping unless
+        // the author knew to account for the wrapping. source_node is required,
+        // matching switch.rs/loop_node.rs. An explicit-but-unresolvable string
+        // is still SOURCE_NOT_FOUND below.
         let source_node_value = &input.input["source_node"];
         let source: Value = if source_node_value.is_null() {
             return NodeOutput::failure(NodeError::unrecoverable(
@@ -156,6 +154,7 @@ mod tests {
 
     fn make_input(input: Value, node_outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -243,10 +242,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_source_node_key_is_rejected() {
-        // T1-1i: unify to reject — the key omitted entirely (the shape the
-        // canvas most commonly sends for an unconfigured field) must be
-        // rejected. Previously this merged every upstream output into one
-        // object and succeeded.
+        // The key omitted entirely (the shape the canvas most commonly sends
+        // for an unconfigured field) must be rejected rather than merging
+        // every upstream output into one object.
         let mut outputs = HashMap::new();
         outputs.insert("n_a".to_string(), json!({ "val": 99 }));
         let input = make_input(
@@ -286,9 +284,9 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_source_node_returns_error() {
-        // Batch A / T1-1g pattern (unchanged by T1-1i): a bare number for
-        // "source_node" is a malformed value, not "unset" — rejected with a
-        // distinct code from the is_null() reject path (SOURCE_NODE_REQUIRED).
+        // A bare number for "source_node" is a malformed value, not "unset" —
+        // rejected with a distinct code (INVALID_SOURCE_NODE) from the is_null()
+        // reject path (SOURCE_NODE_REQUIRED).
         let input = make_input(
             json!({
                 "source_node": 5,
@@ -303,9 +301,8 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_null_source_node_is_rejected() {
-        // T1-1i: explicit JSON null is treated the same as an absent key —
-        // both are rejected now, unlike a non-string value which was
-        // already rejected before this batch (see
+        // Explicit JSON null is treated the same as an absent key — both are
+        // rejected, same as a non-string value (see
         // non_string_source_node_returns_error).
         let mut outputs = HashMap::new();
         outputs.insert("n_a".to_string(), json!({ "val": 99 }));

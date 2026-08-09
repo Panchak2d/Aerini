@@ -169,6 +169,15 @@
 #wf-settings-modal .settings-row > div { flex: 1; min-width: 0; }
 .settings-label { font-size: 13px; color: var(--t1); font-weight: 400; }
 .settings-desc { font-size: 11px; color: var(--t3); margin-top: 2px; line-height: 1.45; }
+.settings-text-input { width: 100%; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 6px 9px; }
+.settings-text-input:focus { outline: 2px solid var(--color-focus); outline-offset: -1px; }
+.wf-tags-editor { display: flex; flex-direction: column; gap: 8px; }
+.wf-tags-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wf-tags-chips:empty { display: none; }
+.wf-tag-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 4px 6px 4px 10px; border-radius: 4px; background: var(--bg3); color: var(--t2); }
+.wf-tag-chip-remove { background: none; border: none; color: var(--t3); cursor: pointer; font-size: 10px; padding: 2px; border-radius: 3px; line-height: 1; }
+.wf-tag-chip-remove:hover { color: var(--red); background: rgba(248,113,113,.1); }
+.wf-tag-chip-remove:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 
 .browser-notice { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.28); border-radius: 7px; padding: 9px 11px; font-size: 12px; color: var(--amber); line-height: 1.6; }
 .browser-notice strong { display: block; font-size: 12px; margin-bottom: 2px; }
@@ -271,12 +280,12 @@
 
 .onboarding-box {
   background: var(--bg2);
-  border: 1px solid rgba(52,211,153,0.18);
+  border: 1px solid color-mix(in srgb, var(--color-action-run) 18%, transparent);
   border-radius: 14px;
   padding: 36px 40px;
   max-width: 520px;
   width: calc(100vw - 48px);
-  box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(52,211,153,0.05);
+  box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 0 1px color-mix(in srgb, var(--color-action-run) 5%, transparent);
   animation: slide-up .25s ease;
 }
 
@@ -338,7 +347,7 @@
   height: 26px;
   border-radius: 50%;
   background: var(--color-action-run);
-  box-shadow: 0 0 0 3px rgba(52,211,153,0.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-action-run) 15%, transparent);
   color: #000;
   font-size: 11px;
   font-weight: 700;
@@ -501,14 +510,6 @@
 
 
 /* ── MISC OVERRIDES & STATE ─────────────────────────────────────────────────── */
-
-/* Drawer tabs: sentence-case 12px (overrides the smaller uppercase default) */
-.drawer-tab {
-  font-size: 12px;
-  text-transform: none;
-  letter-spacing: 0;
-  padding: 3px 11px;
-}
 
 /* confirm-btn-ok → panels.css */
 

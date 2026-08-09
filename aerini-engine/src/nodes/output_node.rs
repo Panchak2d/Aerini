@@ -62,16 +62,15 @@ impl Node for OutputNode {
         // non-string, non-null value is a malformed config, not "unset" — it
         // must not silently fall through to the merged-context fallback
         // below, which is reserved for a genuinely absent/null source_node.
-        // Mirrors switch.rs's T1-1g is_null/as_str/reject pattern. Batch K
-        // since fixed the fallback branch's HashMap-iteration
-        // non-determinism — see ordered_node_outputs below.
+        // Mirrors switch.rs's is_null/as_str/reject pattern. The fallback branch
+        // below uses ordered_node_outputs for deterministic iteration.
         let source_node_value = &input.input["source_node"];
         let source: Value = if source_node_value.is_null() {
             // Use all context outputs merged, preferring the most recently
-            // completed node's output. T2-5 fix: iterate in real completion
-            // order (context.execution_order, via ordered_node_outputs) —
-            // previously iterated the raw HashMap, whose order is
-            // unspecified and differs run to run for an identical workflow.
+            // completed node's output. Iterate in real completion order
+            // (context.execution_order, via ordered_node_outputs) — a raw
+            // HashMap iteration order is unspecified and would differ run to
+            // run for an identical workflow.
             let mut last: Option<Value> = None;
             for (id, val) in ordered_node_outputs(&input.context) {
                 if id != input.node_id {
@@ -136,9 +135,8 @@ impl Node for OutputNode {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — Batch A only: covers the source_node validation this batch added.
-// No test module existed in this file before this fix; scope is limited
-// to what this fix changes, not a full suite for pre-existing logic.
+// Tests cover the source_node validation requirement — not a full suite for
+// pre-existing logic.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -149,6 +147,7 @@ mod tests {
 
     fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -164,9 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_source_node_returns_error() {
-        // Batch A / T1-1g pattern: a bare number for "source_node" must not
-        // silently fall through to the merged-context fallback the way an
-        // absent key correctly does.
+        // A bare number for "source_node" must not silently fall through to
+        // the merged-context fallback the way an absent key correctly does.
         let input = make_input(json!({ "source_node": 5 }), HashMap::new());
         let out = OutputNode.execute(input).await;
         assert!(!out.success);
@@ -176,8 +174,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_null_source_node_still_uses_merged_context() {
         // Explicit JSON null is treated the same as an absent key (both are
-        // "genuinely unset"), unlike a non-string value — unchanged from
-        // pre-batch behavior.
+        // "genuinely unset"), unlike a non-string value.
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "val": 7 }));
         let input = make_input(json!({ "source_node": null }), outputs);
@@ -188,15 +185,16 @@ mod tests {
 
     #[tokio::test]
     async fn null_source_node_fallback_picks_most_recently_completed_not_hashmap_order() {
-        // the fallback must select the node that actually
-        // completed last per execution_order, not whichever node the raw
-        // HashMap happens to enumerate last (non-deterministic pre-fix).
-        // "z_early" would sort/hash after "a_late" under most naive
-        // orderings, but execution_order says a_late finished after it.
+        // The fallback must select the node that actually completed last per
+        // execution_order, not whichever node a raw HashMap happens to
+        // enumerate last (non-deterministic). "z_early" would sort/hash
+        // after "a_late" under most naive orderings, but execution_order
+        // says a_late finished after it.
         let mut outputs = HashMap::new();
         outputs.insert("z_early".to_string(), json!({ "val": "wrong" }));
         outputs.insert("a_late".to_string(), json!({ "val": "right" }));
         let input = NodeInput {
+            cancel_token: None,
             node_id: "test".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),

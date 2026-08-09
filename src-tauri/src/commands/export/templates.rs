@@ -334,11 +334,9 @@ pub(super) fn build_docker_readme(
 
     let safe = name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
 
-    // replaces the old, misleading "Shell Command and Code Nodes"
-    // section, which implied these node types simply run — they don't,
-    // unless explicitly enabled (matches aerini-server's own default-secure
-    // posture; see build_serve_dockerfile/build_serve_docker_compose).
-    // Extended to Database, which the old section never mentioned at all.
+    // Shell/Code/Database node types don't simply run — they require
+    // explicit enabling, matching aerini-server's own default-secure
+    // posture (see build_serve_dockerfile/build_serve_docker_compose).
     let dangerous_section = if dangerous.is_empty() {
         "This workflow does not use any node type from the dangerous list below \
          — nothing to enable.".to_string()
@@ -364,8 +362,8 @@ pub(super) fn build_docker_readme(
          \n\
          ## Security Warning\n\
          \n\
-         `aerini-server.json` contains the argon2id hash of your `run_secret`.\\n\\\
-The raw secret was shown once at export time and is not stored in this file.\\n\\\
+         `aerini-server.json` contains the argon2id hash of your `run_secret`.\n\
+The raw secret was shown once at export time and is not stored in this file.\n\
 Treat this zip like a credentials file: do not commit it to version\n\
          control, do not share it over unencrypted channels, and do not store\n\
          it in a world-readable directory.\n\
@@ -473,10 +471,9 @@ pub(super) fn build_readme(
         format!("Edit .env and set:\n{}", lines)
     };
 
-    // replaces the old "SHELL COMMAND NODES" section, which only
-    // covered Shell (never Code or Database) and never mentioned that these
-    // node types are DISABLED by default — a workflow using one would
-    // silently no-op that node with only a journalctl line to explain why
+    // Shell/Code/Database node types are DISABLED by default — a workflow
+    // using one would silently no-op that node with only a journalctl line
+    // to explain why.
     let dangerous_section = if dangerous.is_empty() {
         "This workflow does not use any node type from the list below — nothing to enable.".to_string()
     } else {
@@ -504,8 +501,8 @@ pub(super) fn build_readme(
          \n\
          SECURITY WARNING\n\
          ----------------\n\
-         aerini-server.json contains the argon2id hash of your run_secret.\\n\\\
-The raw secret was shown once at export time and is not stored in this file.\\n\\\
+         aerini-server.json contains the argon2id hash of your run_secret.\n\
+The raw secret was shown once at export time and is not stored in this file.\n\
 Treat this zip like a credentials file:\n\
          - Do NOT commit it to version control.\n\
          - Do NOT share it over unencrypted channels.\n\
@@ -624,6 +621,19 @@ mod dangerous_export_tests {
         let docker_readme = build_docker_readme("wf", "Schedule", 7700, &[], &["code"]);
         assert!(docker_readme.contains("--allow-code"));
         assert!(docker_readme.contains("DISABLED by default"));
+    }
+
+    #[test]
+    fn readme_and_docker_readme_security_warning_reads_as_one_flowing_paragraph() {
+        let readme = build_readme("wf", "Schedule", 7700, &[], &[]);
+        assert!(!readme.contains("\\n\\"));
+        assert!(readme.contains("run_secret.\nThe raw secret was shown once"));
+        assert!(readme.contains("stored in this file.\nTreat this zip"));
+
+        let docker_readme = build_docker_readme("wf", "Schedule", 7700, &[], &[]);
+        assert!(!docker_readme.contains("\\n\\"));
+        assert!(docker_readme.contains("run_secret`.\nThe raw secret was shown once"));
+        assert!(docker_readme.contains("stored in this file.\nTreat this zip"));
     }
 
     #[test]

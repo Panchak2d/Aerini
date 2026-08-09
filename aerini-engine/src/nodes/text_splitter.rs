@@ -82,10 +82,10 @@ impl Node for TextSplitterNode {
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         // Resolve text — either from direct config or from a field in previous node output.
-        // T2-5 / S3-4: search upstream outputs in real completion order (via
+        // Search upstream outputs in real completion order (via
         // ordered_node_outputs), not the raw HashMap's unspecified order —
-        // previously, which upstream node "won" when two shared a field name
-        // at source_field's path was non-deterministic across runs.
+        // otherwise which upstream node "wins" when two share a field name
+        // at source_field's path is non-deterministic across runs.
         let text: String = input.input["source_field"]
             .as_str()
             .filter(|f| !f.is_empty())
@@ -124,21 +124,19 @@ impl Node for TextSplitterNode {
 
         let mut logs: Vec<String> = Vec::new();
         if chunk_size > 0 && overlap >= chunk_size {
-            // Previously fell through silently to split_by_*'s own `step = 1`
-            // fallback with no indication anything was wrong — a config like
-            // chunk_size: 1000, overlap: 1000 against a large document would
-            // silently produce a chunk count approaching total_chars. Clamp
-            // and say so, instead of letting the run "succeed" at an
-            // unintended, much larger output.
+            // If overlap >= chunk_size, split_by_*'s own `step = 1` fallback
+            // would silently produce a chunk count approaching total_chars
+            // for a large document, with no indication anything was wrong —
+            // so overlap is clamped and logged instead.
             //
-            // Clamping to chunk_size - 1 (the original fix) still leaves
-            // step = chunk_size - overlap = 1 — i.e. it stops overlap from
-            // being *invalid* but does not stop the *blowup* it exists to
-            // prevent; a 1000-char chunk_size=100 document still produces
-            // ~900 near-duplicate chunks. Clamping to chunk_size / 2 instead
-            // bounds step to a meaningful fraction of chunk_size regardless
-            // of how large the misconfigured overlap was, capping the worst
-            // case at roughly double the zero-overlap chunk count.
+            // Clamping to chunk_size - 1 would still leave step = chunk_size
+            // - overlap = 1 — i.e. it stops overlap from being *invalid* but
+            // not the *blowup* this guards against; a 1000-char document
+            // with chunk_size=100 would still produce ~900 near-duplicate
+            // chunks. Clamping to chunk_size / 2 instead bounds step to a
+            // meaningful fraction of chunk_size regardless of how large the
+            // misconfigured overlap was, capping the worst case at roughly
+            // double the zero-overlap chunk count.
             let clamped = chunk_size / 2;
             logs.push(format!(
                 "overlap ({}) >= chunk_size ({}) — clamped overlap to {}",
@@ -265,6 +263,7 @@ mod tests {
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -273,15 +272,13 @@ mod tests {
         }
     }
 
-    /// source_field's resolution against real node_outputs previously
-    /// had zero test coverage — every pre-existing test used
-    /// ExecutionContext::default(), which never exercises this code path.
     fn make_input_with_context(
         input: Value,
         node_outputs: HashMap<String, Value>,
         order: Vec<&str>,
     ) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -525,9 +522,9 @@ mod tests {
         }))).await;
         assert!(out.success);
         let data = out.output.unwrap();
-        // Previously silently fell through to split_by_chars's own step=1
-        // fallback (≈900 near-duplicate chunks). Clamped overlap (50) should
-        // produce a small, sane chunk count instead.
+        // Clamped overlap (50) keeps the chunk count small and sane, rather
+        // than the ≈900 near-duplicate chunks an unclamped step=1 fallback
+        // would produce.
         assert_eq!(data["overlap"].as_u64().unwrap(), 50);
         assert!(data["total_chunks"].as_u64().unwrap() < 50,
             "clamp should prevent the near-one-chunk-per-char blowup, got {} chunks",

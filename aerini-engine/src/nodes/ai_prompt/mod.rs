@@ -68,7 +68,7 @@ impl Node for AiPromptNode {
                 PortDefinition { id: "input".to_string(),       label: "In".to_string(),    position: PortPosition::Left,  port_type: None },
                 // Runtime files — wired from image_gen, collect_files, text_to_file, etc.
                 // Expression {{SourceNode.output.files}} is injected here by Canvas.ts when a wire lands.
-                // Merged with config["attachments"] (static design-time files from P6) before processing.
+                // Merged with config["attachments"] (static design-time files) before processing.
                 PortDefinition { id: "attachments".to_string(), label: "Files".to_string(), position: PortPosition::Left,  port_type: Some("files".to_string()) },
             ],
             outputs: vec![
@@ -104,11 +104,10 @@ impl Node for AiPromptNode {
         };
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
 
-        // Bug fix: this used to be computed before provider_id existed
-        // and was hardcoded to "gpt-4o" unconditionally, an Anthropic or Gemini
-        // call with no `model` set silently sent an OpenAI model string to that
-        // provider's API, guaranteeing a model-not-found failure. Branch by
-        // provider_id, matching ai_agent.rs's already-correct pattern.
+        // Must branch by provider_id: an Anthropic or Gemini call with no `model`
+        // set would otherwise silently send an OpenAI model string to that
+        // provider's API, guaranteeing a model-not-found failure. Matches
+        // ai_agent.rs's pattern.
         let default_model = match provider_id {
             "anthropic" => "claude-sonnet-5",
             "gemini"    => "gemini-3.6-flash",
@@ -131,8 +130,8 @@ impl Node for AiPromptNode {
         }
 
         // Two attachment sources merged before processing:
-        //   1. config["attachments"]      — static files set at design time (P6 config panel).
-        //   2. config["attachments_expr"] — dynamic files from the "Files" input port (P8).
+        //   1. config["attachments"]      — static files set at design time (config panel).
+        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
         //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
         //      The executor resolves the expression to a JSON string; extract_port_attachments()
         //      parses it back into items so process_attachments() can classify them normally.
@@ -168,6 +167,7 @@ mod tests {
 
     fn make_input(val: serde_json::Value) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "n1".into(),
             workflow_id:  "w1".into(),
             execution_id: "e1".into(),
@@ -306,9 +306,8 @@ mod tests {
         (format!("http://127.0.0.1:{}", port), rx)
     }
 
-    /// `model` omitted must default per-provider to the
-    /// current model, not the stale (and, for Anthropic/Gemini, provider-blind)
-    /// literal it used to fall back to.
+    /// `model` omitted defaults per-provider to the current model — an unbranched
+    /// default would send a provider-blind model string to Anthropic/Gemini's API.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn omitted_model_defaults_to_current_openai_flagship() {
         let (base_url, rx) = spawn_capturing_mock(

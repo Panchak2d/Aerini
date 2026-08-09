@@ -2,13 +2,15 @@ import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import type { RunManager } from "./run-manager";
 import type { WorkflowResult } from "./ipc/workflow";
+import { ICON_CIRCLE_ALERT } from "./output-renderer";
 import type { SchedulerStatusEvent } from "./ipc/events";
 import { listenNodeStatus, listenSchedulerStatus, listenSchedulerSkip, requestSchedulerState } from "./ipc/events";
 import { getScheduledJobs } from "./ipc/workflow";
 import { setWorkflowRunning } from "./workflow-manager";
 import { getBgJobs, updateBgJobStoreFromEvent, hydrateBgJobsFromScheduler } from "./run-manager";
 import { saveRunToHistory } from "./run-history";
-import { isTauri } from "./utils";
+import { isTauri, escapeHtml } from "./utils";
+import { NODE_IDS, findTriggerNodeTypeId } from "./node-ids";
 import { getCurrentZone } from "./sidebar-sections";
 import { loadBgPanel } from "./bg-panel-loader";
 
@@ -76,12 +78,48 @@ export async function bindSchedulerEvents(
       if (drawer && !drawer.classList.contains("hidden")
           && drawerTabs && drawerContent
           && !drawer.querySelector(".history-panel")) {
+        // "Scheduled" is only accurate for a genuine Schedule-node trigger —
+        // a Webhook or Manual trigger firing (e.g. Chat sending a message)
+        // is a real, on-demand execution, not a schedule.
+        const triggerType = findTriggerNodeTypeId(canvas.nodes.values());
+        const label = triggerType === NODE_IDS.SCHEDULE ? "Scheduled run in progress…" : "Workflow running…";
         drawerTabs.innerHTML   = `<span class="drawer-tab tab-neutral active">Running…</span>`;
-        drawerContent.innerHTML = `<div class="run-spinner-wrap"><div class="run-spinner"></div><div class="run-spinner-label">Scheduled run in progress…</div></div>`;
+        drawerContent.innerHTML = `<div class="run-spinner-wrap"><div class="run-spinner"></div><div class="run-spinner-label">${label}</div></div>`;
       }
     }
     if ((evt.status === "stopped" || evt.status === "error") && evt.workflow_id === wfManager.currentId) {
       canvas.resetAllStatus();
+      const drawer        = document.getElementById("output-drawer");
+      const drawerTabs     = document.getElementById("drawer-tabs");
+      const drawerContent  = document.getElementById("output-content");
+      // Only replace content this handler injected itself (the "running"
+      // spinner above) — never a real result, the Performance tab, or a
+      // history panel just because status flipped. showResultFromScheduler
+      // below overwrites this again whenever evt.last_result is present;
+      // this only covers the gap where it isn't (stopped, or an error
+      // before any result existed) — otherwise the spinner is left frozen
+      // forever with no confirmation the run actually ended.
+      if (drawer && !drawer.classList.contains("hidden")
+          && drawerTabs && drawerContent
+          && drawerContent.querySelector(".run-spinner-wrap")
+          && !evt.last_result) {
+        if (evt.status === "stopped") {
+          drawerTabs.innerHTML    = `<span class="drawer-tab tab-neutral active">Stopped</span>`;
+          drawerContent.innerHTML = `<div class="run-notice run-notice--warning"><strong><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/></svg>Stopped</strong>Workflow was stopped manually.</div>`;
+        } else {
+          const errMsg = evt.last_error ?? "Run failed.";
+          drawerTabs.innerHTML    = `<span class="drawer-tab tab-error active">Error</span>`;
+          drawerContent.innerHTML = `<div class="run-error-card">
+            <div class="run-error-label">${ICON_CIRCLE_ALERT}Execution error</div>
+            <div class="run-error-msg">${escapeHtml(errMsg)}</div>
+            <button class="run-error-copy" id="sched-error-copy-btn">Copy error</button>
+          </div>`;
+          const copyBtn = drawerContent.querySelector<HTMLButtonElement>("#sched-error-copy-btn");
+          copyBtn?.addEventListener("click", () => {
+            navigator.clipboard.writeText(errMsg).then(() => { copyBtn.textContent = "Copied"; });
+          });
+        }
+      }
     }
 
     setWorkflowRunning(evt.workflow_id, evt.status === "running" || evt.status === "waiting");

@@ -51,6 +51,10 @@ impl Node for LoopNode {
                 "index_var": {
                     "type": "string",
                     "description": "Variable name for the current index (default: 'index')"
+                },
+                "max_iterations": {
+                    "type": "number",
+                    "description": "Stop after this many items instead of the full array (default: no limit — every item runs). 0 or blank also means no limit. Can only lower the bound: a value larger than the array, or larger than the 10,000-item cap, has no effect beyond the array's own length."
                 }
             }
         })
@@ -122,11 +126,10 @@ impl Node for LoopNode {
             ));
         }
 
-        // T1-1i-followup: unify further — an explicit source_node string
-        // that names no node in context used to silently resolve to
-        // Value::Null, inconsistent with transform.rs's SOURCE_NOT_FOUND
-        // for the identical shape. A typo'd or stale source_node should
-        // fail loudly, not silently degrade to "no array, NOT_ARRAY".
+        // An explicit source_node string that names no node in context must fail
+        // loudly, matching transform.rs's SOURCE_NOT_FOUND for the identical
+        // shape, rather than resolving to Value::Null and silently degrading
+        // to "no array, NOT_ARRAY".
         let source_node_value = &input.input["source_node"];
         let source_data: Value = if source_node_value.is_null() {
             return NodeOutput::failure(NodeError::unrecoverable(
@@ -160,16 +163,26 @@ impl Node for LoopNode {
             )),
         };
 
-        let total = items.len();
+        let raw_total = items.len();
 
-        // MEDIUM fix: prevent O(n²) memory usage on large arrays.
+        // Cap array size to prevent O(n²) memory usage on large arrays.
         // 10,000 items is a generous cap for a desktop automation tool.
-        if total > 10_000 {
+        if raw_total > 10_000 {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "ARRAY_TOO_LARGE",
-                format!("Array has {} items — maximum is 10,000 per loop. Split your data into smaller batches.", total),
+                format!("Array has {} items — maximum is 10,000 per loop. Split your data into smaller batches.", raw_total),
             ));
         }
+
+        // Optional user cap on how many items this loop actually processes.
+        // Absent, zero, or a non-positive/non-integer value all mean "no
+        // limit" (the pre-existing default). A set value can only lower the
+        // effective bound — it's clamped to the array's own (already-capped)
+        // length, never raised past the ARRAY_TOO_LARGE check above.
+        let total = match input.input["max_iterations"].as_u64() {
+            Some(m) if m > 0 => raw_total.min(m as usize),
+            _ => raw_total,
+        };
 
         if total == 0 {
             return NodeOutput::success_with_logs(
@@ -191,6 +204,11 @@ impl Node for LoopNode {
             // dedicated loop_results store, which is excluded from snapshot() cloning.
             // Return [] as a placeholder — the executor overwrites it before returning
             // the done output to the caller.
+            let done_msg = if total < raw_total {
+                format!("Loop complete: processed {}/{} items (stopped at max_iterations)", total, raw_total)
+            } else {
+                format!("Loop complete: processed {} items", total)
+            };
             return NodeOutput::success_with_logs(
                 json!({
                     "items": items,
@@ -200,15 +218,15 @@ impl Node for LoopNode {
                     "item": null,
                     "index": current_index
                 }),
-                vec![format!("Loop complete: processed {} items", total)],
+                vec![done_msg],
             );
         }
 
         let current_item = items[current_index].clone();
 
         // Emit current item — the executor will activate loop_body successors.
-        // MEDIUM fix: omit "items" from per-iteration output. Serializing the
-        // full array on every iteration causes O(n²) memory usage. Downstream
+        // "items" is omitted from per-iteration output — serializing the full
+        // array on every iteration would cause O(n²) memory usage. Downstream
         // nodes that need the full array should reference the loop node's
         // initial output from workflow context instead.
         NodeOutput::success_with_logs(
@@ -230,9 +248,8 @@ impl Node for LoopNode {
 }
 
 // ---------------------------------------------------------------------------
-// Tests cover the source_node validation added in Batch A and unified to a
-// hard requirement in Batch W (T1-1i) — not a full suite for pre-existing
-// logic.
+// Tests cover the source_node validation requirement — not a full suite for
+// pre-existing logic.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -243,6 +260,7 @@ mod tests {
 
     fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -258,9 +276,9 @@ mod tests {
 
     #[tokio::test]
     async fn non_string_source_node_returns_error() {
-        // Batch A / T1-1g pattern (unchanged by T1-1i): a bare number for
-        // "source_node" is a malformed value, not "unset" — rejected with a
-        // distinct code from the is_null() reject path (SOURCE_NODE_REQUIRED).
+        // A bare number for "source_node" is a malformed value, not "unset" —
+        // rejected with a distinct code (INVALID_SOURCE_NODE) from the is_null()
+        // reject path (SOURCE_NODE_REQUIRED).
         let input = make_input(
             json!({ "array_field": "items", "source_node": 5 }),
             HashMap::new(),
@@ -272,10 +290,9 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_string_source_node_returns_error() {
-        // T1-1i followup: a syntactically-valid string that names no node in
-        // context now errors (SOURCE_NOT_FOUND), matching transform.rs.
-        // Previously resolved to Value::Null and fell through to NOT_ARRAY,
-        // silently masking a typo'd/stale source_node.
+        // A syntactically-valid string that names no node in context errors
+        // (SOURCE_NOT_FOUND), matching transform.rs — guards against a
+        // typo'd/stale source_node silently masking as an empty/missing array.
         let input = make_input(
             json!({ "array_field": "items", "source_node": "ghost" }),
             HashMap::new(),
@@ -287,10 +304,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_source_node_key_is_rejected() {
-        // T1-1i: unify to reject — the key omitted entirely (the shape the
-        // canvas most commonly sends for an unconfigured field) must be
-        // rejected. Previously this searched all upstream outputs and
-        // succeeded.
+        // The key omitted entirely (the shape the canvas most commonly sends
+        // for an unconfigured field) must be rejected rather than searching
+        // all upstream outputs for a match.
         let mut outputs = HashMap::new();
         outputs.insert("n_a".to_string(), json!({ "items": [1, 2, 3] }));
         let input = make_input(
@@ -304,9 +320,8 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_null_source_node_is_rejected() {
-        // T1-1i: explicit JSON null is treated the same as an absent key —
-        // both are rejected now, unlike a non-string value which was
-        // already rejected before this fix.
+        // Explicit JSON null is treated the same as an absent key — both are
+        // rejected, same as a non-string value.
         let mut outputs = HashMap::new();
         outputs.insert("n_a".to_string(), json!({ "items": [1, 2, 3] }));
         let input = make_input(
@@ -320,17 +335,16 @@ mod tests {
 
     #[tokio::test]
     async fn null_source_node_is_rejected_even_with_execution_order_present() {
-        // T1-1i: the removed search fallback used to pick a deterministic
-        // "first completed match" when execution_order was
-        // populated and two upstream outputs both carried an "items" array.
-        // That search is gone entirely — a null source_node must be
-        // rejected regardless of whether a deterministic candidate would
-        // have been resolvable, guarding against the search silently
-        // creeping back in as a "helpful" fallback later.
+        // A null source_node must be rejected regardless of whether a
+        // deterministic candidate could be resolved from execution_order —
+        // even with two upstream outputs both carrying an "items" array here.
+        // No implicit "first completed match" search exists; don't reintroduce
+        // one as a "helpful" fallback.
         let mut outputs = HashMap::new();
         outputs.insert("z_second".to_string(), json!({ "items": [9, 9] }));
         outputs.insert("a_first".to_string(), json!({ "items": [1, 2, 3] }));
         let input = NodeInput {
+            cancel_token: None,
             node_id: "test".to_string(),
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
@@ -347,9 +361,8 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "SOURCE_NODE_REQUIRED");
     }
 
-    /// S4-12 (edge case): naming item_var after the internal key
-    /// loop_executor.rs reads to advance iteration must be rejected, not
-    /// silently overwrite it.
+    /// Naming item_var after the internal key loop_executor.rs reads to
+    /// advance iteration must be rejected, not silently overwrite it.
     #[tokio::test]
     async fn item_var_colliding_with_loop_next_index_is_rejected() {
         let mut outputs = HashMap::new();
@@ -367,8 +380,8 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "RESERVED_VAR_NAME");
     }
 
-    /// S4-12 (edge case): index_var colliding with a reserved key is rejected
-    /// the same way item_var is.
+    /// index_var colliding with a reserved key is rejected the same way
+    /// item_var is.
     #[tokio::test]
     async fn index_var_colliding_with_reserved_key_is_rejected() {
         let mut outputs = HashMap::new();
@@ -386,8 +399,8 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "RESERVED_VAR_NAME");
     }
 
-    /// S4-12 (edge case): item_var and index_var set to the same name collide
-    /// with each other, not just with a fixed key.
+    /// item_var and index_var set to the same name collide with each other,
+    /// not just with a fixed key.
     #[tokio::test]
     async fn item_var_equal_to_index_var_is_rejected() {
         let mut outputs = HashMap::new();
@@ -406,9 +419,8 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "RESERVED_VAR_NAME");
     }
 
-    /// S4-12 (normal case): distinct, non-reserved item_var/index_var names
-    /// still work exactly as before and appear in the output under both
-    /// their custom name and the fixed "item"/"index" keys.
+    /// Distinct, non-reserved item_var/index_var names appear in the output
+    /// under both their custom name and the fixed "item"/"index" keys.
     #[tokio::test]
     async fn distinct_non_reserved_vars_still_work() {
         let mut outputs = HashMap::new();
@@ -431,7 +443,7 @@ mod tests {
         assert_eq!(data["row_num"], json!(0));
     }
 
-    /// Regression for the reserved-name false positive: item_var/index_var
+    /// The reserved-name check must not false-positive: item_var/index_var
     /// resolve to their own defaults ("item"/"index") when omitted, and
     /// "item"/"index" are themselves in RESERVED_LOOP_OUTPUT_KEYS. That must
     /// not be treated as a collision — the fixed "item"/"index" keys and the
@@ -450,6 +462,79 @@ mod tests {
         let data = out.output.unwrap();
         assert_eq!(data["item"], json!(10));
         assert_eq!(data["index"], json!(0));
+    }
+
+    /// max_iterations lower than the array's real length caps both the
+    /// per-iteration "total" and, once the capped index is reached, "done" —
+    /// before the real array (5 items) is anywhere near exhausted.
+    #[tokio::test]
+    async fn max_iterations_stops_loop_early() {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": [10, 20, 30, 40, 50] }));
+
+        let input = make_input(
+            json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 2 }),
+            outputs.clone(),
+        );
+        let out = LoopNode.execute(input).await;
+        assert!(out.success, "expected success, got: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["total"], json!(2), "total must reflect the cap (2), not the array length (5)");
+        assert_eq!(data["done"], json!(false));
+        assert_eq!(data["item"], json!(10));
+
+        let mut metadata = HashMap::new();
+        metadata.insert("__loop_test_index".to_string(), json!(2));
+        let input_at_cap = NodeInput {
+            cancel_token: None,
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input:        json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 2 }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata,
+                ..Default::default()
+            },
+        };
+        let out_at_cap = LoopNode.execute(input_at_cap).await;
+        assert!(out_at_cap.success, "expected success, got: {:?}", out_at_cap.error);
+        let data_at_cap = out_at_cap.output.unwrap();
+        assert_eq!(data_at_cap["done"], json!(true), "must be done at index 2 with max_iterations: 2, despite the real array having 5 items");
+        assert_eq!(data_at_cap["total"], json!(2));
+    }
+
+    /// max_iterations larger than the array must not change anything — it
+    /// can only lower the effective bound, never raise it.
+    #[tokio::test]
+    async fn max_iterations_larger_than_array_has_no_effect() {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": [1, 2, 3] }));
+        let input = make_input(
+            json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 100 }),
+            outputs,
+        );
+        let out = LoopNode.execute(input).await;
+        assert!(out.success, "expected success, got: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["total"], json!(3));
+    }
+
+    /// max_iterations: 0 is treated the same as unset (no limit) — it does
+    /// not mean "process zero items".
+    #[tokio::test]
+    async fn max_iterations_zero_means_no_limit() {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": [1, 2, 3] }));
+        let input = make_input(
+            json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 0 }),
+            outputs,
+        );
+        let out = LoopNode.execute(input).await;
+        assert!(out.success, "expected success, got: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["total"], json!(3));
     }
 }
 

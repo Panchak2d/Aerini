@@ -64,7 +64,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         match super::pool::get_mysql_pool(&url).await {
             Err(e) => NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
             Ok(pool) => if is_execute {
-                super::mysql::mysql_run_execute(&pool, &query, &params).await
+                super::mysql::mysql_run_execute(&pool, &query, &params, input.cancel_token.clone()).await
             } else {
                 super::mysql::mysql_run_query(&pool, &query, &params).await
             },
@@ -327,7 +327,7 @@ mod multi_statement_smuggling_tests {
         assert!(
             !result.success,
             "expected the stacked statement to be rejected by Postgres's extended protocol, \
-             but the call reported success — re-open T1-6, this is now exploitable"
+             but the call reported success — multi-statement smuggling is exploitable"
         );
 
         let leaked = sqlx::query(

@@ -1,6 +1,6 @@
 const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
-const MIN_W = 180;   // was 220 — widened to match the mockup's own clamp and PLAN_UI_A Batch 5
+const MIN_W = 180;   // matches the mockup's own clamp
 const MAX_W = 420;
 const DEF_W = 260;
 const SIDEBAR_STEP = 24; // px per arrow-key press — same value as resize.ts's DRAWER_STEP
@@ -48,7 +48,7 @@ export function initSidebarSections(): void {
  *   7. Body transition stuck — set to "none" on resize mousedown, cleared on
  *      mouseup for the same reason. A stuck "none" silently kills all CSS
  *      transitions app-wide until the next full page load.
- *   8. Body resizing-h class (Batch 5) — same mousedown/mouseup pair as #6;
+ *   8. Body resizing-h class — same mousedown/mouseup pair as #6;
  *      a stuck class here forces `cursor: col-resize !important` app-wide,
  *      not just a broken transition.
  */
@@ -100,7 +100,7 @@ function resetTransientState(): void {
   // 6 — Resize handle dragging class
   document.getElementById("sidebar-resize-handle")?.classList.remove("dragging");
 
-  // 8 — Body resizing-h class (Batch 5)
+  // 8 — Body resizing-h class
   document.body.classList.remove("resizing-h");
 
   // 7 — Body transition: only clear the specific value we set; do not touch
@@ -169,7 +169,7 @@ export function bindResizeHandle(): void {
   // mouseup: onMove's own startW is read from LS_WIDTH (not the live
   // --sidebar-w value), so an un-persisted keyboard resize would leave a
   // subsequent drag silently ignoring it and snapping back to the last
-  // persisted width — same-batch-scope fix, not a new bug introduced here.
+  // persisted width.
   handle.addEventListener("keydown", (e) => {
     const cur = parseInt(document.documentElement.style.getPropertyValue("--sidebar-w"), 10) || DEF_W;
     if (e.key === "ArrowRight")     { e.preventDefault(); setWidth(cur + SIDEBAR_STEP, true); }
@@ -275,7 +275,8 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
     const q = search.value.toLowerCase().trim();
     document.querySelectorAll<HTMLElement>(".workflow-item").forEach(item => {
       const name = item.querySelector(".workflow-item-name")?.textContent?.toLowerCase() ?? "";
-      item.style.display = q && !name.includes(q) ? "none" : "";
+      const tags = item.dataset.wfTags ?? "";
+      item.style.display = q && !name.includes(q) && !tags.includes(q) ? "none" : "";
     });
   });
 

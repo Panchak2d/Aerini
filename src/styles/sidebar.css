@@ -65,7 +65,7 @@
 }
 .activity-btn.active {
   color: var(--green);
-  background: rgba(52, 211, 153, 0.1);
+  background: color-mix(in srgb, var(--color-action-run) 10%, transparent);
 }
 /* Left accent bar on active button */
 .activity-btn.active::before {
@@ -324,6 +324,28 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.workflow-item-tags {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  margin: 0 6px;
+}
+.workflow-item-tag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--bg4);
+  color: var(--t3);
+  white-space: nowrap;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workflow-item.active .workflow-item-tag,
+.workflow-item:hover .workflow-item-tag { background: var(--bg3); color: var(--t2); }
+.workflow-item-tag-more { padding-left: 4px; padding-right: 4px; }
 .workflow-item-del {
   background: none;
   border: none;
@@ -360,8 +382,8 @@
 
 /* Cursor lock for the duration of a sidebar-width drag — same convention as
    workspace.css's body.resizing-v for the drawer, just the horizontal twin.
-   Declared here (not workspace.css) since that file is out of this batch's
-   scope; a body-class rule applies globally no matter which sheet holds it. */
+   Declared here rather than workspace.css since a body-class rule applies
+   globally no matter which sheet holds it. */
 body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select: none !important; }
 
 

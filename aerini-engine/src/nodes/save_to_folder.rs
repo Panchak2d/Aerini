@@ -16,7 +16,10 @@
 // Path traversal protection: all '/', '\', '..' stripped from every filename
 // before any path is constructed. folder_path is user-selected and not sanitized.
 //
-// Concurrent writes: tokio::spawn per file (all spawned before any awaited).
+// Writes: sequential, one file at a time, on the node's own async task — no
+// per-file spawn. Each file lands via a same-directory temp file + rename, so
+// an interrupted run leaves at most one stray temp file, never a truncated
+// file at its real target path.
 //
 // Output: { saved, count, folder, skipped, errors }
 
@@ -25,6 +28,7 @@ use base64::{Engine as _, engine::general_purpose};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
@@ -138,8 +142,8 @@ impl Node for SaveToFolderNode {
                 }
                 // Rejoin whatever suffix of `abs` doesn't exist yet onto the canonicalized
                 // (symlink-dereferenced) existing ancestor, so the value threaded through to
-                // flat_mode/subfolder_mode is exactly the path just validated above — not the
-                // raw, unresolved folder_path string the old code discarded here.
+                // flat_mode/subfolder_mode is exactly the path just validated above, not the
+                // raw, unresolved folder_path string.
                 let suffix = match abs.strip_prefix(check) {
                     Ok(s) => s,
                     Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
@@ -165,7 +169,8 @@ impl Node for SaveToFolderNode {
         let overwrite = cfg["overwrite"].as_bool().unwrap_or(true);
         // Sanitize prefix: strip path separators to prevent directory traversal.
         let raw_prefix = cfg["filename_prefix"].as_str().unwrap_or("").to_string();
-        let prefix: String = raw_prefix.chars().filter(|&c| c != '/' && c != '\\').collect();
+        let no_sep: String = raw_prefix.chars().filter(|&c| c != '/' && c != '\\').collect();
+        let prefix: String = truncate_to_byte_len(&no_sep, MAX_PREFIX_LEN).to_string();
 
         let subfolders = cfg["subfolders"].as_array().cloned().unwrap_or_default();
 
@@ -215,7 +220,7 @@ async fn flat_mode(
         ));
     }
 
-    let results = write_files_concurrent(&files, &base, prefix, overwrite).await;
+    let results = write_files(&files, &base, prefix, overwrite).await;
     build_output(results, folder_path)
 }
 
@@ -267,7 +272,7 @@ async fn subfolder_mode(
         }
 
         logs.push(format!("Subfolder '{}': {} file(s)", sf_name, files.len()));
-        let results = write_files_concurrent(&files, &target_dir, prefix, overwrite).await;
+        let results = write_files(&files, &target_dir, prefix, overwrite).await;
         all_results.extend(results);
     }
 
@@ -336,33 +341,17 @@ pub fn derive_ports(config: &Value) -> NodePorts {
     }
 }
 
-// ── Concurrent file writing ───────────────────────────────────────────────────
+// ── File writing ───────────────────────────────────────────────────────────────
 
-/// Spawn one task per file. All tasks run concurrently (all spawned before any awaited).
-async fn write_files_concurrent(
+async fn write_files(
     files: &[Value],
     dir: &Path,
     prefix: &str,
     overwrite: bool,
 ) -> Vec<Result<Value, Value>> {
-    let handles: Vec<_> = files.iter().map(|file| {
-        let dir      = dir.to_path_buf();
-        let prefix   = prefix.to_string();
-        let file     = file.clone();
-        tokio::spawn(async move {
-            write_single_file(&file, &dir, &prefix, overwrite).await
-        })
-    }).collect();
-
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(r) => results.push(r),
-            Err(e) => results.push(Err(json!({
-                "filename": "unknown",
-                "reason": format!("task panicked: {}", e)
-            }))),
-        }
+    let mut results = Vec::with_capacity(files.len());
+    for file in files {
+        results.push(write_single_file(file, dir, prefix, overwrite).await);
     }
     results
 }
@@ -403,7 +392,20 @@ async fn write_single_file(
     };
 
     let byte_count = bytes.len();
-    if let Err(e) = fs::write(&path, &bytes).await {
+    // Write to a same-directory temp name first, then rename onto the real path.
+    // `fs::write` on `path` directly would truncate an existing file before the
+    // new bytes land, so a write error (disk full, permissions) partway through
+    // would leave a corrupt file at `path`. rename() is a single directory-entry
+    // swap, so the visible file is always either the old complete one or the new
+    // complete one, never a truncated in-between state.
+    let tmp_path = dir.join(format!(".{}.{}.tmp", filename, Uuid::new_v4().simple()));
+
+    if let Err(e) = fs::write(&tmp_path, &bytes).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(json!({ "filename": filename, "reason": format!("write failed: {}", e) }));
+    }
+    if let Err(e) = fs::rename(&tmp_path, &path).await {
+        let _ = fs::remove_file(&tmp_path).await;
         return Err(json!({ "filename": filename, "reason": format!("write failed: {}", e) }));
     }
 
@@ -434,8 +436,21 @@ fn build_output(results: Vec<Result<Value, Value>>, folder: &str) -> NodeOutput 
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+// write_single_file's staging name is `.{filename}.{uuid}.tmp` — 38 fixed
+// bytes (3 literal dots + "tmp" + a 32-hex-char UUID) plus `filename`
+// (prefix + this function's output). OS path-component limits sit at 255
+// bytes (NTFS/ext4/APFS), so len(prefix) + len(sanitized) must stay ≤ 217;
+// this cap leaves 50 bytes of headroom for filename_prefix (MAX_PREFIX_LEN).
+const MAX_SANITIZED_LEN: usize = 167;
+
+// filename_prefix resolves through the same expression pipeline as any other
+// config string field, so it isn't guaranteed short — cap it independently
+// of MAX_SANITIZED_LEN.
+const MAX_PREFIX_LEN: usize = 50;
+
 /// Strip path separators, `..` sequences, null bytes, and Windows reserved device names
-/// from a filename. An empty result falls back to "file.bin".
+/// from a filename, then cap the result to MAX_SANITIZED_LEN bytes (extension-preserving).
+/// An empty result falls back to "file.bin".
 fn sanitize_filename(name: &str) -> String {
     // Windows reserved device names. On Windows, CreateFile("NUL") silently discards
     // all written data; CreateFile("CON") writes to the console. Block all 22 names
@@ -445,6 +460,11 @@ fn sanitize_filename(name: &str) -> String {
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
+    // Stem (part before first '.') against reserved names, case-insensitively.
+    let is_reserved = |s: &str| {
+        let stem = s.split('.').next().unwrap_or("").to_uppercase();
+        WINDOWS_RESERVED.contains(&stem.as_str())
+    };
 
     // Strip null bytes (cause ENAMETOOLONG / confusing OS errors), path separators,
     // and .. sequences.
@@ -457,13 +477,52 @@ fn sanitize_filename(name: &str) -> String {
         return "file.bin".to_string();
     }
 
-    // Check stem (part before first '.') against reserved names, case-insensitively.
-    let stem = no_dotdot.split('.').next().unwrap_or("").to_uppercase();
-    if WINDOWS_RESERVED.contains(&stem.as_str()) {
+    if is_reserved(&no_dotdot) {
         return "file.bin".to_string();
     }
 
-    no_dotdot
+    let capped = cap_sanitized_length(&no_dotdot, MAX_SANITIZED_LEN);
+    // Re-check post-truncation: a truncated stem could coincidentally land on
+    // a reserved name if the untruncated original started with one followed
+    // by more text (e.g. "CON-notes-from-a-very-long-title...").
+    if is_reserved(&capped) {
+        return "file.bin".to_string();
+    }
+
+    capped
+}
+
+/// Cap `name` to `max_bytes` bytes, preserving the extension (text from the
+/// last '.' onward) by truncating the stem first. Falls back to a flat
+/// truncation of the whole name when the extension alone is at or over the
+/// byte budget.
+fn cap_sanitized_length(name: &str, max_bytes: usize) -> String {
+    if name.len() <= max_bytes {
+        return name.to_string();
+    }
+    if let Some(dot) = name.rfind('.') {
+        let ext = &name[dot..];
+        if dot > 0 && ext.len() <= max_bytes {
+            let stem = truncate_to_byte_len(&name[..dot], max_bytes - ext.len());
+            return format!("{}{}", stem, ext);
+        }
+    }
+    truncate_to_byte_len(name, max_bytes).to_string()
+}
+
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. Steps back to the nearest char boundary by hand rather than
+/// `str::floor_char_boundary` (stable only since Rust 1.91) so this keeps
+/// working on whatever older toolchain this crate is built with.
+fn truncate_to_byte_len(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Decode base64. Strips a `data:<mime>;base64,` prefix if present.
@@ -542,11 +601,11 @@ mod tests {
     // ── sandbox containment ────────────────────────────────────
 
     // With __file_sandbox_dir set and a RELATIVE folder_path, the write must land
-    // inside the sandbox. Before the fix, the containment check validated a
-    // sandbox-resolved path that was then discarded — the actual write used the
-    // raw, unresolved folder_path, which resolves relative to the process's CWD
-    // instead of the sandbox root. This test exercises the full execute() path
-    // (not flat_mode directly) since the sandbox resolution lives there.
+    // inside the sandbox — the actual write must use the sandbox-resolved path,
+    // not the raw, unresolved folder_path (which would resolve relative to the
+    // process's CWD instead of the sandbox root). This test exercises the full
+    // execute() path (not flat_mode directly) since the sandbox resolution
+    // lives there.
     #[tokio::test]
     async fn sandbox_relative_folder_path_writes_inside_sandbox() {
         let sandbox_dir = TempDir::new().unwrap();
@@ -559,6 +618,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
@@ -620,7 +680,7 @@ mod tests {
         assert!(dir.path().join("b.txt").exists());
     }
 
-    // P2 regression: empty files array must surface NO_FILES_RECEIVED, not succeed silently.
+    // Empty files array must surface NO_FILES_RECEIVED, not succeed silently.
     #[tokio::test]
     async fn flat_mode_empty_files_array_returns_error() {
         let dir = TempDir::new().unwrap();
@@ -631,7 +691,7 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "NO_FILES_RECEIVED");
     }
 
-    // P2 regression: missing target directory must be created, not error.
+    // Missing target directory must be created, not error.
     #[tokio::test]
     async fn flat_mode_missing_dir_is_created_by_create_dir_all() {
         let base = TempDir::new().unwrap();
@@ -672,6 +732,48 @@ mod tests {
         assert!(!dir.path().join("bad.txt").exists(), "bad file must not be created");
     }
 
+    // overwrite=true must replace an existing file's on-disk content — the write
+    // now lands via a temp file + rename rather than a direct in-place write.
+    #[tokio::test]
+    async fn flat_mode_overwrite_true_replaces_existing_file_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let first = json!({ "files": [file_entry("out.txt", "QUFB")] }); // "AAA"
+        let out1 = flat_mode(&first, None, path, "", true).await;
+        assert!(out1.success, "{:?}", out1.error);
+
+        let second = json!({ "files": [file_entry("out.txt", "QkJC")] }); // "BBB"
+        let out2 = flat_mode(&second, None, path, "", true).await;
+        assert!(out2.success, "{:?}", out2.error);
+
+        let content = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+        assert_eq!(content, "BBB", "overwrite=true must replace the file's content");
+    }
+
+    // The temp-file-then-rename write must not leave its staging file behind
+    // once the run completes successfully.
+    #[tokio::test]
+    async fn flat_mode_write_leaves_no_stray_temp_files() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = json!({
+            "files": [
+                file_entry("a.txt", "QUFB"),
+                file_entry("b.txt", "QkJC"),
+            ]
+        });
+        let out = flat_mode(&cfg, None, path, "", true).await;
+        assert!(out.success, "{:?}", out.error);
+
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "no .tmp staging files should remain: {:?}", leftover);
+    }
+
     // ── subfolder_mode ────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -695,7 +797,7 @@ mod tests {
         assert!(dir.path().join("images").join("img.txt").exists());
     }
 
-    // P2 ordering regression: create_dir_all must fire BEFORE the files.is_empty() guard.
+    // create_dir_all must fire before the files.is_empty() guard.
     // When source_expr resolves to an empty array, the subfolder directory must still
     // exist on disk even though no files are written.
     #[tokio::test]
@@ -715,12 +817,90 @@ mod tests {
         let subdir = dir.path().join("empty_sub");
         assert!(
             subdir.exists(),
-            "directory must be created even when source resolves to 0 files (P2 ordering fix)"
+            "directory must be created even when source resolves to 0 files"
         );
         // Confirm the output surfaces the zero-file condition rather than silently succeeding.
         assert!(
             !out.success || out.output.as_ref().map(|o| o["count"] == 0).unwrap_or(false),
             "zero files must not produce a silent success with count > 0"
         );
+    }
+
+    // ── sanitize_filename length cap ────────────────────────────────────────
+
+    #[test]
+    fn sanitize_filename_short_name_unaffected() {
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn sanitize_filename_long_name_truncates_preserving_extension() {
+        let name = format!("{}.jpg", "a".repeat(300));
+        let result = sanitize_filename(&name);
+        assert_eq!(
+            result,
+            format!("{}.jpg", "a".repeat(163)),
+            "stem must truncate to fit MAX_SANITIZED_LEN while the extension survives intact"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_oversized_extension_falls_back_to_flat_truncation() {
+        // The ".xxx...xxx" extension alone (251 bytes) exceeds the 167-byte cap.
+        let name = format!("a.{}", "x".repeat(250));
+        let result = sanitize_filename(&name);
+        assert_eq!(
+            result,
+            format!("a.{}", "x".repeat(165)),
+            "extension budget exceeded — must flat-truncate instead of preserving it"
+        );
+    }
+
+    // ── filename_prefix length cap ──────────────────────────────────────────
+
+    fn exec_input(folder_path: &str, prefix: &str, filename: &str, b64: &str) -> NodeInput {
+        NodeInput {
+            cancel_token: None,
+            node_id:      "test-node".to_string(),
+            workflow_id:  "test-wf".to_string(),
+            execution_id: "test-exec".to_string(),
+            input: json!({
+                "folder_path": folder_path,
+                "filename_prefix": prefix,
+                "files": [file_entry(filename, b64)]
+            }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: std::sync::Arc::new(HashMap::new()),
+                metadata:     HashMap::new(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn filename_prefix_within_cap_unaffected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let prefix = "p".repeat(10);
+        let input = exec_input(path, &prefix, "out.txt", "Z29vZA==");
+        let out = SaveToFolderNode.execute(input).await;
+        assert!(out.success, "{:?}", out.error);
+        let expected = format!("{}out.txt", "p".repeat(10));
+        assert!(dir.path().join(&expected).exists());
+    }
+
+    #[tokio::test]
+    async fn filename_prefix_over_cap_truncates_to_max_prefix_len() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let prefix = "p".repeat(80);
+        let input = exec_input(path, &prefix, "out.txt", "Z29vZA==");
+        let out = SaveToFolderNode.execute(input).await;
+        assert!(out.success, "{:?}", out.error);
+        let capped = format!("{}out.txt", "p".repeat(MAX_PREFIX_LEN));
+        assert!(dir.path().join(&capped).exists(), "prefix must be capped to MAX_PREFIX_LEN bytes");
+        let uncapped = format!("{}out.txt", "p".repeat(80));
+        assert!(!dir.path().join(&uncapped).exists(), "uncapped 80-byte prefix must not appear on disk");
     }
 }

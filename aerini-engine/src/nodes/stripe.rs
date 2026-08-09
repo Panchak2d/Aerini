@@ -71,9 +71,9 @@ impl Node for StripeNode {
 
                 let description = input.input["description"].as_str().unwrap_or("");
                 let caller_key  = input.input["idempotency_key"].as_str().filter(|s| !s.is_empty());
-                // T1-13 residual: distinguishes loop-body iterations that
-                // happen to resolve identical amount/currency/description —
-                // see resolve_idempotency_key's doc comment.
+                // Distinguishes loop-body iterations that happen to resolve
+                // identical amount/currency/description — see
+                // resolve_idempotency_key's doc comment.
                 let loop_iteration = input.context.metadata.get("__loop_iteration_index")
                     .and_then(|v| v.as_u64());
                 let idempotency_key = resolve_idempotency_key(
@@ -154,8 +154,8 @@ impl Node for StripeNode {
 /// otherwise fail reqwest's `HeaderValue` conversion (e.g. an embedded
 /// newline).
 ///
-/// T1-13 residual: `execution_id + node_id + amount + currency + description`
-/// alone does not guarantee distinctness across iterations of a loop body
+/// `execution_id + node_id + amount + currency + description` alone does
+/// not guarantee distinctness across iterations of a loop body
 /// containing this node — two iterations can resolve identical
 /// amount/currency/description (e.g. charging the same flat fee to N
 /// different customers, where only an upstream node's customer id differs
@@ -190,25 +190,16 @@ fn resolve_idempotency_key(
 mod tests {
     use super::*;
 
-    // no request previously carried an Idempotency-Key header
-    // at all, so a recoverable failure retried by `execute_with_retry`
-    // (executor/mod.rs) created a second, distinct PaymentIntent for the
-    // same purchase. These tests exercise the real `resolve_idempotency_key`
-    // function `execute()` calls — not a duplicated copy — covering the two
-    // properties the fix requires: stable across retries, distinct across
-    // genuinely separate invocations.
+    // These tests exercise the real `resolve_idempotency_key` function
+    // `execute()` calls — not a duplicated copy — covering: stable across
+    // retries, distinct across genuinely separate invocations.
     //
-    // Scope note (7): `execute` posts to the hardcoded
-    // `https://api.stripe.com` — there is no injectable base_url, so
-    // end-to-end header-on-the-wire coverage would require either a real
-    // network call to Stripe or a refactor to make the endpoint
-    // configurable, both out of scope for this fix. The pre-existing
-    // `Authorization` header a few lines above `Idempotency-Key` in the same
-    // request-builder chain has never had that coverage either; holding
-    // this one-line addition to a higher bar than its neighbor would be
-    // inconsistent. Manually traced: `.header("Idempotency-Key", idempotency_key)`
-    // sits in the same builder chain as the already-working `Authorization`
-    // header, using the identical `reqwest` header-setting idiom.
+    // `execute` posts to the hardcoded `https://api.stripe.com` with no
+    // injectable base_url, so header-on-the-wire coverage would require a
+    // real network call or an endpoint-configurability refactor — the
+    // neighboring `Authorization` header, set in the same builder chain,
+    // has never had that coverage either. `.header("Idempotency-Key",
+    // idempotency_key)` uses the identical `reqwest` header-setting idiom.
 
     #[test]
     fn idempotency_key_stable_across_retries() {
@@ -249,15 +240,14 @@ mod tests {
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    // ── T1-13 residual: __loop_iteration_index folded into the auto-derived key ──
+    // ── __loop_iteration_index folded into the auto-derived key ──
 
     #[test]
     fn loop_iterations_with_identical_params_get_distinct_keys() {
-        // The exact collision the residual gap describes: same node, same run,
-        // same amount/currency/description (e.g. a flat per-item fee) across
-        // two iterations — only the iteration index differs. Without folding
-        // it in, these would previously hash to the *same* key and Stripe
-        // would silently treat charge #2 as a duplicate of charge #1.
+        // Same node, same run, same amount/currency/description (e.g. a flat
+        // per-item fee) across two iterations — only the iteration index
+        // differs. Without folding it in, these would hash to the *same* key
+        // and Stripe would silently treat charge #2 as a duplicate of charge #1.
         let iter0 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(0));
         let iter1 = resolve_idempotency_key(None, "exec-1", "stripe_node", 500, "usd", "flat fee", Some(1));
         assert_ne!(iter0, iter1, "identical params but different loop iteration must yield different keys");

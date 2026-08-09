@@ -1,23 +1,56 @@
 use serde_json::{json, Value};
+use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 // ── MySQL ─────────────────────────────────────────────────────────────────────
 
-pub(super) async fn mysql_run_execute(pool: &sqlx::MySqlPool, query: &str, params: &[Value]) -> NodeOutput {
+pub(super) async fn mysql_run_execute(
+    pool: &sqlx::MySqlPool,
+    query: &str,
+    params: &[Value],
+    cancel_token: Option<CancellationToken>,
+) -> NodeOutput {
     let mut q = sqlx::query(query);
     for p in params {
         q = mysql_bind_one(q, p);
     }
-    match q.execute(pool).await {
+
+    let mut kill_mitigation_unavailable = false;
+    let exec_result = if let Some(token) = cancel_token {
+        let mut conn = match pool.acquire().await {
+            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
+                format!("Execute failed: {}", e))),
+            Ok(c) => c,
+        };
+        let connection_id = mysql_capture_connection_id(&mut conn).await;
+        kill_mitigation_unavailable = connection_id.is_none();
+        let watcher = connection_id.map(|id| {
+            let watch_pool = pool.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                mysql_kill_query(&watch_pool, id).await;
+            })
+        });
+        let result = q.execute(&mut *conn).await;
+        if let Some(handle) = watcher {
+            handle.abort();
+        }
+        result
+    } else {
+        q.execute(pool).await
+    };
+
+    match exec_result {
         Err(e) => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
             format!("Execute failed: {}", e))),
         Ok(result) => {
             let rows_affected = result.rows_affected();
             // last_insert_id() is available on MySqlQueryResult via sqlx::mysql::MySqlQueryResult
             let last_id = result.last_insert_id();
-            NodeOutput::success_with_logs(
+            let mut output = NodeOutput::success_with_logs(
                 json!({
                     "rows": [],
                     "rows_affected": rows_affected,
@@ -25,9 +58,43 @@ pub(super) async fn mysql_run_execute(pool: &sqlx::MySqlPool, query: &str, param
                     "columns": []
                 }),
                 vec![format!("{} row(s) affected", rows_affected)],
-            )
+            );
+            if kill_mitigation_unavailable {
+                output.logs.push(
+                    "cancel-safety: could not capture this query's MySQL connection id; \
+                     a cancellation mid-query cannot be killed server-side this time".to_string(),
+                );
+            }
+            output
         }
     }
+}
+
+/// Reads the current session's connection id, for `mysql_kill_query` to target later.
+/// `None` on any read failure — the caller falls back to running without kill-safety
+/// rather than failing the query over a diagnostic read.
+async fn mysql_capture_connection_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>) -> Option<u64> {
+    sqlx::query_scalar("SELECT CONNECTION_ID()")
+        .fetch_one(&mut **conn)
+        .await
+        .ok()
+}
+
+const KILL_QUERY_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Best-effort: acquires a second pooled connection and issues `KILL QUERY` for
+/// `connection_id`, then gives up silently on acquire timeout or error. Not a
+/// guaranteed kill — MySQL's own KILL QUERY has a known race (upstream bug
+/// #79838) where a kill landing just after the target query already finished
+/// can hit that connection's next statement instead of the intended one.
+async fn mysql_kill_query(pool: &sqlx::MySqlPool, connection_id: u64) {
+    let mut conn = match tokio::time::timeout(KILL_QUERY_ACQUIRE_TIMEOUT, pool.acquire()).await {
+        Ok(Ok(c)) => c,
+        _ => return,
+    };
+    let _ = sqlx::query(&format!("KILL QUERY {}", connection_id))
+        .execute(&mut *conn)
+        .await;
 }
 
 pub(super) async fn mysql_run_query(pool: &sqlx::MySqlPool, query: &str, params: &[Value]) -> NodeOutput {
@@ -128,7 +195,7 @@ mod multi_statement_smuggling_tests {
         assert!(
             !result.success,
             "expected the stacked statement to be rejected by MySQL's prepared-statement protocol, \
-             but the call reported success — re-open T1-6, this is now exploitable"
+             but the call reported success — multi-statement smuggling is exploitable"
         );
 
         let leaked = sqlx::query(
@@ -146,5 +213,66 @@ mod multi_statement_smuggling_tests {
             .execute(&pool)
             .await
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod cancellation_kill_tests {
+    use super::{mysql_kill_query, mysql_run_execute};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn mysql_run_execute_with_cancel_token_completes_normally_when_not_cancelled() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_MYSQL");
+
+        let token = CancellationToken::new();
+        let result = mysql_run_execute(&pool, "SELECT 1", &[], Some(token)).await;
+
+        assert!(
+            result.success,
+            "expected a fast query to succeed normally when its cancel_token is never cancelled, got: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn mysql_kill_query_interrupts_in_flight_query() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_MYSQL");
+
+        let mut conn = pool.acquire().await.expect("failed to acquire connection");
+        let connection_id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("failed to read CONNECTION_ID()");
+
+        let sleeper = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            let result = sqlx::query("SELECT SLEEP(5)").execute(&mut *conn).await;
+            (result, start.elapsed())
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        mysql_kill_query(&pool, connection_id).await;
+
+        let (result, elapsed) = sleeper.await.expect("sleeper task panicked");
+        assert!(
+            result.is_err(),
+            "expected KILL QUERY to interrupt the in-flight SLEEP(5) with an error, got Ok"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "expected the kill to interrupt SLEEP(5) well before its natural 5s completion, took {:?}",
+            elapsed
+        );
     }
 }

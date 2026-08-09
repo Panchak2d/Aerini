@@ -811,13 +811,12 @@ pub async fn get_tokens(
 
 // ── Tests ───────────────────────────────────────
 //
-// exchange_code/refresh_tokens's new "google_sheets" match arms are thin
+// exchange_code/refresh_tokens's "google_sheets" match arms are thin
 // delegations to the pre-existing, already-network-tested youtube functions
-// (no new logic of their own) — verified by manual trace only, matching the
-// precedent set by Batch F's postgres/mysql wiring (this file has no HTTP-mock
-// test infrastructure to exercise them against, and adding one is out of this
-// batch's scope). What *is* new logic — the URL a user is told to register, and
-// the live-port probe — is unit-tested below.
+// (no new logic of their own) — verified by manual trace only, since this file
+// has no HTTP-mock test infrastructure to exercise them against. What *is* new
+// logic — the URL a user is told to register, and the live-port probe — is
+// unit-tested below.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,9 +850,8 @@ mod tests {
 
     #[test]
     fn build_auth_url_unknown_platform_still_empty() {
-        // Regression guard: adding the google_sheets arm must not disturb the
-        // existing "unrecognized platform" fallback used by run_full_oauth_flow's
-        // own empty-string check.
+        // Guards the "unrecognized platform" fallback that run_full_oauth_flow's
+        // own empty-string check relies on.
         assert_eq!(build_auth_url("bogus", "id", "state", "http://x/callback"), "");
     }
 

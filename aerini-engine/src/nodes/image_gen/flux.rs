@@ -206,10 +206,10 @@ async fn bfl_poll(
 mod tests {
     use crate::provider::{AuthStyle, ProviderRegistry};
 
-    /// S2-8 (normal case): flux_pro/flux_2_pro are registered with
-    /// AuthStyle::HeaderKey("x-key") — the precondition call_flux_one/bfl_poll
-    /// now depend on, having switched from a manual `.header("x-key", ...)`
-    /// to routing through ProviderRegistry::apply_auth().
+    /// flux_pro/flux_2_pro are registered with AuthStyle::HeaderKey("x-key")
+    /// — the precondition call_flux_one/bfl_poll depend on, since both
+    /// route auth through ProviderRegistry::apply_auth() rather than
+    /// setting the header manually.
     #[test]
     fn flux_pro_and_flux_2_pro_use_x_key_header_auth() {
         let registry = ProviderRegistry::global();
@@ -219,10 +219,9 @@ mod tests {
         assert!(matches!(flux_2_pro.auth_style, AuthStyle::HeaderKey("x-key")));
     }
 
-    /// S2-8 (edge case): apply_auth() actually attaches "x-key" with the real
-    /// key value when called with the flux_pro record — confirms the request
-    /// built via the new code path carries the same header the old manual
-    /// call used to, not just that the record is configured correctly.
+    /// Confirms apply_auth() actually attaches "x-key" with the real key
+    /// value when called with the flux_pro record — not just that the
+    /// record is configured correctly.
     #[test]
     fn flux_apply_auth_sends_x_key_header() {
         let record = ProviderRegistry::global().get("flux_pro").unwrap();

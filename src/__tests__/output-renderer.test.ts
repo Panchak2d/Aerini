@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractPreview, syntaxHighlight } from "../output-renderer";
+import { extractPreview, syntaxHighlight, renderErrorsTab, renderSummaryTab, ICON_CIRCLE_ALERT } from "../output-renderer";
+import type { WorkflowResult } from "../ipc/workflow";
 
 // output-renderer.ts imports invoke/convertFileSrc from @tauri-apps/api/core.
 // Mock the module so the import does not throw in Node.
@@ -136,5 +137,54 @@ describe("syntaxHighlight — string values (behaviour note)", () => {
     const out = syntaxHighlight('"hello"');
     expect(out).toBe("&quot;hello&quot;");
     expect(out).not.toContain("json-str");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderErrorsTab — shared error icon
+// ---------------------------------------------------------------------------
+
+describe("renderErrorsTab — error icon", () => {
+  it("includes the shared circle-alert icon markup for each error card", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: false,
+      node_outputs: {},
+      logs: [{ level: "error", message: "boom", node_id: "n1", timestamp: new Date().toISOString() }],
+    };
+    const html = renderErrorsTab(result, new Map());
+    expect(html).toContain(ICON_CIRCLE_ALERT);
+  });
+
+  it("returns the empty-state message when there are no error-level logs", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [],
+    };
+    expect(renderErrorsTab(result, new Map())).toContain("No errors");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderSummaryTab — shared error icon
+// ---------------------------------------------------------------------------
+
+describe("renderSummaryTab — error icon", () => {
+  it("includes the shared circle-alert icon in the error card when the run failed", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: false,
+      node_outputs: {},
+      logs: [{ level: "error", message: "boom", timestamp: new Date().toISOString() }],
+    };
+    expect(renderSummaryTab(result, new Map())).toContain(ICON_CIRCLE_ALERT);
+  });
+
+  it("omits the error card entirely when success is false but no error-level log exists", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: false,
+      node_outputs: {},
+      logs: [{ level: "warn", message: "hmm", timestamp: new Date().toISOString() }],
+    };
+    expect(renderSummaryTab(result, new Map())).not.toContain("sum-error-card");
   });
 });

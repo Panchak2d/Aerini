@@ -4,10 +4,10 @@
 
 #chat-panel {
   position: fixed;
-  top: 0;
+  top: var(--toolbar-h);
   right: 0;
-  bottom: 0;
-  width: 360px;
+  bottom: calc(var(--status-h) + var(--canvas-stat-h));
+  width: var(--chat-w);
   background: var(--bg2);
   border-left: 1px solid var(--bd);
   display: none;

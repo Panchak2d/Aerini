@@ -11,17 +11,24 @@
 // correct answer — nothing is skipped or merged, only serialized.
 let _queue: Promise<void> = Promise.resolve();
 
-function showConfirmNow(message: string, isDanger: boolean, okLabel: string): Promise<boolean> {
+function showConfirmNow(message: string, isDanger: boolean, okLabel: string, iconVariant: "danger" | "neutral"): Promise<boolean> {
   return new Promise(resolve => {
     const modal      = document.getElementById("confirm-modal")!;
     const msgEl      = document.getElementById("confirm-message")!;
     const okBtn      = document.getElementById("confirm-ok")! as HTMLButtonElement;
     const cancelBtn  = document.getElementById("confirm-cancel")!;
     const backdrop   = modal.querySelector(".confirm-backdrop")!;
+    const iconDanger  = modal.querySelector(".confirm-icon--danger");
+    const iconNeutral = modal.querySelector(".confirm-icon--neutral");
 
     msgEl.textContent = message;
     okBtn.textContent = okLabel;
     okBtn.classList.toggle("confirm-danger", isDanger);
+    // Both icons are set explicitly every call, not just for "neutral" — the
+    // modal's DOM is shared and reused (see module doc comment above), so a
+    // prior call's variant would otherwise leak into this one.
+    iconDanger?.classList.toggle("hidden", iconVariant !== "danger");
+    iconNeutral?.classList.toggle("hidden", iconVariant !== "neutral");
     modal.classList.remove("hidden");
 
     const cleanup = (result: boolean) => {
@@ -43,8 +50,8 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string): Pr
 
 // Confirm dialog — replaces window.confirm, which Tauri webview suppresses.
 // Returns Promise<boolean>: true on OK, false on Cancel / backdrop click.
-export function showConfirm(message: string, isDanger = false, okLabel = "Continue"): Promise<boolean> {
-  const result = _queue.then(() => showConfirmNow(message, isDanger, okLabel));
+export function showConfirm(message: string, isDanger = false, okLabel = "Continue", iconVariant: "danger" | "neutral" = "danger"): Promise<boolean> {
+  const result = _queue.then(() => showConfirmNow(message, isDanger, okLabel, iconVariant));
   // Advance the queue regardless of this call's own outcome, so the next
   // queued call always waits for this dialog to close, not for its answer.
   _queue = result.then(() => undefined, () => undefined);

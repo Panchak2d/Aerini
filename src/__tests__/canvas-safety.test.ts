@@ -5,8 +5,9 @@ import { Canvas } from "../canvas/Canvas";
 import { Connector, PendingConnector } from "../canvas/Connector";
 import { CanvasNode } from "../canvas/Node";
 import type { UndoAction } from "../canvas/UndoManager";
-import { serialize } from "../canvas/CanvasSerializer";
+import { serialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
 import { checkDangerousNodes } from "../validation";
+import type { NodeDescriptor } from "../ipc/workflow";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
 vi.mock("@tauri-apps/api/core", () => ({
@@ -215,6 +216,43 @@ describe("checkDangerousNodes — scoped to the given node set", () => {
     const ok = await checkDangerousNodes("wf1", nodes, approved, confirm);
     expect(ok).toBe(false);
     expect(approved.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkDangerousNodes must also prompt for plugin nodes: they get resolved
+// credential values merged into their input and have outbound HTTP access by
+// design, but sat outside DANGEROUS_NODE_IDS entirely (finding #4).
+// ---------------------------------------------------------------------------
+
+describe("checkDangerousNodes — plugin nodes", () => {
+  function fakeNode(id: string, typeId: string): CanvasNode {
+    return { data: { id, node_type_id: typeId, name: id } } as unknown as CanvasNode;
+  }
+
+  const PLUGIN_DESCRIPTOR: NodeDescriptor = {
+    type_id: "my_plugin_node", display_name: "My Plugin", node_type: "action", version: "1",
+    input_schema: {}, output_schema: {},
+    ports: { inputs: [{ id: "input", label: "In", position: "left" }], outputs: [{ id: "output", label: "Out", position: "right" }] },
+    is_plugin: true,
+  };
+
+  it("prompts for a node whose descriptor is registered as is_plugin, even though it's not in DANGEROUS_NODE_IDS", async () => {
+    registerNodeDescriptors([PLUGIN_DESCRIPTOR]);
+    const confirm = vi.fn().mockResolvedValue(true);
+    const nodes = [fakeNode("n1", "my_plugin_node")];
+    const ok = await checkDangerousNodes("wf1", nodes, new Set(), confirm);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(ok).toBe(true);
+  });
+
+  it("does not prompt for a registered built-in (non-plugin, non-dangerous) node type", async () => {
+    registerNodeDescriptors([{ ...PLUGIN_DESCRIPTOR, type_id: "http_request", is_plugin: false }]);
+    const confirm = vi.fn().mockResolvedValue(true);
+    const nodes = [fakeNode("n1", "http_request")];
+    const ok = await checkDangerousNodes("wf1", nodes, new Set(), confirm);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(ok).toBe(true);
   });
 });
 
