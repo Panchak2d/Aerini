@@ -35,6 +35,7 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
     parallelChk.checked   = wfManager.parallelExecution;
     maxConcInput.value    = String(wfManager.maxConcurrentNodes);
     concurrencyRow.hidden = !wfManager.parallelExecution;
+    (document.getElementById("wf-setting-unlimited-duration") as HTMLInputElement).checked = wfManager.unlimitedDuration;
 
     const cs = wfManager.chatSettings;
     (document.getElementById("wf-setting-chat-attachments") as HTMLInputElement).checked = cs.allow_attachments;
@@ -78,6 +79,11 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
       wfManager.maxConcurrentNodes = val;
       wfManager.markUnsaved(true);
     }
+  });
+
+  document.getElementById("wf-setting-unlimited-duration")!.addEventListener("change", (e) => {
+    wfManager.unlimitedDuration = (e.target as HTMLInputElement).checked;
+    wfManager.markUnsaved(true);
   });
 
   document.getElementById("wf-setting-chat-attachments")!.addEventListener("change", (e) => {

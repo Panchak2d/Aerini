@@ -278,6 +278,7 @@ pub async fn run_workflow(
     .with_max_concurrent_nodes(workflow.max_concurrent_nodes.unwrap_or(8))
     .with_cancel_token(token)
     .with_server_max_duration_secs(Some(SERVER_MAX_DURATION_SECS))
+    .with_unlimited_duration(workflow.unlimited_duration)
     // Desktop is single-tenant — the person running this
     // workflow is the same person who owns the machine and its data.
     // Unlocks node-level admin gates (e.g. `allow_raw_sql`) the same way

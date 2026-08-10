@@ -36,6 +36,9 @@ pub(crate) struct WorkflowExecutorConfig {
     pub(super) cancel_token: Option<CancellationToken>,
     // Server-level ceiling applied to every workflow regardless of per-workflow max_duration_secs.
     pub(super) server_max_duration_secs: Option<u64>,
+    // When true, run() applies no timeout at all — wins over both server_max_duration_secs
+    // and workflow.max_duration_secs. Default: false.
+    pub(super) unlimited_duration: bool,
     // When true, nodes gated on admin scope (e.g. allow_raw_sql) are unlocked.
     pub(super) caller_is_admin: bool,
     // When true, Code (JS) nodes run with module import restrictions and OS resource limits.
@@ -60,6 +63,7 @@ impl Default for WorkflowExecutorConfig {
             max_concurrent_nodes:   8,
             cancel_token:           None,
             server_max_duration_secs: None,
+            unlimited_duration:     false,
             caller_is_admin:        false,
             code_sandbox_enabled:   false,
             code_max_memory_mb:     None,
@@ -123,6 +127,11 @@ impl WorkflowExecutorConfig {
 
     pub(super) fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
         self.server_max_duration_secs = secs.map(|s| s.clamp(10, 86400));
+        self
+    }
+
+    pub(super) fn with_unlimited_duration(mut self, enabled: bool) -> Self {
+        self.unlimited_duration = enabled;
         self
     }
 

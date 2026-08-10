@@ -12,6 +12,7 @@ export interface PropSchema {
   enum?: string[];
   minimum?: number;
   maximum?: number;
+  maxLength?: number;
 }
 
 export const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
@@ -53,6 +54,10 @@ function renderTextField(
   inp.type = "text"; inp.value = cur;
   inp.placeholder = prop.description ? prop.description + " · {{ for data" : "Value or {{ for data";
   inp.autocomplete = "off"; inp.spellcheck = false;
+  // Only constrains a literal value typed directly — an {{expression}} in this
+  // same input isn't evaluated here, so it can still resolve past this cap at
+  // execution time. Server-side enforcement is the real backstop.
+  if (prop.maxLength !== undefined) inp.maxLength = prop.maxLength;
   inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); syncRequired(); });
 
   // Only add the expression button for string-typed fields.
@@ -300,10 +305,14 @@ export function renderConfigFieldsLoop(
       fieldEl.classList.toggle("field-required-empty", v === undefined || String(v).trim() === "");
     };
 
+    const hint = prop.maxLength !== undefined
+      ? `${prop.description ? prop.description + " · " : ""}Max ${prop.maxLength} characters`
+      : prop.description;
+
     fieldEl = mkField(
       formatLabel(key),
       () => renderField(key, prop, cur, node, canvasEl, onChange, syncRequired),
-      prop.description,
+      hint,
       isRequired,
     );
 

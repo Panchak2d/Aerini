@@ -588,6 +588,13 @@
             </div>
             <input type="number" id="wf-setting-max-concurrent" class="settings-number-input" min="1" max="64" value="8">
           </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Allow runs longer than 24 hours</div>
+              <div class="settings-desc">Manual runs of this workflow normally stop after 24h. Enable only if this workflow is expected to run longer (e.g. chained long waits). The Stop button still works while this is on.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-unlimited-duration" class="settings-toggle">
+          </div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">Chat</div>

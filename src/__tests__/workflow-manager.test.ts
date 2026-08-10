@@ -166,6 +166,10 @@ describe("deserialize — defaults", () => {
     expect(deserialize(emptyJson).maxConcurrentNodes).toBe(8);
   });
 
+  it("defaults unlimitedDuration to false", () => {
+    expect(deserialize(emptyJson).unlimitedDuration).toBe(false);
+  });
+
   it("defaults chatSettings to DEFAULT_CHAT_SETTINGS", () => {
     expect(deserialize(emptyJson).chatSettings).toEqual(DEFAULT_CHAT_SETTINGS);
   });
@@ -186,6 +190,18 @@ describe("deserialize — parallel_execution flag", () => {
   });
 });
 
+describe("serialize/deserialize — unlimited_duration flag", () => {
+  it("omits unlimited_duration from JSON when false (sparse-output convention)", () => {
+    const doc = JSON.parse(serialize("wf_ud_off", "UD Off", new Map(), new Map(), undefined, undefined, undefined, undefined, false));
+    expect(doc.unlimited_duration).toBeUndefined();
+  });
+
+  it("restores unlimited_duration: true through a full serialize → deserialize cycle", () => {
+    const json = serialize("wf_ud", "UD On", new Map(), new Map(), undefined, undefined, undefined, undefined, true);
+    expect(deserialize(json).unlimitedDuration).toBe(true);
+  });
+});
+
 describe("deserialize — empty canvas JSON", () => {
   it("empty nodes + edges → empty Maps", () => {
     const rt = deserialize(JSON.stringify({ id: "wf_e", name: "Empty", nodes: [], edges: [] }));
@@ -196,7 +212,7 @@ describe("deserialize — empty canvas JSON", () => {
 
 // ---------------------------------------------------------------------------
 // disabled flag: ContextMenu's Disable/Enable toggle must survive
-// save (serialize) and load (deserialize) — previously silently dropped.
+// save (serialize) and load (deserialize).
 // ---------------------------------------------------------------------------
 
 describe("serialize — disabled flag", () => {
@@ -281,7 +297,7 @@ function fakeManagerThis() {
   return { onToast: vi.fn(), refreshWorkflowList: vi.fn(async () => {}) };
 }
 
-describe("duplicateWorkflow — dangling-edge filter (S11-13)", () => {
+describe("duplicateWorkflow — dangling-edge filter", () => {
   beforeEach(() => {
     installLocalStorageStub();
   });

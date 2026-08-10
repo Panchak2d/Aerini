@@ -526,6 +526,7 @@ mod tests {
             edges: vec![],
             metadata: Default::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),

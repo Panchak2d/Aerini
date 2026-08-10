@@ -72,6 +72,8 @@ export class WorkflowManager {
   /** Per-workflow parallel execution setting. Serialised into workflow JSON. */
   parallelExecution   = false;
   maxConcurrentNodes  = 8;
+  /** Desktop-only opt-out of the 24h manual-run ceiling. Serialised into workflow JSON. */
+  unlimitedDuration   = false;
   /** Per-workflow Chat Panel feature toggles. Serialised into workflow JSON
    *  under "settings.chat" — read by ChatPanel.applyToggles() on panel open. */
   chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
@@ -117,7 +119,7 @@ export class WorkflowManager {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
     this.autoSaveTimer = setTimeout(async () => {
       if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
       if (isTauri()) {
         try { await saveWorkflow(json); } catch (e) { console.error("Aerini: autosave failed", e); }
       } else {
@@ -272,9 +274,10 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onStatusChange("Workflow not found"); return; }
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
@@ -314,7 +317,7 @@ export class WorkflowManager {
       // parsed JSON, so any validation deserialize() performs (e.g. dropping
       // edges whose from_node/to_node isn't present in the node list) is
       // applied here too.
-      const { nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags } = deserialize(json);
+      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
 
       const newId   = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const newName = `${name} (copy)`;
@@ -343,7 +346,7 @@ export class WorkflowManager {
         newConnectors.set(newEdgeId, conn);
       }
 
-      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags);
+      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration);
       if (isTauri()) await saveWorkflow(dupJson);
       else lsSave(newId, newName, dupJson, tags);
       await this.refreshWorkflowList();
@@ -357,9 +360,10 @@ export class WorkflowManager {
   async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
     const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
     try {
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
@@ -384,7 +388,7 @@ export class WorkflowManager {
       if (!name?.trim()) { this.onStatusChange("Save cancelled"); return; }
       this.onTitleChange(this.currentName);
     }
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
     this.onStatusChange("Saving…");
     try {
       if (isTauri()) {
@@ -416,6 +420,7 @@ export class WorkflowManager {
     this.currentTags        = [];
     this.parallelExecution  = false;
     this.maxConcurrentNodes = 8;
+    this.unlimitedDuration  = false;
     this.chatSettings       = { ...DEFAULT_CHAT_SETTINGS };
     this.markUnsaved(false);
     this.canvas.nodes.clear();
@@ -453,7 +458,7 @@ export class WorkflowManager {
 
   /** Serializes the live in-memory canvas exactly as a save would, without persisting it. */
   getCurrentJson(): string {
-    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
   }
 
   /** Restore a version by ID — loads its snapshot onto the canvas. */
@@ -471,9 +476,10 @@ export class WorkflowManager {
     try {
       const snapshot = await getVersion(versionId);
       if (!snapshot) return null;
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags } = deserialize(snapshot);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(snapshot);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
+      this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.canvas.nodes = nodes;
@@ -508,7 +514,7 @@ export class WorkflowManager {
     if (!isTauri()) return false;
     const persisted = await loadWorkflow(this.currentId);
     if (!persisted) return false;
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
     await saveVersion(this.currentId, json, message.trim() || undefined);
     return true;
   }
@@ -532,7 +538,7 @@ export class WorkflowManager {
     const id   = this.currentId;
     const name = this.currentName;
     const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors,
-      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
     // Persist to storage — this is required, not optional.
     // The scheduler daemon looks up the workflow from the DB by ID;
     // if the save fails the scheduler will immediately error on first run.
@@ -558,7 +564,7 @@ export class WorkflowManager {
       return;
     }
 
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
     const obj  = JSON.parse(json) as { id: string; name: string; nodes: unknown[]; edges: unknown[]; metadata?: { author?: string; tags?: string[] } };
     const file = { aerini_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:obj.metadata?.author ?? "", tags:obj.metadata?.tags ?? [], nodes:obj.nodes, edges:obj.edges };
     const content  = JSON.stringify(file, null, 2);

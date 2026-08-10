@@ -102,6 +102,22 @@ describe("diffWorkflowJson — workflow-level metadata changes", () => {
   });
 });
 
+describe("diffWorkflowJson — unlimited_duration", () => {
+  it("does not report unlimited_duration when unchanged", () => {
+    const a = baseDoc({ unlimited_duration: false });
+    const b = baseDoc({ unlimited_duration: false });
+    const result = diffWorkflowJson(JSON.stringify(a), JSON.stringify(b));
+    expect(result.metadata.some(c => c.field === "Unlimited duration")).toBe(false);
+  });
+
+  it("reports unlimited_duration changing from false to true", () => {
+    const a = baseDoc({ unlimited_duration: false });
+    const b = baseDoc({ unlimited_duration: true });
+    const result = diffWorkflowJson(JSON.stringify(a), JSON.stringify(b));
+    expect(result.metadata).toContainEqual({ field: "Unlimited duration", from: false, to: true });
+  });
+});
+
 describe("diffWorkflowJson — node added / removed / changed", () => {
   it("reports a node present only in the new doc as added", () => {
     const a = baseDoc({ nodes: [] });

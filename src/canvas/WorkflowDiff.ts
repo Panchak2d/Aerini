@@ -122,6 +122,7 @@ export function diffWorkflowJson(oldJson: string, newJson: string): WorkflowDiff
   pushIfChanged("Tags", oldDoc.metadata?.tags ?? [], newDoc.metadata?.tags ?? []);
   pushIfChanged("Parallel execution", !!oldDoc.parallel_execution, !!newDoc.parallel_execution);
   pushIfChanged("Max concurrent nodes", oldDoc.max_concurrent_nodes ?? 8, newDoc.max_concurrent_nodes ?? 8);
+  pushIfChanged("Unlimited duration", !!oldDoc.unlimited_duration, !!newDoc.unlimited_duration);
 
   const oldChat: ChatSettings = { ...DEFAULT_CHAT_SETTINGS, ...(oldDoc.settings?.chat ?? {}) };
   const newChat: ChatSettings = { ...DEFAULT_CHAT_SETTINGS, ...(newDoc.settings?.chat ?? {}) };

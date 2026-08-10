@@ -63,6 +63,8 @@ export interface WorkflowDocument {
   parallel_execution?: boolean;
   /** Max concurrent node tasks when parallel_execution is true. Default: 8. */
   max_concurrent_nodes?: number;
+  /** When true, a desktop manual run skips the 24h server ceiling. Default: false. */
+  unlimited_duration?: boolean;
   /** Workflow-scoped feature settings — currently only the Chat panel toggles. */
   settings?: { chat?: Partial<ChatSettings> };
 }
@@ -76,6 +78,7 @@ export function serialize(
   maxConcurrentNodes?: number,
   chatSettings?: ChatSettings,
   tags?: string[],
+  unlimitedDuration?: boolean,
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -113,6 +116,9 @@ export function serialize(
       doc.max_concurrent_nodes = maxConcurrentNodes;
     }
   }
+  if (unlimitedDuration) {
+    doc.unlimited_duration = true;
+  }
   if (chatSettings && !chatSettingsEqualDefault(chatSettings)) {
     doc.settings = { chat: chatSettings };
   }
@@ -131,6 +137,7 @@ export function deserialize(json: string): {
   connectors: Map<string, Connector>;
   parallelExecution: boolean;
   maxConcurrentNodes: number;
+  unlimitedDuration: boolean;
   chatSettings: ChatSettings;
   tags: string[];
 } {
@@ -139,6 +146,7 @@ export function deserialize(json: string): {
     nodes?: unknown[]; edges?: unknown[];
     parallel_execution?: boolean;
     max_concurrent_nodes?: number;
+    unlimited_duration?: boolean;
     settings?: { chat?: Partial<ChatSettings> };
     metadata?: { tags?: string[] };
   };
@@ -199,6 +207,7 @@ export function deserialize(json: string): {
     connectors,
     parallelExecution: doc.parallel_execution ?? false,
     maxConcurrentNodes: doc.max_concurrent_nodes ?? 8,
+    unlimitedDuration: doc.unlimited_duration ?? false,
     chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
     tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
   };

@@ -53,7 +53,13 @@ impl Node for SaveToFolderNode {
             "properties": {
                 "filename_prefix": {
                     "type": "string",
-                    "description": "Optional prefix prepended to every saved filename"
+                    "description": "Optional prefix prepended to every saved filename",
+                    // Only catches a literal value typed directly into the field.
+                    // filename_prefix resolves through the expression pipeline, so an
+                    // {{expression}}-driven value isn't evaluated client-side and can
+                    // still exceed this cap — the truncation in execute() below (also
+                    // MAX_PREFIX_LEN) is the actual enforcement backstop.
+                    "maxLength": MAX_PREFIX_LEN
                 }
             }
         })
@@ -902,5 +908,16 @@ mod tests {
         assert!(dir.path().join(&capped).exists(), "prefix must be capped to MAX_PREFIX_LEN bytes");
         let uncapped = format!("{}out.txt", "p".repeat(80));
         assert!(!dir.path().join(&uncapped).exists(), "uncapped 80-byte prefix must not appear on disk");
+    }
+
+    // ── input_schema() ────────────────────────────────────────────────────────
+
+    #[test]
+    fn input_schema_filename_prefix_has_max_length() {
+        let schema = SaveToFolderNode.input_schema();
+        assert_eq!(
+            schema["properties"]["filename_prefix"]["maxLength"],
+            json!(MAX_PREFIX_LEN)
+        );
     }
 }

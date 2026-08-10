@@ -260,6 +260,15 @@ pub struct Workflow {
     /// The executor clamps values to [10, 86400] seconds.
     #[serde(default)]
     pub max_duration_secs: Option<u64>,
+    /// Desktop-only opt-out of both `commands/workflow.rs::run_workflow`'s
+    /// `SERVER_MAX_DURATION_SECS` backstop and any explicit `max_duration_secs`
+    /// on this workflow — when true, `WorkflowExecutor::run` applies no timeout
+    /// at all. Must only ever be read there — never by `scheduler/mod.rs` or
+    /// `scheduler/runner.rs`, or the always-on-job exemption established for
+    /// that backstop breaks.
+    /// Default: false — zero behavior change for existing saved workflows.
+    #[serde(default)]
+    pub unlimited_duration: bool,
     /// When true, independent branches run concurrently via the parallel executor.
     /// Default: false — existing workflows are unaffected (sequential-safe default).
     /// Enabling this for workflows with ordered side-effects (Stripe → Slack → Email)
@@ -290,6 +299,7 @@ impl Workflow {
             edges: vec![],
             metadata: WorkflowMetadata::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: WorkflowSettings::default(),

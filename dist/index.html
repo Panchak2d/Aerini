@@ -6,8 +6,8 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-3oJz8OCW.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-BzEEpTu2.js">
+  <script type="module" crossorigin src="./assets/index-Bgcm_eAN.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-CHDa_tN9.js">
   <link rel="modulepreload" crossorigin href="./assets/core-CdvzL0T1.js">
   <link rel="stylesheet" crossorigin href="./assets/style-DfYBtucG.css">
 </head>
@@ -590,6 +590,13 @@
               <div class="settings-desc">Reduce if hitting external rate limits. Default: 8.</div>
             </div>
             <input type="number" id="wf-setting-max-concurrent" class="settings-number-input" min="1" max="64" value="8">
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Allow runs longer than 24 hours</div>
+              <div class="settings-desc">Manual runs of this workflow normally stop after 24h. Enable only if this workflow is expected to run longer (e.g. chained long waits). The Stop button still works while this is on.</div>
+            </div>
+            <input type="checkbox" id="wf-setting-unlimited-duration" class="settings-toggle">
           </div>
         </div>
         <div class="settings-group">

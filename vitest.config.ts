@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
 
+// --no-experimental-webstorage doesn't exist before Node 25 (nodejs/node#57666)
+// — passing it on an older Node crashes the process with "bad option" instead
+// of being ignored, so it must be gated by version rather than passed unconditionally.
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+
 export default defineConfig({
   test: {
     environment: "node",
@@ -11,6 +16,6 @@ export default defineConfig({
     // etc. with "Cannot read properties of undefined". Disabling Node's
     // copy lets jsdom's localStorage own the global again. VERIFIED via
     // nodejs.org globals docs + matching community reports (2026).
-    execArgv: ["--no-experimental-webstorage"],
+    execArgv: nodeMajor >= 25 ? ["--no-experimental-webstorage"] : [],
   },
 });

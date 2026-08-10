@@ -374,6 +374,42 @@ async fn upload_to_instagram(
 
 // ── TikTok ────────────────────────────────────────────────────────────────────
 
+/// Tracks a TikTok Direct Post session between the moment `publish_id` is
+/// obtained and the moment the upload either completes or fails. TikTok has
+/// no abort endpoint for the `FILE_UPLOAD` source type this flow uses — if
+/// this task is dropped mid-upload (workflow cancellation, panic, process
+/// exit), TikTok is left processing a session this codebase can no longer
+/// reach. Logging `publish_id` on drop is the only trail left if that
+/// happens; there is nothing else to do about the orphaned session itself.
+struct PublishIdGuard {
+    publish_id: String,
+    filename: String,
+    disarmed: bool,
+}
+
+impl PublishIdGuard {
+    fn new(publish_id: String, filename: String) -> Self {
+        Self { publish_id, filename, disarmed: false }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for PublishIdGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            tracing::warn!(
+                "TikTok publish session for '{}' (publish_id={}) did not complete \
+                 — no abort endpoint exists for this flow, so TikTok may still process it",
+                self.filename,
+                self.publish_id,
+            );
+        }
+    }
+}
+
 /// Uploads a single file to TikTok using the Direct Post chunked upload flow.
 ///
 /// Flow (May 2026):
@@ -484,6 +520,8 @@ async fn upload_to_tiktok(
         ))?
         .to_string();
 
+    let mut publish_guard = PublishIdGuard::new(publish_id.clone(), filename.to_string());
+
     let upload_url = init_body_val["data"]["upload_url"]
         .as_str()
         .ok_or_else(|| upload_err(
@@ -551,6 +589,8 @@ async fn upload_to_tiktok(
         }
     }
 
+    publish_guard.disarm();
+
     // TikTok processes video asynchronously after all chunks arrive.
     // Return the publish_id immediately without polling (processing can take minutes).
     Ok(json!({
@@ -560,3 +600,84 @@ async fn upload_to_tiktok(
     }))
 }
 
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata};
+
+    /// Minimal hand-rolled `Subscriber` that records every event's fields as
+    /// one `"name=value "`-pair string per event. `aerini-engine` depends on
+    /// `tracing` (Cargo.toml:56) but not `tracing-subscriber`, so this avoids
+    /// adding a dev-dependency just to capture a `warn!` line in a test.
+    #[derive(Default)]
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldPrinter<'a> {
+        out: &'a mut String,
+    }
+
+    impl<'a> Visit for FieldPrinter<'a> {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            use fmt::Write;
+            let _ = write!(self.out, "{}={:?} ", field.name(), value);
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool { true }
+        fn new_span(&self, _span: &Attributes<'_>) -> Id { Id::from_u64(1) }
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut line = String::new();
+            event.record(&mut FieldPrinter { out: &mut line });
+            self.events.lock().unwrap().push(line);
+        }
+    }
+
+    // The bug this guard exists for: a publish session dropped before
+    // disarm() runs (workflow cancellation, panic, early return) must leave
+    // a trail, since TikTok has no abort endpoint to call instead.
+    #[test]
+    fn publish_id_guard_warns_on_drop_when_not_disarmed() {
+        let subscriber = CapturingSubscriber::default();
+        let events = subscriber.events.clone();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let guard = PublishIdGuard::new("pub_123".to_string(), "clip.mp4".to_string());
+            drop(guard);
+        });
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one warn! event, got {:?}", *events);
+        assert!(events[0].contains("pub_123"), "warning did not mention publish_id: {}", events[0]);
+        assert!(events[0].contains("clip.mp4"), "warning did not mention filename: {}", events[0]);
+    }
+
+    // Normal case: disarm() before drop (the function's only success path,
+    // via the `Ok(json!(...))` return) must suppress the warning.
+    #[test]
+    fn publish_id_guard_silent_on_drop_when_disarmed() {
+        let subscriber = CapturingSubscriber::default();
+        let events = subscriber.events.clone();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut guard = PublishIdGuard::new("pub_456".to_string(), "clip2.mp4".to_string());
+            guard.disarm();
+            drop(guard);
+        });
+
+        assert!(events.lock().unwrap().is_empty(), "disarmed guard must not warn on drop");
+    }
+}

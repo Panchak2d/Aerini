@@ -396,13 +396,11 @@ impl CredentialStore {
 fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Security::Authorization::{
-        SetNamedSecurityInfoW, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION,
-    };
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
         ACL, InitializeAcl, AddAccessAllowedAce, GetTokenInformation,
-        TOKEN_USER, TokenUser, ACL_REVISION,
+        TOKEN_USER, TokenUser, ACL_REVISION, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, CloseHandle};
@@ -416,7 +414,7 @@ fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
     unsafe {
         // Open the current process token to get the owner SID.
         let mut token: HANDLE = INVALID_HANDLE_VALUE;
-        if windows_sys::Win32::Security::OpenProcessToken(
+        if windows_sys::Win32::System::Threading::OpenProcessToken(
             windows_sys::Win32::System::Threading::GetCurrentProcess(),
             windows_sys::Win32::Security::TOKEN_QUERY,
             &mut token,

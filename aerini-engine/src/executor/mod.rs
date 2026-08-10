@@ -203,6 +203,13 @@ impl WorkflowExecutor {
         self
     }
 
+    /// When true, `run()` applies no timeout at all, regardless of
+    /// `workflow.max_duration_secs` or `with_server_max_duration_secs`. Default: false.
+    pub fn with_unlimited_duration(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_unlimited_duration(enabled);
+        self
+    }
+
     /// Grant admin-level node permissions (e.g. `allow_raw_sql`) to this executor.
     /// Should be set to `true` only when the caller holds the `admin` API scope.
     pub fn with_caller_is_admin(mut self, is_admin: bool) -> Self {
@@ -327,11 +334,15 @@ impl WorkflowExecutor {
         workflow: Arc<Workflow>,
         initial_variables: HashMap<String, Value>,
     ) -> Result<WorkflowResult, EngineError> {
-        let limit_secs = match (workflow.max_duration_secs, self.config.server_max_duration_secs) {
-            (Some(wf), Some(srv)) => Some(wf.min(srv).clamp(10, 86400)),
-            (Some(wf), None)      => Some(wf.clamp(10, 86400)),
-            (None,     Some(srv)) => Some(srv),  // already clamped in builder
-            (None,     None)      => None,
+        let limit_secs = if self.config.unlimited_duration {
+            None
+        } else {
+            match (workflow.max_duration_secs, self.config.server_max_duration_secs) {
+                (Some(wf), Some(srv)) => Some(wf.min(srv).clamp(10, 86400)),
+                (Some(wf), None)      => Some(wf.clamp(10, 86400)),
+                (None,     Some(srv)) => Some(srv),  // already clamped in builder
+                (None,     None)      => None,
+            }
         };
 
         // one run-level memory-tracking group,
@@ -778,6 +789,7 @@ mod tests {
             edges: vec![],
             metadata: Default::default(),
             max_duration_secs,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),
@@ -953,6 +965,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn unlimited_duration_overrides_explicit_max_duration_secs() {
+        tokio::time::pause();
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(SlowNode));
+        let executor = Arc::new(
+            WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials))
+                .with_server_max_duration_secs(Some(10))
+                .with_unlimited_duration(true),
+        );
+
+        // Workflow sets 10s and the server ceiling is also 10s, but
+        // unlimited_duration wins outright — no timeout wrapper at all.
+        let workflow = single_node_workflow("slow_test", Some(10));
+
+        let exec = Arc::clone(&executor);
+        let wf   = workflow.clone();
+        let handle = tokio::spawn(async move { exec.run(Arc::new(wf), HashMap::new()).await });
+
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
+        assert!(result.unwrap().success);
+    }
+
     // ── __direct_input propagation ────────────────────────────────────────────
     //
     // __direct_input must reflect the matching upstream edge's actual output,
@@ -1052,6 +1092,7 @@ mod tests {
             edges: vec![edge],
             metadata: Default::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),
@@ -1192,6 +1233,7 @@ mod tests {
             edges: vec![edge],
             metadata: Default::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),
@@ -1539,6 +1581,7 @@ mod tests {
             edges,
             metadata: Default::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),
@@ -1655,6 +1698,7 @@ mod tests {
             edges,
             metadata: Default::default(),
             max_duration_secs: None,
+            unlimited_duration: false,
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: Default::default(),
