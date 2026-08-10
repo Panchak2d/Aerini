@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1 (bumped from v1.1.0 — that version hard-fails when apt can't locate hhvm/mysql on current runner images; v1.3.1 guards every apt-get remove with --fix-missing || warn)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1 — apt-get remove failures (package not present on a given runner image) are non-fatal by design
         with:
           tool-cache: false
           android: true

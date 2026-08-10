@@ -23,6 +23,7 @@ static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 ///
 /// Compatibility: --experimental-loader works on all Node.js 18+ versions.
 /// The API moved to a worker thread in 18.19 but the flag is not removed.
+#[cfg(not(windows))]
 const SANDBOX_LOADER_CONTENT: &str = r#"
 // Aerini Code Node sandbox loader.
 // Blocks import of dangerous built-in modules. Do not modify — auto-generated.

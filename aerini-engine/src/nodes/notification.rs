@@ -66,7 +66,7 @@ impl Node for NotificationNode {
     }
 }
 
-async fn send_notification(title: &str, body: &str, urgency: &str) -> Result<&'static str, String> {
+async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] urgency: &str) -> Result<&'static str, String> {
     #[cfg(target_os = "linux")]
     {
         let mut cmd = Command::new("notify-send");
