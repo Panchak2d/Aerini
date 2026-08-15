@@ -392,6 +392,17 @@ async fn check_nodejs_available() -> bool {
         .unwrap_or(false)
 }
 
+#[tauri::command]
+async fn get_nodejs_version() -> Option<String> {
+    std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+}
+
 /// Cancel a specific in-flight manual run by its `run_id`. No-op if that
 /// `run_id` isn't currently active — matches the previous "no-op when idle"
 /// contract, now scoped to one run instead of whatever happened to be the
@@ -730,6 +741,7 @@ pub fn run() {
             close_window,
             force_quit,
             check_nodejs_available,
+            get_nodejs_version,
             cancel_run,
             get_autostart,
             set_autostart,
@@ -756,10 +768,12 @@ pub fn run() {
             commands::chat::save_chat_session,
             commands::chat::delete_chat_session,
             commands::credentials::list_credentials,
+            commands::credentials::list_credential_usage,
             commands::credentials::get_credential_metadata,
             commands::credentials::get_credential_secret,
             commands::credentials::save_credential,
             commands::credentials::delete_credential,
+            commands::credentials::export_encryption_key,
             commands::oauth::get_oauth_redirect_port,
             // Keep original command names for IPC compatibility with frontend
             commands::scheduler::start_scheduled_workflow,
@@ -772,10 +786,12 @@ pub fn run() {
             commands::export::validate_workflow_for_export,
             commands::export::generate_server_package,
             commands::export::generate_docker_package,
+            commands::export::export_all_workflows,
             commands::plugins::list_installed_plugins,
             commands::plugins::install_plugin_from_path,
             commands::plugins::remove_plugin,
             commands::memory::get_memory_breakdown,
+            commands::memory::get_process_memory,
             commands::performance::get_live_performance,
             commands::performance::get_recent_performance,
             commands::performance::get_performance_report,

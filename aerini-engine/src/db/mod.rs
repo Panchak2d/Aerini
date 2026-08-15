@@ -92,6 +92,22 @@ pub struct WorkflowSummary {
     pub tags:       Vec<String>,
 }
 
+/// Outcome of a conditional save via [`WorkflowDb::save_checked`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// No row existed for this id yet — inserted fresh at `row_version` 1.
+    Created { row_version: i64 },
+    /// A prior row existed and, if the caller supplied an expected version,
+    /// it matched — updated, `row_version` incremented by one.
+    Updated { row_version: i64 },
+    /// A prior row existed but at a different `row_version` than the caller
+    /// expected — nothing was written.
+    Conflict { current_row_version: i64 },
+    /// The caller supplied an expected version but no row exists for this
+    /// id — an If-Match precondition can't be satisfied against nothing.
+    NotFound,
+}
+
 pub struct WorkflowDb {
     pub(super) pool:                    Pool<SqliteConnectionManager>,
     pub(super) history_limit:           i64,
@@ -101,7 +117,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 6;
+    pub(super) const SCHEMA_VERSION: i64 = 7;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -145,10 +161,10 @@ impl WorkflowDb {
         };
 
         // Separate from history_limit (unlike performance_reports, which
-        // deliberately reuses it): versions already shipped with their own
-        // distinct default (50, see old MAX_VERSIONS), so reusing
-        // history_limit's default of 500 here would silently change
-        // established retention behavior for existing users.
+        // deliberately reuses it): versions default to 50, distinct from
+        // history_limit's default of 500 — reusing history_limit's default
+        // here would silently change established retention behavior for
+        // existing users.
         let version_retention_limit = {
             let conn = pool.get().map_err(|e| e.to_string())?;
             let result = conn.query_row(
@@ -192,6 +208,9 @@ impl WorkflowDb {
         }
         if current_version < 6 {
             Self::migrate_v6(conn)?;
+        }
+        if current_version < 7 {
+            Self::migrate_v7(conn)?;
         }
 
         Ok(())
@@ -347,6 +366,19 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+    /// Version 7 — adds `row_version` to `workflows`: an optimistic-concurrency
+    /// counter for the API server's `POST /api/workflows` (`If-Match`/`ETag`).
+    /// Existing rows default to 1; every subsequent `save()`/`save_checked()`
+    /// increments it, so it stays a reliable "have I got the latest?" token.
+    fn migrate_v7(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            ALTER TABLE workflows ADD COLUMN row_version INTEGER NOT NULL DEFAULT 1;
+            PRAGMA user_version = 7;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -377,7 +409,7 @@ mod tests {
         let db = WorkflowDb::open(&path, 8).expect("open failed");
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, WorkflowDb::SCHEMA_VERSION);
 
         cleanup(&path);
     }
@@ -403,7 +435,7 @@ mod tests {
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 6, "must be migrated to v6");
+        assert_eq!(v, WorkflowDb::SCHEMA_VERSION, "must be migrated to the current schema version");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))

@@ -2,7 +2,7 @@ import { Canvas } from "./canvas/Canvas";
 import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
-import { getNodeTypes, checkNodejsAvailable } from "./ipc/workflow";
+import { getNodeTypes } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import { initStatusBarFields } from "./statusbar-fields";
@@ -18,12 +18,13 @@ import { showPopover, closePopover, setDescriptorRegistry } from "./popover";
 import { listenCloseRequested } from "./ipc/events";
 import { getVersion } from "@tauri-apps/api/app";
 import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionControls, bindBgRunsFilter, activateZone, getCurrentZone } from "./sidebar-sections";
+import { setMonitorWfManager } from "./panels/MonitorPanel";
 import { isTauri } from "./utils";
 import { invoke } from "@tauri-apps/api/core";
 import { preloadAllIcons } from "./icon-cache";
 
 import { showConfirm } from "./confirm";
-import { injectNodejsBanner } from "./banners";
+import { refreshNodejsAvailability, reshowNodejsBannerIfStillMissing, recheckNodejsOnFocusRegain } from "./banners";
 import { initInterpolationAutocomplete } from "./interpolation";
 import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
@@ -131,6 +132,7 @@ async function init() {
     confirm:     showConfirm,
     onPanelClose: () => { closePopover(); },
   });
+  setMonitorWfManager(wfManager);
 
   // After loading or creating a workflow, switch to Nodes zone so the
   // user can immediately start placing nodes without an extra click.
@@ -150,6 +152,7 @@ async function init() {
       wfManager.parallelExecution,
       wfManager.maxConcurrentNodes,
     );
+    if (isTauri()) reshowNodejsBannerIfStillMissing(canvas);
   };
 
   canvas.onCanvasChanged = () => {
@@ -333,9 +336,8 @@ async function init() {
   initOnboarding(canvas, wfManager);
 
   if (isTauri()) {
-    checkNodejsAvailable().then(available => {
-      if (!available) injectNodejsBanner(canvas);
-    }).catch(() => {});
+    refreshNodejsAvailability(canvas).catch(() => {});
+    window.addEventListener("focus", () => recheckNodejsOnFocusRegain(canvas));
   }
 
   if (isTauri()) {

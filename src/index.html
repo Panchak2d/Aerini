@@ -52,6 +52,11 @@
             <path d="M12 15v4M9 22h6"/>
           </svg>
         </button>
+        <button id="tab-monitor" class="activity-btn" role="tab" aria-selected="false" aria-controls="zone-monitor" data-zone="monitor" title="Monitor" data-tooltip="Monitor" aria-label="Monitor">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3 12 8 12 10 6 14 18 16 12 21 12"/>
+          </svg>
+        </button>
       </div>
       <div class="activity-bottom">
         <button id="btn-credentials" class="activity-btn" title="Manage credentials (API keys)" data-tooltip="Credentials" aria-label="Manage credentials (API keys)">
@@ -159,6 +164,8 @@
         </div>
       </div>
 
+      <div class="sidebar-zone" id="zone-monitor" role="tabpanel" aria-labelledby="tab-monitor"></div>
+
     </div>
 
     <!-- Right edge resize handle -->
@@ -198,6 +205,13 @@
               <div>
                 <div class="dropdown-item-label">Export for Server</div>
                 <div class="dropdown-item-desc">Run this workflow 24/7 on a VPS</div>
+              </div>
+            </button>
+            <button class="toolbar-dropdown-item" id="btn-export-all">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+              <div>
+                <div class="dropdown-item-label">Export All Workflows</div>
+                <div class="dropdown-item-desc">Back up every workflow to one .zip</div>
               </div>
             </button>
           </div>
@@ -299,6 +313,9 @@
     </div>
   </main>
 
+  <!-- ── Monitor ── -->
+  <div id="monitor-area"></div>
+
   <!-- ── Output drawer ── -->
   <div id="output-drawer" class="hidden">
     <div id="drawer-resize-handle"></div>
@@ -332,16 +349,43 @@
       <div id="perf-empty" class="perf-empty">This workflow hasn't run yet. Run it to see its memory profile here.</div>
       <div id="perf-content" class="perf-content" hidden>
         <div class="perf-head">
-          <span class="perf-dot" id="perf-dot"></span>
-          <span id="perf-status"></span>
+          <span class="perf-pill">
+            <span class="bg-job-dot" id="perf-dot"></span>
+            <span class="bg-job-status" id="perf-status"></span>
+          </span>
+          <span class="perf-idle-note" id="perf-idle-note" hidden>This workflow isn't running right now — showing its last completed run.</span>
         </div>
-        <div class="perf-stats">
-          <div class="perf-stat"><span class="perf-stat-label">Current</span><b id="perf-current"></b></div>
-          <div class="perf-stat"><span class="perf-stat-label">Peak</span><b id="perf-peak"></b></div>
-          <div class="perf-stat"><span class="perf-stat-label">Baseline</span><b id="perf-baseline"></b></div>
-          <div class="perf-stat"><span class="perf-stat-label">Delta</span><b id="perf-delta"></b></div>
+
+        <div class="perf-headline">
+          <div class="perf-headline-current">
+            <span class="perf-stat-label">Current</span>
+            <b id="perf-current" class="perf-headline-value"></b>
+          </div>
+          <div class="perf-headline-side">
+            <div class="perf-stat"><span class="perf-stat-label">Peak</span><b id="perf-peak"></b></div>
+            <div class="perf-stat"><span class="perf-stat-label">Delta</span><b id="perf-delta"></b></div>
+          </div>
         </div>
-        <div id="perf-graph" class="perf-graph"></div>
+
+        <div class="perf-ref-strip">
+          <span class="perf-ref-item"><span class="perf-ref-label">Baseline</span><b id="perf-baseline"></b></span>
+          <span class="perf-ref-item"><span class="perf-ref-label">Average</span><b id="perf-average"></b></span>
+          <span class="perf-ref-item"><span class="perf-ref-label">Minimum</span><b id="perf-minimum"></b></span>
+        </div>
+
+        <details class="perf-meta">
+          <summary class="perf-meta-toggle">Run details</summary>
+          <div class="perf-meta-grid">
+            <div class="perf-stat"><span class="perf-stat-label">Duration</span><b id="perf-duration"></b></div>
+            <div class="perf-stat"><span class="perf-stat-label">Samples</span><b id="perf-samples"></b></div>
+            <div class="perf-stat"><span class="perf-stat-label">Interval</span><b id="perf-interval"></b></div>
+          </div>
+        </details>
+
+        <div class="perf-graph-wrap">
+          <div id="perf-graph" class="perf-graph"></div>
+          <div class="perf-graph-tooltip" id="perf-graph-tooltip" hidden></div>
+        </div>
       </div>
     </div>
   </div>
@@ -516,6 +560,16 @@
           <div class="settings-row">
             <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>
             <input type="checkbox" id="setting-autofit" class="settings-toggle" checked />
+          </div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-group-title">Environment</div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Node.js</div>
+              <div class="settings-desc" id="nodejs-check-status">Required for Code nodes.</div>
+            </div>
+            <button id="btn-recheck-nodejs" class="btn-sm">Recheck Node.js</button>
           </div>
         </div>
         <div class="settings-group">

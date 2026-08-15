@@ -2,6 +2,7 @@ import type { Canvas } from "./Canvas";
 import { CanvasNode, PORT_RADIUS, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
 import type { MoveEntry, UndoAction } from "./UndoManager";
+import { isMonitorModeActive } from "../monitor-mode";
 
 export class InputHandler {
   private canvas: Canvas;
@@ -43,6 +44,7 @@ export class InputHandler {
   }
 
   onKey(e: KeyboardEvent): void {
+    if (isMonitorModeActive()) return;
     const activeEl = document.activeElement;
     const inInput = activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
     if (e.key === "Shift") { this.shiftHeld = true; this.canvas.el.classList.add("shift-held"); }
@@ -50,7 +52,7 @@ export class InputHandler {
 
     const c = this.canvas;
 
-    // ── Canvas-focused node navigation (H1) ────────────────────────────────
+    // ── Canvas-focused node navigation ──────────────────────────────────────
     // Only active when the canvas element itself has focus (role="application")
     const canvasFocused = document.activeElement === c.el;
     if (canvasFocused) {

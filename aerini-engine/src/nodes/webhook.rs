@@ -85,6 +85,19 @@ impl Node for WebhookNode {
                     )
                 },
                 "timeout_secs":      { "type": "number", "description": "Wait timeout (default 60)" },
+                "dedup_window_secs": {
+                    "type": "number",
+                    "description": concat!(
+                        "When set above 0, a request whose body was already seen within this many ",
+                        "seconds does not re-run the workflow (the caller still gets a 200 OK — this ",
+                        "only suppresses the re-run). Providers that retry on timeout or a non-2xx ",
+                        "response (Stripe, GitHub, ...) resend the same event body byte-for-byte, so ",
+                        "this catches that case. Only applies to requests with a non-empty body — ",
+                        "GET requests and empty-body POSTs are never deduped. Default: 0 (disabled). ",
+                        "Only takes effect for a workflow set to run in the background (Active in the ",
+                        "scheduler) — an ad-hoc 'Run' press always executes once per press."
+                    )
+                },
                 "validate_timestamp": {
                     "type": "boolean",
                     "description": concat!(

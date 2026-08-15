@@ -13,6 +13,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroize;
 
 use crate::error::EngineError;
 use crate::executor::CredentialResolver;
@@ -73,8 +74,22 @@ pub enum KeySource {
 }
 
 pub struct CredentialStore {
-    conn:   Mutex<Connection>,
-    cipher: Aes256Gcm,
+    conn:    Mutex<Connection>,
+    cipher:  Aes256Gcm,
+    raw_key: RawKey,
+}
+
+/// Holds the same 32-byte AES-256 key `cipher` was built from, purely so
+/// `export_key_base64` can hand it back out for backup — nothing else reads
+/// this field. Wiped on drop: this is the single value that decrypts every
+/// credential in the store, so it gets the same care as the private key
+/// material `cipher` itself already holds internally.
+struct RawKey(Vec<u8>);
+
+impl Drop for RawKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 impl CredentialStore {
@@ -82,6 +97,7 @@ impl CredentialStore {
         let key_bytes = Self::load_key(key_source)?;
         let key    = Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
+        let raw_key = RawKey(key_bytes);
 
         let conn = Connection::open(db_path)
             .map_err(|e| EngineError::Database(e.to_string()))?;
@@ -112,7 +128,30 @@ impl CredentialStore {
             [],
         );
 
-        Ok(Self { conn: Mutex::new(conn), cipher })
+        Ok(Self { conn: Mutex::new(conn), cipher, raw_key })
+    }
+
+    /// Returns the raw AES-256 encryption key that decrypts every credential
+    /// in this store, base64-encoded — the same format already written to
+    /// disk by `key_from_file` and to the OS keychain by `key_from_keychain`.
+    ///
+    /// This is the only recovery path if the OS keychain entry is ever lost
+    /// (reset, migrated to a new machine, SecretService unavailable, ...)
+    /// with no surviving fallback file: without a copy of this value saved
+    /// somewhere else, every credential encrypted under it becomes
+    /// permanently undecryptable.
+    ///
+    /// To restore from a backup: write this exact string to the key file
+    /// this store was (or will be) opened with — `KeySource::File`'s path,
+    /// or `KeySource::OsKeychain`'s `fallback` path — before the app next
+    /// starts. `key_from_keychain`'s existing migration path picks up a
+    /// fallback-file key and moves it into the OS keychain automatically;
+    /// no separate import method is needed.
+    ///
+    /// Anyone holding this value can decrypt every credential in this store.
+    /// Treat it with at least as much care as the credentials themselves.
+    pub fn export_key_base64(&self) -> String {
+        B64.encode(&self.raw_key.0)
     }
 
     pub fn store(&self, req: &CreateCredentialRequest) -> Result<(), EngineError> {
@@ -597,6 +636,73 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("corrupt nonce"),
             "error must identify the nonce as the corrupt field"
+        );
+    }
+
+    #[test]
+    fn exported_key_matches_the_key_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+
+        let store = CredentialStore::open(&db_path, KeySource::File(key_path.clone())).unwrap();
+        let exported = store.export_key_base64();
+
+        let on_disk = std::fs::read_to_string(&key_path).unwrap();
+        assert_eq!(
+            exported.trim(), on_disk.trim(),
+            "export_key_base64 must return exactly what key_from_file wrote to disk"
+        );
+    }
+
+    /// This is the actual #7 recovery scenario, reproduced end-to-end: a
+    /// credential is stored, its key is exported, the original key file is
+    /// deleted (simulating a lost keychain entry with no surviving fallback
+    /// file), the exported value is written back to that same path, and a
+    /// fresh `CredentialStore::open` against it must decrypt the original
+    /// credential. Backup-only coverage (asserting the string looks right)
+    /// wouldn't catch a wrong byte order, encoding mismatch, or wrong field
+    /// being exported — only actually restoring from it does.
+    #[test]
+    fn key_exported_before_loss_restores_access_after_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+
+        let store = CredentialStore::open(&db_path, KeySource::File(key_path.clone())).unwrap();
+        store.store(&CreateCredentialRequest {
+            id: "cred1".to_string(),
+            name: "Test Cred".to_string(),
+            value: "irreplaceable-secret".to_string(),
+            cred_type: "api_key".to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+        }).unwrap();
+        let backed_up_key = store.export_key_base64();
+        drop(store);
+
+        // Simulate total key loss: the key file (and, in the real desktop
+        // path, the OS keychain entry) is gone.
+        std::fs::remove_file(&key_path).unwrap();
+        assert!(
+            CredentialStore::open(&db_path, KeySource::File(key_path.clone()))
+                .unwrap()
+                .retrieve("cred1")
+                .is_err(),
+            "sanity check: losing the key file must actually break decryption \
+             (a fresh key was silently generated and now can't read the old rows), \
+             otherwise this test would pass without the backup doing anything"
+        );
+
+        // Restore: write the backed-up key back to the expected path.
+        std::fs::write(&key_path, &backed_up_key).unwrap();
+
+        let restored = CredentialStore::open(&db_path, KeySource::File(key_path)).unwrap();
+        assert_eq!(
+            restored.retrieve("cred1").unwrap(),
+            Some("irreplaceable-secret".to_string()),
+            "restoring the exported key must recover the original credential"
         );
     }
 }

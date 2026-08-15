@@ -66,6 +66,7 @@ elif [ ! -f "$INSTALL_DIR/.env" ]; then
   echo "IMPORTANT: Edit $INSTALL_DIR/.env and fill in your credential values,"
   echo "then run: systemctl --user restart $SERVICE_NAME"
 fi
+chmod 600 "$INSTALL_DIR/.env"
 
 # Install systemd user service
 SERVICE_DIR="$HOME/.config/systemd/user"
@@ -138,6 +139,8 @@ pub(super) fn build_service_file(workflow_name: &str, port: u16, dangerous: &[&s
          ExecStart={{{{INSTALL_DIR}}}}/aerini-server --config {{{{INSTALL_DIR}}}}/aerini-server.json --port {port}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
+         NoNewPrivileges=yes\n\
+         PrivateTmp=yes\n\
          StandardOutput=journal\n\
          StandardError=journal\n\
          \n\
@@ -643,5 +646,23 @@ mod dangerous_export_tests {
         let unsafe_ = build_serve_docker_compose("wf", 7700, &[], &["shell_exec"]);
         assert!(unsafe_.contains("# command:"));
         assert!(unsafe_.contains("\"--allow-shell\""));
+    }
+}
+
+#[cfg(test)]
+mod security_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn service_file_includes_hardening_directives() {
+        let out = build_service_file("wf", 7700, &[]);
+        assert!(out.contains("NoNewPrivileges=yes"));
+        assert!(out.contains("PrivateTmp=yes"));
+    }
+
+    #[test]
+    fn install_sh_chmods_env_file() {
+        let out = build_install_sh("wf", 7700);
+        assert!(out.contains(r#"chmod 600 "$INSTALL_DIR/.env""#));
     }
 }

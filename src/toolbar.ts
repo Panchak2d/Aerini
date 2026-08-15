@@ -1,15 +1,18 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import { RunManager, getBgJobs } from "./run-manager";
-import { stopScheduledWorkflow, parseSchedulerError } from "./ipc/workflow";
+import { stopScheduledWorkflow, parseSchedulerError, getNodejsVersion, exportAllWorkflows } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
 import { checkForUpdate } from "./ipc/update";
+import { setNodejsAvailability } from "./banners";
+import { invoke } from "@tauri-apps/api/core";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
 import { bindWfSettings } from "./wf-settings";
 import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
+import { isMonitorModeActive } from "./monitor-mode";
 import { bindDrawerResize } from "./resize";
 import { loadBgPanel } from "./bg-panel-loader";
 import { NODE_IDS, findTriggerNodeTypeId } from "./node-ids";
@@ -27,6 +30,21 @@ export interface IChatPanel {
 export interface ToolbarResult {
   refreshRunBtn:     () => void;
   runWithValidation: () => Promise<void>;
+}
+
+async function handleExportAll(toast: Toast): Promise<void> {
+  try {
+    const result = await exportAllWorkflows();
+    if (result.workflow_count === 0) {
+      toast("No workflows to export", "info");
+      return;
+    }
+    const filename = `aerini-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+    await invoke<string>("save_export_zip", { zipPath: result.zip_path, filename });
+    toast(`✓ Exported ${result.workflow_count} workflow${result.workflow_count === 1 ? "" : "s"}`, "success");
+  } catch (err) {
+    if (err !== "cancelled") toast(`Export failed: ${err}`, "error");
+  }
 }
 
 function buildIconBtn(id: string, title: string, svgInner: string): HTMLButtonElement {
@@ -109,10 +127,12 @@ export function bindDrawerToggle(canvas: Canvas): void {
     setDrawerCollapsed(true);
   });
   header.addEventListener("click", (e) => {
+    if (isMonitorModeActive()) return;
     if ((e.target as HTMLElement).closest(".drawer-actions, .drawer-tabs, .drawer-tab-static")) return;
     setDrawerCollapsed(!drawer!.classList.contains("hidden"));
   });
   header.addEventListener("keydown", (e) => {
+    if (isMonitorModeActive()) return;
     if (e.key !== "Enter" && e.key !== " ") return;
     if ((e.target as HTMLElement).closest(".drawer-actions, .drawer-tabs, .drawer-tab-static")) return;
     e.preventDefault();
@@ -261,6 +281,7 @@ export function bindToolbar(
   });
   $("btn-export-aerini")?.addEventListener("click", () => { closeAllDropdowns(); wfManager.handleExport(); });
   $("btn-export-server")?.addEventListener("click", () => { closeAllDropdowns(); import("./export-server-panel").then(m => m.showExportServerPanel(wfManager.currentId, toast)); });
+  $("btn-export-all")?.addEventListener("click", () => { closeAllDropdowns(); handleExportAll(toast); });
 
   document.addEventListener("click", () => closeAllDropdowns());
 
@@ -334,6 +355,22 @@ export function bindToolbar(
     }
   });
 
+  $("btn-recheck-nodejs")?.addEventListener("click", async () => {
+    if (!isTauri()) return;
+    const btn = $("btn-recheck-nodejs") as HTMLButtonElement;
+    const statusEl = document.getElementById("nodejs-check-status");
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = "Checking…";
+    // Minimum 1s before the button re-enables, regardless of how fast the
+    // subprocess check resolves — debounces spam-clicking without a separate
+    // cooldown flag to track.
+    const minDelay = new Promise(resolve => setTimeout(resolve, 1000));
+    const [version] = await Promise.all([getNodejsVersion().catch(() => null), minDelay]);
+    setNodejsAvailability(version !== null, canvas);
+    if (statusEl) statusEl.textContent = version ? `Found ${version}.` : "Still not found.";
+    btn.disabled = false;
+  });
+
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;
   if (gridSnapEl) {
     gridSnapEl.checked = localStorage.getItem("aerini_grid_snap") === "true";
@@ -370,6 +407,7 @@ export function bindToolbar(
   titleEl.addEventListener("dblclick", () => wfManager.startRename(titleEl));
 
   window.addEventListener("keydown", e => {
+    if (isMonitorModeActive()) return;
     const inInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
     if ((e.metaKey || e.ctrlKey) && e.key === "s")     { e.preventDefault(); wfManager.handleSave(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === "n")     { e.preventDefault(); wfManager.handleNew(); return; }

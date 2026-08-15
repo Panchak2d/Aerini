@@ -13,10 +13,36 @@ export interface PropSchema {
   minimum?: number;
   maximum?: number;
   maxLength?: number;
+  /** Opts a field into the credential picker. `true` for no type constraint,
+   *  or an object naming the cred_type ("api_key" | "bearer" | "basic" |
+   *  "oauth" | "other") to filter the saved-credential picker to that type. */
+  "x-aerini-credential"?: true | { cred_type?: string };
 }
 
-export const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
+const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
 const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
+
+interface CredentialFieldInfo { key: string; credType?: string; }
+
+function credentialFieldInfo(key: string, prop: PropSchema): CredentialFieldInfo | null {
+  const ann = prop["x-aerini-credential"];
+  if (ann === true) return { key };
+  if (ann && typeof ann === "object") return { key, credType: ann.cred_type };
+  if (CREDENTIAL_KEYS.has(key)) return { key };
+  return null;
+}
+
+/** All keys in a node's schema that should be treated as credential fields —
+ *  the legacy bare `api_key`/`password` names plus anything opted in via
+ *  `x-aerini-credential`. Used both to exclude these from the generic config
+ *  field loop and to drive the Connection section's picker(s). */
+export function getCredentialFieldKeys(props: Record<string, PropSchema>): Set<string> {
+  const keys = new Set<string>();
+  for (const [key, prop] of Object.entries(props)) {
+    if (credentialFieldInfo(key, prop)) keys.add(key);
+  }
+  return keys;
+}
 
 
 
@@ -332,66 +358,87 @@ export function renderCredentialSection(
 ): void {
   const { node, body, creds, onChange } = ctx;
 
+  const credFields: CredentialFieldInfo[] = [];
+  for (const [key, prop] of Object.entries(props)) {
+    const info = credentialFieldInfo(key, prop);
+    if (info) credFields.push(info);
+  }
+
   const hasCredField =
-    Object.keys(props).some(k => CREDENTIAL_KEYS.has(k)) ||
+    credFields.length > 0 ||
     Object.keys(node.data.credentials).length > 0 ||
     (ext?.forceCredSection ?? false);
 
   if (!hasCredField) return;
 
-  const credKey = props["api_key"] !== undefined ? "api_key"
-    : props["password"] !== undefined ? "password"
-    : "api_key"; // default for http_request
+  // No schema field matched (forceCredSection, or a saved workflow with a
+  // credential entry whose key no longer appears in the current schema) —
+  // fall back to the same single-field default the pre-multi-field code used.
+  if (credFields.length === 0) {
+    credFields.push({ key: props["api_key"] !== undefined ? "api_key" : props["password"] !== undefined ? "password" : "api_key" });
+  }
+
   body.appendChild(mkSection("Connection"));
   ext?.credentialsHeader?.(ctx);
 
   const hint = document.createElement("div");
   hint.className = "config-hint";
-  hint.textContent = "Select a saved credential to attach to this node.";
+  hint.textContent = credFields.length > 1
+    ? "Select a saved credential to attach to each field below."
+    : "Select a saved credential to attach to this node.";
   body.appendChild(hint);
-  body.appendChild(mkField("Use Saved Credential", () => {
-    const options = [{ value: "", label: "— none —" }, ...creds.map(c => ({ value: c.id, label: c.name }))];
-    const cur = node.data.credentials[credKey] ?? "";
-    return mkCustomSelect(options.map(o => o.label), options.find(o => o.value === cur)?.label ?? "— none —", (label) => {
-      const opt = options.find(o => o.label === label);
-      if (opt?.value) {
-        node.data.credentials[credKey] = opt.value;
-        void autoFillFromCredentialMetadata(opt.value);
-      } else {
-        delete node.data.credentials[credKey];
-      }
-      onChange();
-    });
-  }));
-  if (!creds.length) {
-    const warn = document.createElement("div");
-    warn.className = "config-hint config-hint-warn";
-    warn.textContent = "No credentials saved. Click Credentials in the toolbar.";
-    body.appendChild(warn);
-  }
 
-  // One-off inline key: AI nodes read api_key straight from config if no
-  // credential is selected, so this needs no backend support — see
-  // executor build_input(), which only overwrites resolved_input["api_key"]
-  // when node.credentials actually has an entry for credKey.
-  if (credKey === "api_key" && AI_NODE_IDS.has(node.data.node_type_id)) {
-    const details = document.createElement("details");
-    details.className = "cred-advanced";
-    const summary = document.createElement("summary");
-    summary.className = "cred-advanced-summary";
-    summary.textContent = "Or enter a key directly";
-    details.appendChild(summary);
-    details.appendChild(mkField("API Key (one-off)", () => {
-      const inp = mk<HTMLInputElement>("input");
-      inp.type = "password"; inp.autocomplete = "off";
-      inp.value = String((node.data.config as Record<string, unknown>)["api_key"] ?? "");
-      inp.placeholder = "sk-…";
-      inp.addEventListener("input", () => {
-        (node.data.config as Record<string, unknown>)["api_key"] = inp.value;
+  for (const { key: credKey, credType } of credFields) {
+    const pool = credType ? creds.filter(c => c.cred_type === credType) : creds;
+    const label = credFields.length > 1 ? `Use Saved Credential — ${formatLabel(credKey)}` : "Use Saved Credential";
+
+    body.appendChild(mkField(label, () => {
+      const options = [{ value: "", label: "— none —" }, ...pool.map(c => ({ value: c.id, label: c.name }))];
+      const cur = node.data.credentials[credKey] ?? "";
+      return mkCustomSelect(options.map(o => o.label), options.find(o => o.value === cur)?.label ?? "— none —", (selLabel) => {
+        const opt = options.find(o => o.label === selLabel);
+        if (opt?.value) {
+          node.data.credentials[credKey] = opt.value;
+          void autoFillFromCredentialMetadata(opt.value);
+        } else {
+          delete node.data.credentials[credKey];
+        }
         onChange();
       });
-      return inp;
-    }, "Saved in this workflow's file, unencrypted. Ignored if a saved credential is selected above."));
-    body.appendChild(details);
+    }));
+
+    if (!pool.length) {
+      const warn = document.createElement("div");
+      warn.className = "config-hint config-hint-warn";
+      warn.textContent = creds.length
+        ? `No saved credentials of type "${credType}". Add one in Credentials in the toolbar.`
+        : "No credentials saved. Click Credentials in the toolbar.";
+      body.appendChild(warn);
+    }
+
+    // One-off inline key: AI nodes read api_key straight from config if no
+    // credential is selected, so this needs no backend support — see
+    // executor build_input(), which only overwrites resolved_input["api_key"]
+    // when node.credentials actually has an entry for credKey.
+    if (credKey === "api_key" && AI_NODE_IDS.has(node.data.node_type_id)) {
+      const details = document.createElement("details");
+      details.className = "cred-advanced";
+      const summary = document.createElement("summary");
+      summary.className = "cred-advanced-summary";
+      summary.textContent = "Or enter a key directly";
+      details.appendChild(summary);
+      details.appendChild(mkField("API Key (one-off)", () => {
+        const inp = mk<HTMLInputElement>("input");
+        inp.type = "password"; inp.autocomplete = "off";
+        inp.value = String((node.data.config as Record<string, unknown>)["api_key"] ?? "");
+        inp.placeholder = "sk-…";
+        inp.addEventListener("input", () => {
+          (node.data.config as Record<string, unknown>)["api_key"] = inp.value;
+          onChange();
+        });
+        return inp;
+      }, "Saved in this workflow's file, unencrypted. Ignored if a saved credential is selected above."));
+      body.appendChild(details);
+    }
   }
 }

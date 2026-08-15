@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, vi } from "vitest";
 import { CanvasNode } from "../canvas/Node";
-import { renderConfigFieldsLoop, type PropSchema } from "../popover/field-renderer";
+import { renderConfigFieldsLoop, renderCredentialSection, getCredentialFieldKeys, type PropSchema } from "../popover/field-renderer";
 import type { ExtensionContext } from "../node-configs/popover-utils";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
@@ -77,5 +77,54 @@ describe("field-renderer — maxLength", () => {
 
     const hint = ctx.body.querySelector(".field-hint") as HTMLElement;
     expect(hint.textContent).toBe("Just a description");
+  });
+});
+
+describe("field-renderer — credential fields", () => {
+  it("normal case: x-aerini-credential with a cred_type renders one picker per field and hard-filters each by type", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.creds.push(
+      { id: "c1", name: "AWS prod",   cred_type: "api_key" },
+      { id: "c2", name: "GH token",   cred_type: "oauth"   },
+    );
+    const props: Record<string, PropSchema> = {
+      access_key_id:     { type: "string", "x-aerini-credential": { cred_type: "api_key" } },
+      secret_access_key: { type: "string", "x-aerini-credential": { cred_type: "oauth" } },
+    };
+
+    renderCredentialSection(ctx, props, undefined, () => {});
+
+    const fieldLabels = Array.from(ctx.body.querySelectorAll(".field-label")).map(el => el.textContent);
+    expect(fieldLabels).toContain("Use Saved Credential — Access Key ID");
+    expect(fieldLabels).toContain("Use Saved Credential — Secret Access Key");
+    expect(ctx.body.querySelectorAll(".config-hint-warn").length).toBe(0);
+    expect(getCredentialFieldKeys(props)).toEqual(new Set(["access_key_id", "secret_access_key"]));
+  });
+
+  it("edge case: a declared cred_type with no matching saved credential shows an empty picker and a type-specific warning, not a fallback to all credentials", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.creds.push({ id: "c1", name: "Only a bearer token", cred_type: "bearer" });
+    const props: Record<string, PropSchema> = {
+      api_secret: { type: "string", "x-aerini-credential": { cred_type: "oauth" } },
+    };
+
+    renderCredentialSection(ctx, props, undefined, () => {});
+
+    const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+    expect(options).toEqual(["— none —"]);
+    const warn = ctx.body.querySelector(".config-hint-warn") as HTMLElement;
+    expect(warn.textContent).toBe('No saved credentials of type "oauth". Add one in Credentials in the toolbar.');
+  });
+
+  it("backward compat: a bare 'api_key' field with no annotation still renders unfiltered, exactly as before this change", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.creds.push({ id: "c1", name: "Any old key", cred_type: "basic" });
+    const props: Record<string, PropSchema> = { api_key: { type: "string" } };
+
+    renderCredentialSection(ctx, props, undefined, () => {});
+
+    const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+    expect(options).toEqual(["— none —", "Any old key"]);
+    expect(getCredentialFieldKeys(props)).toEqual(new Set(["api_key"]));
   });
 });

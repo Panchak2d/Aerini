@@ -207,11 +207,35 @@ fn execute(input: NodeInput) -> NodeOutput {
 }
 ```
 
-**`data`** must be a valid JSON object string. If it's not valid JSON, Aerini treats the output as `{}` without raising an error.
+**`data`** must be a valid JSON object string. If your node reports `success: true` but `data` isn't valid JSON, Aerini treats it as a failure: the run logs an error and the node fails with error code `wasm_invalid_output`, rather than silently substituting `{}`.
 
 **`recoverable`** tells the executor whether to retry on failure (based on the node's retry settings in the workflow). Use `true` for transient problems like network timeouts and rate limits; use `false` for permanent failures like missing required input or authentication errors.
 
 **Parameters and credentials both arrive in `params`.** Aerini merges resolved credential values into `input.params` before calling `execute()`. You don't need to check `input.credentials` separately — everything is in one place.
+
+---
+
+## Declaring credential fields
+
+By default, the config UI treats any field literally named `api_key` or `password` in your `input-schema` as a credential field — it's hidden from the generic config form and shown in the "Connection" section with a saved-credential picker instead. This still works and isn't going away.
+
+For anything else — multiple credential fields on one node, or a field name that isn't `api_key`/`password` — opt in explicitly with the `x-aerini-credential` JSON Schema annotation:
+
+```json
+{
+  "properties": {
+    "access_key_id":     { "type": "string", "x-aerini-credential": true },
+    "secret_access_key": { "type": "string", "x-aerini-credential": { "cred_type": "api_key" } }
+  }
+}
+```
+
+- `"x-aerini-credential": true` marks the field as a credential field with no type constraint — the picker shows every saved credential.
+- `"x-aerini-credential": { "cred_type": "..." }` filters the picker to only saved credentials of that type. Valid values: `"api_key"`, `"bearer"`, `"basic"`, `"oauth"`, `"other"` — the type a user picks when saving a credential in Aerini's Credentials panel, not a name you invent.
+- A node can declare as many credential fields as it needs; each gets its own picker.
+- If a `cred_type` is declared and the user has no saved credential of that type, the picker shows no options rather than falling back to an unrelated credential type — they'll need to save one of the right type first.
+
+Either convention resolves the same way: the secret arrives merged into `params` as described above, keyed by the field name.
 
 ---
 

@@ -34,6 +34,13 @@ pub enum TriggerKind {
         path: String,
         method: String,
         secret: String,
+        /// Suppresses re-firing the workflow for a request whose body was
+        /// already seen within this many seconds (0 = disabled). Added after
+        /// the original four fields — `#[serde(default)]` keeps older
+        /// persisted rows (missing this field) deserializing as `0`,
+        /// unchanged behavior.
+        #[serde(default)]
+        dedup_window_secs: u64,
     },
     /// No automatic trigger — only fires via manual Run press.
     /// Background scheduling is not supported for this trigger type.
@@ -106,7 +113,7 @@ impl ScheduledJobRow {
     /// reply — where the raw secret would otherwise leak.
     pub fn redacted(&self) -> Self {
         let mut row = self.clone();
-        if let Ok(TriggerKind::Webhook { port, path, method, .. }) =
+        if let Ok(TriggerKind::Webhook { port, path, method, dedup_window_secs, .. }) =
             serde_json::from_str::<TriggerKind>(&row.trigger_kind)
         {
             let redacted_trigger = TriggerKind::Webhook {
@@ -114,6 +121,7 @@ impl ScheduledJobRow {
                 path,
                 method,
                 secret: REDACTED_WEBHOOK_SECRET.to_string(),
+                dedup_window_secs,
             };
             if let Ok(json) = serde_json::to_string(&redacted_trigger) {
                 row.trigger_kind = json;
@@ -202,13 +210,14 @@ mod tests {
             path:   "/hook".to_string(),
             method: "POST".to_string(),
             secret: "super-secret-value".to_string(),
+            dedup_window_secs: 0,
         };
         let row      = row_with_trigger(&trigger);
         let redacted = row.redacted();
 
         let parsed: TriggerKind = serde_json::from_str(&redacted.trigger_kind).unwrap();
         match parsed {
-            TriggerKind::Webhook { port, path, method, secret } => {
+            TriggerKind::Webhook { port, path, method, secret, .. } => {
                 assert_eq!(port, 3456);
                 assert_eq!(path, "/hook");
                 assert_eq!(method, "POST");
@@ -225,6 +234,17 @@ mod tests {
         let row      = row_with_trigger(&trigger);
         let redacted = row.redacted();
         assert_eq!(redacted.trigger_kind, row.trigger_kind);
+    }
+
+    #[test]
+    fn webhook_json_predating_dedup_window_secs_deserializes_with_default_zero() {
+        let legacy_json = r#"{"kind":"webhook","port":3456,"path":"/hook","method":"POST","secret":"s"}"#;
+        let trigger: TriggerKind = serde_json::from_str(legacy_json)
+            .expect("pre-dedup persisted rows must still deserialize");
+        match trigger {
+            TriggerKind::Webhook { dedup_window_secs, .. } => assert_eq!(dedup_window_secs, 0),
+            other => panic!("expected Webhook trigger, got {:?}", other),
+        }
     }
 
     #[test]

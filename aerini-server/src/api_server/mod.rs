@@ -11,8 +11,11 @@
 //!   GET    /aerini-widget.js
 //!   POST   /api/widget/:workflow_id/trigger
 //!   GET    /api/workflows
-//!   POST   /api/workflows
-//!   GET    /api/workflows/:id
+//!   POST   /api/workflows           (optional `If-Match: "<row_version>"` for
+//!                                    optimistic-concurrency protection — 409
+//!                                    on a stale version, 412 if If-Match is
+//!                                    given but the workflow doesn't exist)
+//!   GET    /api/workflows/:id       (returns `ETag: "<row_version>"`)
 //!   DELETE /api/workflows/:id
 //!   POST   /api/workflows/:id/run
 //!   GET    /api/scheduler
@@ -487,7 +490,8 @@ pub async fn run(cfg: ServerConfig) {
                 || extra_c.iter().any(|o| o.as_slice() == b)
         }))
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]);
+        .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE, axum::http::header::IF_MATCH])
+        .expose_headers([axum::http::header::ETAG]);
 
     let rl = Arc::new(crate::middleware::RateLimiter::new(300, 60));
     Arc::clone(&rl).spawn_eviction_task();

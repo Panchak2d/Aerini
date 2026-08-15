@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { summarizeMemory, formatBytes } from "../mem-summary";
+import { summarizeMemory, formatBytes, pushMemSample, classifyProcessMem } from "../mem-summary";
 import type { RunBreakdown } from "../ipc/memory";
 
 const MB = 1024 * 1024;
@@ -7,6 +7,33 @@ const MB = 1024 * 1024;
 function run(overrides: Partial<RunBreakdown> = {}): RunBreakdown {
   return { workflow_id: "wf_1", started_at_ms: 0, live_bytes: 0, nodes: [], ...overrides };
 }
+
+describe("pushMemSample", () => {
+  it("normal case: appends a reading, growing the window", () => {
+    const h = pushMemSample([1 * MB, 2 * MB], 3 * MB);
+    expect(h).toEqual([1 * MB, 2 * MB, 3 * MB]);
+  });
+
+  it("edge case: once at the 60-sample cap, the oldest reading drops instead of growing forever", () => {
+    const full = Array.from({ length: 60 }, (_, i) => i);
+    const h = pushMemSample(full, 999);
+    expect(h.length).toBe(60);
+    expect(h[0]).toBe(1); // sample 0 dropped
+    expect(h[59]).toBe(999);
+  });
+});
+
+describe("classifyProcessMem", () => {
+  it("normal case: a reading close to the recent median is active", () => {
+    const history = [290, 292, 288, 291, 289].map(mb => mb * MB);
+    expect(classifyProcessMem(history, 293 * MB)).toBe("active");
+  });
+
+  it("edge case (the bug this guards against): a spike is never flagged before enough samples exist to judge it against", () => {
+    const history = [100 * MB, 100 * MB]; // only 2 samples, below the 5-sample minimum
+    expect(classifyProcessMem(history, 900 * MB)).toBe("active");
+  });
+});
 
 describe("summarizeMemory", () => {
   it("normal case: sums a run's own bytes plus every node's bytes, and reports the largest single row for bar scaling", () => {

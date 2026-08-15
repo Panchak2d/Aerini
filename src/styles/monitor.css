@@ -1,0 +1,199 @@
+/* ══════════════════════════════════════════
+   MONITOR
+   ══════════════════════════════════════════ */
+
+#monitor-area {
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-canvas);
+}
+
+body.monitor-mode #canvas-area  { display: none; }
+body.monitor-mode #monitor-area { display: flex; }
+body.monitor-mode #output-drawer { display: none !important; }
+
+/* ── Header strip ── */
+#monitor-header {
+  display: flex;
+  gap: 24px;
+  flex-shrink: 0;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--bd);
+}
+.monitor-stat { display: flex; flex-direction: column; gap: 2px; }
+.monitor-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--t3); }
+.monitor-stat-val   { font-family: var(--font-mono); font-size: 15px; color: var(--t1); }
+
+/* Memory chip: a plain button reset, not mem-chip's pill sizing — this
+   sits in the header next to the plain "Active runs" stat and needs to
+   read the same size, just wrapped in something clickable. */
+.monitor-mem-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  padding: 2px 4px; cursor: pointer; font: inherit; color: inherit;
+  transition: border-color 80ms ease, background 80ms ease;
+}
+.monitor-mem-btn:hover, .monitor-mem-btn[aria-expanded="true"] {
+  border-color: var(--bd); background: var(--bg3);
+}
+.monitor-mem-btn[data-level="active"] .mem-dot { background: var(--green); }
+.monitor-mem-btn[data-level="warn"]   .mem-dot { background: var(--amber); }
+.monitor-mem-btn[data-level="high"]   .mem-dot { background: var(--red); }
+
+.monitor-mem-spark { flex-shrink: 0; }
+.monitor-mem-spark polyline { fill: none; stroke-width: 1.5; }
+
+/* mem-popover default opens upward from the bottom status bar — this
+   chip lives in the top header strip, so it needs to open downward. */
+.monitor-mem-popover { top: calc(100% + 8px); bottom: auto; left: 0; right: auto; }
+.monitor-mem-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; color: var(--t2); }
+.monitor-mem-row span:last-child { color: var(--t1); font-variant-numeric: tabular-nums; }
+
+.monitor-header-actions { display: flex; gap: 8px; margin-left: auto; align-self: center; }
+.monitor-bulk-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  background: none;
+  border: 1px solid var(--bd);
+  border-radius: var(--radius);
+  color: var(--t2);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+.monitor-bulk-btn:disabled { opacity: .35; cursor: default; }
+.monitor-bulk-btn--start:hover:not(:disabled) {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+.monitor-bulk-btn--stop:hover:not(:disabled) {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+/* ── Currently-open canvas workflow card ── */
+.monitor-canvas-card {
+  flex-shrink: 0;
+  margin: 14px 20px 0;
+  padding: 10px 12px;
+  background: var(--color-surface-1);
+  border-radius: var(--radius);
+}
+.monitor-canvas-card-label { font-size: 10px; color: var(--t3); margin-bottom: 6px; }
+.monitor-row--canvas { padding: 0; }
+
+/* ── Row list ── */
+#monitor-list { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 20px 20px; display: flex; flex-direction: column; gap: 6px; }
+
+.monitor-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--color-surface-1);
+  border-radius: var(--radius);
+}
+.monitor-row .bg-job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-row-mem,
+.monitor-row-duration,
+.monitor-row-countdown {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--t3);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Hover actions reuse panels.css's .bg-job-hover-actions, whose reveal rule
+   is scoped to .bg-job-item:hover — a class monitor rows don't carry. Without
+   this, Stop/Start/Restart/Open stay at opacity:0 permanently on every
+   Monitor row. */
+.monitor-row:hover .bg-job-hover-actions,
+.monitor-row:focus-within .bg-job-hover-actions { opacity: 1; }
+
+.bg-job-action-open { color: var(--t3); }
+.bg-job-action-open:hover { color: var(--t1); background: var(--bg4); border-color: var(--bd); }
+
+/* Monitor's own status-pill colors. A new `--idle` state has no equivalent
+   in panels.css's bg-job-status--* family (BgJobsPanel only ever shows jobs
+   that exist, never idle saved workflows) — defined here under a
+   Monitor-owned class instead of extending that shared selector, but using
+   the same color tokens so it reads as one visual system. */
+.monitor-status { font-size: 10px; flex-shrink: 0; white-space: nowrap; min-width: 46px; }
+.monitor-status--running { color: var(--green); }
+.monitor-status--done    { color: var(--t3); }
+.monitor-status--failed  { color: var(--red); }
+.monitor-status--stopped { color: var(--t3); }
+.monitor-status--idle    { color: var(--t3); }
+
+.monitor-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--t3);
+}
+
+/* ── Sidebar: Overview + Resources ── */
+.monitor-sidebar-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--t3);
+  margin-bottom: 6px;
+}
+
+.monitor-overview-list,
+.monitor-resources { display: flex; flex-direction: column; gap: 2px; }
+
+.monitor-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t2);
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.monitor-overview-row:hover { background: var(--bg3); color: var(--t1); }
+.monitor-overview-row.active { background: var(--bg4); color: var(--t1); }
+
+.monitor-overview-count { font-family: var(--font-mono); font-size: 11px; }
+
+.monitor-resource-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--t2);
+}
+.monitor-resource-val { font-family: var(--font-mono); font-size: 11px; color: var(--t1); }
+
+.monitor-resource-peak-right { display: flex; align-items: center; gap: 6px; }
+
+.monitor-resource-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--t3);
+  cursor: pointer;
+  transition: color 80ms ease;
+}
+.monitor-resource-reset:hover { color: var(--t1); }

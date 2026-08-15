@@ -303,11 +303,11 @@ impl SchedulerDaemon {
         }
 
         let trigger = match trigger {
-            TriggerKind::Webhook { port, path, method, secret } => {
+            TriggerKind::Webhook { port, path, method, secret, dedup_window_secs } => {
                 let effective_port = port_override.unwrap_or(port);
                 check_webhook_port(&*self.db, &self.webhook_ports, workflow_id, effective_port)?;
                 probe_port_is_free(effective_port)?;
-                TriggerKind::Webhook { port: effective_port, path, method, secret }
+                TriggerKind::Webhook { port: effective_port, path, method, secret, dedup_window_secs }
             }
             other => other,
         };
@@ -763,7 +763,8 @@ pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
             let path   = node.config["path"].as_str().unwrap_or("/webhook").to_string();
             let method = node.config["method"].as_str().unwrap_or("ANY").to_string();
             let secret = node.config["secret"].as_str().unwrap_or("").to_string();
-            Ok(TriggerKind::Webhook { port, path, method, secret })
+            let dedup_window_secs = node.config["dedup_window_secs"].as_u64().unwrap_or(0);
+            Ok(TriggerKind::Webhook { port, path, method, secret, dedup_window_secs })
         }
         "manual_trigger" => Ok(TriggerKind::Manual),
         other => Err(format!(

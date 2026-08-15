@@ -26,6 +26,13 @@ export async function listCredentials(): Promise<CredentialEntry[]> {
   return invoke("list_credentials");
 }
 
+/// Maps credential ID -> distinct workflow names referencing it, for every
+/// credential used by at least one workflow. Powers the "used by" display in
+/// CredentialPanel's list — computed up front, not just at delete time.
+export async function listCredentialUsage(): Promise<Record<string, string[]>> {
+  return invoke("list_credential_usage");
+}
+
 export async function getCredentialMetadata(id: string): Promise<CredentialMetadata | null> {
   return invoke("get_credential_metadata", { id });
 }
@@ -40,4 +47,11 @@ export async function saveCredential(req: CreateCredentialRequest): Promise<void
 
 export async function deleteCredential(id: string): Promise<void> {
   return invoke("delete_credential", { id });
+}
+
+/// Returns the raw AES-256 credential-encryption key, base64-encoded.
+/// See CredentialPanel's backup UI for how this is presented — this is the
+/// only recovery path if the OS keychain entry holding it is ever lost.
+export async function exportEncryptionKey(): Promise<string> {
+  return invoke("export_encryption_key");
 }

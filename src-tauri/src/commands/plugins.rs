@@ -34,12 +34,12 @@ pub async fn list_installed_plugins(plugin_dir: String) -> Result<Vec<PluginInfo
         Err(_) => return Ok(Vec::new()),
     };
 
-    // T2-8 fix: `PluginLoader::shared()` reuses the one process-wide `Engine` +
-    // epoch-ticker thread instead of constructing a fresh pair on every call to
-    // this command (e.g. every time a user opens/refreshes the Plugins settings
-    // panel). `describe_plugin` (vs. `load_plugin`) additionally avoids leaking
-    // two `Box`'d strings per plugin per call — this command only inspects
-    // metadata for display, it never registers or executes any of these plugins.
+    // `PluginLoader::shared()` reuses the process-wide `Engine` and epoch-ticker
+    // thread rather than constructing a fresh pair per call, since this command
+    // runs every time a user opens or refreshes the Plugins settings panel.
+    // `describe_plugin` (not `load_plugin`) is used because it never leaks the
+    // `type_id`/`display_name` strings that `load_plugin` intentionally leaks
+    // for its one-per-process caller.
     let loader = PluginLoader::shared()?;
     let mut out = Vec::new();
 

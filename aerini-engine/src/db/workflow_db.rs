@@ -1,7 +1,7 @@
 //! Workflow CRUD, versions, variables, and settings methods for [`super::WorkflowDb`].
 
 use uuid::Uuid;
-use super::{WorkflowDb, WorkflowSummary, VersionRow};
+use super::{WorkflowDb, WorkflowSummary, VersionRow, SaveOutcome};
 use crate::model::Workflow;
 
 impl WorkflowDb {
@@ -10,8 +10,11 @@ impl WorkflowDb {
         let tags = serde_json::to_string(&workflow.metadata.tags).map_err(|e| e.to_string())?;
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO workflows (id, name, json, created_at, updated_at, tags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, row_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name, json = excluded.json, updated_at = excluded.updated_at,
+               tags = excluded.tags, row_version = workflows.row_version + 1",
             rusqlite::params![
                 workflow.id,
                 workflow.name,
@@ -22,6 +25,74 @@ impl WorkflowDb {
             ],
         ).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Conditional save used by the API server for optimistic-concurrency
+    /// protection (`If-Match`/`ETag`).
+    ///
+    /// `expected_row_version = None` behaves exactly like [`Self::save`] —
+    /// an unconditional upsert. `Some(v)` only writes if the stored row is
+    /// still at version `v`; the version check and the write happen in one
+    /// atomic `UPDATE ... WHERE row_version = ?` statement, not a separate
+    /// read-then-write, so two racing callers can't both pass the check
+    /// against the same stale version.
+    pub fn save_checked(
+        &self,
+        workflow: &Workflow,
+        expected_row_version: Option<i64>,
+    ) -> Result<SaveOutcome, String> {
+        let json = workflow.to_json_pretty().map_err(|e| e.to_string())?;
+        let tags = serde_json::to_string(&workflow.metadata.tags).map_err(|e| e.to_string())?;
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        let now  = chrono::Utc::now().to_rfc3339();
+
+        let Some(expected) = expected_row_version else {
+            let row_version: i64 = conn.query_row(
+                "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, row_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                 ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name, json = excluded.json, updated_at = excluded.updated_at,
+                   tags = excluded.tags, row_version = workflows.row_version + 1
+                 RETURNING row_version",
+                rusqlite::params![
+                    workflow.id, workflow.name, json,
+                    workflow.metadata.created_at.to_rfc3339(), now, tags,
+                ],
+                |row| row.get::<_, i64>(0),
+            ).map_err(|e| e.to_string())?;
+            return Ok(if row_version == 1 {
+                SaveOutcome::Created { row_version }
+            } else {
+                SaveOutcome::Updated { row_version }
+            });
+        };
+
+        let result = conn.query_row(
+            "UPDATE workflows SET name = ?2, json = ?3, updated_at = ?4, tags = ?5,
+               row_version = row_version + 1
+             WHERE id = ?1 AND row_version = ?6
+             RETURNING row_version",
+            rusqlite::params![workflow.id, workflow.name, json, now, tags, expected],
+            |row| row.get::<_, i64>(0),
+        );
+        match result {
+            Ok(row_version) => Ok(SaveOutcome::Updated { row_version }),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // The CAS UPDATE matched no row — either it doesn't exist,
+                // or it exists at a different row_version. Distinguish for
+                // the caller's error message.
+                match conn.query_row(
+                    "SELECT row_version FROM workflows WHERE id = ?1",
+                    rusqlite::params![workflow.id],
+                    |row| row.get::<_, i64>(0),
+                ) {
+                    Ok(current)                                    => Ok(SaveOutcome::Conflict { current_row_version: current }),
+                    Err(rusqlite::Error::QueryReturnedNoRows)      => Ok(SaveOutcome::NotFound),
+                    Err(e)                                          => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     pub fn load(&self, id: &str) -> Result<Option<Workflow>, String> {
@@ -35,6 +106,26 @@ impl WorkflowDb {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.to_string()),
             Ok(json) => Ok(Some(Workflow::from_json(&json).map_err(|e| e.to_string())?)),
+        }
+    }
+
+    /// Like [`Self::load`], but also returns the row's current `row_version`
+    /// so a caller (the API server's `GET /api/workflows/:id`) can hand it
+    /// back to the client as an `ETag` for a later conditional save.
+    pub fn load_with_row_version(&self, id: &str) -> Result<Option<(Workflow, i64)>, String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        let result = conn.query_row(
+            "SELECT json, row_version FROM workflows WHERE id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        );
+        match result {
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+            Ok((json, row_version)) => Ok(Some((
+                Workflow::from_json(&json).map_err(|e| e.to_string())?,
+                row_version,
+            ))),
         }
     }
 
@@ -514,6 +605,84 @@ mod tests {
 
         assert!(db.list_versions("wf-1").expect("list failed").is_empty(), "versions must cascade-delete with their workflow");
         assert_eq!(db.list_versions("wf-2").expect("list failed").len(), 1, "a different workflow's versions must be untouched");
+
+        cleanup(&path);
+    }
+
+    // save_checked()'s CAS logic depends on row_version only ever moving
+    // forward for a given row. save() (the unconditional path used by e.g.
+    // the desktop app) must uphold that same invariant even though it never
+    // checks the version itself.
+    #[test]
+    fn save_increments_row_version_on_each_call_instead_of_resetting_it() {
+        let path = temp_path("save_row_version");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let wf = Workflow::new("wf-1", "A");
+        db.save(&wf).expect("first save failed");
+        let (_, v1) = db.load_with_row_version("wf-1").expect("load failed").expect("row missing");
+        assert_eq!(v1, 1);
+
+        db.save(&wf).expect("second save failed");
+        let (_, v2) = db.load_with_row_version("wf-1").expect("load failed").expect("row missing");
+        assert_eq!(v2, 2, "row_version must increment, not reset, on a repeat save");
+
+        cleanup(&path);
+    }
+
+    // Normal case: creating a brand-new row (no expected version — there's
+    // nothing to match yet) succeeds at version 1, and a subsequent update
+    // against that exact version succeeds and increments to 2.
+    #[test]
+    fn save_checked_creates_then_updates_when_expected_version_matches() {
+        let path = temp_path("save_checked_normal");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let wf = Workflow::new("wf-1", "A");
+        assert_eq!(db.save_checked(&wf, None).expect("create failed"), SaveOutcome::Created { row_version: 1 });
+        assert_eq!(db.save_checked(&wf, Some(1)).expect("update failed"), SaveOutcome::Updated { row_version: 2 });
+
+        cleanup(&path);
+    }
+
+    // The core edge case this feature exists for: a caller holding a stale
+    // version (someone else saved in between) must be rejected, not silently
+    // overwrite the newer save. The stored row must be left untouched.
+    #[test]
+    fn save_checked_returns_conflict_and_does_not_write_when_version_is_stale() {
+        let path = temp_path("save_checked_conflict");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let wf = Workflow::new("wf-1", "A");
+        db.save_checked(&wf, None).expect("create failed"); // row_version 1
+        db.save_checked(&wf, Some(1)).expect("first update failed"); // row_version 2
+
+        let mut stale_edit = wf.clone();
+        stale_edit.name = "stale edit".to_string();
+        let outcome = db.save_checked(&stale_edit, Some(1)).expect("conflicting save failed");
+        assert_eq!(outcome, SaveOutcome::Conflict { current_row_version: 2 });
+
+        let (current, _) = db.load_with_row_version("wf-1").expect("load failed").expect("row missing");
+        assert_eq!(current.name, "A", "the conflicting write must not have applied");
+
+        cleanup(&path);
+    }
+
+    // Edge case: If-Match asserts a specific version, but the row doesn't
+    // exist at all (never created, or deleted since). This is distinct from
+    // Conflict — there's no current_row_version to report.
+    #[test]
+    fn save_checked_returns_not_found_when_expected_version_given_but_no_row_exists() {
+        let path = temp_path("save_checked_not_found");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let wf = Workflow::new("wf-1", "A");
+        let outcome = db.save_checked(&wf, Some(1)).expect("save_checked failed");
+        assert_eq!(outcome, SaveOutcome::NotFound);
 
         cleanup(&path);
     }

@@ -1,9 +1,11 @@
 import {
   listCredentials,
+  listCredentialUsage,
   getCredentialMetadata,
   getCredentialSecret,
   saveCredential,
   deleteCredential,
+  exportEncryptionKey,
 } from "../ipc/credentials";
 import { showConfirm } from "../confirm";
 import { escapeHtml as escHtml } from "../utils";
@@ -36,6 +38,7 @@ interface EditingCredential {
 export class CredentialPanel {
   private el: HTMLElement;
   private creds: Credential[] = [];
+  private usage: Record<string, string[]> = {};
   private editing: EditingCredential | null = null;
   // Guards the async gap in startEdit/delete (before any confirm dialog is
   // up) — without it, clicking Edit on a second item while the first is
@@ -62,8 +65,72 @@ export class CredentialPanel {
   hide(): void { this.el.classList.add("hidden"); }
 
   private async refresh(): Promise<void> {
-    this.creds = await listCredentials().catch(() => []);
+    const [creds, usage] = await Promise.all([
+      listCredentials().catch(() => []),
+      listCredentialUsage().catch(() => ({})),
+    ]);
+    this.creds = creds;
+    this.usage = usage;
     this.render();
+  }
+
+  private async backupEncryptionKey(): Promise<void> {
+    if (this.busy) return;
+    const ok = await showConfirm(
+      "This reveals the master key that encrypts every credential saved here. " +
+      "Anyone who gets it can decrypt all of them. Store it somewhere as secure " +
+      "as the credentials themselves — a password manager, not a plain text file " +
+      "on this machine. It will only be shown this once per click.",
+      true,
+      "Show Key",
+    );
+    if (!ok) return;
+
+    this.busy = true;
+    const btn = this.el.querySelector<HTMLButtonElement>("#cred-key-backup")!;
+    btn.disabled = true;
+    const originalLabel = btn.textContent;
+    btn.textContent = "Loading…";
+    try {
+      const key = await exportEncryptionKey();
+      this.renderKeyBanner(key);
+    } catch (e) {
+      await showConfirm(`Could not read the encryption key: ${e}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+      this.busy = false;
+    }
+  }
+
+  private renderKeyBanner(key: string): void {
+    const slot = this.el.querySelector("#cred-key-banner-slot");
+    if (!slot) return;
+    slot.innerHTML = `
+      <div class="esp-run-secret-banner">
+        <div class="esp-run-secret-title">⚠ Your encryption key — save it now</div>
+        <div class="esp-run-secret-desc">
+          If the OS keychain entry holding this is ever lost, this is the <strong>only</strong> way
+          to recover every credential saved above. To restore: stop the app, place this exact value
+          in the key file the app expects (see <code>docs/credentials.md</code>), then restart —
+          it's picked up automatically.
+        </div>
+        <div class="esp-run-secret-row">
+          <code class="esp-run-secret-value">${escHtml(key)}</code>
+          <button class="esp-run-secret-copy" type="button">Copy</button>
+        </div>
+      </div>`;
+
+    const copyBtn = slot.querySelector<HTMLButtonElement>(".esp-run-secret-copy")!;
+    copyBtn.addEventListener("click", () => {
+      navigator.clipboard.writeText(key).then(() => {
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+      }).catch(() => {
+        copyBtn.textContent = "Copy failed";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+      });
+    });
   }
 
   private render(): void {
@@ -84,6 +151,11 @@ export class CredentialPanel {
         </div>
 
         <div class="cred-panel-body" id="cred-panel-body">
+          <div class="cred-key-backup-row">
+            <button class="cred-key-backup-btn" id="cred-key-backup" type="button">Backup Encryption Key</button>
+            <span class="cred-key-backup-hint">Recover access if the OS keychain entry is ever lost — read this before you need it.</span>
+          </div>
+          <div id="cred-key-banner-slot"></div>
           ${isEmpty ? `
           <div class="cred-empty-state">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.4"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
@@ -115,6 +187,7 @@ export class CredentialPanel {
 
     this.el.querySelector("#cred-close")!.addEventListener("click", () => this.hide());
     this.el.querySelector(".cred-panel-backdrop")!.addEventListener("click", () => this.hide());
+    this.el.querySelector("#cred-key-backup")!.addEventListener("click", () => this.backupEncryptionKey());
     this.bindForm();
     this.bindList();
   }
@@ -130,19 +203,27 @@ export class CredentialPanel {
         No credentials saved yet. Add your first API key below.
       </div>`;
     }
-    return this.creds.map(c => `
+    return this.creds.map(c => {
+      const names = this.usage[c.id] ?? [];
+      const usageLabel = names.length
+        ? `Used by ${names.length} workflow${names.length === 1 ? "" : "s"}`
+        : "Not used by any workflow";
+      const usageTitle = names.length ? names.join(", ") : usageLabel;
+      return `
       <div class="cred-item${this.editing?.id === c.id ? " editing" : ""}" data-id="${escHtml(c.id)}">
         <div class="cred-item-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg></div>
         <div class="cred-item-info">
           <div class="cred-item-name">${escHtml(c.name)}</div>
           <div class="cred-item-id">${escHtml(c.id)}</div>
+          <div class="cred-item-usage${names.length ? "" : " unused"}" title="${escHtml(usageTitle)}">${escHtml(usageLabel)}</div>
         </div>
         <span class="cred-item-type">${escHtml(credTypeLabel(c.cred_type))}</span>
         <div class="cred-item-actions">
           <button class="cred-item-edit" data-id="${escHtml(c.id)}" title="View / edit this credential">Edit</button>
           <button class="cred-item-del" data-id="${escHtml(c.id)}" title="Delete this credential">Delete</button>
         </div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
   }
 
   private renderForm(): string {

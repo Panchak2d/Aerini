@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Canvas } from "../canvas/Canvas";
 import { bindDrawerToggle } from "../toolbar";
+import { enterMonitorMode, exitMonitorMode } from "../monitor-mode";
 
 function makeFakeCanvas() {
   return { resize: vi.fn() } as unknown as Canvas;
@@ -67,6 +68,24 @@ describe("bindDrawerToggle", () => {
   it("does nothing if the drawer markup isn't present (defensive, no throw)", () => {
     document.body.innerHTML = `<div id="toolbar"></div>`;
     expect(() => bindDrawerToggle(makeFakeCanvas())).not.toThrow();
+  });
+
+  it("normal case: header click does not expand the drawer while Monitor mode is active", () => {
+    setDom(true);
+    enterMonitorMode();
+    bindDrawerToggle(makeFakeCanvas());
+    document.getElementById("drawer-header")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("output-drawer")!.classList.contains("hidden")).toBe(true);
+    exitMonitorMode();
+  });
+
+  it("edge case: header Enter/Space also does not expand the drawer while Monitor mode is active", () => {
+    setDom(true);
+    enterMonitorMode();
+    bindDrawerToggle(makeFakeCanvas());
+    document.getElementById("drawer-header")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(document.getElementById("output-drawer")!.classList.contains("hidden")).toBe(true);
+    exitMonitorMode();
   });
 
   it("R-bug3b/3c fix, normal case: the header releases focus after a click-toggle, instead of holding it forever and hijacking every later Space press", () => {

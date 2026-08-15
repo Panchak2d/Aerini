@@ -7,7 +7,7 @@ export interface ExtensionContext {
   body:     HTMLElement;
   canvasEl: HTMLCanvasElement;
   onChange: () => void;
-  creds:    Array<{ id: string; name: string }>;
+  creds:    Array<{ id: string; name: string; cred_type: string }>;
   /** Re-opens the popover for this node — used when a field change alters which
    *  other fields should be visible (e.g. schedule mode selector). */
   rerender: () => void;

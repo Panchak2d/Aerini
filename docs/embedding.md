@@ -40,6 +40,12 @@ You need:
 You don't need deep Rust knowledge. The guide explains each concept when it first
 appears.
 
+**Platform note:** `aerini-engine` targets native platforms only. As pinned
+today it depends on `tokio` (full feature set), `rusqlite`, and
+`reqwest`/`hyper`, none of which build for `wasm32-unknown-unknown` — so it
+cannot run inside a browser tab as-is. For browser-facing use, see the
+[chat widget](widget-embedding.md) instead.
+
 ---
 
 ## A note on a few Rust concepts you'll see

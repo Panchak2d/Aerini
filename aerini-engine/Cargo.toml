@@ -29,6 +29,7 @@ dashmap     = "6.1"
 aes-gcm = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64  = "0.22"
+zeroize = "1"
 
 # HTTP node
 reqwest = { version = "0.13", features = ["json", "rustls", "query", "form", "multipart"], default-features = false }

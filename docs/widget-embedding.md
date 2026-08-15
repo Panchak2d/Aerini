@@ -10,6 +10,13 @@ If you're looking for the Rust embedding API (running `aerini-engine` inside
 your own application) see [Embedding aerini-engine](embedding.md) instead —
 this doc is about the browser-facing chat widget only.
 
+> **Check your license before deploying this on a commercial site.** Serving
+> the widget means running `aerini-server` as a service for your site's
+> visitors — the scenario [embedding.md's licensing section](embedding.md#licensing)
+> covers. This isn't legal advice either way; it's a pointer to go read that
+> section and the [pricing page](https://panchak2d.github.io/aerini/pricing)
+> before you decide.
+
 ---
 
 ## What you need first

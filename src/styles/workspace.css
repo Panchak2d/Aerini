@@ -416,20 +416,46 @@ body.resizing-v #output-drawer { transition: none; }
 
 .perf-empty { color: var(--t3); line-height: 1.5; padding: 4px 0; }
 .perf-content[hidden] { display: none; }
-.perf-head { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; }
-.perf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--statusbar-idle); flex-shrink: 0; }
-.perf-dot[data-status="running"] { background: var(--blue); }
-.perf-dot[data-status="success"] { background: var(--green); }
-.perf-dot[data-status="failed"]  { background: var(--red); }
-#perf-status { font-size: 12px; font-weight: 600; color: var(--t1); }
-.perf-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+
+.perf-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.perf-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: var(--radius); background: var(--bg2); }
+.perf-pill .bg-job-status { font-size: 12px; font-weight: 600; }
+.perf-idle-note { font-size: 10.5px; color: var(--t3); }
+
+.perf-headline { display: flex; align-items: center; gap: 16px; background: var(--color-surface-1); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 10px; }
+.perf-headline-current { display: flex; flex-direction: column; gap: 2px; }
+.perf-headline-value { font-size: 22px; font-weight: 600; color: var(--t1); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+.perf-headline-side { display: flex; flex-direction: column; gap: 6px; padding-left: 14px; border-left: 1px solid var(--bd); }
+
+.perf-ref-strip { display: flex; gap: 14px; color: var(--t3); font-size: 10.5px; margin-bottom: 10px; flex-wrap: wrap; }
+.perf-ref-label { text-transform: uppercase; letter-spacing: .06em; margin-right: 4px; }
+.perf-ref-item b { color: var(--t2); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+.perf-meta { margin-bottom: 14px; }
+.perf-meta-toggle { cursor: pointer; font-size: 10.5px; color: var(--t3); list-style: none; user-select: none; }
+.perf-meta-toggle::-webkit-details-marker { display: none; }
+.perf-meta-toggle::before { content: "▸ "; }
+.perf-meta[open] .perf-meta-toggle::before { content: "▾ "; }
+.perf-meta-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 8px; }
+
 .perf-stat { display: flex; flex-direction: column; gap: 2px; }
 .perf-stat-label { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--t3); }
-.perf-stat b { font-size: 13px; font-weight: 600; color: var(--t1); font-variant-numeric: tabular-nums; }
-.perf-graph { width: 100%; height: 60px; }
-.perf-graph-empty { color: var(--t3); font-size: 11px; line-height: 60px; text-align: center; }
+.perf-stat b { font-size: 13px; font-weight: 600; color: var(--t1); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+.perf-graph-wrap { position: relative; }
+.perf-graph { width: 100%; height: 120px; }
+.perf-graph-empty { color: var(--t3); font-size: 11px; line-height: 120px; text-align: center; }
+.perf-graph-inner { display: flex; gap: 6px; width: 100%; height: 100%; }
+.perf-graph-axis { display: flex; flex-direction: column; justify-content: space-between; font-size: 9px; color: var(--t3); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.perf-graph-plot { position: relative; flex: 1; min-width: 0; }
 .perf-graph-svg { width: 100%; height: 100%; overflow: visible; }
-.perf-graph-svg polyline { fill: none; stroke: var(--blue); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.perf-graph-line { fill: none; stroke: var(--blue); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.perf-graph-area { fill: var(--blue); opacity: 0.12; stroke: none; }
+.perf-graph-grid { stroke: var(--t3); stroke-width: 1; opacity: 0.15; vector-effect: non-scaling-stroke; }
+.perf-graph-baseline { stroke: var(--t3); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; vector-effect: non-scaling-stroke; }
+.perf-graph-peak { position: absolute; width: 6px; height: 6px; margin-left: -3px; margin-top: -3px; border-radius: 50%; background: var(--blue); pointer-events: none; }
+.perf-graph-tooltip { position: absolute; top: -4px; transform: translate(-50%, -100%); background: var(--bg2); border: 1px solid var(--bd); border-radius: var(--radius-sm); padding: 3px 6px; font-size: 10px; color: var(--t1); white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; }
+.perf-graph-tooltip[hidden] { display: none; }
 
 /* ── reduced motion ────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

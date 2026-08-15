@@ -1,6 +1,6 @@
 # Nodes Reference
 
-All 39 built-in nodes, organized by category.
+All 40 built-in nodes, organized by category.
 
 **Finding a node:** press `Space` or `Ctrl+K` on the canvas to open node search. Type any part of the node's name.
 
@@ -18,7 +18,7 @@ All 39 built-in nodes, organized by category.
 | **Logic** | [If / Condition](#if--condition), [Switch](#switch), [Loop (For Each)](#loop-for-each), [Merge](#merge), [Stop](#stop), [Collect Files](#collect-files) |
 | **Flow Control** | [Delay](#delay), [Wait](#wait) |
 | **AI** | [AI Prompt](#ai-prompt), [AI Agent](#ai-agent), [AI Memory](#ai-memory), [Text Splitter](#text-splitter), [Image Generation](#image-generation) |
-| **Actions** | [HTTP Request](#http-request), [Shell Command](#shell-command), [Code (JS)](#code-js), [Send Email](#send-email), [SendGrid](#sendgrid), [File](#file), [Desktop Notification](#desktop-notification), [Save to Folder](#save-to-folder), [Social Upload](#social-upload), [Database](#database), [S3 Storage](#s3-storage) |
+| **Actions** | [HTTP Request](#http-request), [Shell Command](#shell-command), [Code (JS)](#code-js), [Send Email](#send-email), [SendGrid](#sendgrid), [File](#file), [Text to File](#text-to-file), [Desktop Notification](#desktop-notification), [Save to Folder](#save-to-folder), [Social Upload](#social-upload), [Database](#database), [S3 Storage](#s3-storage) |
 | **Integrations** | [Slack](#slack), [Discord](#discord), [GitHub](#github), [Google Sheets](#google-sheets), [Notion](#notion), [Telegram](#telegram), [Stripe](#stripe) |
 | **Data & Utility** | [Transform Data](#transform-data), [JSON](#json), [Set Variable](#set-variable), [Get Variable](#get-variable), [Output](#output) |
 
@@ -96,8 +96,9 @@ Listens for an incoming HTTP request and triggers the workflow when one arrives.
 | `port` | number | Port to listen on. Default `3456`. Must be ≥ 1024. |
 | `path` | string | URL path. Default `/webhook`. |
 | `method` | string | `GET`, `POST`, `PUT`, or `ANY`. |
-| `secret` | string | Optional. If set, incoming requests must include an `X-Aerini-Secret` header with this value. Comparison is timing-safe. |
+| `secret` | string | Optional. If set, incoming requests must include an `x-webhook-secret` header with this value. Comparison is timing-safe. Validates only that the caller knows the secret — it does not sign the body, so a captured request can be replayed. For Stripe/GitHub-style body signatures, verify their native signature header in a downstream Code node instead. |
 | `timeout_secs` | number | How long to wait for a request before timing out. Default `60`. |
+| `dedup_window_secs` | number | Default `0` (disabled). When set above 0, a request whose body was already seen within this many seconds does not re-run the workflow — the caller still gets a 200 OK, only the re-run is suppressed. Covers retry-on-timeout providers (Stripe, GitHub, ...), which resend the same event body byte-for-byte. Only applies to requests with a non-empty body; GET requests and empty-body POSTs are never deduped. Only takes effect when the workflow is running Active in the scheduler — an ad-hoc Run press always executes once per press. |
 
 Output: `{ body: any, headers: object, method: string, path: string }`
 
@@ -559,6 +560,25 @@ Read, write, append to, delete, or check existence of a file on the local filesy
 Output: `{ content: string, exists: boolean, bytes: number, path: string }`
 
 Read limit: 50 MB. Path traversal sequences (`..`) are rejected. In the desktop app, a confirmation prompt appears before any workflow with a File node runs. In server mode, use `--file-sandbox-dir` to restrict File nodes to a specific directory tree.
+
+### Text to File
+
+`type_id: text_to_file`
+
+Converts a text string into a file object. Typically wired between AI Prompt (or any text-producing node) and Save to Folder, to write generated text to disk.
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `content` | string | **required.** Text content to encode as a file. |
+| `filename` | string | Output filename. Defaults to `output.<format>`. |
+| `mime_type` | string | Overrides the MIME type implied by `format`. |
+| `format` | string | `txt`, `md`, `html`, `csv`, `json`, `pdf`, or `docx`. Falls back to the filename extension, then `txt`, when omitted. |
+
+Output: `{ files: [{ filename: string, data: string, mime_type: string }] }` — `data` is base64-encoded.
+
+`pdf` and `docx` produce real binary documents: leading `#`/`##`/`###` lines render as headings, and `docx` also renders `**bold**`/`*italic*`. Other formats pass the text through unchanged.
+
+**Auto-wiring:** connecting an upstream node to this node's input port fills `content` with `{{SourceNode.output.content}}` automatically, if `content` isn't already set.
 
 ### Desktop Notification
 

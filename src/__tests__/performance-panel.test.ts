@@ -40,4 +40,24 @@ describe("buildGraphSvg", () => {
     ]);
     expect(svg).not.toContain("NaN");
   });
+
+  it("normal case: y-axis labels reflect the history's own min/max bytes, and no peak/baseline markup renders without markers", () => {
+    const svg = buildGraphSvg([
+      { at_ms: 0, bytes: 1024 },
+      { at_ms: 1000, bytes: 2048 },
+    ]);
+    expect(svg).toContain("1.0 KB");
+    expect(svg).toContain("2.0 KB");
+    expect(svg).not.toContain("perf-graph-peak");
+    expect(svg).not.toContain("perf-graph-baseline");
+  });
+
+  it("normal case: peak dot and dashed baseline line render when markers are supplied", () => {
+    const svg = buildGraphSvg(
+      [{ at_ms: 0, bytes: 0 }, { at_ms: 1000, bytes: 100 }],
+      { peakBytes: 100, peakAtMs: 1000, baselineBytes: 0 },
+    );
+    expect(svg).toContain("perf-graph-peak");
+    expect(svg).toContain("perf-graph-baseline");
+  });
 });

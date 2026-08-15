@@ -2,11 +2,11 @@
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Sse},
     Json,
 };
-use aerini_engine::model::Workflow;
+use aerini_engine::{db::SaveOutcome, model::Workflow};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -61,12 +61,39 @@ pub async fn get_workflow(
     Path(id):          Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) { return e.into_response(); }
-    match tokio::task::spawn_blocking(move || s.db.load(&id)).await {
-        Ok(Ok(Some(wf))) => (StatusCode::OK, Json(json!(wf.to_json_pretty().unwrap_or_default()))).into_response(),
-        Ok(Ok(None))     => (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))).into_response(),
-        Ok(Err(e))       => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)           => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+    match tokio::task::spawn_blocking(move || s.db.load_with_row_version(&id)).await {
+        Ok(Ok(Some((wf, row_version)))) => {
+            let mut resp = (StatusCode::OK, Json(json!(wf.to_json_pretty().unwrap_or_default()))).into_response();
+            set_etag(&mut resp, row_version);
+            resp
+        }
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))).into_response(),
+        Ok(Err(e))   => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
+        Err(e)       => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
     }
+}
+
+/// Sets the `ETag` response header to the given `row_version`, quoted per
+/// HTTP's ETag syntax. `row_version` is always a plain non-negative counter,
+/// so formatting can't produce characters `HeaderValue` would reject —
+/// this only returns without setting the header if that invariant is ever
+/// violated, rather than panicking on a response header.
+fn set_etag(resp: &mut axum::response::Response, row_version: i64) {
+    if let Ok(v) = HeaderValue::from_str(&format!("\"{row_version}\"")) {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+}
+
+/// Parses an `If-Match` header value into the row_version it asserts.
+/// Accepts a bare integer (`5`) or a quoted ETag (`"5"`) — the two forms
+/// that round-trip against the `ETag` this same API emits, so a client that
+/// sends back exactly what it received always parses cleanly. Any other
+/// form (wildcard, weak ETag, multiple values) is rejected rather than
+/// guessed at.
+fn parse_if_match(raw: &str) -> Option<i64> {
+    let trimmed  = raw.trim();
+    let unquoted = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(trimmed);
+    unquoted.parse::<i64>().ok()
 }
 
 #[derive(Deserialize)]
@@ -75,6 +102,7 @@ pub struct SaveWorkflowBody { pub workflow_json: String }
 pub async fn save_workflow(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
+    headers:           HeaderMap,
     Json(b):           Json<SaveWorkflowBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
@@ -82,8 +110,44 @@ pub async fn save_workflow(
         Ok(w)  => w,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error":e.to_string()}))).into_response(),
     };
-    match tokio::task::spawn_blocking(move || s.db.save(&wf)).await {
-        Ok(Ok(())) => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
+
+    // No If-Match header → unconditional save (last-write-wins). Only a
+    // client that opts in by sending back the ETag it last read gets the
+    // conflict protection — other callers are unaffected.
+    let if_match = match headers.get(header::IF_MATCH) {
+        None => None,
+        Some(v) => match v.to_str().ok().and_then(parse_if_match) {
+            Some(version) => Some(version),
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "malformed If-Match header — expected the row_version from a prior ETag"})),
+            ).into_response(),
+        },
+    };
+
+    match tokio::task::spawn_blocking(move || s.db.save_checked(&wf, if_match)).await {
+        Ok(Ok(outcome)) => {
+            let (status, row_version, body) = match outcome {
+                SaveOutcome::Created { row_version } | SaveOutcome::Updated { row_version } =>
+                    (StatusCode::OK, Some(row_version), json!({"ok": true, "row_version": row_version})),
+                SaveOutcome::Conflict { current_row_version } => (
+                    StatusCode::CONFLICT,
+                    None,
+                    json!({
+                        "error": "workflow was modified since you last loaded it",
+                        "current_row_version": current_row_version,
+                    }),
+                ),
+                SaveOutcome::NotFound => (
+                    StatusCode::PRECONDITION_FAILED,
+                    None,
+                    json!({"error": "workflow not found — If-Match cannot be satisfied"}),
+                ),
+            };
+            let mut resp = (status, Json(body)).into_response();
+            if let Some(v) = row_version { set_etag(&mut resp, v); }
+            resp
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
         Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
     }
@@ -327,4 +391,30 @@ pub async fn sse_events(
             .interval(Duration::from_secs(30))
             .text("ping"),
     ).into_response()
+}
+
+#[cfg(test)]
+mod if_match_tests {
+    use super::parse_if_match;
+
+    #[test]
+    fn parse_if_match_accepts_bare_integer() {
+        assert_eq!(parse_if_match("5"), Some(5));
+    }
+
+    // Normal case for real clients: this is the exact form set_etag() emits,
+    // so a client round-tripping the ETag it received must parse cleanly.
+    #[test]
+    fn parse_if_match_accepts_quoted_integer() {
+        assert_eq!(parse_if_match("\"5\""), Some(5));
+    }
+
+    // Edge case: anything that isn't a plain (optionally quoted) integer —
+    // wildcard, weak ETag, garbage — is rejected rather than guessed at.
+    #[test]
+    fn parse_if_match_rejects_non_numeric_value() {
+        assert_eq!(parse_if_match("*"), None);
+        assert_eq!(parse_if_match("W/\"5\""), None);
+        assert_eq!(parse_if_match("not-a-version"), None);
+    }
 }

@@ -174,6 +174,17 @@ export const deleteVersion = (id: string) =>
 export const checkNodejsAvailable = () =>
   invoke<boolean>("check_nodejs_available");
 
+export const getNodejsVersion = () =>
+  invoke<string | null>("get_nodejs_version");
+
+export interface ExportAllResult {
+  zip_path: string;
+  workflow_count: number;
+}
+
+export const exportAllWorkflows = () =>
+  invoke<ExportAllResult>("export_all_workflows");
+
 export interface PluginInfo {
   filename: string;
   display_name: string;

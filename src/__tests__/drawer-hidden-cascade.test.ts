@@ -5,10 +5,12 @@ import { resolve } from "node:path";
 
 let baseCss: string;
 let workspaceCss: string;
+let monitorCss: string;
 
 beforeAll(() => {
   baseCss      = readFileSync(resolve(__dirname, "../styles/base.css"), "utf-8");
   workspaceCss = readFileSync(resolve(__dirname, "../styles/workspace.css"), "utf-8");
+  monitorCss   = readFileSync(resolve(__dirname, "../styles/monitor.css"), "utf-8");
 });
 
 function buildDom(collapsed: boolean) {
@@ -36,5 +38,27 @@ describe("output-drawer collapsed-state CSS cascade (R2C regression)", () => {
     buildDom(false);
     const drawer = document.getElementById("output-drawer")!;
     expect(getComputedStyle(drawer).display).toBe("flex");
+  });
+});
+
+describe("output-drawer full suppression during Monitor mode", () => {
+  function buildMonitorDom(drawerCollapsed: boolean) {
+    document.head.innerHTML = `<style>${baseCss}\n${workspaceCss}\n${monitorCss}</style>`;
+    document.body.className = "monitor-mode";
+    document.body.innerHTML = `
+      <div id="output-drawer" class="${drawerCollapsed ? "hidden" : ""}">
+        <div class="drawer-header" id="drawer-header"><span>Output</span></div>
+      </div>
+    `;
+  }
+
+  it("normal case: a collapsed drawer is fully display:none, not just its collapsed peek bar", () => {
+    buildMonitorDom(true);
+    expect(getComputedStyle(document.getElementById("output-drawer")!).display).toBe("none");
+  });
+
+  it("edge case: even a drawer some other code path force-opened (no .hidden class) stays display:none while body.monitor-mode is set", () => {
+    buildMonitorDom(false);
+    expect(getComputedStyle(document.getElementById("output-drawer")!).display).toBe("none");
   });
 });

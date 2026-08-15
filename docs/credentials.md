@@ -232,3 +232,30 @@ aerini-server api --keychain --token mytoken
 ```
 
 See [Security — encryption key](security.md#3-the-encryption-key--your-most-important-file) for the full picture.
+
+---
+
+## Back up the encryption key
+
+The key described above is the only thing that can decrypt anything in `credentials.db`. If it's lost — a keychain reset, a fresh OS install, migrating to a new machine — every credential in every workflow becomes permanently unreadable. There is no password reset for this; back it up before you need it, not after.
+
+**Desktop app:**
+
+1. Open the **Connections** panel (the lock icon in the sidebar).
+2. Click **Backup Encryption Key** and confirm the warning.
+3. Copy the value shown and store it somewhere as secure as the credentials themselves — a password manager entry, not a plain text file next to your workflows.
+
+**To restore** (only needed if the OS keychain entry is lost and no fallback file survived):
+
+1. Quit Aerini.
+2. Write the backed-up value, exactly as copied, to `.cred.key` in the app data directory for your platform:
+
+   | Platform | Path |
+   |---|---|
+   | macOS | `~/Library/Application Support/com.aerini.app/.cred.key` |
+   | Windows | `%APPDATA%\com.aerini.app\.cred.key` |
+   | Linux | `~/.local/share/com.aerini.app/.cred.key` |
+
+3. Relaunch Aerini. The existing keychain-migration behavior (see above) picks up the file automatically and moves it back into the OS keychain — no separate "restore" button or import step.
+
+**In server mode**, the key already lives in a plain file you control (`<data_dir>/aerini.key`) — back that file up directly (see [Security](security.md#3-the-encryption-key--your-most-important-file)); there's no separate export step for `aerini-server`.

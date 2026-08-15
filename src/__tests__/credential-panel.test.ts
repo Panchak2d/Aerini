@@ -5,6 +5,7 @@ import type { CredentialEntry, CredentialMetadata } from "../ipc/credentials";
 
 const credMock = vi.hoisted(() => ({
   listCredentials:       vi.fn(),
+  listCredentialUsage:   vi.fn(),
   getCredentialMetadata: vi.fn(),
   getCredentialSecret:   vi.fn(),
   saveCredential:        vi.fn(),
@@ -30,6 +31,7 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   document.body.innerHTML = "";
   credMock.listCredentials.mockReset().mockResolvedValue([]);
+  credMock.listCredentialUsage.mockReset().mockResolvedValue({});
   credMock.getCredentialMetadata.mockReset().mockResolvedValue(null);
   credMock.getCredentialSecret.mockReset().mockResolvedValue(null);
   credMock.saveCredential.mockReset().mockResolvedValue(undefined);
@@ -75,6 +77,35 @@ describe("CredentialPanel — list rendering", () => {
     await flush();
     expect(document.querySelectorAll(".cred-item-edit")).toHaveLength(2);
     expect(document.querySelectorAll(".cred-item-del")).toHaveLength(2);
+  });
+});
+
+describe("CredentialPanel — usage visibility", () => {
+  it("shows workflow count and names up front for a credential in use", async () => {
+    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
+    credMock.listCredentialUsage.mockResolvedValue({ k1: ["Alpha Flow", "Beta Flow"] });
+
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    const usageEl = document.querySelector(".cred-item-usage")!;
+    expect(usageEl.textContent).toBe("Used by 2 workflows");
+    expect(usageEl.classList.contains("unused")).toBe(false);
+    expect(usageEl.getAttribute("title")).toBe("Alpha Flow, Beta Flow");
+  });
+
+  it("shows an unused state for a credential no workflow references", async () => {
+    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
+    credMock.listCredentialUsage.mockResolvedValue({});
+
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    const usageEl = document.querySelector(".cred-item-usage")!;
+    expect(usageEl.textContent).toBe("Not used by any workflow");
+    expect(usageEl.classList.contains("unused")).toBe(true);
   });
 });
 

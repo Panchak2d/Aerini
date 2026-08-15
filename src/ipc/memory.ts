@@ -33,6 +33,22 @@ export async function getMemoryBreakdown(): Promise<RunBreakdown[]> {
   return invoke<RunBreakdown[]>("get_memory_breakdown");
 }
 
+export interface ProcessMemory {
+  current_bytes: number;
+}
+
+/**
+ * This process's own resident set size — independent of
+ * getMemoryBreakdown()'s per-run allocator attribution above. Unlike that
+ * function, this is never `[]`-at-idle: the process itself is always
+ * running while the app is open, so this is the figure that shouldn't
+ * flicker to "—" between runs. `null` only if the backend couldn't resolve
+ * the current process (see commands/memory.rs::get_process_memory).
+ */
+export async function getProcessMemory(): Promise<ProcessMemory | null> {
+  return invoke<ProcessMemory | null>("get_process_memory");
+}
+
 let _unlistenMemoryBreakdown: (() => void) | null = null;
 let _memoryBreakdownRegistered = false;
 

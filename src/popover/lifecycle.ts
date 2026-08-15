@@ -20,7 +20,7 @@ import { renderHttpAuthMode, renderHttpSsrfWarning }  from "./extensions/http";
 import { renderWebhookBanners }                       from "./extensions/webhook";
 import { renderSocialUploadFields }                   from "./extensions/social-upload";
 import {
-  CREDENTIAL_KEYS, renderConfigFieldsLoop, renderCredentialSection,
+  getCredentialFieldKeys, renderConfigFieldsLoop, renderCredentialSection,
   type PropSchema,
 } from "./field-renderer";
 
@@ -175,7 +175,8 @@ export async function showPopover(
   }
   // Keys managed by custom UI blocks — excluded from generic field rendering.
   const CUSTOM_UI_KEYS = new Set(["subfolders", "sources", "files", "folder_path", "overwrite", "attachments"]);
-  const cfgKeys = Object.entries(props).filter(([k]) => !CREDENTIAL_KEYS.has(k) && !CUSTOM_UI_KEYS.has(k));
+  const credFieldKeys = getCredentialFieldKeys(props);
+  const cfgKeys = Object.entries(props).filter(([k]) => !credFieldKeys.has(k) && !CUSTOM_UI_KEYS.has(k));
 
   const pop = document.createElement("div");
   pop.className = "node-popover"; pop.id = "node-popover";

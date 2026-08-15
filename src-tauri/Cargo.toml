@@ -50,5 +50,18 @@ tracing = "0.1"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 url     = "2"
 
+# Process-wide RSS for the Monitor panel's primary Memory stat — see
+# commands/memory.rs::get_process_memory. 0.39.6 VERIFIED current
+# (crates.io + docs.rs, checked this pass) — newer than the 0.39.3 this
+# batch's brief cited; same 0.39.x line, no breaking API change between
+# them. MSRV 1.95 per its own docs.rs page — confirm the build machine's
+# `rustc --version` meets this before merging (not verifiable from this
+# sandbox, which has no Rust toolchain). default-features = false + only
+# "system": trims the "component"/"disk"/"network"/"user" families that
+# are default-on upstream but unused here (a single process's own memory
+# needs none of them), matching this file's existing minimal-features
+# convention (see reqwest, aws-sdk-s3 in aerini-engine/Cargo.toml).
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

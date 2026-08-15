@@ -397,6 +397,99 @@ pub async fn generate_docker_package(
     })
 }
 
+/// Response for `export_all_workflows` — path to the generated backup zip.
+#[derive(Debug, Serialize)]
+pub struct ExportAllResult {
+    pub zip_path:       String,
+    pub workflow_count: usize,
+}
+
+/// Bundle every workflow's `.aerini` export JSON (same shape the
+/// single-workflow export produces — see the frontend's `handleExport`) into
+/// one zip, so a full-library backup doesn't mean exporting one at a time.
+#[tauri::command]
+pub async fn export_all_workflows(
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<ExportAllResult, String> {
+    let db_clone = Arc::clone(&db);
+
+    let (zip_path, count) = tokio::task::spawn_blocking(move || -> Result<(std::path::PathBuf, usize), String> {
+        let summaries = db_clone.list()?;
+
+        let temp_dir = std::env::temp_dir();
+        let zip_path = temp_dir.join(format!(
+            "aerini-backup-{}.zip",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        let zip_file = std::fs::File::create(&zip_path)
+            .map_err(|e| format!("Cannot create zip: {}", e))?;
+
+        let write_result: Result<usize, String> = (|| {
+            let mut zip = zip::ZipWriter::new(zip_file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            let mut used_names: HashMap<String, u32> = HashMap::new();
+            let mut count = 0usize;
+
+            for summary in &summaries {
+                let wf = db_clone.load(&summary.id)?
+                    .ok_or_else(|| format!("Workflow {} disappeared during export", summary.id))?;
+
+                let file = serde_json::json!({
+                    "aerini_version": "1",
+                    "schema_version": wf.schema_version,
+                    "id": wf.id,
+                    "name": wf.name,
+                    "description": wf.description,
+                    "author": wf.metadata.author,
+                    "tags": wf.metadata.tags,
+                    "nodes": wf.nodes,
+                    "edges": wf.edges,
+                });
+                let content = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+
+                let base = safe_filename(&wf.name);
+                let n = used_names.entry(base.clone()).or_insert(0);
+                *n += 1;
+                let filename = if *n == 1 { format!("{}.aerini", base) } else { format!("{}-{}.aerini", base, n) };
+
+                zip.start_file(&filename, options).map_err(|e| e.to_string())?;
+                zip.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+                count += 1;
+            }
+
+            zip.finish().map_err(|e| e.to_string())?;
+            Ok(count)
+        })();
+
+        match write_result {
+            Ok(count) => Ok((zip_path, count)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&zip_path);
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(ExportAllResult {
+        zip_path:       zip_path.display().to_string(),
+        workflow_count: count,
+    })
+}
+
+/// Sanitizes a workflow name into a safe, lowercase zip-entry base filename.
+/// Collision numbering (handled by the caller) covers workflows that sanitize
+/// to the same base name.
+fn safe_filename(name: &str) -> String {
+    let s = name
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+        .to_lowercase();
+    if s.is_empty() { "workflow".to_string() } else { s }
+}
+
 /// Hash `raw_secret` with argon2id for storage in `aerini-server.json`.
 ///
 /// argon2id is brute-force resistant (unlike BLAKE3, which is a fast hash).

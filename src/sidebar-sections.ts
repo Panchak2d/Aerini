@@ -1,3 +1,6 @@
+import { enterMonitorMode, exitMonitorMode } from "./monitor-mode";
+import { mountMonitorPanel, unmountMonitorPanel } from "./panels/MonitorPanel";
+
 const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
 const MIN_W = 180;   // matches the mockup's own clamp
@@ -20,6 +23,7 @@ export function initSidebarSections(): void {
   resetTransientState();
   const savedZone = lsGet<string>(LS_ZONE, "workflows");
   switchZone(savedZone, false);
+  if (savedZone === "monitor") { enterMonitorMode(); mountMonitorPanel(); }
 }
 
 /**
@@ -216,7 +220,11 @@ function bindActivityBar(): void {
   document.querySelectorAll<HTMLElement>(".activity-btn[data-zone]").forEach(btn => {
     btn.addEventListener("click", () => {
       const z = btn.dataset.zone ?? "nodes";
-      if (z !== _current) switchZone(z, true);
+      if (z === _current) return;
+      const wasMonitor = _current === "monitor";
+      switchZone(z, true);
+      if (z === "monitor") { enterMonitorMode(); mountMonitorPanel(); }
+      else if (wasMonitor) { exitMonitorMode(); unmountMonitorPanel(); }
     });
   });
 }

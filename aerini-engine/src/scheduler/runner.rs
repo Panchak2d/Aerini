@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
@@ -221,7 +222,7 @@ pub(super) async fn run_job_loop(
             emit_done_async(&event_sink, &db, &workflow_id).await;
         }
 
-        TriggerKind::Webhook { port, path, method, secret } => {
+        TriggerKind::Webhook { port, path, method, secret, dedup_window_secs } => {
             let listener = match tokio::net::TcpListener::bind(
                 format!("127.0.0.1:{}", port)
             ).await {
@@ -235,6 +236,12 @@ pub(super) async fn run_job_loop(
             };
 
             emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
+
+            // Per-job dedup store: request body hash -> when it was last seen.
+            // Scoped to this loop (not a global static) so one workflow's
+            // dedup state can never collide with, or leak into, another's,
+            // and it's naturally cleared when the job restarts.
+            let dedup_seen: Arc<DashMap<[u8; 32], std::time::Instant>> = Arc::new(DashMap::new());
 
             // Tracks every per-connection task spawned below, aborting any
             // still-tracked task when dropped. Held locally, not in
@@ -300,6 +307,7 @@ pub(super) async fn run_job_loop(
                 let file_sandbox_dir = file_sandbox_dir.clone();
                 let run_semaphore    = Arc::clone(&run_semaphore);
                 let active_runs      = Arc::clone(&active_runs);
+                let dedup_seen       = Arc::clone(&dedup_seen);
 
                 let handle = tokio::spawn(async move {
                     let payload = match tokio::time::timeout(
@@ -326,6 +334,55 @@ pub(super) async fn run_job_loop(
                         let _ = stream.write_all(
                             format!("HTTP/1.1 200 OK\r\n{CORS_HEADER_LINES}Content-Length: 2\r\n\r\nOK").as_bytes()
                         ).await;
+                    }
+
+                    // Duplicate-delivery guard: providers that retry (Stripe, GitHub, ...)
+                    // resend the same event body byte-for-byte, so a repeat within the
+                    // window is treated as a re-delivery, not a new trigger, and the
+                    // workflow is not re-run. The caller already got its 2xx above —
+                    // per each provider's own retry contract, that's what stops the
+                    // retries; this only prevents this delivery from running the
+                    // workflow a second time. A body-less request (GET, or POST with
+                    // no body) is exempt: every such request would hash identically,
+                    // which would wrongly collapse distinct intentional triggers
+                    // (e.g. a repeated manual ping) into one.
+                    if dedup_window_secs > 0 {
+                        let body_is_empty = matches!(
+                            payload.get("body"),
+                            Some(Value::String(s)) if s.is_empty()
+                        );
+                        if !body_is_empty {
+                            let body_str = payload.get("body")
+                                .map(|b| b.to_string())
+                                .unwrap_or_default();
+                            let key = *blake3::hash(body_str.as_bytes()).as_bytes();
+                            let now = std::time::Instant::now();
+                            let window = std::time::Duration::from_secs(dedup_window_secs);
+
+                            // entry() holds the shard lock across the check and the
+                            // write, so two near-simultaneous identical deliveries
+                            // can't both slip past a separate get-then-insert race.
+                            let is_duplicate = match dedup_seen.entry(key) {
+                                dashmap::mapref::entry::Entry::Occupied(mut e) => {
+                                    let seen_at = *e.get();
+                                    let dup = now.duration_since(seen_at) < window;
+                                    e.insert(now);
+                                    dup
+                                }
+                                dashmap::mapref::entry::Entry::Vacant(e) => {
+                                    e.insert(now);
+                                    false
+                                }
+                            };
+
+                            if is_duplicate {
+                                log_skip(&event_sink, &workflow_id, "duplicate webhook delivery skipped (dedup window)");
+                                return;
+                            }
+                            // Opportunistic prune on every new key so this map doesn't
+                            // grow unbounded over a long-lived job.
+                            dedup_seen.retain(|_, seen_at| now.duration_since(*seen_at) < window);
+                        }
                     }
 
                     let _guard = match exec_lock.try_lock() {
@@ -903,7 +960,13 @@ async fn read_line_capped(
 /// `with_cors` in `nodes::webhook` for why the origin is a wildcard rather
 /// than an echoed `Origin` header: this endpoint accepts arbitrary
 /// third-party callers, not just the app's own UI.
-const CORS_HEADER_LINES: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: content-type, x-webhook-secret, x-webhook-timestamp\r\n";
+///
+/// Includes `Connection: close`: this handler reads exactly one request per
+/// accepted `TcpStream` and drops the stream when its task returns. Without
+/// this header an HTTP/1.1 client is entitled to assume the connection is
+/// still open for reuse and pool it, and the next request sent over that
+/// pooled connection then hits a socket the server already tore down.
+const CORS_HEADER_LINES: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: content-type, x-webhook-secret, x-webhook-timestamp\r\nConnection: close\r\n";
 
 /// Full response for an OPTIONS preflight — see the `OPTIONS` check in
 /// `parse_http_request`.
@@ -1224,6 +1287,125 @@ mod integration_tests {
 
         let out_out = &result["node_outputs"]["out"];
         assert_eq!(out_out["value"], json!({ "result": { "hello": "world" } }));
+
+        daemon.stop_job(&workflow.id).ok();
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Same shape as `webhook_repro_workflow` but with `dedup_window_secs` set,
+    /// and no `extract`/`output` nodes — the dedup test only needs to count
+    /// how many times the workflow ran, not inspect its output.
+    fn webhook_dedup_workflow(port: u16, dedup_window_secs: u64) -> Workflow {
+        let mut wf = Workflow::new("wf-dedup-repro", "Dedup Repro");
+        wf.nodes.push(WorkflowNode {
+            id: "trigger".to_string(),
+            node_type_id: "webhook".to_string(),
+            node_type: NodeType::Action,
+            name: "Webhook".to_string(),
+            config: json!({
+                "port": port,
+                "path": "/hook",
+                "method": "POST",
+                "dedup_window_secs": dedup_window_secs
+            }),
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+        wf
+    }
+
+    /// Reproduces the #8 backlog scenario directly: a provider (Stripe,
+    /// GitHub, ...) resends the same event body because it didn't see the
+    /// ack in time. With `dedup_window_secs` set, the second identical
+    /// delivery must not re-run the workflow — asserted by counting
+    /// `scheduler-status` events carrying a `last_result`, which only fire
+    /// once per actual run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_webhook_body_within_window_runs_workflow_once() {
+        const PORT: u16 = 38476;
+        let data_dir = temp_data_dir("dedup-repro");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        let workflow = webhook_dedup_workflow(PORT, 30);
+        wf_db.save(&workflow).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry, &data_dir, None);
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(registry),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        daemon.start_job(&workflow.id, Some(PORT), Some(false))
+            .expect("start_job failed to arm the webhook listener");
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/hook", PORT);
+        let body = json!({ "id": "evt_same_delivery_retried" });
+
+        // First delivery — retry the connect briefly since the listener
+        // binds in a just-spawned background task.
+        let mut first = None;
+        for _ in 0..40 {
+            match client.post(&url).json(&body).send().await {
+                Ok(r) => { first = Some(r); break; }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+        let first = first.expect("webhook listener never accepted the first connection");
+        assert!(first.status().is_success());
+
+        // Second delivery — identical body, simulating the provider's retry.
+        let second = client.post(&url).json(&body).send().await
+            .expect("second (retried) delivery failed to send");
+        assert!(second.status().is_success(), "retried delivery must still get a 2xx ack");
+
+        // Wait for exactly one run to be recorded — bounded polling, same
+        // convention as scheduler_webhook_run_completes_against_real_listener,
+        // rather than a fixed sleep that could flake under a slow CI runner.
+        let mut run_count: usize;
+        for _ in 0..60 {
+            run_count = {
+                let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+                events.iter()
+                    .filter(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null())
+                    .count()
+            };
+            if run_count >= 1 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // A little extra time for a wrongly-not-deduped second run to also
+        // land, so a regression shows up as run_count == 2, not a flaky pass.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        run_count = {
+            let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+            events.iter()
+                .filter(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null())
+                .count()
+        };
+        assert_eq!(run_count, 1, "expected exactly one run for two identical deliveries within the dedup window");
+
+        // The skip must be logged, not silent.
+        let skip_logged = {
+            let events = sink.0.lock().expect("CapturingSink mutex poisoned");
+            events.iter().any(|(name, p)| {
+                name.as_str() == "scheduler-skip" && p["reason"] == json!("duplicate webhook delivery skipped (dedup window)")
+            })
+        };
+        assert!(skip_logged, "duplicate delivery must be logged via scheduler-skip");
 
         daemon.stop_job(&workflow.id).ok();
         cleanup_db(&db_path);
