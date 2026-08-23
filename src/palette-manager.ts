@@ -3,6 +3,7 @@ import type { Canvas } from "./canvas/Canvas";
 import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 import { escapeHtml } from "./utils";
 import { getIconSvg } from "./icon-cache";
+import { getPluginIconSvg } from "./plugin-icon";
 import { NODE_DESCRIPTION_FALLBACK } from "./node-descriptions";
 
 interface Category { label: string; nodes: NodeDescriptor[] }
@@ -182,7 +183,10 @@ export function buildSidebarPalette(
       // the chip-filter attribute and dot color swap to "trigger".
       const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
       item.dataset.cat = isTrigger ? "trigger" : desc.node_type;
-      item.innerHTML = `<span class="palette-dot dot-${isTrigger ? "trigger" : desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>${desc.is_plugin ? '<span class="palette-plugin-badge" title="Plugin node">P</span>' : ""}`;
+      const pluginBadge = desc.is_plugin
+        ? `<span class="palette-plugin-badge" title="Plugin node">${getPluginIconSvg(desc.icon)}</span>`
+        : "";
+      item.innerHTML = `<span class="palette-dot dot-${isTrigger ? "trigger" : desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginBadge}`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -317,7 +321,7 @@ function renderPaletteResults(q: string): void {
       row.innerHTML = `
         <div class="palette-result-icon palette-result-icon--${catClass}">${iconSvg || "·"}</div>
         <div>
-          <div class="palette-result-name">${escapeHtml(desc.display_name)}${desc.is_plugin ? '<span class="palette-plugin-badge" title="Plugin node">P</span>' : ""}</div>
+          <div class="palette-result-name">${escapeHtml(desc.display_name)}${desc.is_plugin ? `<span class="palette-plugin-badge" title="Plugin node">${getPluginIconSvg(desc.icon)}</span>` : ""}</div>
           <div class="palette-result-cat">${escapeHtml(CAT_NAMES[desc.node_type] ?? desc.node_type)}</div>
         </div>
         <kbd class="palette-result-kbd">Enter</kbd>`;

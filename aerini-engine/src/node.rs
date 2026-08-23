@@ -27,7 +27,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
 
@@ -86,10 +86,33 @@ pub trait Node: Send + Sync {
         false
     }
 
+    /// True when this plugin exports the `trigger` WIT interface, checked
+    /// once at load time. The executor uses this to recognize a
+    /// trigger-capable node as a legitimate entry point instead of warning
+    /// on it as a disconnected node. All built-in nodes and plugins that
+    /// don't export `trigger` use the default (false).
+    fn is_trigger_capable(&self) -> bool {
+        false
+    }
+
     /// One or two sentence plain-text description shown in the node palette tooltip.
     /// Plugins that do not override this return an empty string; the frontend falls
     /// back to a static description map for built-in nodes that have not yet migrated.
     fn description(&self) -> &'static str {
+        ""
+    }
+
+    /// Raw icon markup (SVG shape fragment), untrusted until sanitized at render
+    /// time. Empty string -> generic glyph. All built-in nodes and plugins that
+    /// do not export the optional `metadata` WIT interface use this default.
+    fn icon(&self) -> &'static str {
+        ""
+    }
+
+    /// Author or organization name. Empty string when unset. All built-in nodes
+    /// and plugins that do not export the optional `metadata` WIT interface use
+    /// this default.
+    fn author(&self) -> &'static str {
         ""
     }
 
@@ -216,23 +239,26 @@ impl NodeRegistry {
     /// Register a WASM plugin node.
     ///
     /// Returns `Err` if the plugin's `type_id` conflicts with a sealed built-in.
-    /// A `WARN` log is emitted in both the error case (builtin collision) and the
-    /// plugin-on-plugin collision case (a different plugin already claimed the ID).
-    pub fn register_plugin(&mut self, node: Arc<dyn Node>) -> Result<(), String> {
+    /// Returns `Ok(false)` (rather than `Ok(true)`) when the `type_id` was already
+    /// claimed by a different plugin — the new node still wins (last-registered),
+    /// but callers can use this signal to surface the collision instead of only
+    /// logging it. A `WARN` log is emitted in both the error case and this case.
+    pub fn register_plugin(&mut self, node: Arc<dyn Node>) -> Result<bool, String> {
         let id = node.type_id();
         if self.builtins.contains(id) {
             let msg = format!("plugin type_id '{id}' conflicts with a built-in node — rejected");
             tracing::warn!("{}", msg);
             return Err(msg);
         }
-        if self.nodes.contains_key(id) {
+        let collided = self.nodes.contains_key(id);
+        if collided {
             tracing::warn!(
                 "plugin type_id '{}' already registered by another plugin — overwriting",
                 id
             );
         }
         self.nodes.insert(id.to_string(), node);
-        Ok(())
+        Ok(!collided)
     }
 
     /// Look up by node_type_id (e.g. "http_request").
@@ -253,6 +279,73 @@ impl NodeRegistry {
 
 impl Default for NodeRegistry {
     fn default() -> Self { Self::new() }
+}
+
+// ── Reloadable ────────────────────────────────────────────────────────────────
+
+/// A value that can be atomically replaced at runtime, for callers that need
+/// to observe updates (e.g. a rebuilt [`NodeRegistry`] after installing a
+/// plugin) without restarting the process.
+///
+/// `current()` clones the `Arc` under a read lock and returns immediately —
+/// the lock is never held across an `.await`. A workflow run captures its
+/// own `current()` snapshot once, at the start of the run, and holds that
+/// `Arc` for the run's entire duration: a `reload()` call therefore only
+/// affects runs started after it returns. A run already in progress keeps
+/// executing against the version it started with, even if `reload()` is
+/// called mid-run — this is what makes `reload()` safe to call at any time,
+/// with no run-tracking or cancellation logic needed.
+pub struct Reloadable<T>(RwLock<Arc<T>>);
+
+impl<T> Reloadable<T> {
+    pub fn new(value: T) -> Self {
+        Self(RwLock::new(Arc::new(value)))
+    }
+
+    /// Snapshot for one command call or one workflow run. Cheap: the read
+    /// lock is held only long enough to clone the `Arc` pointer.
+    ///
+    /// Recovers from a poisoned lock instead of propagating the panic: the
+    /// critical section here is a single pointer clone/assignment with no
+    /// partially-mutated state to distrust, so treating a poison as fatal
+    /// would only mean one unrelated panic elsewhere permanently breaks
+    /// every later reload and every later run for the rest of the process's
+    /// life — worse than reading the value the poisoning writer left behind.
+    pub fn current(&self) -> Arc<T> {
+        let guard = self.0.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(&guard)
+    }
+
+    /// Atomically replace the value. Snapshots already returned by an
+    /// earlier `current()` call are unaffected.
+    pub fn reload(&self, value: T) {
+        let mut guard = self.0.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Arc::new(value);
+    }
+}
+
+#[cfg(test)]
+mod reloadable_tests {
+    use super::Reloadable;
+
+    #[test]
+    fn current_reflects_the_latest_reload() {
+        let r = Reloadable::new(1);
+        assert_eq!(*r.current(), 1);
+        r.reload(2);
+        assert_eq!(*r.current(), 2);
+    }
+
+    /// A snapshot captured before `reload()` must keep reading its own
+    /// (old) value afterward, not switch underneath the holder.
+    #[test]
+    fn a_snapshot_captured_before_reload_is_unaffected_by_it() {
+        let r = Reloadable::new("v1");
+        let in_flight_snapshot = r.current();
+        r.reload("v2");
+        assert_eq!(*in_flight_snapshot, "v1");
+        assert_eq!(*r.current(), "v2");
+    }
 }
 
 // ── Node descriptor (serializable, sent to UI) ───────────────────────────────
@@ -282,6 +375,13 @@ pub struct NodeDescriptor {
     /// Empty string when the node does not override `Node::description()`.
     #[serde(default)]
     pub description: String,
+    /// Raw icon markup declared by the plugin. Untrusted — sanitized only at
+    /// render time. Empty string when unset.
+    #[serde(default)]
+    pub icon: String,
+    /// Author or organization name declared by the plugin. Empty string when unset.
+    #[serde(default)]
+    pub author: String,
 }
 
 impl NodeDescriptor {
@@ -297,6 +397,92 @@ impl NodeDescriptor {
             dynamic_ports: node.is_dynamic_ports(),
             is_plugin: node.is_plugin(),
             description: node.description().to_string(),
+            icon: node.icon().to_string(),
+            author: node.author().to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubNode(&'static str);
+
+    #[async_trait]
+    impl Node for StubNode {
+        fn type_id(&self) -> &'static str { self.0 }
+        fn display_name(&self) -> &'static str { self.0 }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "0.0.0" }
+        fn input_schema(&self) -> Value { Value::Null }
+        fn output_schema(&self) -> Value { Value::Null }
+        async fn execute(&self, _input: NodeInput) -> NodeOutput {
+            unimplemented!("not exercised by registry tests")
+        }
+    }
+
+    fn sealed_registry_with_builtin(id: &'static str) -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        reg.register(Arc::new(StubNode(id)));
+        reg.seal_builtins();
+        reg
+    }
+
+    #[test]
+    fn register_plugin_first_time_returns_ok_true() {
+        let mut reg = sealed_registry_with_builtin("http_request");
+        let result = reg.register_plugin(Arc::new(StubNode("my_plugin_node")));
+        assert_eq!(result, Ok(true));
+        assert!(reg.contains("my_plugin_node"));
+    }
+
+    #[test]
+    fn register_plugin_builtin_collision_returns_err_and_keeps_builtin() {
+        let mut reg = sealed_registry_with_builtin("http_request");
+        let result = reg.register_plugin(Arc::new(StubNode("http_request")));
+        assert!(result.is_err());
+        // built-in must still be the one registered under that id
+        assert_eq!(reg.get("http_request").unwrap().display_name(), "http_request");
+    }
+
+    #[test]
+    fn register_plugin_plugin_collision_returns_ok_false_and_last_wins() {
+        let mut reg = sealed_registry_with_builtin("http_request");
+        reg.register_plugin(Arc::new(StubNode("shared_id"))).unwrap();
+        let result = reg.register_plugin(Arc::new(StubNode("shared_id")));
+        assert_eq!(result, Ok(false));
+        assert!(reg.contains("shared_id"));
+    }
+
+    #[test]
+    fn descriptor_icon_and_author_default_to_empty_string() {
+        let descriptor = NodeDescriptor::from_node(&StubNode("plain_node"));
+        assert_eq!(descriptor.icon, "");
+        assert_eq!(descriptor.author, "");
+    }
+
+    struct BrandedStubNode;
+
+    #[async_trait]
+    impl Node for BrandedStubNode {
+        fn type_id(&self) -> &'static str { "branded_node" }
+        fn display_name(&self) -> &'static str { "Branded Node" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "2.0.0" }
+        fn input_schema(&self) -> Value { Value::Null }
+        fn output_schema(&self) -> Value { Value::Null }
+        fn icon(&self) -> &'static str { "<circle r=\"1\"/>" }
+        fn author(&self) -> &'static str { "Acme Co" }
+        async fn execute(&self, _input: NodeInput) -> NodeOutput {
+            unimplemented!("not exercised by descriptor tests")
+        }
+    }
+
+    #[test]
+    fn descriptor_carries_icon_and_author_when_node_overrides_them() {
+        let descriptor = NodeDescriptor::from_node(&BrandedStubNode);
+        assert_eq!(descriptor.icon, "<circle r=\"1\"/>");
+        assert_eq!(descriptor.author, "Acme Co");
     }
 }

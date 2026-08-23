@@ -268,6 +268,7 @@ pub async fn run_workflow(
 
     let cancel = CancellationToken::new();
     let executor = s.base_executor.clone()
+        .with_registry(s.registry.current())
         .with_caller_is_admin(caller.has_scope("admin"))
         .with_cancel_token(cancel);
 

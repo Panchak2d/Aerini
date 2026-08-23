@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "aerini-spike-trigger-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "P8.0 spike (throwaway) -- WASI P3 echo-stream trigger guest component. Not a shipped Aerini plugin; not wired into aerini-engine."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 0.7.1+wasi-0.3.0 is current -- final WASI 0.3.0 (not an -rc build). Targets
+# wasm32-wasip2 (the native wasm32-wasip3 rustc target is still Tier 3).
+# Re-exports its own `wit_bindgen` (pinned to 0.57.1) -- deliberately used below instead of adding
+# a second, separately-versioned `wit-bindgen` dependency (see guest/src/lib.rs
+# top comment for why: a second copy would not satisfy wasip3's own `^0.57.1`
+# requirement under Cargo's 0.x semver rules, producing two incompatible copies
+# of the async runtime-support types wasip3's stream/clock bindings use).
+wasip3 = "0.7.1"

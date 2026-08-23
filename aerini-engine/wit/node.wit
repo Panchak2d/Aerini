@@ -9,7 +9,17 @@ interface types {
 
     /// Input passed to a plugin node's execute function.
     record node-input {
-        /// Node configuration parameters (from the workflow JSON).
+        /// Node configuration parameters (from the workflow JSON), one `param`
+        /// per top-level key. A non-string value is JSON-encoded into `value`
+        /// (e.g. a nested object becomes its JSON text), which requires
+        /// re-parsing per field to recover structure. The host also always
+        /// includes one additional entry, key "__aerini_input_json", whose
+        /// value is the entire merged input JSON-encoded as a single object --
+        /// parse that once instead of re-parsing individual fields. Skipped
+        /// (with a host-side warning) on the rare chance a node's own config
+        /// already defines a field with that literal name, so a plugin never
+        /// receives host-synthesized data silently standing in for the
+        /// author's own value.
         params: list<param>,
         /// Resolved credential values (secrets, never credential IDs).
         credentials: list<param>,
@@ -66,4 +76,153 @@ interface node {
 /// This world only declares what is specific to Aerini.
 world aerini-node {
     export node;
+}
+
+/// Optional plugin identity/branding metadata. Not required -- deliberately
+/// kept out of the `aerini-node` world so plugins compiled against any
+/// earlier revision of this package keep loading unchanged. A plugin that
+/// does not export this interface gets host-side defaults: no icon (generic
+/// glyph), empty author, "1.0.0" version.
+interface metadata {
+    record plugin-metadata {
+        /// Semver string, e.g. "1.2.0". Empty string -> host defaults to "1.0.0".
+        version: string,
+        /// Author or organization name shown in the plugin's detail view. Empty string if unset.
+        author: string,
+        /// Icon markup: zero or more SVG shape elements only -- <path>, <circle>,
+        /// <rect>, <line>, <ellipse>, <polygon>, <polyline>, <g> -- no <script>,
+        /// <style>, <foreignObject>, <image>, <use>, <a>, event-handler attributes,
+        /// or a `style` attribute. Rendered inside a fixed 24x24 viewBox, stroke-only,
+        /// single theme-driven color -- matching the built-in node icon style exactly.
+        /// Anything outside this allowlist is stripped by the host before rendering
+        /// (see docs/plugin-authoring.md). Empty string -> generic plugin glyph.
+        icon: string,
+    }
+
+    describe-metadata: func() -> plugin-metadata;
+}
+
+/// Extends `aerini-node` with the optional `metadata` export. Plugin authors who
+/// want a custom icon/author/version target THIS world when generating guest
+/// bindings, instead of `aerini-node`. Old plugins built against `aerini-node`
+/// (with or without `metadata` existing in this file) keep loading unchanged --
+/// the host tries this world's shape and falls back to plain `aerini-node`.
+world aerini-node-with-metadata {
+    export node;
+    export metadata;
+}
+
+/// Optional trigger-plugin interface. A plugin exporting this alongside `node`
+/// can act as a trigger source: instead of running once per workflow
+/// execution like `node.execute`, the host keeps one instance alive and reads
+/// a stream of events from it, each one starting a new workflow run.
+///
+/// Every other function in this package is synchronous; `events` is not -- it
+/// requires an async-capable host runtime (WASI 0.3 / Preview 3
+/// component-model-async). An engine configured for synchronous calls cannot
+/// also host an async one and vice versa, so a plugin exporting both `node`
+/// and `trigger` is instantiated separately per role, on two different
+/// wasmtime engines.
+interface trigger {
+    /// One event produced by a trigger's `events` stream.
+    record trigger-event {
+        /// JSON-encoded event payload. Must be a valid JSON object string --
+        /// becomes the input to the workflow run this event starts.
+        data: string,
+    }
+
+    /// Begin emitting trigger events. Unlike `node.execute` -- called once per
+    /// workflow run -- `events` is called once per running trigger-plugin
+    /// instance, at trigger-registration time; its returned stream stays open
+    /// and is drained for that instance's whole lifetime.
+    ///
+    /// `config` is the trigger node's resolved configuration (the values a
+    /// workflow author sets in its config panel, `{{...}}` expressions
+    /// already evaluated), JSON-encoded as a single object string -- parsed
+    /// once, with nested objects/arrays intact. `node-input.params` instead
+    /// carries values as a flat list because it must stay compatible with
+    /// already-published plugins built against that exact shape; this
+    /// interface has no such history, so it takes the single-JSON-string form
+    /// directly.
+    events: async func(config: string) -> stream<trigger-event>;
+}
+
+/// Extends `aerini-node` with the optional `trigger` export, additive in the
+/// same way `aerini-node-with-metadata` is. Old plugins targeting
+/// `aerini-node` or `aerini-node-with-metadata` keep loading unchanged --
+/// this world is an addition, not a replacement.
+world aerini-node-with-trigger {
+    export node;
+    export trigger;
+}
+
+/// Optional, host-provided key-value storage. Unlike `metadata`/`trigger`
+/// above (things a plugin *exports* for the host to call), `storage` is an
+/// *import* -- something the host provides for a plugin to call -- so it
+/// carries no combinability problem with the other optional capabilities:
+/// a plugin author who also wants `metadata` or `trigger` alongside
+/// `storage` can hand-declare their own world importing `storage` next to
+/// whichever export(s) they need; the host links `storage` into every
+/// plugin's linker unconditionally (see `plugin_loader.rs`), so it is
+/// available regardless of which of this package's worlds a given plugin
+/// actually targets.
+///
+/// Scoped per plugin **type-id**, not per placed node instance -- every
+/// execution of a given plugin, across every workflow and every
+/// placement, reads and writes the same key space. Bounded: hosts reject
+/// oversized keys/values and enforce a total-bytes quota per plugin (see
+/// `plugin_loader.rs`'s `STORAGE_MAX_*` constants for current limits) --
+/// this is a small durable-notes capability, not a general-purpose
+/// database or a substitute for the Database/S3 nodes.
+///
+/// Only backed by a real store during `node.execute` -- during `describe()`
+/// (called once at load time, before a plugin's own type-id is even known,
+/// which is what `storage` would otherwise be scoped by) every function
+/// here is a no-op: `get` returns `none`, `set`/`list-keys` return
+/// `error(unavailable)`, `delete` does nothing.
+interface storage {
+    /// Failure reasons for `set`/`list-keys`. `get` and `delete` never
+    /// fail -- a storage-backend problem there degrades to "key absent" /
+    /// "nothing to delete" respectively (logged host-side), not a guest
+    /// error, since neither can lose data the guest hasn't already
+    /// confirmed was written via a successful `set`.
+    enum storage-error {
+        /// `key` exceeded the host's max key length.
+        key-too-long,
+        /// `value` exceeded the host's max value length.
+        value-too-large,
+        /// This plugin's total stored bytes, or total key count, would
+        /// exceed its quota.
+        quota-exceeded,
+        /// The storage backend itself is unavailable (e.g. couldn't be
+        /// opened, or a working connection couldn't be obtained) --
+        /// unrelated to `key`/`value` content.
+        unavailable,
+    }
+
+    /// Fetch a value by key. Returns `none` if the key doesn't exist --
+    /// or, per this interface's own doc comment, if the storage backend
+    /// hit a problem reading it.
+    get: func(key: string) -> option<string>;
+
+    /// Store `value` under `key`, overwriting any existing value for that
+    /// key.
+    set: func(key: string, value: string) -> result<_, storage-error>;
+
+    /// Delete `key`. Not an error if the key didn't exist.
+    delete: func(key: string);
+
+    /// List every stored key that starts with `prefix` (an empty `prefix`
+    /// lists every key for this plugin), lexicographically sorted.
+    list-keys: func(prefix: string) -> result<list<string>, storage-error>;
+}
+
+/// Pairs `storage` with the required `node` export -- the convenience
+/// world plugin authors compiling against this package's `wit-bindgen`/
+/// `bindgen!` tooling target when they want storage. Additive alongside
+/// `aerini-node`/`aerini-node-with-metadata`/`aerini-node-with-trigger`;
+/// old plugins targeting any of those keep loading unchanged.
+world aerini-node-with-storage {
+    export node;
+    import storage;
 }

@@ -39,7 +39,7 @@ use tokio::sync::Semaphore;
 
 use crate::executor::CredentialResolver;
 use crate::model::Workflow;
-use crate::node::NodeRegistry;
+use crate::node::{NodeRegistry, Reloadable};
 use crate::cron::next_cron_delay_secs;
 use crate::EventSink;
 
@@ -73,7 +73,12 @@ pub trait SchedulerDb: Send + Sync + 'static {
 
 pub struct SchedulerDaemon {
     db:            Arc<dyn SchedulerDb>,
-    registry:      Arc<NodeRegistry>,
+    /// Re-resolved to the latest snapshot at the start of each fire (not just
+    /// once at arm-time) — see `Reloadable::current`'s doc comment — so an
+    /// always-on interval/cron job picks up a plugin reload on its very next
+    /// fire without needing to be re-armed, while a fire already in progress
+    /// keeps the snapshot it started with.
+    registry:      Arc<Reloadable<NodeRegistry>>,
     cred_store:    Arc<dyn CredentialResolver>,
     event_sink:    Arc<dyn EventSink>,
     jobs:          Arc<Mutex<HashMap<String, Arc<tokio::task::JoinHandle<()>>>>>,
@@ -100,6 +105,12 @@ pub struct SchedulerDaemon {
     run_semaphore:        Arc<Semaphore>,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
+    /// Directory `TriggerKind::Plugin` jobs resolve `type_id` against, via
+    /// `PluginLoader::shared().start_trigger`. `None` (the default) means no
+    /// plugin directory is configured for this scheduler — a `Plugin`
+    /// trigger armed under that condition fails immediately with a clear
+    /// error rather than the job silently never producing events.
+    plugin_dir: Option<Arc<std::path::PathBuf>>,
     /// Set to `true` by `drain_all` to prevent new iterations from starting.
     shutting_down: Arc<AtomicBool>,
     /// In-flight `executor.run()` count. Decremented on drop via `ActiveRunGuard`.
@@ -109,7 +120,7 @@ pub struct SchedulerDaemon {
 impl SchedulerDaemon {
     pub fn new(
         db:         Arc<dyn SchedulerDb>,
-        registry:   Arc<NodeRegistry>,
+        registry:   Arc<Reloadable<NodeRegistry>>,
         cred_store: Arc<dyn CredentialResolver>,
         event_sink: Arc<dyn EventSink>,
     ) -> Self {
@@ -135,6 +146,7 @@ impl SchedulerDaemon {
             run_semaphore:        Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
             server_max_duration_secs: None,
             file_sandbox_dir: None,
+            plugin_dir: None,
             shutting_down: Arc::new(AtomicBool::new(false)),
             active_runs:   Arc::new(AtomicUsize::new(0)),
         }
@@ -219,6 +231,13 @@ impl SchedulerDaemon {
     /// Restrict File nodes to paths within `dir` for all workflows run by this scheduler.
     pub fn with_file_sandbox_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.file_sandbox_dir = Some(Arc::new(dir));
+        self
+    }
+
+    /// Set the directory `TriggerKind::Plugin` jobs resolve their `type_id`
+    /// against. Not required for any other trigger kind.
+    pub fn with_plugin_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.plugin_dir = Some(Arc::new(dir));
         self
     }
 
@@ -433,7 +452,7 @@ impl SchedulerDaemon {
                 Utc::now().checked_add_signed(chrono::Duration::seconds(delay as i64))
             }
             TriggerKind::Once { run_at } => Some(run_at),
-            TriggerKind::Webhook { .. } | TriggerKind::Manual => None,
+            TriggerKind::Webhook { .. } | TriggerKind::Manual | TriggerKind::Plugin { .. } => None,
         }
     }
 
@@ -462,6 +481,7 @@ impl SchedulerDaemon {
         let max_concurrent_nodes = self.max_concurrent_nodes;
         let server_max_duration_secs = self.server_max_duration_secs;
         let file_sandbox_dir = self.file_sandbox_dir.clone();
+        let plugin_dir       = self.plugin_dir.clone();
         let run_semaphore = Arc::clone(&self.run_semaphore);
         let shutting_down = Arc::clone(&self.shutting_down);
         let active_runs   = Arc::clone(&self.active_runs);
@@ -550,7 +570,7 @@ impl SchedulerDaemon {
                 event_sink, exec_lock, fire_immediately, env_allowlist,
                 shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled,
                 code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-                server_max_duration_secs, file_sandbox_dir, run_semaphore,
+                server_max_duration_secs, file_sandbox_dir, plugin_dir, run_semaphore,
                 shutting_down, active_runs,
             ).await;
             jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
@@ -767,11 +787,22 @@ pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
             Ok(TriggerKind::Webhook { port, path, method, secret, dedup_window_secs })
         }
         "manual_trigger" => Ok(TriggerKind::Manual),
-        other => Err(format!(
-            "Node type '{}' is not a recognised trigger. \
-             Add a Schedule, Webhook, or Manual Trigger node as the first node.",
-            other
-        )),
+        // Any other node type is a candidate plugin-sourced trigger, using the
+        // entry node's own type_id/config directly — the same convention an
+        // installed plugin's type_id already uses as its node_type_id
+        // elsewhere in this codebase. Whether a plugin actually exporting
+        // `trigger` with this type_id is installed is not checked here; like
+        // `Cron`'s expr above (only validated once `run_job_loop` starts, via
+        // `next_cron_delay_secs`), that check happens when the job's loop
+        // begins (`PluginLoader::start_trigger`), surfacing through the same
+        // `scheduler-status` error event as any other trigger failure. This
+        // also means an unrecognised or mistyped node type is no longer
+        // rejected synchronously here — a deliberate trade-off, not an
+        // oversight.
+        other => Ok(TriggerKind::Plugin {
+            type_id: other.to_string(),
+            config:  node.config.to_string(),
+        }),
     }
 }
 

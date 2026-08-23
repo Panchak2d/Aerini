@@ -56,6 +56,30 @@
 //! same `SsrfPolicy::Strict` the Database and HTTP nodes enforce — before
 //! `wasmtime_wasi_http`'s default send path is allowed to run it. See
 //! [`check_plugin_request_ssrf`] for exactly what is and isn't caught.
+//!
+//! # Plugin storage
+//!
+//! The optional WIT `storage` import (`wit/node.wit`'s `interface storage`)
+//! gives a plugin a small, bounded, host-provided key-value store, scoped
+//! per plugin type-id — see that interface's own doc comment for the
+//! scoping rationale and [`PluginStorage`]'s for the backend. Backed by
+//! the same `rusqlite`/`r2d2` stack `crate::db::WorkflowDb` already uses,
+//! in a dotfile database inside `plugin_dir` (opened lazily,
+//! [`PluginLoader::plugin_storage`]). Linked into every plugin
+//! unconditionally, like WASI/HTTP above — already-published plugins that
+//! don't import it are unaffected.
+//!
+//! # Trigger plugins
+//!
+//! A second, dedicated `wasmtime::Engine` (`PluginLoader::trigger_engine`, configured
+//! with `wasm_component_model_async`) hosts trigger-plugin
+//! components — those exporting `aerini-node-with-trigger`'s optional `trigger`
+//! interface alongside `node`. It is never used for the `node`/`describe`/`execute`
+//! path above, which stays fully synchronous; see `wit/node.wit`'s doc comment on
+//! `interface trigger` for why the two can't share one engine. Trigger plugins get
+//! no `wasi:http` linking and no raw-socket grant — the same effective "no network"
+//! default action plugins have, reached here by simply not linking HTTP at all. See
+//! [`PluginLoader::start_trigger`].
 
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -65,9 +89,13 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use hyper::Request;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::OptionalExtension;
 use serde_json::Value;
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{ResourceTable, Source, StreamConsumer, StreamResult};
 use wasmtime::{Config, Engine, StoreLimitsBuilder};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
@@ -99,6 +127,139 @@ mod wit {
     pub use aerini::plugin::types::{NodeInput, NodeOutput, Param};
 }
 
+/// Bindings for the optional `aerini-node-with-metadata` world (`node` + `metadata`
+/// exports). Generated separately from `wit` above because `bindgen!` cannot express
+/// "this world's exports are a superset of that one" -- the two worlds get
+/// independent, structurally-identical Rust types. Only `AeriniNodeWithMetadataPre`
+/// and the `describe-metadata` call are used from here; `execute`/`describe` always
+/// go through `wit::AeriniNodePre`, which every plugin -- with or without metadata --
+/// satisfies.
+mod wit_metadata {
+    wasmtime::component::bindgen!({
+        world: "aerini-node-with-metadata",
+        path: "wit",
+    });
+}
+
+/// Bindings for the `aerini-node-with-trigger` world (`node` + `trigger`
+/// exports), generated with `bindgen!`'s async support auto-enabled by the
+/// presence of `trigger.events`'s `async func` in the WIT source -- no
+/// explicit `async: true` option is needed in the macro invocation itself.
+///
+/// Kept entirely separate from [`wit`]/[`wit_metadata`] above: those are
+/// only ever instantiated on [`PluginLoader`]'s synchronous `engine`, this
+/// one only ever on `PluginLoader::trigger_engine` -- see `wit/node.wit`'s
+/// own doc comment on `interface trigger` for why the same plugin file is
+/// compiled and instantiated separately per engine rather than once.
+/// Nothing from this module is re-exported at the file level (unlike
+/// `wit`'s `pub use`): every caller goes through [`PluginLoader::start_trigger`]
+/// and the plain [`String`] events it yields, never these generated types
+/// directly.
+mod wit_trigger {
+    wasmtime::component::bindgen!({
+        world: "aerini-node-with-trigger",
+        path: "wit",
+    });
+}
+
+/// Bindings for the `aerini-node-with-storage` world (`node` export +
+/// `storage` import), used only for the `storage::Host` trait and its
+/// generated `add_to_linker` -- the `node`-export half of this world's
+/// generated bindings goes unused here since `execute`/`describe` always
+/// go through [`wit::AeriniNodePre`] regardless of which world a given
+/// plugin's own build actually targeted (see `wit/node.wit`'s own doc
+/// comment on `interface storage` for why an import needs no such
+/// per-world detection: the linker satisfies whatever a compiled
+/// component actually imports, not what a nominal "world" could import).
+/// `storage` is linked into every plugin's [`Linker`](wasmtime::component::Linker)
+/// unconditionally in [`PluginLoader::compile_and_link`] -- a plugin
+/// compiled before this existed simply has no such import to satisfy, so
+/// linking it in changes nothing for already-published plugins.
+mod wit_storage {
+    wasmtime::component::bindgen!({
+        world: "aerini-node-with-storage",
+        path: "wit",
+    });
+
+    pub use aerini::plugin::storage::{add_to_linker, Host as StorageHost, StorageError};
+}
+
+/// A plugin's pre-instantiated bindings, in whichever of the two `aerini:plugin`
+/// world shapes it actually exports. Produced by
+/// [`PluginLoader::detect_node_pre`](PluginLoader::detect_node_pre).
+enum NodePre {
+    /// Exports only `node` (`describe`/`execute`) -- the pre-`metadata` shape.
+    Plain(wit::AeriniNodePre<PluginState>),
+    /// Exports `node` and `metadata` (`describe-metadata`).
+    WithMetadata(wit_metadata::AeriniNodeWithMetadataPre<PluginState>),
+}
+
+/// World-agnostic result of calling `describe()` (and `describe-metadata()`, when
+/// the plugin exports it) once against an instantiated plugin.
+struct RawDescribe {
+    type_id: String,
+    display_name: String,
+    category: String,
+    description: String,
+    input_schema: String,
+    output_schema: String,
+    /// Empty when the plugin doesn't export `metadata`, or exports it but left
+    /// this field unset -- both mean "use the host default" (Constraint 1 /
+    /// `wit/node.wit`'s doc comment).
+    version: String,
+    author: String,
+    icon: String,
+}
+
+/// Instantiates `node_pre` and extracts everything callers need from `describe()`
+/// (and `describe-metadata()`, when the world supports it) into one owned,
+/// world-agnostic result. `describe()` is called through `node_pre`'s own bindings
+/// rather than a separately-constructed plain `AeriniNodePre` so a `WithMetadata`
+/// plugin is instantiated exactly once for this call, not twice.
+fn describe_via_pre(
+    node_pre: &NodePre,
+    store: &mut wasmtime::Store<PluginState>,
+) -> Result<RawDescribe, PluginLoadError> {
+    match node_pre {
+        NodePre::Plain(pre) => {
+            let bindings = pre.instantiate(&mut *store)
+                .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            let d = bindings.aerini_plugin_node().call_describe(&mut *store)
+                .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            Ok(RawDescribe {
+                type_id: d.type_id,
+                display_name: d.display_name,
+                category: d.category,
+                description: d.description,
+                input_schema: d.input_schema,
+                output_schema: d.output_schema,
+                version: String::new(),
+                author: String::new(),
+                icon: String::new(),
+            })
+        }
+        NodePre::WithMetadata(pre) => {
+            let bindings = pre.instantiate(&mut *store)
+                .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            let d = bindings.aerini_plugin_node().call_describe(&mut *store)
+                .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            let m = bindings.aerini_plugin_metadata().call_describe_metadata(&mut *store)
+                .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            Ok(RawDescribe {
+                type_id: d.type_id,
+                display_name: d.display_name,
+                category: d.category,
+                description: d.description,
+                input_schema: d.input_schema,
+                output_schema: d.output_schema,
+                version: m.version,
+                author: m.author,
+                icon: m.icon,
+            })
+        }
+    }
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Errors that can occur while loading a WASM plugin.
@@ -115,6 +276,9 @@ pub enum PluginLoadError {
 
     #[error("plugin does not export the `aerini-node` world")]
     MissingInterface,
+
+    #[error("no plugin exporting `aerini-node-with-trigger` with type_id \"{0}\" found in the plugin directory")]
+    NoSuchTriggerPlugin(String),
 
     /// Kept for API compatibility; not returned by any current code path.
     #[error("not yet implemented")]
@@ -136,12 +300,18 @@ pub enum PluginLoadError {
 /// - [`wasmtime::StoreLimits`] — enforces the 64 MiB memory cap per execution.
 /// - [`PluginHttpHooks`] — enforces this crate's SSRF policy on every outbound
 ///   request before `wasi:http`'s default send path is allowed to run it.
+/// - `storage` — this call's `storage` import backing, if any. `None` for
+///   every `describe()`-time `Store` (no plugin type-id is known yet to
+///   scope by) and for a `Store` built after [`PluginStorage::open`]
+///   failed for this plugin's directory; every `storage.*` guest call then
+///   degrades per `wit/node.wit`'s own doc comment instead of panicking.
 struct PluginState {
     wasi_ctx: WasiCtx,
     http_ctx: WasiHttpCtx,
     table: ResourceTable,
     limits: wasmtime::StoreLimits,
     http_hooks: PluginHttpHooks,
+    storage: Option<PluginStorageHandle>,
 }
 
 impl WasiView for PluginState {
@@ -158,6 +328,150 @@ impl WasiHttpView for PluginState {
             hooks: &mut self.http_hooks,
         }
     }
+}
+
+/// A [`PluginStorage`] handle plus the key-space `scope` this particular
+/// `Store` reads and writes under -- see [`PluginStorage`]'s own doc
+/// comment for what `scope` is derived from.
+#[derive(Clone)]
+struct PluginStorageHandle {
+    db: Arc<PluginStorage>,
+    scope: String,
+}
+
+impl wit_storage::StorageHost for PluginState {
+    fn get(&mut self, key: String) -> Option<String> {
+        let handle = self.storage.as_ref()?;
+        handle.db.get(&handle.scope, &key)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), wit_storage::StorageError> {
+        let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
+        handle.db.set(&handle.scope, &key, &value)
+    }
+
+    fn delete(&mut self, key: String) {
+        if let Some(handle) = self.storage.as_ref() {
+            handle.db.delete(&handle.scope, &key);
+        }
+    }
+
+    fn list_keys(&mut self, prefix: String) -> Result<Vec<String>, wit_storage::StorageError> {
+        let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
+        handle.db.list_keys(&handle.scope, &prefix)
+    }
+}
+
+// ── Trigger plugin store state ─────────────────────────────────────────────────
+
+/// Per-instance store state for a trigger-plugin component, run on
+/// [`PluginLoader::trigger_engine`].
+///
+/// Deliberately narrower than [`PluginState`]: no [`WasiHttpCtx`] and no HTTP
+/// linking at all. Raw `wasi:sockets` capability is also left at
+/// `WasiCtxBuilder`'s own default (no `allow_tcp`/`socket_addr_check`
+/// override), which denies every address absent an explicit grant -- the
+/// same effective "no network" position [`make_plugin_state`] already gives
+/// action plugins, just reached without an HTTP linker to leave unlinked in
+/// the first place. Extending outbound HTTP to trigger plugins (mirroring
+/// `check_plugin_request_ssrf`) is real, wanted follow-on work, gated on
+/// first confirming `wasmtime_wasi_http`'s `p3` module's exact linking API
+/// against a real build -- not done here.
+///
+/// One `TriggerPluginState` (and one `Store`) per running trigger instance,
+/// held for that instance's whole lifetime -- unlike [`PluginState`], which
+/// is recreated per `execute()` call, a trigger instance's `events()` stream
+/// must stay backed by the same store for as long as it's being drained.
+struct TriggerPluginState {
+    wasi_ctx: WasiCtx,
+    table: ResourceTable,
+    limits: wasmtime::StoreLimits,
+}
+
+impl WasiView for TriggerPluginState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView { ctx: &mut self.wasi_ctx, table: &mut self.table }
+    }
+}
+
+fn make_trigger_plugin_state() -> TriggerPluginState {
+    TriggerPluginState {
+        wasi_ctx: WasiCtx::builder().build(),
+        table: ResourceTable::new(),
+        limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
+    }
+}
+
+/// Bridges a guest's `trigger-event` stream to an mpsc channel of plain
+/// JSON strings. `poll_consume` waits for channel capacity before pulling
+/// from `source`, so a slow receiver applies backpressure to the guest
+/// instead of buffering unboundedly on the host side; if the receiver is
+/// dropped mid-stream, the stream is reported as `Dropped` so the guest's
+/// writer stops.
+struct TriggerEventConsumer {
+    tx: tokio_util::sync::PollSender<Result<String, String>>,
+}
+
+impl StreamConsumer<TriggerPluginState> for TriggerEventConsumer {
+    type Item = wit_trigger::exports::aerini::plugin::trigger::TriggerEvent;
+
+    fn poll_consume(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut store: wasmtime::StoreContextMut<TriggerPluginState>,
+        mut source: Source<'_, Self::Item>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        let this = self.get_mut();
+        match this.tx.poll_reserve(cx) {
+            Poll::Pending => {
+                if finish {
+                    Poll::Ready(Ok(StreamResult::Cancelled))
+                } else {
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Ready(Ok(())) => {
+                if source.remaining(&mut store) == 0 {
+                    // poll_reserve already committed a slot; nothing to send yet, so give it back.
+                    this.tx.abort_send();
+                    return Poll::Ready(Ok(StreamResult::Completed));
+                }
+
+                let mut buf: Vec<Self::Item> = Vec::with_capacity(1);
+                if let Err(e) = source.read(&mut store, &mut buf) {
+                    return Poll::Ready(Err(e));
+                }
+
+                let Some(event) = buf.into_iter().next() else {
+                    return Poll::Ready(Ok(StreamResult::Completed));
+                };
+
+                if this.tx.send_item(Ok(event.data)).is_err() {
+                    return Poll::Ready(Ok(StreamResult::Dropped));
+                }
+
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+        }
+    }
+}
+
+/// No epoch deadline is set on trigger stores (contrast [`make_store`]):
+/// a trigger instance is meant to stay alive and idle between events
+/// indefinitely, so the same fixed wall-clock deadline that bounds one
+/// `execute()` call would misfire on a trigger that's simply waiting for
+/// its next event. Cancellation for the trigger path is `tokio::time::timeout`
+/// plus the owning job task's abort, both handled by the caller
+/// (`scheduler/runner.rs`), not by this store.
+fn make_trigger_store(
+    engine: &Engine,
+    state: TriggerPluginState,
+) -> wasmtime::Store<TriggerPluginState> {
+    let mut store = wasmtime::Store::new(engine, state);
+    store.limiter(|s| &mut s.limits);
+    store
 }
 
 // ── Outbound HTTP SSRF enforcement ─────────────────────────────────────────────
@@ -279,12 +593,23 @@ const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// `execute()` per workflow run.
 const PLUGIN_EPOCH_DEADLINE: u64 = 3_000;
 
+/// Per-call wall-clock budget for any single guest call made while resolving
+/// or starting a trigger-plugin instance (`describe`, and the initial
+/// `events(config)` call) — the async trigger engine's counterpart to
+/// [`PLUGIN_EPOCH_DEADLINE`]'s role above, using the same ~30s budget for
+/// consistency. Deliberately not applied to *draining* an already-started
+/// event stream afterward: waiting indefinitely between events is the
+/// normal, expected state for a trigger (unlike a bounded `describe`/`events`
+/// call, which should always return promptly) — timing that out would
+/// misfire on every healthy, simply-quiet trigger.
+const PLUGIN_TRIGGER_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Max chars of a malformed plugin `data` string echoed into the error log
 /// (`wit_output_to_engine`) — avoids dumping an arbitrarily large/binary
 /// blob into logs while still giving an operator enough to diagnose.
 const INVALID_OUTPUT_LOG_PREVIEW_CHARS: usize = 200;
 
-fn make_plugin_state() -> PluginState {
+fn make_plugin_state(storage: Option<PluginStorageHandle>) -> PluginState {
     PluginState {
         // No preopened directories, no inherited stdio — sandboxed context.
         // Filesystem syscalls succeed at the API level but return "not found" /
@@ -294,6 +619,345 @@ fn make_plugin_state() -> PluginState {
         table: ResourceTable::new(),
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
         http_hooks: PluginHttpHooks,
+        storage,
+    }
+}
+
+// ── Plugin storage (WIT `storage` import backing) ──────────────────────────────
+
+/// File name of the per-`plugin_dir` storage database — a dotfile sidecar
+/// matching P5's `.aerini-plugin-trust.json` naming convention exactly (same
+/// directory, same "hidden management file living next to the `.wasm`s"
+/// pattern), scanned past by every existing `.wasm`-extension-filtered
+/// directory walk in this crate and in `commands/plugins.rs` without any
+/// change needed there.
+const STORAGE_DB_FILENAME: &str = ".aerini-plugin-storage.db";
+
+/// Max bytes for a single storage key.
+const STORAGE_MAX_KEY_BYTES: usize = 256;
+/// Max bytes for a single storage value.
+const STORAGE_MAX_VALUE_BYTES: usize = 64 * 1024;
+/// Max distinct keys one plugin (one `scope`) may hold at once — bounds
+/// row/index growth independently of the byte quota below (many tiny keys
+/// would otherwise sail under a bytes-only cap).
+const STORAGE_MAX_KEYS_PER_SCOPE: i64 = 10_000;
+/// Max total bytes (sum of all value lengths) one plugin (one `scope`) may
+/// hold at once. A durable-notes budget, not a database's — see
+/// `interface storage`'s own doc comment in `wit/node.wit`.
+const STORAGE_MAX_SCOPE_BYTES: i64 = 5 * 1024 * 1024;
+
+/// Bounded, host-provided key-value storage backing the WIT `storage`
+/// import — one `PluginStorage` per `plugin_dir`, opened lazily and cached
+/// (see [`PluginLoader::plugin_storage`]), shared via `Arc` across every
+/// [`WasmPluginNode`] loaded from that directory. `r2d2::Pool` is
+/// `Send + Sync` and cheap to clone, matching `Engine`'s own sharing model
+/// elsewhere in this file — the same `rusqlite` + `r2d2`/`r2d2_sqlite`
+/// stack already used by `crate::db::WorkflowDb`, reused here rather than
+/// adding a new storage-backend dependency.
+///
+/// **Scoped per plugin type-id**, not per placed node instance: every
+/// execution of a given plugin, across every workflow and every
+/// placement, reads and writes the same key space. Resolved this way over
+/// per-node-instance scoping because (a) it needs zero new plumbing —
+/// `WasmPluginNode` already carries `type_id`, while node-instance scoping
+/// would need additions to `node-input.params`'s shape that nothing else
+/// here requires, and (b) it matches this capability's own framing as "a
+/// safe substitute for real filesystem access" (see this file's own
+/// module-level doc comment) — a plugin's own app-data directory, on a
+/// real filesystem, wouldn't vary by which workflow node happens to be
+/// calling into it either. A plugin author who wants isolation between
+/// two placements of their own node type must namespace their own keys
+/// (e.g. fold a config value into the key) — documented on `interface
+/// storage`. Revisit as per-node-instance scoping if shared state across
+/// placements proves to cause real collisions in practice, not guessed at
+/// here.
+struct PluginStorage {
+    pool: r2d2::Pool<SqliteConnectionManager>,
+}
+
+impl PluginStorage {
+    /// Opens (creating if absent) the storage database at
+    /// `plugin_dir/`[`STORAGE_DB_FILENAME`]. Does not create `plugin_dir`
+    /// itself — every real caller only reaches this after a `.wasm` file
+    /// was already successfully read from that same directory (see
+    /// [`PluginLoader::plugin_storage`]'s doc comment), so it's already
+    /// known to exist.
+    fn open(plugin_dir: &Path) -> Result<Self, String> {
+        let path = plugin_dir.join(STORAGE_DB_FILENAME);
+        let manager = SqliteConnectionManager::file(&path).with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA busy_timeout=5000;
+                 PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;"
+            )
+        });
+        let pool = r2d2::Pool::builder().max_size(4).build(manager).map_err(|e| e.to_string())?;
+
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS plugin_storage (
+                scope TEXT NOT NULL,
+                key   TEXT NOT NULL,
+                value BLOB NOT NULL,
+                PRIMARY KEY (scope, key)
+            );"
+        ).map_err(|e| e.to_string())?;
+        drop(conn);
+
+        Ok(Self { pool })
+    }
+
+    fn get(&self, scope: &str, key: &str) -> Option<String> {
+        let conn = self.pool.get().map_err(|e| {
+            tracing::warn!("plugin storage: pool unavailable on get: {e}");
+        }).ok()?;
+        conn.query_row(
+            "SELECT value FROM plugin_storage WHERE scope = ?1 AND key = ?2",
+            rusqlite::params![scope, key],
+            |row| row.get::<_, String>(0),
+        ).ok()
+    }
+
+    /// Checks the key/value size limits and the per-scope key-count/byte
+    /// quotas, then writes — all inside one `IMMEDIATE` transaction so a
+    /// concurrent `set` on the same scope (two workflow runs of the same
+    /// plugin type in parallel) can't race the quota check against the
+    /// write (`BEGIN IMMEDIATE` takes SQLite's write lock upfront, closing
+    /// the check-then-write TOCTOU gap a plain `BEGIN` would leave open).
+    /// Known, accepted trade-off: under real contention on the same scope,
+    /// a losing transaction waits on `busy_timeout` (5s, set in `open`)
+    /// rather than queuing indefinitely — a `set` can surface `unavailable`
+    /// under sustained concurrent writes to one plugin's key space, not
+    /// just on a genuine backend failure. Not expected to matter at this
+    /// capability's intended scale (a few small notes, not a write-heavy
+    /// database); documented rather than engineered around.
+    fn set(&self, scope: &str, key: &str, value: &str) -> Result<(), wit_storage::StorageError> {
+        if key.len() > STORAGE_MAX_KEY_BYTES {
+            return Err(wit_storage::StorageError::KeyTooLong);
+        }
+        if value.len() > STORAGE_MAX_VALUE_BYTES {
+            return Err(wit_storage::StorageError::ValueTooLarge);
+        }
+
+        let mut conn = self.pool.get().map_err(|e| {
+            tracing::warn!("plugin storage: pool unavailable on set: {e}");
+            wit_storage::StorageError::Unavailable
+        })?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| {
+                tracing::warn!("plugin storage: failed to start transaction: {e}");
+                wit_storage::StorageError::Unavailable
+            })?;
+
+        let existing_len: Option<i64> = tx
+            .query_row(
+                "SELECT LENGTH(value) FROM plugin_storage WHERE scope = ?1 AND key = ?2",
+                rusqlite::params![scope, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                tracing::warn!("plugin storage: quota pre-check failed: {e}");
+                wit_storage::StorageError::Unavailable
+            })?;
+
+        if existing_len.is_none() {
+            let key_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM plugin_storage WHERE scope = ?1",
+                    rusqlite::params![scope],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    tracing::warn!("plugin storage: key-count check failed: {e}");
+                    wit_storage::StorageError::Unavailable
+                })?;
+            if key_count >= STORAGE_MAX_KEYS_PER_SCOPE {
+                return Err(wit_storage::StorageError::QuotaExceeded);
+            }
+        }
+
+        let scope_total: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(value)), 0) FROM plugin_storage WHERE scope = ?1",
+                rusqlite::params![scope],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                tracing::warn!("plugin storage: total-bytes check failed: {e}");
+                wit_storage::StorageError::Unavailable
+            })?;
+
+        let projected = scope_total - existing_len.unwrap_or(0) + value.len() as i64;
+        if projected > STORAGE_MAX_SCOPE_BYTES {
+            return Err(wit_storage::StorageError::QuotaExceeded);
+        }
+
+        tx.execute(
+            "INSERT INTO plugin_storage (scope, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![scope, key, value],
+        ).map_err(|e| {
+            tracing::warn!("plugin storage: write failed: {e}");
+            wit_storage::StorageError::Unavailable
+        })?;
+
+        tx.commit().map_err(|e| {
+            tracing::warn!("plugin storage: commit failed: {e}");
+            wit_storage::StorageError::Unavailable
+        })?;
+
+        Ok(())
+    }
+
+    fn delete(&self, scope: &str, key: &str) {
+        let Ok(conn) = self.pool.get().map_err(|e| tracing::warn!("plugin storage: pool unavailable on delete: {e}")) else {
+            return;
+        };
+        if let Err(e) = conn.execute(
+            "DELETE FROM plugin_storage WHERE scope = ?1 AND key = ?2",
+            rusqlite::params![scope, key],
+        ) {
+            tracing::warn!("plugin storage: delete failed: {e}");
+        }
+    }
+
+    /// Lists keys under `scope` starting with `prefix`. `prefix` is
+    /// caller-supplied (guest-controlled) content, not a trusted pattern —
+    /// `%`/`_`/`\` are escaped to literals before being used in a SQL
+    /// `LIKE ... ESCAPE '\'` clause, so a key containing those characters
+    /// can't be used to widen the match beyond a literal prefix.
+    fn list_keys(&self, scope: &str, prefix: &str) -> Result<Vec<String>, wit_storage::StorageError> {
+        let conn = self.pool.get().map_err(|e| {
+            tracing::warn!("plugin storage: pool unavailable on list_keys: {e}");
+            wit_storage::StorageError::Unavailable
+        })?;
+
+        let mut escaped = String::with_capacity(prefix.len());
+        for c in prefix.chars() {
+            if c == '%' || c == '_' || c == '\\' {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        let pattern = format!("{escaped}%");
+
+        let mut stmt = conn
+            .prepare("SELECT key FROM plugin_storage WHERE scope = ?1 AND key LIKE ?2 ESCAPE '\\' ORDER BY key")
+            .map_err(|e| {
+                tracing::warn!("plugin storage: list_keys prepare failed: {e}");
+                wit_storage::StorageError::Unavailable
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope, pattern], |row| row.get::<_, String>(0))
+            .map_err(|e| {
+                tracing::warn!("plugin storage: list_keys query failed: {e}");
+                wit_storage::StorageError::Unavailable
+            })?;
+
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(|e| {
+                tracing::warn!("plugin storage: list_keys row read failed: {e}");
+                wit_storage::StorageError::Unavailable
+            })?);
+        }
+        Ok(keys)
+    }
+}
+
+#[cfg(test)]
+mod plugin_storage_tests {
+    use super::*;
+
+    fn storage() -> PluginStorage {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        // Leak the TempDir so it outlives this test's `PluginStorage` --
+        // acceptable in a `#[cfg(test)]`-only helper (mirrors this file's
+        // own `NamedTempFile` test fixtures elsewhere, which rely on the
+        // guard staying alive for the test's duration rather than cleaning
+        // up immediately).
+        let path = dir.keep();
+        PluginStorage::open(&path).expect("PluginStorage::open failed")
+    }
+
+    /// Normal case: a value written by `set` is returned by `get`, scoped
+    /// under the same `scope` it was written under.
+    #[test]
+    fn set_then_get_round_trips() {
+        let db = storage();
+        assert_eq!(db.get("plugin-a", "k1"), None, "unset key must read as absent");
+        db.set("plugin-a", "k1", "hello").expect("set failed");
+        assert_eq!(db.get("plugin-a", "k1"), Some("hello".to_string()));
+        // A different scope must not see it.
+        assert_eq!(db.get("plugin-b", "k1"), None, "scopes must not leak into each other");
+    }
+
+    /// Edge case: oversized keys/values are rejected before ever reaching
+    /// SQLite, with the specific error the size limit that was exceeded.
+    #[test]
+    fn set_rejects_oversized_key_and_value() {
+        let db = storage();
+        let long_key = "k".repeat(STORAGE_MAX_KEY_BYTES + 1);
+        assert!(matches!(db.set("plugin-a", &long_key, "v"), Err(wit_storage::StorageError::KeyTooLong)));
+
+        let long_value = "v".repeat(STORAGE_MAX_VALUE_BYTES + 1);
+        assert!(matches!(db.set("plugin-a", "k1", &long_value), Err(wit_storage::StorageError::ValueTooLarge)));
+    }
+
+    /// Edge case: the per-scope byte quota is enforced across multiple
+    /// keys, and an update to an *existing* key correctly nets out its own
+    /// prior size rather than double-counting it.
+    #[test]
+    fn set_enforces_scope_byte_quota() {
+        let db = storage();
+        let chunk = "x".repeat(STORAGE_MAX_VALUE_BYTES);
+        let mut written = 0i64;
+        let mut i = 0;
+        loop {
+            let key = format!("k{i}");
+            match db.set("plugin-a", &key, &chunk) {
+                Ok(()) => { written += chunk.len() as i64; i += 1; }
+                Err(wit_storage::StorageError::QuotaExceeded) => break,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+            assert!(written <= STORAGE_MAX_SCOPE_BYTES, "wrote past the quota before it was enforced");
+        }
+        assert!(written > 0, "quota must allow at least one write before rejecting");
+
+        // Overwriting an already-stored key with an equal-sized value must
+        // still succeed -- it doesn't add new net bytes to the scope.
+        db.set("plugin-a", "k0", &chunk).expect("overwrite of existing key must not double-count its own prior size");
+    }
+
+    #[test]
+    fn delete_removes_key() {
+        let db = storage();
+        db.set("plugin-a", "k1", "v").expect("set failed");
+        assert_eq!(db.get("plugin-a", "k1"), Some("v".to_string()));
+        db.delete("plugin-a", "k1");
+        assert_eq!(db.get("plugin-a", "k1"), None);
+        // Deleting an already-absent key is a no-op, not an error.
+        db.delete("plugin-a", "does-not-exist");
+    }
+
+    /// `%`/`_` in a caller-supplied prefix must be treated as literal
+    /// characters, not SQL `LIKE` wildcards -- otherwise a plugin could
+    /// list keys outside the prefix it actually asked for.
+    #[test]
+    fn list_keys_escapes_like_metacharacters() {
+        let db = storage();
+        db.set("plugin-a", "a%b", "v1").expect("set failed");
+        db.set("plugin-a", "aXb", "v2").expect("set failed");
+        db.set("plugin-a", "a%bc", "v3").expect("set failed");
+
+        let matches = db.list_keys("plugin-a", "a%b").expect("list_keys failed");
+        assert_eq!(
+            matches,
+            vec!["a%b".to_string(), "a%bc".to_string()],
+            "prefix 'a%b' must match only keys literally starting with 'a%b', not 'aXb' via wildcard expansion"
+        );
     }
 }
 
@@ -334,6 +998,29 @@ pub struct PluginLoader {
     /// only the read accessor below needs to be test-only.
     #[allow(dead_code)]
     compile_count: std::sync::atomic::AtomicUsize,
+    /// Second, dedicated engine for trigger-plugin components (the
+    /// `aerini-node-with-trigger` world). Configured for
+    /// `wasm_component_model_async`, which `engine` above is not -- the two
+    /// configurations are mutually exclusive on one `Engine`/`Config`, so
+    /// action-plugin execution and trigger-plugin event streaming never
+    /// share one. No epoch ticker: see `make_trigger_store`'s doc comment
+    /// for why.
+    trigger_engine: Engine,
+    /// Compiled-`Component` cache for `trigger_engine`, keyed and
+    /// invalidated identically to `component_cache` — kept as a separate
+    /// field (not merged into it) because a `Component` compiled against
+    /// one engine cannot be instantiated on the other; sharing one map
+    /// keyed only by path would risk serving a component compiled for the
+    /// wrong engine on a fingerprint match.
+    trigger_component_cache: Mutex<HashMap<PathBuf, CachedComponent>>,
+    /// Opened, cached [`PluginStorage`] databases, keyed by the `plugin_dir`
+    /// they back — see [`PluginLoader::plugin_storage`]. A `HashMap` (not a
+    /// single `Option`) for the same reason `component_cache` is keyed by
+    /// path rather than being one bare field: nothing today calls
+    /// `load_plugin`/`load_plugins_from_dir` against more than one
+    /// `plugin_dir` in one process, but keying by path costs nothing and
+    /// doesn't assume that stays true.
+    storage_pools: Mutex<HashMap<PathBuf, Arc<PluginStorage>>>,
 }
 
 /// One cached, already-compiled [`wasmtime::component::Component`] plus the
@@ -427,11 +1114,84 @@ impl PluginLoader {
             })
             .expect("failed to spawn wasm epoch ticker thread");
 
+        // Second engine for trigger-plugin components. `wasm_component_model_async`
+        // is what lets this engine compile and instantiate a component using
+        // `trigger.events`'s async ABI; `engine` above doesn't set it, and per
+        // `wit/node.wit`'s own doc comment the two configurations cannot be
+        // combined on one `Engine`. No `epoch_interruption` here — see
+        // `make_trigger_store`.
+        let mut trigger_config = Config::new();
+        trigger_config.wasm_component_model(true);
+        trigger_config.wasm_component_model_async(true);
+        let trigger_engine = Engine::new(&trigger_config)?;
+
         Ok(Self {
             engine,
             component_cache: Mutex::new(HashMap::new()),
             compile_count: std::sync::atomic::AtomicUsize::new(0),
+            trigger_engine,
+            trigger_component_cache: Mutex::new(HashMap::new()),
+            storage_pools: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Returns the shared [`PluginStorage`] backing the WIT `storage`
+    /// import for every plugin loaded from `plugin_dir`, opening and
+    /// caching it on first use (a `plugin_dir` this loader hasn't seen
+    /// before), and simply returning the cached handle on every call
+    /// after that — matching `compile_and_link`'s own cache-then-reuse
+    /// shape for `component_cache`, including *not* holding the mutex
+    /// during the actual (I/O-bound) open: released after the initial
+    /// miss check, re-acquired only to insert, so two threads racing to
+    /// open the same never-before-seen `plugin_dir` concurrently don't
+    /// serialize behind one lock for the whole open — the same tolerated
+    /// "whichever insert wins" race `component_cache` already accepts for
+    /// a concurrent first compile of the same file.
+    ///
+    /// `plugin_dir` here is always a loaded plugin's own file's parent
+    /// directory (see [`load_plugin`](Self::load_plugin)'s call site),
+    /// which is the same path as the `plugin_dir` passed to
+    /// [`load_plugins`]/[`load_plugins_from_dir`](Self::load_plugins_from_dir)
+    /// in every real call path in this crate — installs place `.wasm`
+    /// files flat, directly in `plugin_dir`, with no subdirectories
+    /// (P2's single-file installs; P6.1's pack members, "flat, same
+    /// directory as single-file installs").
+    ///
+    /// A failure to open the database (e.g. a read-only `plugin_dir`) is
+    /// logged once per distinct `plugin_dir` and does not fail plugin
+    /// loading — the affected [`WasmPluginNode`]s simply get no storage
+    /// handle, and every `storage.*` guest call degrades per
+    /// `wit/node.wit`'s own doc comment on `interface storage` instead of
+    /// blocking the plugin from loading and running otherwise.
+    fn plugin_storage(&self, plugin_dir: &Path) -> Option<Arc<PluginStorage>> {
+        if let Some(existing) = self
+            .storage_pools
+            .lock()
+            .expect("storage pool mutex poisoned")
+            .get(plugin_dir)
+        {
+            return Some(Arc::clone(existing));
+        }
+
+        match PluginStorage::open(plugin_dir) {
+            Ok(db) => {
+                let db = Arc::new(db);
+                self.storage_pools
+                    .lock()
+                    .expect("storage pool mutex poisoned")
+                    .insert(plugin_dir.to_path_buf(), Arc::clone(&db));
+                Some(db)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "plugin_loader: failed to open plugin storage database in {}: {} — \
+                     plugins loaded from this directory get no `storage` import backing",
+                    plugin_dir.display(),
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Number of real (cache-miss) compiles performed by this instance so
@@ -461,11 +1221,13 @@ impl PluginLoader {
     /// Steps shared by [`load_plugin`](Self::load_plugin) and
     /// [`describe_plugin`](Self::describe_plugin): read the file, compile it
     /// to a component, build a linker with the full WASIp2 + HTTP surface,
-    /// pre-instantiate, and validate that the `aerini-node` world is
-    /// exported. Extracted so the two call paths — one that goes on to leak
+    /// and pre-instantiate. Does not validate which world is exported --
+    /// that's [`detect_node_pre`](Self::detect_node_pre), since both call
+    /// paths need to try the same `InstancePre` against two possible world
+    /// shapes. Extracted so the two call paths — one that goes on to leak
     /// `'static` strings and register a live `Node`, one that doesn't —
     /// can't drift apart on the compile/link logic itself.
-    fn compile_and_link(&self, path: &Path) -> Result<wit::AeriniNodePre<PluginState>, PluginLoadError> {
+    fn compile_and_link(&self, path: &Path) -> Result<wasmtime::component::InstancePre<PluginState>, PluginLoadError> {
         // Steps 1-2: read + compile — or reuse a cached `Component` for this
         // exact path if its (mtime, len) fingerprint matches what's cached.
         // `std::fs::metadata` (not `std::fs::read`) is the first fallible
@@ -508,13 +1270,14 @@ impl PluginLoader {
 
         // Step 3: linker + pre-instantiation.
         //
-        // Two separate calls are required:
+        // Three calls are required:
         // (a) `wasmtime_wasi::p2::add_to_linker_sync` — satisfies all `wasi:cli/command`
         //     imports (filesystem, random, clocks, stdio) that `wasm32-wasip2` binaries
         //     unconditionally import via Rust's standard library.
         // (b) `wasmtime_wasi_http::p2::add_only_http_to_linker_sync` — adds only the
         //     `wasi:http/outgoing-handler` interface without duplicating the WASI
         //     interfaces already registered in (a).
+        // (c) this package's own `storage` import (below) — see its own comment.
         //
         // Using just `wasmtime_wasi_http::p2::add_to_linker_sync` (the proxy world bundle)
         // instead of (a)+(b) would omit `wasi:filesystem`, `wasi:random`, etc., causing
@@ -525,11 +1288,41 @@ impl PluginLoader {
         wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
             .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
 
-        let instance_pre = linker.instantiate_pre(&component)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+        // (c) the `storage` import (`PluginState` implements its generated
+        // `Host` trait directly, so `HasSelf<PluginState>` — the "my data
+        // IS &mut T" convenience `HasData` impl — is the right `D` here,
+        // matching `wasmtime_wasi::p3::bindings`' own documented example
+        // for a plain custom host-implemented interface). Linked
+        // unconditionally, like (a)/(b) above: a plugin compiled before
+        // `storage` existed has no such import to satisfy, so this is a
+        // no-op for it, not a compatibility risk (Constraint 1).
+        wit_storage::add_to_linker::<PluginState, wasmtime::component::HasSelf<PluginState>>(
+            &mut linker,
+            |state| state,
+        ).map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
 
-        // Step 4: validate the `aerini-node` world export exists.
-        wit::AeriniNodePre::new(instance_pre).map_err(|_| PluginLoadError::MissingInterface)
+        linker.instantiate_pre(&component)
+            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))
+    }
+
+    /// Determines which world `instance_pre` exports and returns the matching
+    /// bindings, trying the superset (`aerini-node-with-metadata`) first and
+    /// falling back to the plain `aerini-node` world -- per `wit/node.wit`'s
+    /// own doc comment, both are permanent, equally-valid shapes, not a
+    /// migration path. `InstancePre::new` on the `bindgen!`-generated `*Pre`
+    /// types is a type-level check against the component's export signature;
+    /// it runs no guest code, so trying the superset first and falling back
+    /// costs nothing beyond the check itself.
+    fn detect_node_pre(
+        &self,
+        instance_pre: wasmtime::component::InstancePre<PluginState>,
+    ) -> Result<NodePre, PluginLoadError> {
+        match wit_metadata::AeriniNodeWithMetadataPre::new(instance_pre.clone()) {
+            Ok(pre) => Ok(NodePre::WithMetadata(pre)),
+            Err(_) => wit::AeriniNodePre::new(instance_pre)
+                .map(NodePre::Plain)
+                .map_err(|_| PluginLoadError::MissingInterface),
+        }
     }
 
     /// Load a single WASM plugin from `path`.
@@ -537,54 +1330,85 @@ impl PluginLoader {
     /// Steps:
     /// 1. Read the file (→ [`PluginLoadError::Io`] on failure).
     /// 2. Compile to a component (→ [`PluginLoadError::WasmCompile`] on failure).
-    /// 3. Build a linker with full WASIp2 + HTTP and pre-instantiate
+    /// 3. Build a linker with full WASIp2 + HTTP + `storage` and pre-instantiate
     ///    (→ [`PluginLoadError::WasmLink`] on failure).
-    /// 4. Validate that the component exports the `aerini-node` world
-    ///    (→ [`PluginLoadError::MissingInterface`] if absent).
-    /// 5. Call `describe()` once to populate the [`NodeDescriptor`](crate::node::NodeDescriptor).
+    /// 4. Detect whether the component exports `aerini-node` or
+    ///    `aerini-node-with-metadata` (→ [`PluginLoadError::MissingInterface`]
+    ///    if neither).
+    /// 5. Call `describe()` (and `describe-metadata()`, when exported) once to
+    ///    populate the [`NodeDescriptor`](crate::node::NodeDescriptor). A plugin
+    ///    that doesn't export `metadata` gets the host defaults from
+    ///    `wit/node.wit`'s doc comment: empty author, `"1.0.0"` version, no icon.
+    /// 6. Open (or reuse) this plugin's directory's storage database (see
+    ///    [`PluginLoader::plugin_storage`]) — never fails the load; a plugin
+    ///    whose storage database couldn't be opened just gets `storage: None`.
+    /// 7. Probe whether the same file also exports `aerini-node-with-trigger`
+    ///    (see [`PluginLoader::probe_trigger_capable`]) — type-level only, no
+    ///    guest code runs; never fails the load.
     ///
-    /// The `describe()` result is cached in [`WasmPluginNode`] for the lifetime
+    /// The describe result is cached in [`WasmPluginNode`] for the lifetime
     /// of the process — it is never called again after load time.
     pub fn load_plugin(&self, path: &Path) -> Result<Arc<dyn Node>, PluginLoadError> {
-        // Steps 1-4: read, compile, link, pre-instantiate, validate world export.
-        let pre = self.compile_and_link(path)?;
+        let instance_pre = self.compile_and_link(path)?;
+        let node_pre = self.detect_node_pre(instance_pre.clone())?;
 
-        // Step 5: call describe() once to get node metadata.
-        let mut store = make_store(&self.engine, make_plugin_state());
+        // Runtime `execute()` always goes through the plain `node`-only Pre --
+        // every valid plugin exports it, with or without `metadata`. Cannot
+        // fail: `detect_node_pre` above already proved `node` is exported by
+        // this exact component.
+        let exec_pre = wit::AeriniNodePre::new(instance_pre)
+            .expect("node export already confirmed by detect_node_pre");
 
-        let bindings = pre.instantiate(&mut store)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+        let mut store = make_store(&self.engine, make_plugin_state(None));
+        let raw = describe_via_pre(&node_pre, &mut store)?;
 
-        let descriptor = bindings
-            .aerini_plugin_node()
-            .call_describe(&mut store)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+        // Leak type_id/display_name/description/icon/author/version once per plugin load —
+        // bounded intentional leak: plugins are loaded once at process start and
+        // live for the process lifetime. Only safe because this method is reached
+        // once per plugin per process (via `load_plugins_from_dir`, called from
+        // `load_plugins` through `shared()`) — a caller needing repeatable
+        // metadata lookups must use `describe_plugin` instead, which runs the
+        // identical steps but leaks nothing.
+        let type_id: &'static str = Box::leak(raw.type_id.into_boxed_str());
+        let display_name: &'static str = Box::leak(raw.display_name.into_boxed_str());
+        let description: &'static str = Box::leak(raw.description.into_boxed_str());
+        let icon: &'static str = Box::leak(raw.icon.into_boxed_str());
+        let author: &'static str = Box::leak(raw.author.into_boxed_str());
+        let version: &'static str = Box::leak(
+            if raw.version.is_empty() { "1.0.0".to_string() } else { raw.version }
+                .into_boxed_str(),
+        );
 
-        // Leak type_id and display_name once per plugin load — bounded intentional leak:
-        // plugins are loaded once at process start and live for the process lifetime.
-        // Only safe because this method is reached once per plugin per process (via
-        // `load_plugins_from_dir`, called from `load_plugins` through `shared()`) —
-        // a caller needing repeatable metadata lookups must use `describe_plugin`
-        // instead, which runs the identical steps but leaks nothing.
-        let type_id: &'static str = Box::leak(descriptor.type_id.into_boxed_str());
-        let display_name: &'static str = Box::leak(descriptor.display_name.into_boxed_str());
-
-        let node_type = category_to_node_type(&descriptor.category, type_id);
+        let node_type = category_to_node_type(&raw.category, type_id);
 
         // JSON Schema strings from the plugin — fall back to empty schema on parse failure.
-        let input_schema: Value = serde_json::from_str(&descriptor.input_schema)
+        let input_schema: Value = serde_json::from_str(&raw.input_schema)
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-        let output_schema: Value = serde_json::from_str(&descriptor.output_schema)
+        let output_schema: Value = serde_json::from_str(&raw.output_schema)
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+
+        // `path`'s parent is `plugin_dir` in every real call path (see
+        // `plugin_storage`'s own doc comment) — falls back to "." rather
+        // than panicking on the near-impossible case of a bare relative
+        // filename with no parent component.
+        let storage_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let storage = self.plugin_storage(storage_dir);
+        let trigger_capable = self.probe_trigger_capable(path);
 
         Ok(Arc::new(WasmPluginNode {
             engine: self.engine.clone(),
-            pre,
+            pre: exec_pre,
             type_id,
             display_name,
+            description,
             node_type,
             input_schema,
             output_schema,
+            icon,
+            author,
+            version,
+            storage,
+            trigger_capable,
         }))
     }
 
@@ -592,31 +1416,27 @@ impl PluginLoader {
     /// without registering it as a live [`Node`] and without leaking any
     /// memory — every string in the returned [`PluginDescriptor`] is owned.
     ///
-    /// Runs the identical compile/link/describe steps as
-    /// [`load_plugin`](Self::load_plugin) (steps 1-5 of that method's own
-    /// doc comment), but never calls [`Box::leak`] and never constructs a
-    /// [`WasmPluginNode`] — the compiled component, linker, and store are
-    /// all dropped when this method returns. Safe to call as many times as
-    /// a caller needs, unlike `load_plugin`, whose leak is only bounded when
-    /// called once per plugin per process.
+    /// Runs the identical compile/link/detect/describe steps as
+    /// [`load_plugin`](Self::load_plugin), but never calls [`Box::leak`] and
+    /// never constructs a [`WasmPluginNode`] — the compiled component, linker,
+    /// and store are all dropped when this method returns. Safe to call as
+    /// many times as a caller needs, unlike `load_plugin`, whose leak is only
+    /// bounded when called once per plugin per process. Discards the
+    /// `metadata`-only fields (`icon`/`author`/`version`) — no current caller
+    /// of `describe_plugin` needs them; see `PluginInfo` (Settings-tab
+    /// listing), which doesn't carry an icon on either the Rust or TS side.
     pub fn describe_plugin(&self, path: &Path) -> Result<PluginDescriptor, PluginLoadError> {
-        let pre = self.compile_and_link(path)?;
+        let instance_pre = self.compile_and_link(path)?;
+        let node_pre = self.detect_node_pre(instance_pre)?;
 
-        let mut store = make_store(&self.engine, make_plugin_state());
+        let mut store = make_store(&self.engine, make_plugin_state(None));
+        let raw = describe_via_pre(&node_pre, &mut store)?;
 
-        let bindings = pre.instantiate(&mut store)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
-
-        let descriptor = bindings
-            .aerini_plugin_node()
-            .call_describe(&mut store)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
-
-        let node_type = category_to_node_type(&descriptor.category, &descriptor.type_id);
+        let node_type = category_to_node_type(&raw.category, &raw.type_id);
 
         Ok(PluginDescriptor {
-            type_id: descriptor.type_id,
-            display_name: descriptor.display_name,
+            type_id: raw.type_id,
+            display_name: raw.display_name,
             node_type,
         })
     }
@@ -678,6 +1498,179 @@ impl PluginLoader {
 
         nodes
     }
+
+    /// Trigger-engine counterpart to the read+compile+cache half of
+    /// `compile_and_link` -- same fingerprint-checked cache contract, against
+    /// `trigger_component_cache`/`trigger_engine` instead of
+    /// `component_cache`/`engine`. Stops short of linking: unlike the
+    /// sync path, a trigger-plugin instantiation attempt is inherently
+    /// speculative (any given `.wasm` file in the directory may not export
+    /// `aerini-node-with-trigger` at all), so the linker + `instantiate_async`
+    /// step lives in `resolve_trigger_instance` right where that outcome is
+    /// decided, not bundled in here.
+    fn compile_trigger_component(&self, path: &Path) -> Result<wasmtime::component::Component, PluginLoadError> {
+        let meta = std::fs::metadata(path)?;
+        let fingerprint = (meta.modified().ok(), meta.len());
+
+        let cached = self
+            .trigger_component_cache
+            .lock()
+            .expect("trigger component cache mutex poisoned")
+            .get(path)
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| entry.component.clone());
+
+        if let Some(c) = cached {
+            return Ok(c);
+        }
+
+        let bytes = std::fs::read(path)?;
+        let component = wasmtime::component::Component::new(&self.trigger_engine, &bytes)
+            .map_err(|e| PluginLoadError::WasmCompile(e.to_string()))?;
+
+        self.trigger_component_cache
+            .lock()
+            .expect("trigger component cache mutex poisoned")
+            .insert(path.to_path_buf(), CachedComponent { fingerprint, component: component.clone() });
+
+        Ok(component)
+    }
+
+    /// Type-level check for whether the `.wasm` file at `path` exports
+    /// `aerini-node-with-trigger`, run once at [`load_plugin`](Self::load_plugin)
+    /// time. Reuses `compile_trigger_component`'s cache; the import check
+    /// against a throwaway linker and `AeriniNodeWithTriggerPre::new` are
+    /// both type-level only -- no guest code executes, unlike
+    /// `resolve_trigger_instance`'s `instantiate_async` + `describe()` call.
+    fn probe_trigger_capable(&self, path: &Path) -> bool {
+        let Ok(component) = self.compile_trigger_component(path) else { return false };
+
+        let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
+        if wasmtime_wasi::p3::add_to_linker(&mut linker).is_err() {
+            return false;
+        }
+
+        let Ok(instance_pre) = linker.instantiate_pre(&component) else { return false };
+        wit_trigger::AeriniNodeWithTriggerPre::new(instance_pre).is_ok()
+    }
+
+    /// Scans `dir` for a `.wasm` file exporting `aerini-node-with-trigger`
+    /// whose `describe().type_id` matches `type_id`, and returns it
+    /// instantiated and ready for `events()` to be called on it.
+    ///
+    /// Every file that fails to compile or link against `trigger_engine` is
+    /// skipped, not logged as a warning -- unlike `load_plugins_from_dir`'s
+    /// directory scan, a "miss" here is the expected outcome for the
+    /// majority of files in a plugin directory (every action-only plugin,
+    /// built against WASIp2, cannot satisfy `wasmtime_wasi::p3`'s linker
+    /// imports and will fail here every time this is called; that is not a
+    /// problem to surface, just a non-match).
+    async fn resolve_trigger_instance(
+        &self,
+        dir: &Path,
+        type_id: &str,
+    ) -> Result<(wasmtime::Store<TriggerPluginState>, wit_trigger::AeriniNodeWithTrigger), PluginLoadError> {
+        let entries = std::fs::read_dir(dir).map_err(PluginLoadError::Io)?;
+
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                continue;
+            }
+
+            let Ok(component) = self.compile_trigger_component(&path) else { continue };
+
+            let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
+            if wasmtime_wasi::p3::add_to_linker(&mut linker).is_err() {
+                continue;
+            }
+
+            let mut store = make_trigger_store(&self.trigger_engine, make_trigger_plugin_state());
+
+            let Ok(bindings) = wit_trigger::AeriniNodeWithTrigger::instantiate_async(&mut store, &component, &linker).await else {
+                continue;
+            };
+
+            // `describe` is declared as a plain (non-`async`) function in
+            // `wit/node.wit`. bindgen's async support is per-function, not
+            // per-world: only a WIT function actually marked `async func`
+            // (`events`, below) gets an `Accessor`-based async call form --
+            // `describe` still generates a synchronous call that returns its
+            // `Result` directly rather than a future, even on an instance
+            // whose world also happens to export an async interface.
+            let Ok(descriptor) = bindings.aerini_plugin_node().call_describe(&mut store) else { continue };
+
+            if descriptor.type_id == type_id {
+                return Ok((store, bindings));
+            }
+        }
+
+        Err(PluginLoadError::NoSuchTriggerPlugin(type_id.to_string()))
+    }
+
+    /// Resolves `type_id` to a trigger-capable plugin under `dir`, starts its
+    /// event stream (`trigger.events(config)`, called exactly once, per
+    /// `wit/node.wit`'s own contract), and hands events back as plain JSON
+    /// strings (`trigger-event.data`) over a channel -- no wasmtime or
+    /// `bindgen!`-generated type crosses this boundary.
+    ///
+    /// The event pump runs on its own spawned task, returned alongside the
+    /// receiver so the caller can bind its lifetime to whatever owns the
+    /// receiver (e.g. abort it together with the job task that's draining
+    /// the channel) -- this function does not itself decide when the stream
+    /// should stop being read.
+    ///
+    /// The channel yields `Err(message)` for a single read failure (the
+    /// plugin instance is left as-is; a further `recv()` may still succeed)
+    /// and closes (`recv()` returns `None`) when the guest closes the
+    /// stream or the instance traps -- the caller decides whether to treat
+    /// closure as fatal for this job (see `scheduler/runner.rs`).
+    pub async fn start_trigger(
+        &self,
+        dir: &Path,
+        type_id: &str,
+        config: &str,
+    ) -> Result<(tokio::task::JoinHandle<()>, tokio::sync::mpsc::Receiver<Result<String, String>>), PluginLoadError> {
+        let (mut store, bindings) = self.resolve_trigger_instance(dir, type_id).await?;
+        let config = config.to_string();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        let handle = tokio::spawn(async move {
+            let pump_tx = tx.clone();
+            let outcome = store
+                .run_concurrent(async move |accessor| -> wasmtime::Result<()> {
+                    let events_call = bindings.aerini_plugin_trigger().call_events(accessor, config);
+                    let reader = match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, events_call).await {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            let _ = pump_tx.send(Err(e.to_string())).await;
+                            return Ok(());
+                        }
+                        Err(_elapsed) => {
+                            let _ = pump_tx.send(Err(format!(
+                                "events() did not return within {}s",
+                                PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs()
+                            ))).await;
+                            return Ok(());
+                        }
+                    };
+
+                    let consumer = TriggerEventConsumer { tx: tokio_util::sync::PollSender::new(pump_tx.clone()) };
+                    if let Err(e) = accessor.with(|access| reader.pipe(access, consumer)) {
+                        let _ = pump_tx.send(Err(e.to_string())).await;
+                    }
+                    Ok(())
+                })
+                .await;
+
+            if let Err(e) = outcome.and_then(|inner| inner) {
+                let _ = tx.send(Err(e.to_string())).await;
+            }
+        });
+
+        Ok((handle, rx))
+    }
 }
 
 // ── WasmPluginNode ────────────────────────────────────────────────────────────
@@ -710,9 +1703,18 @@ impl PluginLoader {
 ///
 /// # Static string fields
 ///
-/// `type_id` and `display_name` are [`Box::leak`]ed once at load time. This is a
-/// bounded, intentional leak: plugins are loaded once at process start and never
-/// unloaded.
+/// `type_id`, `display_name`, `icon`, `author`, and `version` are [`Box::leak`]ed
+/// once at load time. This is a bounded, intentional leak: plugins are loaded
+/// once at process start and never unloaded.
+///
+/// # Storage
+///
+/// `storage`, if present (see [`PluginLoader::plugin_storage`]), backs the
+/// optional WIT `storage` import — scoped by this node's own `type_id` at
+/// each `execute()` call (`wit/node.wit`'s `interface storage` doc comment
+/// covers the scoping choice). `None` means the storage database for this
+/// plugin's directory failed to open; every `storage.*` guest call then
+/// degrades per that same doc comment rather than failing the node.
 pub struct WasmPluginNode {
     /// Shared engine — cheap to clone (internally ref-counted).
     engine: Engine,
@@ -721,9 +1723,15 @@ pub struct WasmPluginNode {
     pre: wit::AeriniNodePre<PluginState>,
     type_id: &'static str,
     display_name: &'static str,
+    description: &'static str,
     node_type: NodeType,
     input_schema: Value,
     output_schema: Value,
+    icon: &'static str,
+    author: &'static str,
+    version: &'static str,
+    storage: Option<Arc<PluginStorage>>,
+    trigger_capable: bool,
 }
 
 #[async_trait]
@@ -736,18 +1744,32 @@ impl Node for WasmPluginNode {
         self.display_name
     }
 
+    fn description(&self) -> &'static str {
+        self.description
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type.clone()
     }
 
     fn version(&self) -> &'static str {
-        // WASM plugins do not expose a version via WIT. Plugins may embed their
-        // version in type_id (e.g. "com.example.my-node@1.2.0") if needed.
-        "1.0.0"
+        self.version
+    }
+
+    fn icon(&self) -> &'static str {
+        self.icon
+    }
+
+    fn author(&self) -> &'static str {
+        self.author
     }
 
     fn is_plugin(&self) -> bool {
         true
+    }
+
+    fn is_trigger_capable(&self) -> bool {
+        self.trigger_capable
     }
 
     fn input_schema(&self) -> Value {
@@ -767,9 +1789,16 @@ impl Node for WasmPluginNode {
         let engine = self.engine.clone();
         let pre = self.pre.clone();
         let wit_input = engine_input_to_wit(&input);
+        // Scoped by this node's own type_id, not by `input.node_id`/
+        // `input.workflow_id` — see `wit/node.wit`'s `interface storage`
+        // doc comment for why storage is per-plugin, not per-placement.
+        let storage_handle = self.storage.clone().map(|db| PluginStorageHandle {
+            db,
+            scope: self.type_id.to_string(),
+        });
 
         let result = tokio::task::spawn_blocking(move || {
-            let mut store = make_store(&engine, make_plugin_state());
+            let mut store = make_store(&engine, make_plugin_state(storage_handle));
 
             let bindings = pre.instantiate(&mut store).map_err(|e| e.to_string())?;
 
@@ -797,23 +1826,50 @@ impl Node for WasmPluginNode {
 
 // ── Input / output conversion ─────────────────────────────────────────────────
 
+/// Reserved `Param` key carrying the entire merged input as one JSON-encoded
+/// object string (see `wit/node.wit`'s `node-input.params` doc comment). Must
+/// match that doc comment exactly.
+const FULL_INPUT_JSON_PARAM_KEY: &str = "__aerini_input_json";
+
 /// Flatten the merged JSON input into a `Vec<Param>` for the WIT interface.
 ///
 /// The executor merges config and resolved credentials into `input.input` as a
 /// JSON object. Each top-level key becomes a `Param`. Non-string values are
-/// serialized to their JSON text representation (e.g. numbers, booleans, objects).
+/// serialized to their JSON text representation (e.g. numbers, booleans, objects) --
+/// kept for plugins written before structured access existed. One additional
+/// `FULL_INPUT_JSON_PARAM_KEY` entry carries the whole object as a single JSON
+/// string, so a plugin can parse nested config once instead of re-parsing each
+/// individually flattened field.
 fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
     let params = match &input.input {
-        Value::Object(map) => map
-            .iter()
-            .map(|(k, v)| wit::Param {
-                key: k.clone(),
-                value: match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                },
-            })
-            .collect(),
+        Value::Object(map) => {
+            let mut params: Vec<wit::Param> = map
+                .iter()
+                .map(|(k, v)| wit::Param {
+                    key: k.clone(),
+                    value: match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                })
+                .collect();
+
+            if map.contains_key(FULL_INPUT_JSON_PARAM_KEY) {
+                tracing::warn!(
+                    "plugin_loader: node config already defines a field named {:?}; \
+                     skipping the host-synthesized full-input JSON param to avoid \
+                     shadowing the author's own value",
+                    FULL_INPUT_JSON_PARAM_KEY
+                );
+            } else {
+                params.push(wit::Param {
+                    key: FULL_INPUT_JSON_PARAM_KEY.to_string(),
+                    value: input.input.to_string(),
+                });
+            }
+
+            params
+        }
         _ => vec![],
     };
 
@@ -823,16 +1879,72 @@ fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
     }
 }
 
+#[cfg(test)]
+mod engine_input_to_wit_tests {
+    use super::{engine_input_to_wit, FULL_INPUT_JSON_PARAM_KEY};
+    use crate::model::{ExecutionContext, NodeInput};
+    use serde_json::json;
+
+    fn make_input(input: serde_json::Value) -> NodeInput {
+        NodeInput {
+            cancel_token: None,
+            node_id: "n1".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext::default(),
+        }
+    }
+
+    /// Nested config must survive intact in the reserved full-JSON param,
+    /// not just as the pre-existing per-key flattened text.
+    #[test]
+    fn nested_config_available_as_single_json_param() {
+        let input = make_input(json!({
+            "url": "https://example.com",
+            "options": { "retries": 3, "headers": { "x-a": "b" } },
+        }));
+
+        let wit_input = engine_input_to_wit(&input);
+
+        let full = wit_input
+            .params
+            .iter()
+            .find(|p| p.key == FULL_INPUT_JSON_PARAM_KEY)
+            .expect("reserved full-input param must be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&full.value).expect("reserved param value must be valid JSON");
+        assert_eq!(parsed, input.input, "reserved param must round-trip the whole merged input");
+
+        // Pre-existing flattened behavior is unchanged for backward compat.
+        let url = wit_input.params.iter().find(|p| p.key == "url").expect("url param missing");
+        assert_eq!(url.value, "https://example.com");
+    }
+
+    /// A node config that happens to already use the reserved key must not be
+    /// shadowed by the host-synthesized value -- the author's own field wins.
+    #[test]
+    fn existing_field_with_reserved_key_is_not_overwritten() {
+        let input = make_input(json!({ FULL_INPUT_JSON_PARAM_KEY: "author-value" }));
+
+        let wit_input = engine_input_to_wit(&input);
+
+        let matches: Vec<_> =
+            wit_input.params.iter().filter(|p| p.key == FULL_INPUT_JSON_PARAM_KEY).collect();
+        assert_eq!(matches.len(), 1, "must not add a second entry under the same key");
+        assert_eq!(matches[0].value, "author-value", "author's own value must win, not the synthesized JSON blob");
+    }
+}
+
 /// Convert a WIT `NodeOutput` record to the engine's [`NodeOutput`].
 fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
     if out.success {
         match serde_json::from_str::<Value>(&out.data) {
             Ok(value) => NodeOutput::success(value),
             Err(parse_err) => {
-                // A plugin that reports success but returns non-JSON `data` was
-                // previously papered over as an empty `{}` object with no error
-                // and no log line — indistinguishable from a plugin that legitimately
-                // returns no data. Surface it as a real, logged failure instead.
+                // A plugin reporting success with non-JSON `data` is a hard failure,
+                // not an empty result — logged here so it's distinguishable from a
+                // plugin that legitimately returns no data.
                 let preview: String = out.data.chars().take(INVALID_OUTPUT_LOG_PREVIEW_CHARS).collect();
                 tracing::error!(
                     "plugin_loader: plugin reported success but `data` is not valid JSON: {} (data preview: {:?})",
@@ -858,6 +1970,18 @@ fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Outcome of one [`load_plugins`] call, keyed by `type_id` — lets a caller
+/// surface what happened (e.g. in a UI) instead of only reading the log.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PluginLoadReport {
+    /// `type_id`s that ended up registered (including the winner of a collision).
+    pub loaded: Vec<String>,
+    /// `type_id`s rejected outright for colliding with a built-in node.
+    pub builtin_rejected: Vec<String>,
+    /// `type_id`s claimed by more than one plugin file; the last one loaded won.
+    pub plugin_collisions: Vec<String>,
+}
+
 /// Load all WASM plugins from `plugin_dir` and register them in `registry`.
 ///
 /// Constructs a [`PluginLoader`] (and a Wasmtime engine) internally.
@@ -866,8 +1990,8 @@ fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
 /// whose `type_id` collides with a built-in is rejected rather than silently replacing it.
 ///
 /// If the Wasmtime engine fails to initialise, an error is logged and the function
-/// returns without registering any plugins — the process continues normally.
-pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
+/// returns an empty report without registering any plugins — the process continues normally.
+pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) -> PluginLoadReport {
     // Seal the built-in namespace before loading any plugins so that a plugin
     // cannot shadow a built-in node type (e.g. "http_request", "shell_exec").
     registry.seal_builtins();
@@ -894,32 +2018,45 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) {
                 "plugin_loader: failed to initialise Wasmtime engine: {}",
                 e
             );
-            return;
+            return PluginLoadReport::default();
         }
     };
 
     let nodes = loader.load_plugins_from_dir(plugin_dir);
-    let mut loaded = 0usize;
-    let mut rejected = 0usize;
+    let mut report = PluginLoadReport::default();
+    // register_plugin already emits a WARN log for both branches below.
     for node in nodes {
+        let id = node.type_id().to_string();
         match registry.register_plugin(node) {
-            Ok(()) => loaded += 1,
-            Err(_) => rejected += 1,   // warning already emitted inside register_plugin
+            Ok(true) => report.loaded.push(id),
+            Ok(false) => {
+                report.loaded.push(id.clone());
+                report.plugin_collisions.push(id);
+            }
+            Err(_) => report.builtin_rejected.push(id),
         }
     }
 
-    if rejected > 0 {
+    if !report.plugin_collisions.is_empty() {
+        tracing::warn!(
+            "plugin_loader: {} plugin node(s) had a type_id collision with another plugin (last-loaded wins) from {}",
+            report.plugin_collisions.len(),
+            plugin_dir.display()
+        );
+    }
+    if !report.builtin_rejected.is_empty() {
         tracing::warn!(
             "plugin_loader: {} plugin node(s) rejected (built-in type_id collision) from {}",
-            rejected,
+            report.builtin_rejected.len(),
             plugin_dir.display()
         );
     }
     tracing::info!(
         "plugin_loader: loaded {} plugin node(s) from {}",
-        loaded,
+        report.loaded.len(),
         plugin_dir.display()
     );
+    report
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

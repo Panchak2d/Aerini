@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use aerini_engine::{
     db::WorkflowDb,
-    node::NodeRegistry,
+    node::{NodeRegistry, Reloadable},
     nodes::register_builtins,
     nodes::database::start_pool_eviction_task,
-    plugin_loader::load_plugins,
+    plugin_loader::{load_plugins, PluginLoadReport},
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
     EventSink,
@@ -438,14 +438,15 @@ async fn pick_folder_dialog(app: tauri::AppHandle) -> Option<String> {
     }
 }
 
-/// Open a native file picker dialog filtered to `.wasm` files and return the
-/// chosen path. Returns null (None → JS null) when the user cancels.
+/// Open a native file picker dialog filtered to `.wasm` and `.aerinipkg`
+/// files and return the chosen path. Returns null (None → JS null) when the
+/// user cancels.
 #[tauri::command]
-async fn pick_wasm_file_dialog(app: tauri::AppHandle) -> Option<String> {
+async fn pick_plugin_file_dialog(app: tauri::AppHandle) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<tauri_plugin_dialog::FilePath>>();
     app.dialog()
         .file()
-        .add_filter("WASM Plugin", &["wasm"])
+        .add_filter("Aerini Plugin", &["wasm", "aerinipkg"])
         .pick_file(move |path| { let _ = tx.send(path); });
     match rx.await {
         Ok(Some(path)) => path.as_path().map(|p| p.display().to_string()),
@@ -455,11 +456,11 @@ async fn pick_wasm_file_dialog(app: tauri::AppHandle) -> Option<String> {
 
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
-/// G9: strips `/`, `\`, and `..` from the filename before constructing the path.
+/// Strips `/`, `\`, and `..` from the filename before constructing the path.
 /// The file is written to `{temp_dir}/aerini_media/{safe_filename}`.
 #[tauri::command]
 async fn write_temp_file(filename: String, data: String) -> Result<String, String> {
-    // G9: path traversal protection — strip separators and collapse ".."
+    // Path traversal protection — strip separators and collapse ".."
     let safe_name: String = filename
         .chars()
         .filter(|c| *c != '/' && *c != '\\')
@@ -496,7 +497,7 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
     Ok(path.display().to_string())
 }
 
-/// G5: Delete files in `{temp_dir}/aerini_media/` that are older than 24 hours.
+/// Delete files in `{temp_dir}/aerini_media/` that are older than 24 hours.
 /// Must be called via spawn_blocking — uses std::fs which is synchronous.
 fn cleanup_old_temp_files(dir: &std::path::Path) {
     let cutoff = std::time::SystemTime::now()
@@ -552,15 +553,16 @@ pub fn run() {
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
             start_pool_eviction_task(tauri::async_runtime::handle().inner());
+            let mut plugin_load_report = PluginLoadReport::default();
             if let Some(dir_str) = db.get_setting("plugin_dir").unwrap_or(None) {
                 let dir = std::path::PathBuf::from(&dir_str);
                 if !dir.exists() {
                     tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
                 } else {
-                    load_plugins(&mut registry, &dir);
+                    plugin_load_report = load_plugins(&mut registry, &dir);
                 }
             }
-            let registry = Arc::new(registry);
+            let registry = Arc::new(Reloadable::new(registry));
 
             let resolver = Arc::new(StoreCredentialResolver { store: Arc::clone(&cred_store) });
 
@@ -580,7 +582,7 @@ pub fn run() {
                 Arc::clone(&event_sink),
             )
             .with_parallel_execution(parallel_execution)
-            // T4: desktop is single-tenant by definition — the
+            // Desktop is single-tenant by definition — the
             // person who configured this schedule is the same person whose
             // machine runs it, same trust level as their own manual runs
             // (see commands/workflow.rs::run_workflow's identical grant).
@@ -600,9 +602,11 @@ pub fn run() {
             app.manage(Arc::clone(&daemon));
             app.manage(Arc::clone(&event_sink));
             app.manage(Arc::new(ActiveRunToken::new()));
+            app.manage(Arc::new(Reloadable::new(plugin_load_report)));
+            app.manage(Arc::new(tokio::sync::Mutex::new(())));
 
-            // G5: async startup cleanup of temp media files older than 24h
-            // spawn_blocking so the std::fs directory scan doesn't occupy a tokio thread
+            // Async startup cleanup of temp media files older than 24h —
+            // spawn_blocking so the std::fs directory scan doesn't occupy a tokio thread.
             let temp_media_dir = std::env::temp_dir().join("aerini_media");
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || {
@@ -790,6 +794,9 @@ pub fn run() {
             commands::plugins::list_installed_plugins,
             commands::plugins::install_plugin_from_path,
             commands::plugins::remove_plugin,
+            commands::plugins::install_plugin_pack_from_path,
+            commands::plugins::remove_plugin_pack,
+            commands::plugins::reload_plugins,
             commands::memory::get_memory_breakdown,
             commands::memory::get_process_memory,
             commands::performance::get_live_performance,
@@ -800,7 +807,7 @@ pub fn run() {
             commands::performance::clear_performance_reports,
             commands::update::check_for_update,
             pick_folder_dialog,
-            pick_wasm_file_dialog,
+            pick_plugin_file_dialog,
             write_temp_file,
         ])
         .run(tauri::generate_context!())

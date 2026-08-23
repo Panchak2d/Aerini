@@ -3,7 +3,8 @@
 use aerini_engine::{
     db::WorkflowDb,
     executor::WorkflowExecutor,
-    node::NodeRegistry,
+    node::{NodeRegistry, Reloadable},
+    plugin_loader::PluginLoadReport,
     scheduler::SchedulerDaemon,
     store::CredentialStore,
 };
@@ -22,7 +23,20 @@ pub struct ApiState {
     pub db:               Arc<WorkflowDb>,
     pub scheduler:        Arc<SchedulerDaemon>,
     pub creds:            Arc<CredentialStore>,
-    pub registry:         Arc<NodeRegistry>,
+    pub registry:         Arc<Reloadable<NodeRegistry>>,
+    /// Held for the full scan+compile+swap sequence of a `/plugins/reload`
+    /// request, so two reloads that finish out of order (e.g. a slower
+    /// install started before a faster one) can't have the earlier-started,
+    /// later-finishing one clobber the newer registry with stale data. The
+    /// swap inside `Reloadable::reload` itself is already atomic; this lock
+    /// orders *whole reloads* against each other, which the swap alone
+    /// doesn't guarantee.
+    pub reload_lock:      Arc<tokio::sync::Mutex<()>>,
+    /// Snapshot of the most recent plugin load — startup, or the last
+    /// `/api/plugins/reload` call, whichever happened later.
+    pub last_load_report: Arc<tokio::sync::RwLock<PluginLoadReport>>,
+    pub data_dir:         Arc<std::path::PathBuf>,
+    pub plugin_dir:       Option<Arc<std::path::PathBuf>>,
     pub sse_tx:           broadcast::Sender<String>,
     pub token_store:      Arc<TokenStore>,
     pub exec_locks:       Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,

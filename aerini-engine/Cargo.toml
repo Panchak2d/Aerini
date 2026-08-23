@@ -135,8 +135,13 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # WASM plugin system
 # component-model feature only — component-model-async is NOT enabled (sync WIT interface).
 # wasmtime-wasi-http adds wasi:http/outgoing-handler support.
+#
+# `wasmtime-wasi`'s "p3" feature gates `wasmtime_wasi::p3` (WASI 0.3 /
+# component-model-async), used only by the second, dedicated async Engine
+# that hosts trigger-plugin components (`aerini-node-with-trigger` world).
+# The default (p2, sync) plugin engine is unaffected by this feature.
 wasmtime           = { version = "46.0.1", features = ["component-model"] }
-wasmtime-wasi      = "46.0.1"
+wasmtime-wasi      = { version = "46.0.1", features = ["p3"] }
 wasmtime-wasi-http = { version = "46.0.1", features = ["p2"] }
 
 # Security: pin rustls-webpki to patched version (RUSTSEC-2026-0098, -0099, -0104).

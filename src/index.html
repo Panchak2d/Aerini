@@ -100,6 +100,17 @@
                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
             </button>
+            <button class="zone-action-btn" id="btn-wf-add-collection" title="New collection" aria-label="New collection">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7a1 1 0 0 1 1-1h4.5l1.5 2H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/>
+                <line x1="12" y1="12.5" x2="12" y2="17.5"/><line x1="9.5" y1="15" x2="14.5" y2="15"/>
+              </svg>
+            </button>
+            <button class="zone-action-btn" id="btn-wf-select-mode" title="Select multiple" aria-label="Select multiple workflows" aria-pressed="false">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12.5 2.2 2.2L16 9.5"/>
+              </svg>
+            </button>
             <button class="zone-action-btn" id="btn-wf-search-toggle" title="Search workflows" aria-label="Search workflows" aria-expanded="false">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
             </button>
@@ -110,6 +121,22 @@
         </div>
         <div class="zone-search hidden" id="wf-search-bar">
           <input id="wf-search" type="text" placeholder="Filter workflows…" aria-label="Filter workflows" autocomplete="off" spellcheck="false" />
+        </div>
+        <button class="workflow-bgruns-pill hidden" id="wf-bgruns-pill" type="button">
+          <span class="workflow-bgruns-pill-dot"></span>
+          <span class="workflow-bgruns-pill-label" id="wf-bgruns-pill-label"></span>
+          <span class="workflow-bgruns-pill-go">View →</span>
+        </button>
+        <div class="workflow-bulk-bar hidden" id="wf-bulk-bar">
+          <div class="workflow-bulk-bar-row">
+            <span id="wf-bulk-count">0 selected</span>
+            <button class="workflow-bulk-clear" id="wf-bulk-clear" type="button">Clear</button>
+          </div>
+          <div class="workflow-bulk-actions">
+            <button id="wf-bulk-move" type="button">Move to ▾</button>
+            <button id="wf-bulk-duplicate" type="button">Duplicate</button>
+            <button class="danger" id="wf-bulk-delete" type="button">Delete</button>
+          </div>
         </div>
         <div id="workflow-list" class="workflow-scroll"></div>
 
@@ -158,7 +185,10 @@
           </div>
           <div class="settings-row">
             <div class="settings-label">Installed plugins</div>
-            <button id="btn-install-plugin" class="btn-sm" disabled>Install .wasm</button>
+            <div class="settings-row-actions">
+              <button id="btn-install-plugin" class="btn-sm" disabled>Install .wasm</button>
+              <button id="btn-reload-plugins" class="btn-sm" disabled>Reload Plugins</button>
+            </div>
           </div>
           <div id="plugin-list" class="plugin-list-container"></div>
         </div>

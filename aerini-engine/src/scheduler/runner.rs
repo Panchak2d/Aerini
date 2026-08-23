@@ -9,8 +9,9 @@ use tokio::sync::Semaphore;
 
 use crate::executor::{CredentialResolver, WorkflowExecutor};
 use crate::model::Workflow;
-use crate::node::NodeRegistry;
+use crate::node::{NodeRegistry, Reloadable};
 use crate::cron::next_cron_delay_secs;
+use crate::plugin_loader::PluginLoader;
 use crate::EventSink;
 
 use super::{ScheduledJobRow, SchedulerDb, SchedulerStatusEvent, TriggerKind};
@@ -108,7 +109,7 @@ pub(super) async fn run_job_loop(
     workflow_id:      String,
     trigger:          TriggerKind,
     db:               Arc<dyn SchedulerDb>,
-    registry:         Arc<NodeRegistry>,
+    registry:         Arc<Reloadable<NodeRegistry>>,
     cred_store:       Arc<dyn CredentialResolver>,
     event_sink:       Arc<dyn EventSink>,
     exec_lock:        Arc<tokio::sync::Mutex<()>>,
@@ -124,6 +125,7 @@ pub(super) async fn run_job_loop(
     max_concurrent_nodes: usize,
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir: Option<Arc<std::path::PathBuf>>,
+    plugin_dir:       Option<Arc<std::path::PathBuf>>,
     run_semaphore:    Arc<Semaphore>,
     shutting_down:    Arc<AtomicBool>,
     active_runs:      Arc<AtomicUsize>,
@@ -133,7 +135,8 @@ pub(super) async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    let snapshot = registry.current();
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -151,7 +154,8 @@ pub(super) async fn run_job_loop(
                 if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    let snapshot = registry.current();
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -162,7 +166,8 @@ pub(super) async fn run_job_loop(
             if fire_immediately {
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    let snapshot = registry.current();
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -189,7 +194,8 @@ pub(super) async fn run_job_loop(
                 if shutting_down.load(Ordering::SeqCst) { break; }
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
-                    fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    let snapshot = registry.current();
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -216,7 +222,8 @@ pub(super) async fn run_job_loop(
             }
             {
                 let _permit = run_semaphore.acquire().await;
-                fire_once(&workflow_id, &db, &registry, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                let snapshot = registry.current();
+                fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
             }
             scheduler_set_status_async(&db, &workflow_id, "done").await;
             emit_done_async(&event_sink, &db, &workflow_id).await;
@@ -299,7 +306,9 @@ pub(super) async fn run_job_loop(
                 let method           = method.clone();
                 let secret           = secret.clone();
                 let db               = Arc::clone(&db);
-                let registry         = Arc::clone(&registry);
+                // Resolved fresh per connection (not once per job-arm) so a
+                // reload is visible to the very next inbound webhook call.
+                let registry         = registry.current();
                 let cred_store       = Arc::clone(&cred_store);
                 let event_sink       = Arc::clone(&event_sink);
                 let exec_lock        = Arc::clone(&exec_lock);
@@ -402,6 +411,110 @@ pub(super) async fn run_job_loop(
                     emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
                 });
                 conn_tasks.push(handle);
+            }
+        }
+
+        TriggerKind::Plugin { type_id, config } => {
+            let Some(plugin_dir) = plugin_dir.clone() else {
+                let msg = format!(
+                    "Plugin trigger \"{}\": no plugin directory is configured for this scheduler.",
+                    type_id
+                );
+                emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                scheduler_set_status_async(&db, &workflow_id, "error").await;
+                return;
+            };
+
+            emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
+
+            // Outer loop: (re)resolves and (re)starts a fresh plugin
+            // instance every time the inner drain loop below falls through
+            // -- whether that's the stream closing normally, a read error,
+            // or the instance never producing a usable stream in the first
+            // place. A short backoff between attempts avoids a busy-loop if
+            // the plugin is persistently failing to resolve or start.
+            loop {
+                if shutting_down.load(Ordering::SeqCst) { break; }
+
+                let loader = match PluginLoader::shared() {
+                    Ok(l)  => l,
+                    Err(e) => {
+                        emit_error_async(&event_sink, &db, &workflow_id, &e).await;
+                        scheduler_set_status_async(&db, &workflow_id, "error").await;
+                        break;
+                    }
+                };
+
+                let (handle, mut rx) = match loader.start_trigger(&plugin_dir, &type_id, &config).await {
+                    Ok(v)  => v,
+                    Err(e) => {
+                        let msg = format!("Plugin trigger \"{}\": {}", type_id, e);
+                        emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                        // Left running (not "error" status): a plugin can be
+                        // (re)installed after this job is already armed, so
+                        // a resolution failure retries rather than
+                        // permanently parking the job — matching Cron's own
+                        // "log and keep trying" handling of a bad
+                        // expression, not Webhook's "port bind failed, stop"
+                        // one.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        continue;
+                    }
+                };
+                // Ties the event-pump task's lifetime to this iteration: a
+                // hard abort of this job's own task (stop_job/stop_all) or
+                // simply falling out of the inner loop below both drop this
+                // guard, which stops the pump task. Nothing here needs the
+                // graceful `detach_all`-style exception `conn_tasks` has in
+                // the Webhook arm above -- unlike a webhook connection, a
+                // pump task is never itself an in-flight workflow run
+                // (`fire_once_with_vars`, below, still gets that handling,
+                // internally, regardless of trigger kind).
+                let _task_guard = AbortOnDropSingle(handle);
+
+                loop {
+                    if shutting_down.load(Ordering::SeqCst) { break; }
+
+                    match rx.recv().await {
+                        Some(Ok(data)) => {
+                            if shutting_down.load(Ordering::SeqCst) { break; }
+                            if let Ok(_guard) = exec_lock.try_lock() {
+                                let payload = plugin_event_to_vars(&data);
+                                let _permit = run_semaphore.acquire().await;
+                                // Resolved fresh per event (not once per job-arm) so a
+                                // reload is visible to the very next plugin trigger event,
+                                // matching the Webhook arm's own per-connection resolve.
+                                let registry_snapshot = registry.current();
+                                fire_once_with_vars(
+                                    &workflow_id, &db, &registry_snapshot, &cred_store, &event_sink, payload, &env_allowlist,
+                                    shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
+                                    server_max_duration_secs, &file_sandbox_dir, &active_runs,
+                                ).await;
+                            } else {
+                                log_skip(&event_sink, &workflow_id, "previous run still in progress");
+                            }
+                        }
+                        Some(Err(e)) => {
+                            let msg = format!("Plugin trigger \"{}\": {}", type_id, e);
+                            emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                            // The pump task always ends its own run right
+                            // after sending an Err (see
+                            // `PluginLoader::start_trigger`), so the next
+                            // `recv()` would just be `None` regardless —
+                            // break now instead of spending an extra
+                            // iteration finding that out.
+                            break;
+                        }
+                        // Guest closed the stream, or the pump task ended
+                        // for any other reason (e.g. it traps) without
+                        // sending an explicit Err.
+                        None => break,
+                    }
+                }
+
+                drop(_task_guard);
+                if shutting_down.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }
 
@@ -922,6 +1035,21 @@ fn log_skip(event_sink: &Arc<dyn EventSink>, workflow_id: &str, reason: &str) {
     }));
 }
 
+/// Converts a plugin trigger's `trigger-event.data` (an opaque JSON string,
+/// per `wit/node.wit`) into the `vars` map `fire_once_with_vars` expects. A
+/// JSON object's own top-level keys become the run's vars directly —
+/// matching Webhook's own structured payload. Anything else (a bare string,
+/// number, array, or invalid JSON) is wrapped under a single `"data"` key,
+/// so the resulting shape is predictable regardless of what the plugin
+/// sends.
+fn plugin_event_to_vars(data: &str) -> std::collections::HashMap<String, Value> {
+    match serde_json::from_str::<Value>(data) {
+        Ok(Value::Object(map)) => map.into_iter().collect(),
+        Ok(other) => std::iter::once(("data".to_string(), other)).collect(),
+        Err(_) => std::iter::once(("data".to_string(), Value::String(data.to_string()))).collect(),
+    }
+}
+
 /// Reads a single line (through the trailing `\n`, if present) from `reader`,
 /// enforcing `max_len` as a hard cap on bytes consumed *while reading* rather
 /// than only checking the result afterward — unlike `AsyncBufReadExt::
@@ -1085,18 +1213,17 @@ async fn parse_http_request(
     Ok(vars)
 }
 
-/// Live reproduction test for the webhook trigger re-execution bug 
-/// it drives `SchedulerDaemon::start_job` for real — the same call path used by both
+/// Integration test for the webhook trigger's full lifecycle: drives
+/// `SchedulerDaemon::start_job` for real — the same call path used by both
 /// `src-tauri/src/commands/scheduler.rs::start_scheduled_workflow` and
 /// `aerini-server` — binds a real `TcpListener`, fires a real HTTP POST at
-/// it, and asserts the workflow actually completes instead of failing on
-/// the pre-patch PORT_IN_USE bug.
+/// it, and asserts the workflow completes and the port is claimed cleanly.
 #[cfg(test)]
 mod integration_tests {
     use crate::db::WorkflowDb;
     use crate::executor::CredentialResolver;
     use crate::model::{NodeType, Workflow, WorkflowEdge, WorkflowNode};
-    use crate::node::NodeRegistry;
+    use crate::node::{NodeRegistry, Reloadable};
     use crate::nodes::register_builtins;
     use crate::scheduler::{SchedulerDaemon, SchedulerDb};
     use crate::EventSink;
@@ -1231,7 +1358,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );
@@ -1344,7 +1471,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );
@@ -1437,7 +1564,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );
@@ -1609,7 +1736,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         ).with_caller_is_admin(true);
@@ -1650,7 +1777,7 @@ mod integration_tests {
         // same as every aerini-server SchedulerDaemon::new call site.
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );
@@ -1769,7 +1896,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );
@@ -1838,7 +1965,7 @@ mod integration_tests {
         let sink = CapturingSink::default();
         let daemon = SchedulerDaemon::new(
             db,
-            Arc::new(registry),
+            Arc::new(Reloadable::new(registry)),
             Arc::new(NoopCredentials),
             Arc::new(sink.clone()),
         );

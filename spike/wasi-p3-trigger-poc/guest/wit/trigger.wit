@@ -1,0 +1,19 @@
+package aerini:spike-trigger@0.1.0;
+
+interface types {
+    record event {
+        seq: u32,
+        message: string,
+        emitted-at-ns: u64,
+    }
+}
+
+interface trigger {
+    use types.{event};
+
+    events: async func() -> stream<event>;
+}
+
+world spike-trigger {
+    export trigger;
+}

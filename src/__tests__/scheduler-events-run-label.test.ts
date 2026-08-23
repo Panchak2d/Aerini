@@ -61,7 +61,7 @@ function canvasWithTrigger(nodeTypeId: string): Canvas {
 }
 
 async function bind(canvas: Canvas, runManager: Partial<RunManager> = {}) {
-  const wfManager = { currentId: "wf-1" } as unknown as WorkflowManager;
+  const wfManager = { currentId: "wf-1", refreshWorkflowList: vi.fn() } as unknown as WorkflowManager;
   await bindSchedulerEvents(
     canvas, wfManager, runManager as unknown as RunManager,
     vi.fn(), vi.fn(), vi.fn(), vi.fn(),

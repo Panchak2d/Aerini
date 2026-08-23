@@ -2,8 +2,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { showImportPreview } from "./modal-manager";
 import { isTauri } from "./utils";
-import { getSetting, installPluginFromPath } from "./ipc/workflow";
-import { showRestartBanner } from "./plugin-settings";
+import { getSetting } from "./ipc/workflow";
+import { installPluginOrPackWithUpdatePrompt } from "./plugin-settings";
 import { showConfirm } from "./confirm";
 
 type ToastFn = (msg: string, type: "success" | "error" | "info") => void;
@@ -25,11 +25,12 @@ export function bindDropImport(toast: ToastFn): void {
     e.preventDefault(); dragCounter = 0; overlay.classList.remove("active");
     const file = e.dataTransfer?.files[0];
     if (!file) return;
-    if (file.name.toLowerCase().endsWith(".wasm")) {
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith(".wasm") || lowerName.endsWith(".aerinipkg")) {
       // Reading arbitrary file paths from a DOM File object is browser-sandboxed,
-      // so .wasm installs from DOM drag are not supported here — the Tauri
+      // so plugin installs from DOM drag are not supported here — the Tauri
       // native drop path (below) handles the actual install.
-      toast("To install a plugin, use the Install .wasm button in Settings → Plugins.", "info");
+      toast("To install a plugin, use the Install button in Settings → Plugins.", "info");
       return;
     }
     readAndPreviewFile(file, toast);
@@ -53,9 +54,12 @@ export function bindDropImport(toast: ToastFn): void {
         const paths = (event.payload as { type: string; paths: string[] }).paths;
         if (!paths?.length) return;
 
-        const wasmPath = paths.find(p => p.toLowerCase().endsWith(".wasm"));
-        if (wasmPath) {
-          handleWasmDrop(wasmPath, toast);
+        const pluginPath = paths.find(p => {
+          const lower = p.toLowerCase();
+          return lower.endsWith(".wasm") || lower.endsWith(".aerinipkg");
+        });
+        if (pluginPath) {
+          handlePluginDrop(pluginPath, toast);
           return;
         }
 
@@ -95,7 +99,7 @@ export function bindFileInput(toast: ToastFn): void {
   });
 }
 
-export async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<void> {
+export async function handlePluginDrop(srcPath: string, toast: ToastFn): Promise<void> {
   let pluginDir: string | null = null;
   try {
     pluginDir = await getSetting("plugin_dir");
@@ -106,11 +110,10 @@ export async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<v
     toast("Set a plugin directory in Settings → Plugins first.", "info");
     return;
   }
-  // the .aerini/.json drop path already gates on
-  // showImportPreview before anything happens; a dropped .wasm plugin
-  // previously installed with zero confirmation despite running with the
-  // same trust-sensitive capabilities (S5/S8's SSRF-bypass trust
-  // boundary). Match the friction level here.
+  // A dropped plugin (single .wasm or .aerinipkg pack) runs with the same
+  // trust-sensitive capabilities (SSRF-bypass-relevant network access) as an
+  // imported workflow — gate it with the same confirmation friction as the
+  // .aerini/.json drop path below.
   const fileName = srcPath.split(/[\\/]/).pop() ?? srcPath;
   const ok = await showConfirm(
     `Install plugin "${fileName}"? Only install plugins from sources you trust.`,
@@ -118,13 +121,7 @@ export async function handleWasmDrop(srcPath: string, toast: ToastFn): Promise<v
     "Install",
   );
   if (!ok) return;
-  try {
-    await installPluginFromPath(srcPath, pluginDir);
-    toast("Plugin installed. Restart to activate.", "success");
-    showRestartBanner();
-  } catch (e) {
-    toast(`Plugin install failed: ${e}`, "error");
-  }
+  await installPluginOrPackWithUpdatePrompt(srcPath, pluginDir, toast);
 }
 
 function readAndPreviewFile(file: File, toast: ToastFn): void {

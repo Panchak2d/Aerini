@@ -8,7 +8,7 @@ use aerini_engine::{
     error::EngineError,
     executor::{CredentialResolver, WorkflowExecutor, WorkflowResult},
     model::{ExecutionContext, NodeInput, Workflow},
-    node::{NodeDescriptor, NodeRegistry},
+    node::{NodeDescriptor, NodeRegistry, Reloadable},
     scheduler::SchedulerDaemon,
     EventSink,
 };
@@ -221,7 +221,7 @@ pub async fn run_workflow(
     workflow_json:      String,
     initial_variables:  HashMap<String, Value>,
     run_id:             Option<String>,
-    registry:           tauri::State<'_, Arc<NodeRegistry>>,
+    registry:           tauri::State<'_, Arc<Reloadable<NodeRegistry>>>,
     cred_resolver:      tauri::State<'_, Arc<dyn CredentialResolver>>,
     event_sink:         tauri::State<'_, Arc<dyn EventSink>>,
     active_run:         tauri::State<'_, Arc<crate::ActiveRunToken>>,
@@ -270,7 +270,7 @@ pub async fn run_workflow(
     active_run.register(&run_id, token.clone());
 
     let executor = WorkflowExecutor::new(
-        Arc::clone(&*registry),
+        registry.current(),
         Arc::clone(&*cred_resolver),
     )
     .with_event_sink(Arc::clone(&*event_sink))
@@ -311,9 +311,9 @@ pub async fn run_workflow(
 
 #[tauri::command]
 pub async fn get_node_types(
-    registry: tauri::State<'_, Arc<NodeRegistry>>,
+    registry: tauri::State<'_, Arc<Reloadable<NodeRegistry>>>,
 ) -> Result<Vec<NodeDescriptor>, String> {
-    let mut descriptors = registry.all_descriptors();
+    let mut descriptors = registry.current().all_descriptors();
     descriptors.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     Ok(descriptors)
 }
@@ -353,9 +353,9 @@ pub async fn set_setting(
 #[tauri::command]
 pub async fn clear_chat_session(
     session_id: String,
-    registry:   tauri::State<'_, Arc<NodeRegistry>>,
+    registry:   tauri::State<'_, Arc<Reloadable<NodeRegistry>>>,
 ) -> Result<(), String> {
-    let node = registry.get("ai_memory")
+    let node = registry.current().get("ai_memory")
         .ok_or_else(|| "ai_memory node type is not registered".to_string())?;
 
     let input = NodeInput {

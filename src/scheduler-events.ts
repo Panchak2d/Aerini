@@ -123,6 +123,12 @@ export async function bindSchedulerEvents(
     }
 
     setWorkflowRunning(evt.workflow_id, evt.status === "running" || evt.status === "waiting");
+    // setWorkflowRunning only patches the dot on an already-rendered row; it
+    // doesn't add or remove the row itself. refreshWorkflowList re-applies
+    // its own isWorkflowRunning filter, so this is what actually keeps a
+    // scheduled/background workflow out of the list while running and
+    // brings it back the moment it stops.
+    wfManager.refreshWorkflowList();
 
     if ((evt.status === "waiting" || evt.status === "error") && evt.last_result) {
       try {

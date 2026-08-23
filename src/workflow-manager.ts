@@ -1,6 +1,7 @@
 import {
   listWorkflows, saveWorkflow, loadWorkflow, deleteWorkflow,
   saveVersion, listVersions, getVersion, deleteVersion as ipcDeleteVersion,
+  getSetting, setSetting,
   type WorkflowSummary, type VersionRow,
 } from "./ipc/workflow";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,13 +10,14 @@ import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import type { Connector } from "./canvas/Connector";
 import { isTauri } from "./utils";
+import { activateZone } from "./sidebar-sections";
 
 const LS_KEY = "aerini_workflows_v1";
 
-function lsSave(id: string, name: string, json: string, tags: string[]): void {
+function lsSave(id: string, name: string, json: string, tags: string[], collectionId: string | null = null): void {
   try {
     const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
-    all[id] = { id, name, json, updated_at: new Date().toISOString(), tags };
+    all[id] = { id, name, json, updated_at: new Date().toISOString(), tags, collection_id: collectionId };
     localStorage.setItem(LS_KEY, JSON.stringify(all));
   } catch (e) {
     console.error("Aerini: localStorage save failed", e);
@@ -32,6 +34,116 @@ function lsLoad(id: string): string | null {
 function lsDelete(id: string): void {
   try { const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}"); delete all[id]; localStorage.setItem(LS_KEY, JSON.stringify(all)); }
   catch {}
+}
+
+// -- Workflow Collections (named folders in the Workflows sidebar) --
+//
+// Collections themselves (id/name/color/order/collapsed) are metadata about
+// the sidebar, not about any one workflow, stored as a single JSON blob,
+// not a per-workflow field. Persisted via the generic settings key/value
+// store in both run modes: get/setSetting (Tauri, already-existing IPC) or
+// localStorage (browser), mirroring the get/set-style helpers already used
+// for the same purpose in sidebar-sections.ts.
+//
+// A workflow's *membership* (`collection_id`) is a per-workflow field,
+// separate from this blob; see WorkflowSummary.collection_id and
+// CanvasSerializer's metadata.collection_id.
+
+export type CollectionColor = "blue" | "green" | "purple" | "amber" | "red" | "slate";
+export const COLLECTION_COLORS: readonly CollectionColor[] = ["blue", "green", "purple", "amber", "red", "slate"];
+
+/** Maps a stored color name to an existing theme CSS variable, never a
+ *  literal hex, so a collection's color stays correct under both the dark
+ *  and paper themes. "slate" reuses --cat-trigger rather than a new token:
+ *  its dark-theme value (#8aa9c9) is exactly the neutral the brief asked
+ *  for, and it already exists for exactly this "muted category" purpose. */
+export function collectionColorVar(color: CollectionColor): string {
+  switch (color) {
+    case "blue":   return "var(--blue)";
+    case "green":  return "var(--green)";
+    case "purple": return "var(--purple)";
+    case "amber":  return "var(--amber)";
+    case "red":    return "var(--red)";
+    case "slate":  return "var(--cat-trigger)";
+  }
+}
+
+export interface CollectionDef {
+  id: string;
+  name: string;
+  color: CollectionColor;
+  order: number;
+  collapsed: boolean;
+}
+
+interface CollectionsBlob {
+  collections: CollectionDef[];
+  /** Uncategorized is a fixed bucket, not a CollectionDef; its collapsed
+   *  state is tracked separately rather than as a fake array entry, so it
+   *  can't be accidentally renamed, recolored, or deleted like a real one. */
+  uncategorizedCollapsed: boolean;
+}
+
+const LS_COLLECTIONS_KEY = "aerini_collections_v1";
+const SETTINGS_COLLECTIONS_KEY = "workflow_collections_v1";
+const DEFAULT_COLLECTIONS_BLOB: CollectionsBlob = { collections: [], uncategorizedCollapsed: false };
+
+function isCollectionsBlob(v: unknown): v is CollectionsBlob {
+  return !!v && typeof v === "object" && Array.isArray((v as CollectionsBlob).collections);
+}
+
+function parseCollectionsBlob(raw: string | null): CollectionsBlob {
+  if (!raw) return { ...DEFAULT_COLLECTIONS_BLOB };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isCollectionsBlob(parsed) ? parsed : { ...DEFAULT_COLLECTIONS_BLOB };
+  } catch {
+    return { ...DEFAULT_COLLECTIONS_BLOB };
+  }
+}
+
+/** Groups a workflow list into per-collection buckets, ordered by
+ *  CollectionDef.order, with the always-present Uncategorized bucket last.
+ *  Pure: no DOM, no storage, so the grouping logic is directly testable. */
+export function groupWorkflowsByCollection(
+  wfs: WorkflowSummary[],
+  collections: CollectionDef[],
+): Array<{ collection: CollectionDef | null; items: WorkflowSummary[] }> {
+  const ordered = [...collections].sort((a, b) => a.order - b.order);
+  const knownIds = new Set(ordered.map(c => c.id));
+  const groups: Array<{ collection: CollectionDef | null; items: WorkflowSummary[] }> = ordered.map(c => ({
+    collection: c,
+    items: wfs.filter(w => w.collection_id === c.id),
+  }));
+  // Uncategorized also catches an orphaned collection_id (points at a
+  // collection that no longer exists, e.g. deleted from another tab since
+  // this list was last loaded) so such a workflow is never silently dropped.
+  groups.push({ collection: null, items: wfs.filter(w => !w.collection_id || !knownIds.has(w.collection_id)) });
+  return groups;
+}
+
+/** Drops the Uncategorized bucket from a render pass when it has no
+ *  workflows, so an empty "Uncategorized" folder doesn't sit in the sidebar
+ *  as permanent clutter; it reappears the moment a workflow lands there.
+ *  Named collections still render empty (they're user-created, intentional,
+ *  and are a drop target), so only the null bucket is ever filtered here.
+ *  Pure: the data layer (groupWorkflowsByCollection) still always includes
+ *  Uncategorized; only this render-facing step hides the empty case. */
+export function visibleCollectionGroups(
+  groups: Array<{ collection: CollectionDef | null; items: WorkflowSummary[] }>,
+): Array<{ collection: CollectionDef | null; items: WorkflowSummary[] }> {
+  return groups.filter(g => g.collection !== null || g.items.length > 0);
+}
+
+/** Inclusive shift-click range over a flat, already-rendered id order.
+ *  Returns [] if either endpoint isn't present (e.g. it was filtered out
+ *  by search since the anchor was set) rather than guessing a range. */
+export function computeSelectionRange(orderedIds: string[], fromId: string, toId: string): string[] {
+  const a = orderedIds.indexOf(fromId);
+  const b = orderedIds.indexOf(toId);
+  if (a === -1 || b === -1) return [];
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  return orderedIds.slice(lo, hi + 1);
 }
 
 // Tracks which workflows are currently running so the sidebar shows a live dot.
@@ -58,10 +170,27 @@ export function setWorkflowRunning(id: string, running: boolean): void {
     }
     item.insertBefore(wrap, item.firstChild);
   }
+  updateRunningPill();
 }
 
 export function isWorkflowRunning(id: string): boolean {
   return _runningWorkflows.has(id);
+}
+
+/** Small cross-link pill shown under the Workflows toolbar when one or more
+ *  workflows are running in the background. Running workflows are excluded
+ *  from this list entirely (see refreshWorkflowList). Background Runs is
+ *  their one home (docs/background-runs.md), so this is the only in-panel
+ *  indicator that something is running, plus a one-click jump to it. */
+function updateRunningPill(): void {
+  const pill = document.getElementById("wf-bgruns-pill");
+  const label = document.getElementById("wf-bgruns-pill-label");
+  if (!pill || !label) return;
+  const n = _runningWorkflows.size;
+  pill.classList.toggle("hidden", n === 0);
+  if (n > 0) {
+    label.textContent = n === 1 ? "1 workflow running in background" : `${n} workflows running in background`;
+  }
 }
 
 export class WorkflowManager {
@@ -69,13 +198,35 @@ export class WorkflowManager {
   currentId   = `wf_${crypto.randomUUID()}`;
   currentName = "Untitled";
   currentTags: string[] = [];
+  /** Exclusive Workflows-sidebar collection membership. null = Uncategorized. */
+  currentCollectionId: string | null = null;
+  /** Collection folder definitions (id/name/color/order/collapsed), lazily
+   *  hydrated once by ensureCollectionsLoaded(), then kept in memory and
+   *  persisted on every mutation. */
+  collections: CollectionDef[] = [];
+  private collectionsLoaded    = false;
+  private uncategorizedCollapsed = false;
+  /** Multi-select state (Ctrl/Cmd+Click, Shift+Click, or explicit Select
+   *  mode). Session-only, intentionally not persisted, matching the
+   *  prototype and the app's other transient UI state (e.g. dropdowns). */
+  selectedIds = new Set<string>();
+  selectMode  = false;
+  private selectAnchorId: string | null = null;
+  /** Id of the collection currently showing its inline rename input: either
+   *  a freshly created, not-yet-named collection, or an existing one mid
+   *  rename via the "⋯" menu. */
+  private editingCollectionId: string | null = null;
+  /** Set by "+ New collection..." inside the bulk bar's Move-to menu; the
+   *  freshly created collection is auto-assigned the pending selection the
+   *  moment its name is committed. */
+  private pendingAssignAfterCreate: string | null = null;
   /** Per-workflow parallel execution setting. Serialised into workflow JSON. */
   parallelExecution   = false;
   maxConcurrentNodes  = 8;
   /** Desktop-only opt-out of the 24h manual-run ceiling. Serialised into workflow JSON. */
   unlimitedDuration   = false;
   /** Per-workflow Chat Panel feature toggles. Serialised into workflow JSON
-   *  under "settings.chat" — read by ChatPanel.applyToggles() on panel open. */
+   *  under "settings.chat"; read by ChatPanel.applyToggles() on panel open. */
   chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
   hasUnsaved  = false;
   private sortMode = "updated_desc";
@@ -85,7 +236,7 @@ export class WorkflowManager {
   private onTitleChange:   (n: string)  => void;
   private onStatusChange:  (m: string)  => void;
   private onToast:         (m: string, t: "success" | "error" | "info") => void;
-  // Async confirm function — replaces window.confirm which is suppressed in Tauri
+  // Async confirm function that replaces window.confirm, which is suppressed in Tauri
   private confirmFn:    (msg: string, isDanger?: boolean) => Promise<boolean>;
   private onPanelClose: (() => void) | null = null;
   onNavigate: (() => void) | null = null;
@@ -108,6 +259,14 @@ export class WorkflowManager {
     this.onToast         = callbacks.onToast;
     this.confirmFn       = callbacks.confirm;
     this.onPanelClose    = callbacks.onPanelClose ?? null;
+
+    document.getElementById("wf-bgruns-pill")?.addEventListener("click", () => activateZone("bgruns"));
+    this.bindBulkBar();
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (this.selectMode || this.selectedIds.size > 0) this.exitSelectMode();
+    });
   }
 
   markUnsaved(on: boolean): void {
@@ -119,11 +278,11 @@ export class WorkflowManager {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
     this.autoSaveTimer = setTimeout(async () => {
       if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
+      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
       if (isTauri()) {
         try { await saveWorkflow(json); } catch (e) { console.error("Aerini: autosave failed", e); }
       } else {
-        lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json, this.currentTags);
+        lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json, this.currentTags, this.currentCollectionId);
       }
     }, 30_000);
   }
@@ -133,12 +292,212 @@ export class WorkflowManager {
     this.refreshWorkflowList();
   }
 
+  // -- Collections: load/persist ------------------------------------------
+
+  private async ensureCollectionsLoaded(): Promise<void> {
+    if (this.collectionsLoaded) return;
+    this.collectionsLoaded = true; // set before the await, so a second concurrent
+    // refreshWorkflowList() call must not also start loading.
+    let blob = DEFAULT_COLLECTIONS_BLOB;
+    try {
+      if (isTauri()) {
+        const raw = await getSetting(SETTINGS_COLLECTIONS_KEY);
+        blob = parseCollectionsBlob(raw);
+      } else {
+        blob = parseCollectionsBlob(localStorage.getItem(LS_COLLECTIONS_KEY));
+      }
+    } catch (e) {
+      console.error("Aerini: loading collections failed, starting empty", e);
+    }
+    this.collections = blob.collections;
+    this.uncategorizedCollapsed = blob.uncategorizedCollapsed;
+  }
+
+  private async persistCollections(): Promise<void> {
+    const blob: CollectionsBlob = { collections: this.collections, uncategorizedCollapsed: this.uncategorizedCollapsed };
+    const json = JSON.stringify(blob);
+    try {
+      if (isTauri()) await setSetting(SETTINGS_COLLECTIONS_KEY, json);
+      else localStorage.setItem(LS_COLLECTIONS_KEY, json);
+    } catch (e) {
+      console.error("Aerini: saving collections failed", e);
+      this.onToast("Could not save collection changes", "error");
+    }
+  }
+
+  // -- Selection -------------------------------------------------------------
+
+  toggleSelectMode(): void {
+    this.selectMode = !this.selectMode;
+    if (!this.selectMode) { this.selectedIds.clear(); this.selectAnchorId = null; }
+    this.refreshWorkflowList();
+  }
+
+  exitSelectMode(): void {
+    this.selectMode = false;
+    this.selectedIds.clear();
+    this.selectAnchorId = null;
+    this.refreshWorkflowList();
+  }
+
+  /** Ctrl/Cmd+Click, a checkbox click, or any click while select mode is on. */
+  toggleSelected(id: string): void {
+    if (this.selectedIds.has(id)) this.selectedIds.delete(id);
+    else this.selectedIds.add(id);
+    this.selectAnchorId = id;
+    this.refreshWorkflowList();
+  }
+
+  /** Shift+Click: range-select from the last-clicked anchor. No-op (per
+   *  computeSelectionRange) if there's no anchor yet, matching the brief:
+   *  shift-click behaves like a plain toggle would with nothing to anchor on. */
+  selectRange(toId: string): void {
+    if (!this.selectAnchorId) { this.toggleSelected(toId); return; }
+    const list = document.getElementById("workflow-list");
+    const ids  = list ? Array.from(list.querySelectorAll<HTMLElement>(".workflow-item")).map(el => el.dataset.wfId!) : [];
+    for (const id of computeSelectionRange(ids, this.selectAnchorId, toId)) this.selectedIds.add(id);
+    this.refreshWorkflowList();
+  }
+
+  // -- Collection CRUD ---------------------------------------------------
+
+  async createCollection(): Promise<void> {
+    await this.ensureCollectionsLoaded();
+    const maxOrder = this.collections.reduce((m, c) => Math.max(m, c.order), -1);
+    const col: CollectionDef = { id: `col_${crypto.randomUUID()}`, name: "", color: "blue", order: maxOrder + 1, collapsed: false };
+    this.collections.unshift(col);
+    this.editingCollectionId = col.id;
+    await this.refreshWorkflowList();
+  }
+
+  /** Commits or discards a collection's inline name input (new or renaming).
+   *  Empty name on a not-yet-named (freshly created) collection discards it;
+   *  empty name on an existing collection reverts to its current name rather
+   *  than deleting the whole folder. */
+  async commitCollectionRename(id: string, value: string): Promise<void> {
+    const col = this.collections.find(c => c.id === id);
+    this.editingCollectionId = null;
+    if (!col) { await this.refreshWorkflowList(); return; }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      if (col.name === "") {
+        this.collections = this.collections.filter(c => c.id !== id);
+        if (this.pendingAssignAfterCreate === id) this.pendingAssignAfterCreate = null;
+        await this.persistCollections();
+        await this.refreshWorkflowList();
+        return;
+      }
+      // Existing collection, cleared to empty on rename; keep its old name.
+      await this.refreshWorkflowList();
+      return;
+    }
+    const wasNew = col.name === "";
+    col.name = trimmed;
+    await this.persistCollections();
+    if (wasNew && this.pendingAssignAfterCreate === id) {
+      const ids = Array.from(this.selectedIds);
+      this.pendingAssignAfterCreate = null;
+      await this.moveWorkflowsToCollection(ids, id);
+      return; // moveWorkflowsToCollection already refreshes and clears selection
+    }
+    this.onToast(wasNew ? `Created collection "${trimmed}"` : `Renamed to "${trimmed}"`, "success");
+    await this.refreshWorkflowList();
+  }
+
+  /** Escape while renaming: discard-if-new, otherwise just close the input. */
+  async cancelCollectionRename(id: string): Promise<void> {
+    const col = this.collections.find(c => c.id === id);
+    this.editingCollectionId = null;
+    if (col && col.name === "") {
+      this.collections = this.collections.filter(c => c.id !== id);
+      if (this.pendingAssignAfterCreate === id) this.pendingAssignAfterCreate = null;
+      await this.persistCollections();
+    }
+    await this.refreshWorkflowList();
+  }
+
+  startCollectionRename(id: string): void {
+    this.editingCollectionId = id;
+    this.refreshWorkflowList();
+  }
+
+  async setCollectionColor(id: string, color: CollectionColor): Promise<void> {
+    const col = this.collections.find(c => c.id === id);
+    if (!col) return;
+    col.color = color;
+    await this.persistCollections();
+    await this.refreshWorkflowList();
+  }
+
+  toggleCollectionCollapsed(id: string | null): void {
+    if (id === null) {
+      this.uncategorizedCollapsed = !this.uncategorizedCollapsed;
+    } else {
+      const col = this.collections.find(c => c.id === id);
+      if (!col) return;
+      col.collapsed = !col.collapsed;
+    }
+    this.persistCollections();
+    this.refreshWorkflowList();
+  }
+
+  /** Workflows inside move to Uncategorized; nothing is deleted (per the
+   *  brief's own confirm-modal copy, reproduced verbatim at the call site). */
+  async deleteCollection(id: string): Promise<void> {
+    const col = this.collections.find(c => c.id === id);
+    if (!col) return;
+    const ok = await this.confirmFn(`Delete "${col.name}"? Workflows inside move to Uncategorized, nothing is deleted.`, true);
+    if (!ok) return;
+    const wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
+    const memberIds = wfs.filter(w => w.collection_id === id).map(w => w.id);
+    this.collections = this.collections.filter(c => c.id !== id);
+    await this.persistCollections();
+    if (memberIds.length) await this.moveWorkflowsToCollection(memberIds, null);
+    this.onToast(`Deleted collection "${col.name}"`, "success");
+    await this.refreshWorkflowList();
+  }
+
+  /** Bulk/drag move: reassigns collection_id for each workflow. The
+   *  currently-open workflow is re-serialized from the live canvas (so an
+   *  in-progress unsaved edit to it isn't clobbered by its last-saved-on-disk
+ *  JSON); every other workflow is loaded, patched, and re-saved, the same
+   *  load→deserialize→mutate→serialize→save idiom duplicateWorkflow() already
+   *  uses elsewhere in this file. */
+  async moveWorkflowsToCollection(ids: string[], collectionId: string | null): Promise<void> {
+    for (const id of ids) {
+      try {
+        if (id === this.currentId) {
+          this.currentCollectionId = collectionId;
+          const json = this.getCurrentJson();
+          if (isTauri()) await saveWorkflow(json);
+          else lsSave(id, this.currentName, json, this.currentTags, collectionId);
+          continue;
+        }
+        const raw = isTauri() ? await loadWorkflow(id) : lsLoad(id);
+        if (!raw) continue;
+        const { name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(raw);
+        const json = serialize(id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId);
+        if (isTauri()) await saveWorkflow(json);
+        else lsSave(id, name, json, tags, collectionId);
+      } catch (e) {
+        console.error(`Aerini: failed to move workflow ${id} to a collection`, e);
+      }
+    }
+    const n = ids.length;
+    const destName = collectionId === null ? "Uncategorized" : (this.collections.find(c => c.id === collectionId)?.name ?? "Uncategorized");
+    if (n > 0) this.onToast(`Moved ${n} workflow${n > 1 ? "s" : ""} to "${destName}"`, "success");
+    this.selectedIds.clear();
+    await this.refreshWorkflowList();
+  }
+
   async refreshWorkflowList(): Promise<void> {
+    await this.ensureCollectionsLoaded();
     const list = document.getElementById("workflow-list")!;
     list.innerHTML = "";
+    list.classList.toggle("select-mode", this.selectMode);
     let wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
 
-    // Running workflows appear only in Background Runs — exclude from this list
+    // Running workflows appear only in Background Runs: exclude from this list
     wfs = wfs.filter(wf => !isWorkflowRunning(wf.id));
 
     wfs.sort((a, b) => {
@@ -157,6 +516,9 @@ export class WorkflowManager {
       wfBadge.classList.toggle("activity-badge--hidden", wfs.length === 0);
     }
 
+    updateRunningPill();
+    this.updateBulkBar();
+
     if (!wfs.length) {
       const empty = document.createElement("div");
       empty.className = "workflow-list-empty";
@@ -165,104 +527,458 @@ export class WorkflowManager {
       return;
     }
 
-    for (const wf of wfs) {
-      const item = document.createElement("div");
-      item.className = "workflow-item";
-      item.dataset.wfId = wf.id;
-      if (wf.id === this.currentId) item.classList.add("active");
+    // Any selected id that no longer exists in the current list (deleted by
+    // another path, or filtered out because it started running) shouldn't
+    // linger in the bulk bar's count.
+    const liveIds = new Set(wfs.map(w => w.id));
+    for (const id of this.selectedIds) if (!liveIds.has(id)) this.selectedIds.delete(id);
 
-      // Run state indicator dot
-      const runWrap = document.createElement("span");
-      runWrap.className = "workflow-item-run-state";
-      if (_runningWorkflows.has(wf.id)) {
-        item.classList.add("wf-is-running");
-        const dot = document.createElement("span");
-        dot.className = "wf-run-dot"; dot.title = "Running";
-        runWrap.appendChild(dot);
-      }
-      item.appendChild(runWrap);
+    for (const { collection, items } of visibleCollectionGroups(groupWorkflowsByCollection(wfs, this.collections))) {
+      list.appendChild(this.buildCollectionGroup(collection, items));
+    }
+    this.updateBulkBar();
+  }
 
-      const nameEl = document.createElement("span");
-      nameEl.className = "workflow-item-name";
-      nameEl.textContent = wf.name;
+  // -- Collection group (header + body) ------------------------------------
 
-      const tags = wf.tags ?? [];
-      item.dataset.wfTags = tags.join(" ").toLowerCase();
+  private buildCollectionGroup(collection: CollectionDef | null, items: WorkflowSummary[]): HTMLElement {
+    const isUncategorized = collection === null;
+    const collapsed = isUncategorized ? this.uncategorizedCollapsed : collection.collapsed;
+    const isEditing = !isUncategorized && this.editingCollectionId === collection.id;
 
-      const updatedAt = new Date(wf.updated_at);
-      const savedLabel = !isNaN(updatedAt.getTime())
-        ? `Last saved: ${updatedAt.toLocaleDateString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" })}`
-        : "";
-      item.title = tags.length ? `${savedLabel}${savedLabel ? " • " : ""}Tags: ${tags.join(", ")}` : savedLabel;
+    const wrap = document.createElement("div");
+    wrap.className = "workflow-collection-group" + (collapsed ? " collapsed" : "");
+    wrap.dataset.collectionId = collection?.id ?? "";
 
-      let tagsEl: HTMLElement | null = null;
-      if (tags.length) {
-        tagsEl = document.createElement("span");
-        tagsEl.className = "workflow-item-tags";
-        // Cap visible chips so a long tag list can't push the name out or
-        // overflow the row — the full list is still in item.title above.
-        const shown = tags.slice(0, 2);
-        for (const t of shown) {
-          const chip = document.createElement("span");
-          chip.className = "workflow-item-tag";
-          chip.textContent = t;
-          tagsEl.appendChild(chip);
+    const header = document.createElement("div");
+    header.className = "workflow-collection-header";
+    header.setAttribute("role", "button");
+    header.tabIndex = 0;
+    header.setAttribute("aria-expanded", String(!collapsed));
+
+    const chev = document.createElement("span");
+    chev.className = "workflow-collection-chev";
+    chev.textContent = "▾";
+    header.appendChild(chev);
+
+    const dot = document.createElement("span");
+    dot.className = "workflow-collection-dot";
+    dot.style.background = collectionColorVar(collection?.color ?? "slate");
+    if (isUncategorized) {
+      dot.classList.add("workflow-collection-dot-muted");
+    } else {
+      dot.title = "Change color";
+      dot.addEventListener("click", e => { e.stopPropagation(); this.openColorMenu(dot, collection.id); });
+    }
+    header.appendChild(dot);
+
+    if (isEditing) {
+      const inp = document.createElement("input");
+      inp.className = "workflow-collection-rename-input";
+      inp.value = collection.name;
+      inp.placeholder = "Collection name";
+      inp.autocomplete = "off";
+      header.appendChild(inp);
+      setTimeout(() => { inp.focus(); inp.select(); }, 0);
+
+      let settled = false;
+      inp.addEventListener("blur", () => {
+        if (settled) return;
+        settled = true;
+        this.commitCollectionRename(collection.id, inp.value);
+      });
+      inp.addEventListener("keydown", e => {
+        if (e.key === "Enter") { inp.blur(); }
+        if (e.key === "Escape") {
+          settled = true;
+          this.cancelCollectionRename(collection.id);
         }
-        if (tags.length > shown.length) {
-          const more = document.createElement("span");
-          more.className = "workflow-item-tag workflow-item-tag-more";
-          more.textContent = `+${tags.length - shown.length}`;
-          tagsEl.appendChild(more);
-        }
+      });
+      // The input sits inside the header; without this, blur-then-click-elsewhere
+      // would also fire the header's own collapse-toggle click handler below.
+      header.addEventListener("click", e => e.stopPropagation());
+    } else {
+      const name = document.createElement("span");
+      name.className = "workflow-collection-name" + (isUncategorized ? " workflow-collection-name-muted" : "");
+      name.textContent = collection?.name ?? "Uncategorized";
+      name.title = isUncategorized ? "Uncategorized" : "Double-click to rename";
+      if (!isUncategorized) {
+        name.addEventListener("dblclick", e => { e.stopPropagation(); this.startCollectionRename(collection.id); });
+      }
+      header.appendChild(name);
+
+      const count = document.createElement("span");
+      count.className = "workflow-collection-count";
+      count.textContent = String(items.length);
+      header.appendChild(count);
+
+      if (!isUncategorized) {
+        const newBtn = document.createElement("button");
+        newBtn.className = "zone-action-btn workflow-collection-new-btn";
+        newBtn.title = `New workflow in ${collection.name}`;
+        newBtn.setAttribute("aria-label", `New workflow in ${collection.name}`);
+        newBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+        newBtn.addEventListener("click", e => { e.stopPropagation(); this.handleNew(collection.id); });
+        header.appendChild(newBtn);
+
+        const menuBtn = document.createElement("button");
+        menuBtn.className = "zone-action-btn workflow-collection-menu-btn";
+        menuBtn.title = "Collection options";
+        menuBtn.setAttribute("aria-label", `Options for ${collection.name}`);
+        menuBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>`;
+        menuBtn.addEventListener("click", e => { e.stopPropagation(); this.openCollectionMenu(menuBtn, collection.id); });
+        header.appendChild(menuBtn);
       }
 
-      const delBtn = document.createElement("button");
-      delBtn.className = "workflow-item-del";
-      delBtn.textContent = "✕";
-      delBtn.title = "Delete workflow";
-      delBtn.addEventListener("click", async e => {
-        e.stopPropagation();
-        // Block deletion while the workflow is actively running in the background
-        if (isWorkflowRunning(wf.id)) {
-          this.onToast(
-            `"${wf.name}" is currently running in the background. Stop it before deleting.`,
-            "error"
-          );
+      const toggle = () => this.toggleCollectionCollapsed(collection?.id ?? null);
+      header.addEventListener("click", toggle);
+      header.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    }
+
+    wrap.appendChild(header);
+
+    if (!collapsed) {
+      const body = document.createElement("div");
+      body.className = "workflow-collection-body";
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "workflow-collection-empty";
+        empty.textContent = isUncategorized ? "No uncategorized workflows" : "Drag workflows here, or use \u201cMove to\u201d";
+        body.appendChild(empty);
+      } else {
+        for (const wf of items) body.appendChild(this.buildWorkflowItem(wf));
+      }
+      wrap.appendChild(body);
+    }
+
+    // Drop target: the whole group (header + collapsed-or-not) accepts drops,
+    // per the brief: drop target is the entire collection group.
+    wrap.addEventListener("dragover", e => { e.preventDefault(); wrap.classList.add("drop-target"); });
+    wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-target"));
+    wrap.addEventListener("drop", e => {
+      e.preventDefault();
+      wrap.classList.remove("drop-target");
+      let ids: string[] = [];
+      try { ids = JSON.parse(e.dataTransfer?.getData("text/plain") || "[]"); } catch { /* ignore malformed payload */ }
+      if (Array.isArray(ids) && ids.length) this.moveWorkflowsToCollection(ids, collection?.id ?? null);
+    });
+
+    return wrap;
+  }
+
+  private buildWorkflowItem(wf: WorkflowSummary): HTMLElement {
+    const item = document.createElement("div");
+    const selected = this.selectedIds.has(wf.id);
+    item.className = "workflow-item" + (selected ? " selected" : "");
+    item.dataset.wfId = wf.id;
+    item.draggable = true;
+    if (wf.id === this.currentId) item.classList.add("active");
+
+    // Run state indicator dot. wf is never running here (filtered above in
+    // refreshWorkflowList), so the wrapper starts empty; setWorkflowRunning()
+    // patches it live via [data-wf-id] if this workflow starts running before
+    // the next full refresh removes it from this list.
+    const runWrap = document.createElement("span");
+    runWrap.className = "workflow-item-run-state";
+    item.appendChild(runWrap);
+
+    const handle = document.createElement("span");
+    handle.className = "workflow-item-drag-handle";
+    handle.textContent = "⠿";
+    item.appendChild(handle);
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "workflow-item-check";
+    check.checked = selected;
+    check.setAttribute("aria-label", `Select ${wf.name}`);
+    check.addEventListener("click", e => { e.stopPropagation(); this.toggleSelected(wf.id); });
+    item.appendChild(check);
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "workflow-item-name";
+    nameEl.textContent = wf.name;
+
+    const tags = wf.tags ?? [];
+    item.dataset.wfTags = tags.join(" ").toLowerCase();
+
+    const updatedAt = new Date(wf.updated_at);
+    const savedLabel = !isNaN(updatedAt.getTime())
+      ? `Last saved: ${updatedAt.toLocaleDateString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" })}`
+      : "";
+    item.title = tags.length ? `${savedLabel}${savedLabel ? " • " : ""}Tags: ${tags.join(", ")}` : savedLabel;
+
+    let tagsEl: HTMLElement | null = null;
+    if (tags.length) {
+      tagsEl = document.createElement("span");
+      tagsEl.className = "workflow-item-tags";
+      // Cap visible chips so a long tag list can't push the name out or
+      // overflow the row; the full list is still in item.title above.
+      const shown = tags.slice(0, 2);
+      for (const t of shown) {
+        const chip = document.createElement("span");
+        chip.className = "workflow-item-tag";
+        chip.textContent = t;
+        tagsEl.appendChild(chip);
+      }
+      if (tags.length > shown.length) {
+        const more = document.createElement("span");
+        more.className = "workflow-item-tag workflow-item-tag-more";
+        more.textContent = `+${tags.length - shown.length}`;
+        tagsEl.appendChild(more);
+      }
+    }
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "workflow-item-del";
+    delBtn.textContent = "✕";
+    delBtn.title = "Delete workflow";
+    delBtn.addEventListener("click", async e => {
+      e.stopPropagation();
+      // Block deletion while the workflow is actively running in the background
+      if (isWorkflowRunning(wf.id)) {
+        this.onToast(
+          `"${wf.name}" is currently running in the background. Stop it before deleting.`,
+          "error"
+        );
+        return;
+      }
+      const ok = await this.confirmFn(`Delete "${wf.name}"? This cannot be undone.`, true);
+      if (!ok) return;
+      if (isTauri()) {
+        try {
+          await deleteWorkflow(wf.id);
+        } catch (err) {
+          this.onToast(`Delete failed: ${err}`, "error");
           return;
         }
-        const ok = await this.confirmFn(`Delete "${wf.name}"? This cannot be undone.`, true);
-        if (!ok) return;
-        if (isTauri()) {
-          try {
-            await deleteWorkflow(wf.id);
-          } catch (err) {
-            this.onToast(`Delete failed: ${err}`, "error");
-            return;
-          }
-        } else {
-          lsDelete(wf.id);
+      } else {
+        lsDelete(wf.id);
+      }
+      this.selectedIds.delete(wf.id);
+      if (wf.id === this.currentId) this.handleNew();
+      else await this.refreshWorkflowList();
+    });
+
+    item.appendChild(nameEl);
+    if (tagsEl) item.appendChild(tagsEl);
+
+    const dupBtn = document.createElement("button");
+    dupBtn.className = "workflow-item-dup";
+    dupBtn.title = "Duplicate workflow";
+    dupBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    dupBtn.addEventListener("click", async e => {
+      e.stopPropagation();
+      await this.duplicateWorkflow(wf.id, wf.name);
+    });
+
+    item.appendChild(dupBtn);
+    item.appendChild(delBtn);
+
+    item.addEventListener("click", (e: MouseEvent) => {
+      if (this.selectMode) { this.toggleSelected(wf.id); return; }
+      if (e.ctrlKey || e.metaKey) { this.toggleSelected(wf.id); return; }
+      if (e.shiftKey) { this.selectRange(wf.id); return; }
+      // Plain click, not in select mode: existing behavior is to open onto canvas.
+      this.handleLoad(wf.id);
+    });
+
+    item.addEventListener("dragstart", (e: DragEvent) => {
+      const ids = this.selectedIds.has(wf.id) && this.selectedIds.size > 1
+        ? Array.from(this.selectedIds)
+        : [wf.id];
+      e.dataTransfer?.setData("text/plain", JSON.stringify(ids));
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      item.classList.add("dragging");
+    });
+    item.addEventListener("dragend", () => item.classList.remove("dragging"));
+
+    return item;
+  }
+
+  // -- Bulk action bar ------------------------------------------------------
+
+  private updateBulkBar(): void {
+    const bar = document.getElementById("wf-bulk-bar");
+    const count = document.getElementById("wf-bulk-count");
+    if (!bar || !count) return;
+    const n = this.selectedIds.size;
+    bar.classList.toggle("hidden", n === 0);
+    if (n > 0) count.textContent = `${n} selected`;
+  }
+
+  /** One-time wiring for the bulk bar's static buttons (index.html), called
+   *  once from the constructor. Reads this.selectedIds live at click time, so
+   *  it never needs rebinding on refresh (unlike the per-item buttons, which
+   *  are rebuilt every render because they're one per row). */
+  private bindBulkBar(): void {
+    document.getElementById("wf-bulk-clear")?.addEventListener("click", () => this.exitSelectMode());
+
+    document.getElementById("wf-bulk-delete")?.addEventListener("click", async () => {
+      const ids = Array.from(this.selectedIds);
+      if (!ids.length) return;
+      const running = ids.filter(id => isWorkflowRunning(id));
+      if (running.length) {
+        this.onToast(`${running.length} selected workflow${running.length > 1 ? "s are" : " is"} running in the background. Stop before deleting.`, "error");
+        return;
+      }
+      const ok = await this.confirmFn(`Delete ${ids.length} workflow${ids.length > 1 ? "s" : ""}? This cannot be undone.`, true);
+      if (!ok) return;
+      for (const id of ids) {
+        try {
+          if (isTauri()) await deleteWorkflow(id);
+          else lsDelete(id);
+        } catch (e) {
+          console.error(`Aerini: failed to delete workflow ${id}`, e);
         }
-        if (wf.id === this.currentId) this.handleNew();
-        else await this.refreshWorkflowList();
-      });
+      }
+      this.onToast(`Deleted ${ids.length} workflow${ids.length > 1 ? "s" : ""}`, "success");
+      const openedWasDeleted = ids.includes(this.currentId);
+      this.selectedIds.clear();
+      if (openedWasDeleted) this.handleNew();
+      else await this.refreshWorkflowList();
+    });
 
-      item.appendChild(nameEl);
-      if (tagsEl) item.appendChild(tagsEl);
+    document.getElementById("wf-bulk-duplicate")?.addEventListener("click", async () => {
+      const ids = Array.from(this.selectedIds);
+      if (!ids.length) return;
+      const wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
+      const byId = new Map(wfs.map(w => [w.id, w]));
+      for (const id of ids) {
+        const wf = byId.get(id);
+        if (wf) await this.duplicateWorkflow(id, wf.name);
+      }
+      this.selectedIds.clear();
+      await this.refreshWorkflowList();
+    });
 
-      const dupBtn = document.createElement("button");
-      dupBtn.className = "workflow-item-dup";
-      dupBtn.title = "Duplicate workflow";
-      dupBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-      dupBtn.addEventListener("click", async e => {
-        e.stopPropagation();
-        await this.duplicateWorkflow(wf.id, wf.name);
-      });
+    document.getElementById("wf-bulk-move")?.addEventListener("click", e => {
+      e.stopPropagation();
+      const anchor = document.getElementById("wf-bulk-move")!;
+      this.openMoveToMenu(anchor);
+    });
+  }
 
-      item.appendChild(dupBtn);
-      item.appendChild(delBtn);
-      item.addEventListener("click", () => this.handleLoad(wf.id));
-      list.appendChild(item);
+  // -- Dropdown menus (collection "...", color picker, bulk "Move to") ------
+  // All three share the same append-to-body / position-under-anchor /
+  // dismiss-on-outside-click shape already used by the sort and filter
+  // dropdowns in sidebar-sections.ts.
+
+  private openCollectionMenu(anchor: HTMLElement, collectionId: string): void {
+    document.getElementById("wf-dropdown")?.remove();
+    const rect = anchor.getBoundingClientRect();
+    const dd = document.createElement("div");
+    dd.id = "wf-dropdown";
+    dd.className = "filter-dropdown";
+    dd.style.top = `${rect.bottom + 4}px`;
+    dd.style.left = `${Math.max(4, rect.right - 150)}px`;
+
+    const mkItem = (label: string, onClick: () => void, danger = false) => {
+      const btn = document.createElement("button");
+      btn.className = "filter-dropdown-item" + (danger ? " filter-dropdown-item-danger" : "");
+      btn.textContent = label;
+      btn.addEventListener("mousedown", ev => { ev.preventDefault(); dd.remove(); onClick(); });
+      dd.appendChild(btn);
+    };
+    mkItem("New workflow here", () => this.handleNew(collectionId));
+    const sep1 = document.createElement("div");
+    sep1.className = "filter-dropdown-sep";
+    dd.appendChild(sep1);
+    mkItem("Rename", () => this.startCollectionRename(collectionId));
+    mkItem("Change color", () => this.openColorMenu(anchor, collectionId));
+    const sep2 = document.createElement("div");
+    sep2.className = "filter-dropdown-sep";
+    dd.appendChild(sep2);
+    mkItem("Delete collection", () => this.deleteCollection(collectionId), true);
+
+    document.body.appendChild(dd);
+    const dismiss = (ev: MouseEvent) => {
+      if (!dd.contains(ev.target as Node) && ev.target !== anchor) {
+        dd.remove(); document.removeEventListener("mousedown", dismiss, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+  }
+
+  private openColorMenu(anchor: HTMLElement, collectionId: string): void {
+    document.getElementById("wf-dropdown")?.remove();
+    const rect = anchor.getBoundingClientRect();
+    const dd = document.createElement("div");
+    dd.id = "wf-dropdown";
+    dd.className = "filter-dropdown workflow-collection-swatch-row";
+    dd.style.top = `${rect.bottom + 4}px`;
+    dd.style.left = `${rect.left}px`;
+
+    const current = this.collections.find(c => c.id === collectionId)?.color;
+    for (const color of COLLECTION_COLORS) {
+      const sw = document.createElement("button");
+      sw.className = "workflow-collection-swatch" + (color === current ? " selected" : "");
+      sw.style.background = collectionColorVar(color);
+      sw.title = color;
+      sw.setAttribute("aria-label", `Set color ${color}`);
+      sw.addEventListener("mousedown", ev => { ev.preventDefault(); dd.remove(); this.setCollectionColor(collectionId, color); });
+      dd.appendChild(sw);
     }
+
+    document.body.appendChild(dd);
+    const dismiss = (ev: MouseEvent) => {
+      if (!dd.contains(ev.target as Node) && ev.target !== anchor) {
+        dd.remove(); document.removeEventListener("mousedown", dismiss, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+  }
+
+  private openMoveToMenu(anchor: HTMLElement): void {
+    document.getElementById("wf-dropdown")?.remove();
+    const rect = anchor.getBoundingClientRect();
+    const dd = document.createElement("div");
+    dd.id = "wf-dropdown";
+    dd.className = "filter-dropdown";
+    dd.style.top = `${rect.bottom + 4}px`;
+    dd.style.left = `${rect.left}px`;
+
+    const mkItem = (label: string, color: string | null, onClick: () => void) => {
+      const btn = document.createElement("button");
+      btn.className = "filter-dropdown-item workflow-collection-move-item";
+      if (color) {
+        const sw = document.createElement("span");
+        sw.className = "workflow-collection-swatch-inline";
+        sw.style.background = color;
+        btn.appendChild(sw);
+      }
+      btn.appendChild(document.createTextNode(label));
+      btn.addEventListener("mousedown", ev => { ev.preventDefault(); dd.remove(); onClick(); });
+      dd.appendChild(btn);
+    };
+
+    const ids = Array.from(this.selectedIds);
+    mkItem("Uncategorized", collectionColorVar("slate"), () => this.moveWorkflowsToCollection(ids, null));
+    for (const c of [...this.collections].sort((a, b) => a.order - b.order)) {
+      mkItem(c.name, collectionColorVar(c.color), () => this.moveWorkflowsToCollection(ids, c.id));
+    }
+    const sep = document.createElement("div");
+    sep.className = "filter-dropdown-sep";
+    dd.appendChild(sep);
+    mkItem("+ New collection…", null, async () => {
+      this.pendingAssignAfterCreate = null; // set below once the collection exists
+      const maxOrder = this.collections.reduce((m, c) => Math.max(m, c.order), -1);
+      const col: CollectionDef = { id: `col_${crypto.randomUUID()}`, name: "", color: "blue", order: maxOrder + 1, collapsed: false };
+      this.collections.unshift(col);
+      this.editingCollectionId = col.id;
+      this.pendingAssignAfterCreate = col.id;
+      await this.refreshWorkflowList();
+    });
+
+    document.body.appendChild(dd);
+    const dismiss = (ev: MouseEvent) => {
+      if (!dd.contains(ev.target as Node) && ev.target !== anchor) {
+        dd.remove(); document.removeEventListener("mousedown", dismiss, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
   }
 
   async handleLoad(id: string): Promise<void> {
@@ -274,12 +990,13 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onStatusChange("Workflow not found"); return; }
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
+      this.currentCollectionId = collectionId;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       if (localStorage.getItem("aerini_autofit") !== "false") {
@@ -312,19 +1029,19 @@ export class WorkflowManager {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onToast("Could not find workflow to duplicate", "error"); return; }
 
-      // Routes through deserialize/serialize — the same pattern every other
-      // load/save path in this file uses — instead of hand-editing the raw
+      // Routes through deserialize/serialize, the same pattern every other
+      // load/save path in this file uses, instead of hand-editing the raw
       // parsed JSON, so any validation deserialize() performs (e.g. dropping
       // edges whose from_node/to_node isn't present in the node list) is
       // applied here too.
-      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
+      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
 
       const newId   = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const newName = `${name} (copy)`;
 
       // Re-assign all node IDs to avoid collisions, re-keying the Map so
       // each entry's key still matches its own data.id (CanvasNode/Connector
-      // objects returned by deserialize() are safe to mutate in place — this
+      // objects returned by deserialize() are safe to mutate in place, since this
       // duplicate call is the only reference to them).
       const idMap: Record<string, string> = {};
       const newNodes = new Map<string, CanvasNode>();
@@ -346,9 +1063,9 @@ export class WorkflowManager {
         newConnectors.set(newEdgeId, conn);
       }
 
-      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration);
+      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId);
       if (isTauri()) await saveWorkflow(dupJson);
-      else lsSave(newId, newName, dupJson, tags);
+      else lsSave(newId, newName, dupJson, tags, collectionId);
       await this.refreshWorkflowList();
       this.onToast(`Duplicated as "${newName}"`, "success");
     } catch (e) {
@@ -360,12 +1077,13 @@ export class WorkflowManager {
   async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
     const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
     try {
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
+      this.currentCollectionId = collectionId;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.fitToScreen();
@@ -383,22 +1101,22 @@ export class WorkflowManager {
   async handleSave(): Promise<void> {
     if (this.currentName === "Untitled") {
       const titleEl = document.getElementById("workflow-name-label");
-      if (!titleEl) { this.onStatusChange("Save cancelled — title element not found"); return; }
+      if (!titleEl) { this.onStatusChange("Save cancelled, title element not found"); return; }
       const name = await this.startRename(titleEl);
       if (!name?.trim()) { this.onStatusChange("Save cancelled"); return; }
       this.onTitleChange(this.currentName);
     }
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
     this.onStatusChange("Saving…");
     try {
       if (isTauri()) {
         await saveWorkflow(json);
-        // Save a version snapshot for history — fire-and-forget, don't block save
+        // Save a version snapshot for history, fire-and-forget, don't block save
         saveVersion(this.currentId, json).catch(e =>
           console.warn("Aerini: saveVersion failed:", e)
         );
       } else {
-        lsSave(this.currentId, this.currentName, json, this.currentTags);
+        lsSave(this.currentId, this.currentName, json, this.currentTags, this.currentCollectionId);
       }
       this.markUnsaved(false);
       this.onToast(`✓ Saved "${this.currentName}"`, "success");
@@ -410,7 +1128,7 @@ export class WorkflowManager {
     }
   }
 
-  async handleNew(): Promise<void> {
+  async handleNew(collectionId: string | null = null): Promise<void> {
     if (this.hasUnsaved) {
       const ok = await this.confirmFn(`Start a new workflow? Unsaved changes to "${this.currentName}" will be lost.`);
       if (!ok) return;
@@ -418,6 +1136,7 @@ export class WorkflowManager {
     this.currentId          = `wf_${crypto.randomUUID()}`;
     this.currentName        = "Untitled";
     this.currentTags        = [];
+    this.currentCollectionId = collectionId;
     this.parallelExecution  = false;
     this.maxConcurrentNodes = 8;
     this.unlimitedDuration  = false;
@@ -458,10 +1177,10 @@ export class WorkflowManager {
 
   /** Serializes the live in-memory canvas exactly as a save would, without persisting it. */
   getCurrentJson(): string {
-    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
+    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
   }
 
-  /** Restore a version by ID — loads its snapshot onto the canvas. */
+  /** Restore a version by ID; loads its snapshot onto the canvas. */
   async restoreVersion(versionId: string): Promise<{ id: string; name: string } | null> {
     if (!isTauri()) return null;
     // Awaited and deliberately left to throw out of this function (unlike
@@ -476,12 +1195,13 @@ export class WorkflowManager {
     try {
       const snapshot = await getVersion(versionId);
       if (!snapshot) return null;
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(snapshot);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(snapshot);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
+      this.currentCollectionId = collectionId;
       this.canvas.nodes = nodes;
       this.canvas.connectors = connectors;
       this.canvas.clearSelection();
@@ -506,7 +1226,7 @@ export class WorkflowManager {
   /**
    * Save the live in-memory canvas as a manually named version snapshot.
    * Returns false without writing anything if this workflow has never been
-   * saved yet — workflow_versions.workflow_id has an ON DELETE CASCADE FK
+   * saved yet: workflow_versions.workflow_id has an ON DELETE CASCADE FK
    * into workflows(id), so a version row can't exist for a workflow that
    * isn't persisted.
    */
@@ -514,7 +1234,7 @@ export class WorkflowManager {
     if (!isTauri()) return false;
     const persisted = await loadWorkflow(this.currentId);
     if (!persisted) return false;
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
     await saveVersion(this.currentId, json, message.trim() || undefined);
     return true;
   }
@@ -534,12 +1254,12 @@ export class WorkflowManager {
       if (!name?.trim()) return null;
       this.onTitleChange(this.currentName);
     }
-    // Capture snapshot first — before any save I/O
+    // Capture snapshot first, before any save I/O
     const id   = this.currentId;
     const name = this.currentName;
     const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors,
-      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
-    // Persist to storage — this is required, not optional.
+      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+    // Persist to storage. This is required, not optional.
     // The scheduler daemon looks up the workflow from the DB by ID;
     // if the save fails the scheduler will immediately error on first run.
     try {
@@ -547,7 +1267,7 @@ export class WorkflowManager {
         await saveWorkflow(json);
         saveVersion(id, json).catch(e => console.warn("Aerini: saveVersion failed:", e));
       } else {
-        lsSave(id, name, json, this.currentTags);
+        lsSave(id, name, json, this.currentTags, this.currentCollectionId);
       }
       this.markUnsaved(false);
       await this.refreshWorkflowList();
@@ -560,12 +1280,15 @@ export class WorkflowManager {
 
   handleExport(): void {
     if (this.canvas.nodes.size === 0) {
-      this.onToast("Nothing to export — add some nodes first", "error");
+      this.onToast("Nothing to export, add some nodes first", "error");
       return;
     }
 
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
     const obj  = JSON.parse(json) as { id: string; name: string; nodes: unknown[]; edges: unknown[]; metadata?: { author?: string; tags?: string[] } };
+    // collection_id is deliberately not copied into the exported file; it's
+    // this sidebar's local folder organization, not a portable property of
+    // the workflow itself.
     const file = { aerini_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:obj.metadata?.author ?? "", tags:obj.metadata?.tags ?? [], nodes:obj.nodes, edges:obj.edges };
     const content  = JSON.stringify(file, null, 2);
     const filename = `${(this.currentName || "workflow").replace(/\s+/g, "-").toLowerCase()}.aerini`;

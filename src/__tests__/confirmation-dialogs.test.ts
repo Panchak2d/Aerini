@@ -171,7 +171,8 @@ describe("plugin-settings — remove confirm gate", () => {
     await flush();
 
     expect(invoke).toHaveBeenCalledWith("remove_plugin", { filename: "cool.wasm", pluginDir: "/plugins" });
-    expect(toast).toHaveBeenCalledWith("Plugin removed. Restart to apply.", "success");
+    expect(invoke).toHaveBeenCalledWith("reload_plugins", { pluginDir: "/plugins" });
+    expect(toast).toHaveBeenCalledWith("Plugin removed.", "success");
   });
 
   it("edge case: Cancel leaves the plugin installed — remove_plugin never invoked", async () => {

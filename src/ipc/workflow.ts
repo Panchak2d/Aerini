@@ -22,6 +22,10 @@ export interface NodeDescriptor {
   is_plugin?: boolean;
   /** One or two sentence description shown in the palette tooltip. Empty string when not set. */
   description?: string;
+  /** Raw inner-SVG-shape markup declared by the plugin; untrusted until passed through getPluginIconSvg. Empty/absent -> generic plugin glyph. */
+  icon?: string;
+  /** Author or organization name declared by the plugin. Empty/absent when not set. */
+  author?: string;
 }
 
 export interface WorkflowLogEntry {
@@ -45,6 +49,11 @@ export interface WorkflowSummary {
   name: string;
   updated_at: string;
   tags: string[];
+  /** Exclusive Workflows-sidebar collection membership. null/absent = Uncategorized.
+   *  Populated today in browser/localStorage mode. In Tauri/desktop mode this is
+   *  `undefined` until the backend (workflows.collection_id column + WorkflowSummary
+   *  Rust struct) ships — see PLAN.md's Batch 2 backlog. */
+  collection_id?: string | null;
 }
 
 export const listWorkflows  = () => invoke<WorkflowSummary[]>("list_workflows");
@@ -52,6 +61,15 @@ export const saveWorkflow   = (json: string) => invoke<void>("save_workflow", { 
 export const loadWorkflow   = (id: string) => invoke<string | null>("load_workflow", { id });
 export const deleteWorkflow = (id: string) => invoke<void>("delete_workflow", { id });
 export const getNodeTypes   = () => invoke<NodeDescriptor[]>("get_node_types");
+
+// Reserved `initialVariables` key that replays a past run's exact recorded
+// output for one node instead of executing it — mirrors
+// `aerini_engine::executor::REPLAY_NODE_OUTPUT_KEY` (Rust) exactly; this
+// string must stay identical to that constant, since the two are never
+// imported across the IPC boundary. Value shape: `{node_id, output}`,
+// matched against `node_id` at the executor's single execute_with_retry
+// call site — see that constant's doc comment for the full mechanism.
+export const REPLAY_NODE_OUTPUT_KEY = "__aerini_replay_node_output";
 
 // runId: pass the id you'll later hand to cancelRun() if this run needs to
 // be independently stoppable (main run / single-node run both do — see
@@ -191,19 +209,41 @@ export interface PluginInfo {
   type_id: string;
   category: string;
   load_error: string | null;
+  registry_warning: string | null;
+  /** Human-readable publisher-signature status, e.g. "Verified — trusted publisher" or "Unsigned — no publisher signature". `null` only when the file failed to describe at all (see load_error), so there was nothing to check a signature against. */
+  signature_status: string | null;
+  /** `pack_id` of the multi-node package this file belongs to, if any. `null` for a standalone plugin. */
+  pack_id: string | null;
+  /** Display name of the owning package, paired with pack_id above. */
+  pack_display_name: string | null;
 }
 
 export const pickFolderDialog = () =>
   invoke<string | null>("pick_folder_dialog");
 
-export const pickWasmFileDialog = () =>
-  invoke<string | null>("pick_wasm_file_dialog");
+export const pickPluginFileDialog = () =>
+  invoke<string | null>("pick_plugin_file_dialog");
 
 export const listInstalledPlugins = (pluginDir: string) =>
   invoke<PluginInfo[]>("list_installed_plugins", { pluginDir });
 
-export const installPluginFromPath = (srcPath: string, pluginDir: string) =>
-  invoke<string>("install_plugin_from_path", { srcPath, pluginDir });
+export const installPluginFromPath = (srcPath: string, pluginDir: string, overwrite: boolean) =>
+  invoke<string>("install_plugin_from_path", { srcPath, pluginDir, overwrite });
 
 export const removePlugin = (filename: string, pluginDir: string) =>
   invoke<void>("remove_plugin", { filename, pluginDir });
+
+export const installPluginPackFromPath = (srcPath: string, pluginDir: string, overwrite: boolean) =>
+  invoke<string>("install_plugin_pack_from_path", { srcPath, pluginDir, overwrite });
+
+export const removePluginPack = (packId: string, pluginDir: string) =>
+  invoke<void>("remove_plugin_pack", { packId, pluginDir });
+
+export interface PluginLoadReport {
+  loaded: string[];
+  builtin_rejected: string[];
+  plugin_collisions: string[];
+}
+
+export const reloadPlugins = (pluginDir: string) =>
+  invoke<PluginLoadReport>("reload_plugins", { pluginDir });

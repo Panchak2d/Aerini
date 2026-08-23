@@ -30,6 +30,7 @@
 //!   GET    /api/credentials
 //!   POST   /api/credentials
 //!   DELETE /api/credentials/:id
+//!   POST   /api/plugins/reload  (admin scope required)
 //!   GET    /api/events   (SSE)
 //!   GET    /api/tokens   (admin scope required)
 //!   POST   /api/tokens   (admin scope required)
@@ -50,9 +51,9 @@ use tower_http::cors::AllowOrigin;
 use aerini_engine::{
     db::WorkflowDb,
     executor::{CredentialResolver, WorkflowExecutor},
-    node::NodeRegistry,
+    node::{NodeRegistry, Reloadable},
     nodes::register_builtins,
-    plugin_loader::load_plugins,
+    plugin_loader::{load_plugins, PluginLoadReport},
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
     EventSink,
@@ -344,17 +345,20 @@ pub async fn run(cfg: ServerConfig) {
 
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
-    if let Some(ref dir) = plugin_dir {
-        if !dir.exists() {
+    let startup_load_report = match plugin_dir {
+        Some(ref dir) if dir.exists() => load_plugins(&mut registry, dir),
+        Some(ref dir) => {
             tracing::warn!(
                 "plugin_dir {:?} does not exist — no plugins loaded",
                 dir
             );
-        } else {
-            load_plugins(&mut registry, dir);
+            PluginLoadReport::default()
         }
-    }
-    let registry = Arc::new(registry);
+        None => PluginLoadReport::default(),
+    };
+    let registry = Arc::new(Reloadable::new(registry));
+    let last_load_report = Arc::new(tokio::sync::RwLock::new(startup_load_report));
+    let reload_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     let (sse_tx, _) = broadcast::channel::<String>(256);
     let event_sink  = Arc::new(BroadcastEventSink { tx: sse_tx.clone() });
@@ -414,8 +418,13 @@ pub async fn run(cfg: ServerConfig) {
     let base_executor = {
         let res  = Arc::new(StoreCredentialResolver { store: Arc::clone(&creds) });
         let sink = Arc::new(BroadcastEventSink { tx: sse_tx.clone() });
+        // Snapshot only — `base_executor` is a template `.clone()`-d once per
+        // request (see routes/workflows.rs), and each of those clones calls
+        // `.with_registry(state.registry.current())` to pick up the latest
+        // reload; the snapshot baked in here only matters for a request that
+        // races the very first reload before that call.
         let mut ex = WorkflowExecutor::new(
-            Arc::clone(&registry),
+            registry.current(),
             Arc::clone(&res) as Arc<dyn CredentialResolver>,
         ).with_event_sink(Arc::clone(&sink) as Arc<dyn EventSink>)
          .with_file_sandbox_dir(file_sandbox_dir.clone());
@@ -442,6 +451,10 @@ pub async fn run(cfg: ServerConfig) {
         scheduler:        Arc::clone(&scheduler),
         creds:            Arc::clone(&creds),
         registry:         Arc::clone(&registry),
+        reload_lock:      Arc::clone(&reload_lock),
+        last_load_report: Arc::clone(&last_load_report),
+        data_dir:         Arc::new(data_dir),
+        plugin_dir:       plugin_dir.map(Arc::new),
         sse_tx:           sse_tx.clone(),
         token_store:      Arc::clone(&token_store),
         exec_locks:       Arc::new(DashMap::new()),
@@ -472,6 +485,8 @@ pub async fn run(cfg: ServerConfig) {
         .route("/api/performance/reports/{run_id}", get(routes::performance::get_report).delete(routes::performance::delete_report))
         .route("/api/credentials",         get(routes::credentials::list_creds).post(routes::credentials::save_cred))
         .route("/api/credentials/{id}",     delete(routes::credentials::delete_cred))
+        .route("/api/plugins/reload",      post(routes::plugins::reload_plugins))
+        .route("/api/plugins/load-report", get(routes::plugins::load_report))
         .route("/api/events",              get(routes::workflows::sse_events))
         .route("/api/tokens",              get(routes::tokens::list_tokens_handler).post(routes::tokens::create_token_handler))
         .route("/api/tokens/{id}",          delete(routes::tokens::revoke_token_handler))

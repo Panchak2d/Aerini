@@ -287,6 +287,13 @@ export function bindToolbar(
 
   $("btn-new-workflow").addEventListener("click", () => wfManager.handleNew());
   $("btn-new-workflow-toolbar").addEventListener("click", () => wfManager.handleNew());
+  $("btn-wf-add-collection").addEventListener("click", () => wfManager.createCollection());
+  $("btn-wf-select-mode").addEventListener("click", () => {
+    wfManager.toggleSelectMode();
+    const btn = $("btn-wf-select-mode");
+    btn.classList.toggle("active", wfManager.selectMode);
+    btn.setAttribute("aria-pressed", String(wfManager.selectMode));
+  });
   let _credPanel: { show(): void } | null = null;
   let _credLoading = false;
   $("btn-credentials").addEventListener("click", () => {

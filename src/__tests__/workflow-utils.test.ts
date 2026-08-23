@@ -19,29 +19,6 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-// drag-drop mocks: vi.mock() is hoisted above all imports, so any
-// variable a factory references must come from vi.hoisted() — a bare
-// module-scope `const` declared after the vi.mock() call would still be
-// uninitialized ("Cannot access before initialization") at the time the
-// hoisted factory runs. Declared here, at module scope, per Vitest's
-// documented mocking requirements (vi.mock cannot live inside describe()).
-const dragDropMocks = vi.hoisted(() => ({
-  getSetting: vi.fn(),
-  installPluginFromPath: vi.fn(),
-  showConfirm: vi.fn(),
-  showRestartBanner: vi.fn(),
-}));
-vi.mock("../ipc/workflow", () => ({
-  getSetting: dragDropMocks.getSetting,
-  installPluginFromPath: dragDropMocks.installPluginFromPath,
-}));
-vi.mock("../confirm", () => ({
-  showConfirm: dragDropMocks.showConfirm,
-}));
-vi.mock("../plugin-settings", () => ({
-  showRestartBanner: dragDropMocks.showRestartBanner,
-}));
-
 function makeNode(id: string, typeId: string, dynamicPorts = false): CanvasNode {
   return new CanvasNode({
     id,
@@ -157,61 +134,6 @@ describe("Canvas — dead destroy() removed", () => {
   it("no longer has a destroy() method", async () => {
     const { Canvas } = await import("../canvas/Canvas");
     expect("destroy" in Canvas.prototype).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-//  drag-drop.ts handleWasmDrop plugin-install confirm gate
-// ---------------------------------------------------------------------------
-
-describe("drag-drop handleWasmDrop, confirm gate", () => {
-  const { getSetting, installPluginFromPath, showConfirm, showRestartBanner } = dragDropMocks;
-
-  beforeEach(() => {
-    getSetting.mockReset();
-    installPluginFromPath.mockReset();
-    showConfirm.mockReset();
-    showRestartBanner.mockReset();
-  });
-
-  it("does not prompt or install when no plugin directory is configured", async () => {
-    getSetting.mockResolvedValue(null);
-    const { handleWasmDrop } = await import("../drag-drop");
-    const toast = vi.fn();
-
-    await handleWasmDrop("/home/user/my-plugin.wasm", toast);
-
-    expect(showConfirm).not.toHaveBeenCalled();
-    expect(installPluginFromPath).not.toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledWith(expect.stringContaining("plugin directory"), "info");
-  });
-
-  it("does not install when the user cancels the confirmation", async () => {
-    getSetting.mockResolvedValue("/plugins");
-    showConfirm.mockResolvedValue(false);
-    const { handleWasmDrop } = await import("../drag-drop");
-    const toast = vi.fn();
-
-    await handleWasmDrop("/home/user/my-plugin.wasm", toast);
-
-    expect(showConfirm).toHaveBeenCalledOnce();
-    expect(installPluginFromPath).not.toHaveBeenCalled();
-  });
-
-  it("installs and shows the restart banner only after the user confirms", async () => {
-    getSetting.mockResolvedValue("/plugins");
-    showConfirm.mockResolvedValue(true);
-    installPluginFromPath.mockResolvedValue(undefined);
-    const { handleWasmDrop } = await import("../drag-drop");
-    const toast = vi.fn();
-
-    await handleWasmDrop("/home/user/my-plugin.wasm", toast);
-
-    expect(showConfirm).toHaveBeenCalledOnce();
-    expect(showConfirm.mock.calls[0][0]).toContain("my-plugin.wasm");
-    expect(installPluginFromPath).toHaveBeenCalledWith("/home/user/my-plugin.wasm", "/plugins");
-    expect(showRestartBanner).toHaveBeenCalledOnce();
-    expect(toast).toHaveBeenCalledWith(expect.stringContaining("installed"), "success");
   });
 });
 

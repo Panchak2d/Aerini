@@ -17,7 +17,7 @@ use super::workflows::PaginationParams;
 /// `workflow_id` is explicitly granted; `Err` (ready to return) otherwise.
 /// Mirrors `list_scheduler`/`sse_events`'s read-side ACL check,
 /// extended to start/stop so a write-scoped, ACL-restricted token can't
-/// act on a workflow outside its grants just by knowing its id (T0-1e).
+/// act on a workflow outside its grants just by knowing its id.
 fn require_workflow_acl(
     s:           &ApiState,
     caller:      &TokenRecord,
@@ -44,10 +44,9 @@ pub async fn list_scheduler(
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) { return e.into_response(); }
 
-    // Per-workflow ACL (P3-2) — previously enforced only for the SSE stream
-    // (sse_events), leaving this endpoint returning every workflow's job row,
-    // secret included, to any read-scoped token regardless of ACL grants
-    //. None = unrestricted (admin, or no ACL rows).
+    // Per-workflow ACL: a read-scoped token only sees job rows for
+    // workflows its ACL grants cover. None = unrestricted (admin, or no
+    // ACL rows).
     let acl_filter = match s.token_store.acl_filter(&caller) {
         Ok(f)  => f,
         Err(e) => return (

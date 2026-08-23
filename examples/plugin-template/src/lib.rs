@@ -41,6 +41,10 @@ impl Guest for EchoPlugin {
     }
 
     fn execute(input: NodeInput) -> NodeOutput {
+        // This template only reads a flat string param -- see `input.params`'s
+        // documentation in wit/node.wit for the reserved "__aerini_input_json"
+        // key, which carries the whole merged input as one JSON string for
+        // nodes with nested/structured config to parse once.
         let message = input
             .params
             .iter()

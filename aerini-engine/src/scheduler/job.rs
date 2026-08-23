@@ -45,6 +45,14 @@ pub enum TriggerKind {
     /// No automatic trigger — only fires via manual Run press.
     /// Background scheduling is not supported for this trigger type.
     Manual,
+    /// Sourced from a trigger-capable WASM plugin (`aerini-node-with-trigger`'s
+    /// `trigger` export). `type_id` identifies which installed plugin acts as
+    /// the source, resolved against the configured plugin directory at arm
+    /// time — not a path, so this stays valid across a plugin reinstall at
+    /// the same type_id. `config` is the trigger node's resolved
+    /// configuration, JSON-encoded as a single object string, passed
+    /// through unchanged to the plugin's `events(config)` call.
+    Plugin { type_id: String, config: String },
 }
 
 impl TriggerKind {
@@ -57,6 +65,7 @@ impl TriggerKind {
             TriggerKind::Once { .. }     => "Once",
             TriggerKind::Webhook { .. }  => "Webhook",
             TriggerKind::Manual          => "Manual",
+            TriggerKind::Plugin { .. }   => "Plugin",
         }
     }
 
@@ -73,6 +82,7 @@ impl TriggerKind {
             TriggerKind::Once { run_at }            => format!("Once at {}", run_at),
             TriggerKind::Webhook { port, path, .. } => format!("Webhook on :{}{}", port, path),
             TriggerKind::Manual                     => "Manual".to_string(),
+            TriggerKind::Plugin { type_id, .. }     => format!("Plugin trigger: {}", type_id),
         }
     }
 }

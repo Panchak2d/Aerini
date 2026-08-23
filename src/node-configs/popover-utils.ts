@@ -11,6 +11,13 @@ export interface ExtensionContext {
   /** Re-opens the popover for this node — used when a field change alters which
    *  other fields should be visible (e.g. schedule mode selector). */
   rerender: () => void;
+  /** True once the generic "Configuration" section header has already been
+   *  rendered for this node. Lets an `afterFields` hook (e.g. plugin-config's
+   *  generic JSON editor) know whether it still needs to render its own
+   *  section header. Optional — most extensions don't need it, and two
+   *  existing tests construct `ExtensionContext` object literals directly
+   *  without it; a missing value reads as falsy, same as `false`. */
+  hasConfigSection?: boolean;
 }
 
 export interface NodeConfigExtension {

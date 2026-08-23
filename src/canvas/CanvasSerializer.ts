@@ -58,6 +58,8 @@ export interface WorkflowDocument {
     updated_at: string;
     version: string;
     tags: string[];
+    /** Exclusive Workflows-sidebar collection membership. `null`/absent = Uncategorized. */
+    collection_id?: string | null;
   };
   /** When true, independent branches run concurrently. Default: false (sequential). */
   parallel_execution?: boolean;
@@ -79,6 +81,7 @@ export function serialize(
   chatSettings?: ChatSettings,
   tags?: string[],
   unlimitedDuration?: boolean,
+  collectionId?: string | null,
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -108,6 +111,7 @@ export function serialize(
       updated_at: new Date().toISOString(),
       version: "1.0.0",
       tags: tags ?? [],
+      collection_id: collectionId ?? null,
     },
   };
   if (parallelExecution) {
@@ -140,6 +144,7 @@ export function deserialize(json: string): {
   unlimitedDuration: boolean;
   chatSettings: ChatSettings;
   tags: string[];
+  collectionId: string | null;
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
@@ -148,7 +153,7 @@ export function deserialize(json: string): {
     max_concurrent_nodes?: number;
     unlimited_duration?: boolean;
     settings?: { chat?: Partial<ChatSettings> };
-    metadata?: { tags?: string[] };
+    metadata?: { tags?: string[]; collection_id?: string | null };
   };
 
   const id   = doc.id   ?? `wf_${Date.now()}`;
@@ -210,5 +215,6 @@ export function deserialize(json: string): {
     unlimitedDuration: doc.unlimited_duration ?? false,
     chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
     tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
+    collectionId: typeof doc.metadata?.collection_id === "string" ? doc.metadata.collection_id : null,
   };
 }

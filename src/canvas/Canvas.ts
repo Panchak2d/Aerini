@@ -717,13 +717,9 @@ export class Canvas {
     this.zoom = Math.min((r.width - pad * 2) / ((mxX - mnX) || 1), (r.height - pad * 2) / ((mxY - mnY) || 1), 1.2);
     this.panX = r.width / 2 - ((mnX + mxX) / 2) * this.zoom;
     this.panY = r.height / 2 - ((mnY + mxY) / 2) * this.zoom;
-    // Batch 2: fitToScreen() changed zoom/pan but never told anyone — the N-1
-    // zoom-hint (app.ts's onZoomChange) and the per-workflow viewport
-    // persistence (onViewportChange) both silently missed every fit, whether
-    // triggered by the pre-existing Ctrl+Shift+F keybind or the new Fit
-    // button (toolbar.ts). onWheel already fires both after every zoom
-    // change; doing the same here is the same existing pattern, not new
-    // zoom logic.
+    // Notify zoom-hint and viewport-persistence listeners, same as onWheel
+    // does after every zoom change -- fitToScreen is just another way the
+    // zoom/pan can change.
     this.onZoomChange?.(this.zoom);
     this.onViewportChange?.();
   }

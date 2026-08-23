@@ -416,6 +416,28 @@ describe("handleNew", () => {
     expect(fakeThis.currentTags).toEqual([]);
     expect(fakeThis.currentName).toBe("Untitled");
   });
+
+  it("assigns the passed collectionId, defaulting to Uncategorized (null) when omitted", async () => {
+    document.body.innerHTML = '<div id="output-drawer"></div>';
+    const fakeThis = {
+      hasUnsaved: false,
+      currentId: "wf_old", currentName: "Old Name", currentTags: [],
+      currentCollectionId: null as string | null,
+      parallelExecution: false, maxConcurrentNodes: 8,
+      chatSettings: { ...DEFAULT_CHAT_SETTINGS },
+      canvas: { nodes: new Map(), connectors: new Map(), clearSelection: vi.fn() },
+      markUnsaved: vi.fn(),
+      onPanelClose: undefined, onTitleChange: vi.fn(),
+      onStatusChange: vi.fn(), refreshWorkflowList: vi.fn(async () => {}),
+      onNavigate: undefined, confirmFn: vi.fn(),
+    };
+
+    await WorkflowManager.prototype.handleNew.call(fakeThis as never, "col_123");
+    expect(fakeThis.currentCollectionId).toBe("col_123");
+
+    await WorkflowManager.prototype.handleNew.call(fakeThis as never);
+    expect(fakeThis.currentCollectionId).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

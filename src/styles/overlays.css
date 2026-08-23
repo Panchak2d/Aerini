@@ -164,7 +164,8 @@
 .settings-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
 .settings-group { display: flex; flex-direction: column; gap: 8px; }
 .settings-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t3); }
-.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; flex-wrap: wrap; }
+.settings-row[hidden] { display: none; }
 #wf-settings-modal .settings-row { align-items: flex-start; }
 #wf-settings-modal .settings-row > div { flex: 1; min-width: 0; }
 .settings-label { font-size: 13px; color: var(--t1); font-weight: 400; }
@@ -189,6 +190,8 @@
 .settings-warn { color: var(--amber); }
 .settings-path-display { font-size: 11px; color: var(--t2); margin-top: 1px; font-family: monospace; word-break: break-all; }
 
+.settings-row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+
 .plugin-list-container { display: flex; flex-direction: column; gap: 4px; }
 .plugin-list-empty { font-size: 11px; color: var(--t3); padding: 4px 0; }
 .plugin-list-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; }
@@ -196,6 +199,11 @@
 .plugin-list-item-name { font-size: 12px; color: var(--t1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .plugin-list-item-meta { font-size: 10px; color: var(--t3); font-family: monospace; }
 .plugin-list-item-error { font-size: 10px; color: var(--red); }
+.plugin-list-item-warning { font-size: 10px; color: var(--amber); }
+.plugin-list-item-signature { font-size: 10px; }
+.plugin-list-item-signature--positive { color: var(--green); }
+.plugin-list-item-signature--neutral { color: var(--t3); }
+.plugin-list-item-signature--warning { color: var(--amber); }
 
 
 /* ── CONTEXT MENU ───────────────────────────────────────────────────────────── */

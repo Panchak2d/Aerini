@@ -48,7 +48,7 @@ beforeEach(() => { schedulerStatusCb = null; });
 describe("bindSchedulerEvents — Performance panel refresh (Issue 2)", () => {
   it("normal case: a scheduler status event refreshes both the MEM chip and the Performance panel", async () => {
     const canvas     = { resetAllStatus: vi.fn() } as unknown as Canvas;
-    const wfManager   = { currentId: "wf-1" } as unknown as WorkflowManager;
+    const wfManager   = { currentId: "wf-1", refreshWorkflowList: vi.fn() } as unknown as WorkflowManager;
     const runManager  = { showResultFromScheduler: vi.fn() } as unknown as RunManager;
     const refreshMem  = vi.fn();
     const refreshPerf = vi.fn();
@@ -64,7 +64,7 @@ describe("bindSchedulerEvents — Performance panel refresh (Issue 2)", () => {
 
   it("edge case: refreshPerf is optional — an omitted callback must not throw", async () => {
     const canvas    = { resetAllStatus: vi.fn() } as unknown as Canvas;
-    const wfManager  = { currentId: "wf-1" } as unknown as WorkflowManager;
+    const wfManager  = { currentId: "wf-1", refreshWorkflowList: vi.fn() } as unknown as WorkflowManager;
     const runManager = { showResultFromScheduler: vi.fn() } as unknown as RunManager;
 
     await bindSchedulerEvents(canvas, wfManager, runManager, vi.fn(), vi.fn(), vi.fn(), vi.fn());

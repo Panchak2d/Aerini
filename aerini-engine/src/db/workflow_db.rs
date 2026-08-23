@@ -10,11 +10,11 @@ impl WorkflowDb {
         let tags = serde_json::to_string(&workflow.metadata.tags).map_err(|e| e.to_string())?;
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, row_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+            "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, collection_id, row_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name, json = excluded.json, updated_at = excluded.updated_at,
-               tags = excluded.tags, row_version = workflows.row_version + 1",
+               tags = excluded.tags, collection_id = excluded.collection_id, row_version = workflows.row_version + 1",
             rusqlite::params![
                 workflow.id,
                 workflow.name,
@@ -22,6 +22,7 @@ impl WorkflowDb {
                 workflow.metadata.created_at.to_rfc3339(),
                 chrono::Utc::now().to_rfc3339(),
                 tags,
+                workflow.metadata.collection_id,
             ],
         ).map_err(|e| e.to_string())?;
         Ok(())
@@ -48,15 +49,16 @@ impl WorkflowDb {
 
         let Some(expected) = expected_row_version else {
             let row_version: i64 = conn.query_row(
-                "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, row_version)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                "INSERT INTO workflows (id, name, json, created_at, updated_at, tags, collection_id, row_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name, json = excluded.json, updated_at = excluded.updated_at,
-                   tags = excluded.tags, row_version = workflows.row_version + 1
+                   tags = excluded.tags, collection_id = excluded.collection_id, row_version = workflows.row_version + 1
                  RETURNING row_version",
                 rusqlite::params![
                     workflow.id, workflow.name, json,
                     workflow.metadata.created_at.to_rfc3339(), now, tags,
+                    workflow.metadata.collection_id,
                 ],
                 |row| row.get::<_, i64>(0),
             ).map_err(|e| e.to_string())?;
@@ -69,10 +71,10 @@ impl WorkflowDb {
 
         let result = conn.query_row(
             "UPDATE workflows SET name = ?2, json = ?3, updated_at = ?4, tags = ?5,
-               row_version = row_version + 1
-             WHERE id = ?1 AND row_version = ?6
+               collection_id = ?6, row_version = row_version + 1
+             WHERE id = ?1 AND row_version = ?7
              RETURNING row_version",
-            rusqlite::params![workflow.id, workflow.name, json, now, tags, expected],
+            rusqlite::params![workflow.id, workflow.name, json, now, tags, workflow.metadata.collection_id, expected],
             |row| row.get::<_, i64>(0),
         );
         match result {
@@ -132,15 +134,16 @@ impl WorkflowDb {
     pub fn list(&self) -> Result<Vec<WorkflowSummary>, String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, updated_at, tags FROM workflows ORDER BY updated_at DESC")
+            .prepare("SELECT id, name, updated_at, tags, collection_id FROM workflows ORDER BY updated_at DESC")
             .map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |row| {
             let tags_json: String = row.get(3)?;
             Ok(WorkflowSummary {
-                id:         row.get(0)?,
-                name:       row.get(1)?,
-                updated_at: row.get(2)?,
-                tags:       serde_json::from_str(&tags_json).unwrap_or_default(),
+                id:            row.get(0)?,
+                name:          row.get(1)?,
+                updated_at:    row.get(2)?,
+                tags:          serde_json::from_str(&tags_json).unwrap_or_default(),
+                collection_id: row.get(4)?,
             })
         }).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
@@ -166,17 +169,18 @@ impl WorkflowDb {
             .query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get::<_, i64>(0))
             .map_err(|e| e.to_string())? as usize;
         let mut stmt = conn
-            .prepare("SELECT id, name, updated_at, tags FROM workflows ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2")
+            .prepare("SELECT id, name, updated_at, tags, collection_id FROM workflows ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2")
             .map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
             rusqlite::params![limit as i64, offset as i64],
             |row| {
                 let tags_json: String = row.get(3)?;
                 Ok(WorkflowSummary {
-                    id:         row.get(0)?,
-                    name:       row.get(1)?,
-                    updated_at: row.get(2)?,
-                    tags:       serde_json::from_str(&tags_json).unwrap_or_default(),
+                    id:            row.get(0)?,
+                    name:          row.get(1)?,
+                    updated_at:    row.get(2)?,
+                    tags:          serde_json::from_str(&tags_json).unwrap_or_default(),
+                    collection_id: row.get(4)?,
                 })
             },
         ).map_err(|e| e.to_string())?;
@@ -458,6 +462,38 @@ mod tests {
         let summaries = db.list().expect("list failed");
         assert_eq!(summaries.len(), 1);
         assert!(summaries[0].tags.is_empty());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn save_and_list_round_trip_collection_id() {
+        let path = temp_path("collection_id_roundtrip");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let mut wf = Workflow::new("wf-1", "My Workflow");
+        wf.metadata.collection_id = Some("col-1".to_string());
+        db.save(&wf).expect("save failed");
+
+        let summaries = db.list().expect("list failed");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].collection_id, Some("col-1".to_string()));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn list_defaults_null_collection_id_for_workflow_saved_with_none() {
+        let path = temp_path("collection_id_default");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        seed_workflow(&db, "wf-1", "My Workflow");
+
+        let summaries = db.list().expect("list failed");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].collection_id, None);
 
         cleanup(&path);
     }

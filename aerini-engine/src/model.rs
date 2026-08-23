@@ -216,6 +216,8 @@ pub struct WorkflowMetadata {
     pub version: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub collection_id: Option<String>,
 }
 
 impl Default for WorkflowMetadata {
@@ -227,6 +229,7 @@ impl Default for WorkflowMetadata {
             updated_at: now,
             version: "1.0.0".to_string(),
             tags: vec![],
+            collection_id: None,
         }
     }
 }

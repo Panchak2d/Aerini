@@ -201,9 +201,10 @@ mod tests {
     use aerini_engine::{
         db::WorkflowDb,
         executor::{CredentialResolver, WorkflowExecutor},
-        node::NodeRegistry,
+        node::{NodeRegistry, Reloadable},
         nodes::register_builtins,
         perf_monitor::{monitor_run, HistorySample, PerfStatus, PerformanceReport},
+        plugin_loader::PluginLoadReport,
         scheduler::{SchedulerDaemon, SchedulerDb},
         store::{CredentialStore, KeySource, StoreCredentialResolver},
         EventSink,
@@ -244,7 +245,7 @@ mod tests {
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry, &dir, Some(Arc::clone(&db)));
-        let registry = Arc::new(registry);
+        let registry = Arc::new(Reloadable::new(registry));
 
         let (sse_tx, _) = tokio::sync::broadcast::channel::<String>(16);
         let sink = Arc::new(crate::event_bridge::BroadcastEventSink { tx: sse_tx.clone() });
@@ -258,7 +259,7 @@ mod tests {
         ));
 
         let base_executor = WorkflowExecutor::new(
-            Arc::clone(&registry),
+            registry.current(),
             Arc::clone(&resolver) as Arc<dyn CredentialResolver>,
         );
 
@@ -272,6 +273,10 @@ mod tests {
             scheduler,
             creds,
             registry,
+            reload_lock: Arc::new(tokio::sync::Mutex::new(())),
+            last_load_report: Arc::new(tokio::sync::RwLock::new(PluginLoadReport::default())),
+            data_dir: Arc::new(dir),
+            plugin_dir: None,
             sse_tx,
             token_store,
             exec_locks: Arc::new(dashmap::DashMap::new()),

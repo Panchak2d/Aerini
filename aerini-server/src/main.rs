@@ -38,7 +38,7 @@ use clap::{Parser, Subcommand};
 use aerini_engine::{
     db::WorkflowDb,
     model::Workflow,
-    node::NodeRegistry,
+    node::{NodeRegistry, Reloadable},
     nodes::register_builtins,
     nodes::database::start_pool_eviction_task,
     plugin_loader::load_plugins,
@@ -531,7 +531,7 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         }
     }
     start_pool_eviction_task(&tokio::runtime::Handle::current());
-    let registry = Arc::new(registry);
+    let registry = Arc::new(Reloadable::new(registry));
 
     let log   = LogBuffer::new(1000);
     let state = Arc::new(RwLock::new(RunState::default()));
@@ -724,6 +724,41 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         tracing::info!("Shutdown complete");
         std::process::exit(0);
     });
+
+    // SIGHUP — reload the plugin registry without restarting the process.
+    #[cfg(unix)]
+    {
+        let registry_hup    = Arc::clone(&registry);
+        let data_dir_hup    = data_dir.clone();
+        let plugin_dir_hup  = plugin_dir.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to install SIGHUP handler: {}", e);
+                    return;
+                }
+            };
+            loop {
+                if sighup.recv().await.is_none() {
+                    break;
+                }
+                tracing::info!("SIGHUP received — reloading plugins");
+                let mut new_registry = NodeRegistry::new();
+                register_builtins(&mut new_registry, &data_dir_hup, None);
+                if let Some(ref dir) = plugin_dir_hup {
+                    if !dir.exists() {
+                        tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
+                    } else {
+                        load_plugins(&mut new_registry, dir);
+                    }
+                }
+                registry_hup.reload(new_registry);
+                tracing::info!("Plugin reload complete");
+            }
+        });
+    }
 
     tracing::info!(
         workflow = %config.workflow_name,

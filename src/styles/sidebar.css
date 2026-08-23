@@ -205,7 +205,7 @@
 .zone-action-btn:hover { color: var(--t1); background: var(--bg4); }
 .zone-action-btn.active { color: var(--blue); }
 
-/* Generic scrollable zone body — Plugins zone. Other zones each
+/* Generic scrollable zone body, Plugins zone. Other zones each
    have their own purpose-named scroll class (.palette-scroll/.workflow-scroll/
    .bg-jobs-list); Plugins' content is .settings-group/.settings-row markup
    (overlays.css, relocated wholesale from the Settings modal), not a
@@ -308,12 +308,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 4px;
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;
   color: var(--t2);
   font-size: 12px;
   min-height: 34px;
+  border: 1px solid transparent;
   transition: background 120ms ease, color 120ms ease;
 }
 .workflow-item:hover { background: var(--bg4); color: var(--t1); }
@@ -361,6 +363,217 @@
 .workflow-item-del:hover { color: var(--red) !important; background: rgba(248,113,113,.1); }
 .workflow-item-del:focus-visible { color: var(--t3); outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
+/* -- Multi-select: checkbox + drag handle -- */
+.workflow-item-check {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  accent-color: var(--blue);
+  cursor: pointer;
+  visibility: hidden;
+}
+#workflow-list.select-mode .workflow-item-check,
+.workflow-item.selected .workflow-item-check,
+.workflow-item:hover .workflow-item-check { visibility: visible; }
+
+.workflow-item-drag-handle {
+  flex-shrink: 0;
+  width: 9px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--t3);
+  opacity: 0;
+  cursor: grab;
+  text-align: center;
+}
+.workflow-item:hover .workflow-item-drag-handle { opacity: 1; }
+
+.workflow-item.selected {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  color: var(--t1);
+}
+.workflow-item.dragging { opacity: .4; }
+
+/* -- Collection groups (collapsible folders) -- */
+.workflow-collection-group { margin-bottom: 2px; border-radius: 7px; }
+.workflow-collection-group.drop-target {
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  outline: 1.5px dashed var(--blue);
+  outline-offset: -1px;
+}
+.workflow-collection-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.workflow-collection-header:hover { background: var(--bg3); }
+.workflow-collection-header:hover .workflow-collection-new-btn { opacity: 1; }
+.workflow-collection-header:hover .workflow-collection-menu-btn { opacity: 1; }
+.workflow-collection-header:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+
+.workflow-collection-chev {
+  width: 13px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 9px;
+  color: var(--t3);
+  transition: transform 150ms ease;
+}
+.workflow-collection-group.collapsed .workflow-collection-chev { transform: rotate(-90deg); }
+
+.workflow-collection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.workflow-collection-dot-muted { opacity: .5; cursor: default; }
+
+.workflow-collection-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-collection-name-muted { color: var(--t3); font-weight: 500; }
+.workflow-collection-count { flex-shrink: 0; font-size: 10.5px; color: var(--t3); }
+.workflow-collection-new-btn { opacity: 0; flex-shrink: 0; width: 20px; height: 20px; }
+.workflow-collection-menu-btn { opacity: 0; flex-shrink: 0; width: 20px; height: 20px; }
+.workflow-collection-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg1);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  color: var(--t1);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 5px;
+  outline: none;
+}
+
+.workflow-collection-body { padding-left: 12px; }
+.workflow-collection-empty {
+  padding: 5px 8px 7px 14px;
+  font-size: 11px;
+  color: var(--t3);
+  font-style: italic;
+}
+
+/* -- Background-runs cross-link pill -- */
+.workflow-bgruns-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 6px 6px 0;
+  padding: 6px 9px;
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 28%, transparent);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--t1);
+  cursor: pointer;
+  flex-shrink: 0;
+  text-align: left;
+}
+.workflow-bgruns-pill:hover { background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.workflow-bgruns-pill.hidden { display: none; }
+.workflow-bgruns-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  flex-shrink: 0;
+  animation: wf-pulse 1.4s ease-in-out infinite;
+}
+.workflow-bgruns-pill-label { flex: 1; }
+.workflow-bgruns-pill-go { color: var(--t2); font-size: 11px; flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) { .workflow-bgruns-pill-dot { animation: none; } }
+
+/* -- Bulk action bar -- */
+.workflow-bulk-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 6px 0;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, transparent);
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+.workflow-bulk-bar.hidden { display: none; }
+.workflow-bulk-bar-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.workflow-bulk-bar #wf-bulk-count { font-size: 11.5px; font-weight: 600; color: var(--t1); flex-shrink: 0; white-space: nowrap; }
+.workflow-bulk-clear {
+  font: inherit;
+  font-size: 11px;
+  background: none;
+  border: none;
+  color: var(--t2);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+.workflow-bulk-clear:hover { color: var(--t1); background: var(--bg4); }
+/* flex-wrap lets a button drop to its own line as a whole unit on a very
+   narrow sidebar, instead of its label wrapping mid-word or the row
+   overflowing the sidebar's clipped edge (both seen at the default width). */
+.workflow-bulk-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.workflow-bulk-actions button {
+  font: inherit;
+  font-size: 11px;
+  background: var(--bg3);
+  border: 1px solid var(--bd);
+  color: var(--t2);
+  border-radius: 5px;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.workflow-bulk-actions button:hover { background: var(--bg4); color: var(--t1); }
+.workflow-bulk-actions button.danger:hover {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+/* -- Dropdown-menu variants shared with .filter-dropdown (panels.css) -- */
+.filter-dropdown-item-danger { color: var(--red); }
+.filter-dropdown-item-danger:hover { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); }
+.filter-dropdown-sep { height: 1px; background: var(--bd); margin: 4px 2px; }
+
+.workflow-collection-swatch-row { flex-direction: row !important; gap: 6px; padding: 6px; }
+.workflow-collection-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--bd);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.workflow-collection-swatch.selected { outline: 2px solid var(--t1); outline-offset: 1px; }
+.workflow-collection-move-item { display: flex; align-items: center; gap: 7px; }
+.workflow-collection-swatch-inline { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
 #sidebar-resize-handle {
   position: absolute;
   top: 0;
@@ -380,20 +593,20 @@
   outline-offset: -2px;
 }
 
-/* Cursor lock for the duration of a sidebar-width drag — same convention as
+/* Cursor lock for the duration of a sidebar-width drag, same convention as
    workspace.css's body.resizing-v for the drawer, just the horizontal twin.
    Declared here rather than workspace.css since a body-class rule applies
    globally no matter which sheet holds it. */
 body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select: none !important; }
 
 
-/* @keyframes wf-pulse — defined here (sidebar loads first); used by sidebar, panels, and overlays */
+/* @keyframes wf-pulse: defined here (sidebar loads first); used by sidebar, panels, and overlays */
 @keyframes wf-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%       { opacity: 0.55; transform: scale(0.78); }
 }
 
-/* ── Category filter chips (Patch 2) ── */
+/* -- Category filter chips (Patch 2) -- */
 .category-chips {
   display: flex;
   gap: 5px;
@@ -424,7 +637,7 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
   border-color: var(--accent);
 }
 
-/* ── Preset template preview tooltip ── */
+/* -- Preset template preview tooltip -- */
 .template-preview-tooltip {
   position: fixed;
   z-index: 9999;
@@ -452,7 +665,7 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
 .tpt-label { color: var(--t3); flex-shrink: 0; }
 .tpt-val { color: var(--t2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
 
-/* ── Node info tooltip — palette item hover ── */
+/* -- Node info tooltip (palette item hover) -- */
 .node-info-tooltip {
   position: fixed;
   z-index: 9999;

@@ -85,7 +85,7 @@ pub async fn revoke_token_handler(
     }
 }
 
-// ── Per-workflow SSE ACL handlers (P3-2) ─────────────────────────────────────
+// ── Per-workflow SSE ACL handlers ────────────────────────────────────────────
 
 /// GET /api/tokens/:id/workflows — list workflow IDs the token is restricted to.
 /// Empty list = unrestricted (sees all events).

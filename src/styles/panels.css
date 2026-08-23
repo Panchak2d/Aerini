@@ -496,15 +496,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 9px;
-  font-weight: 700;
-  font-family: monospace;
-  line-height: 1;
+  width: 18px;
+  height: 18px;
   color: var(--t2);
   background: rgba(255,255,255,.06);
   border: 1px solid rgba(255,255,255,.12);
-  border-radius: 3px;
-  padding: 1px 4px;
+  border-radius: 5px;
   margin-left: 6px;
   flex-shrink: 0;
 }
@@ -1676,6 +1673,21 @@
 }
 .history-item:hover .history-del-btn { opacity: 1; }
 .history-del-btn:hover { color: var(--red); }
+
+.history-replay-btn {
+  background: none;
+  border: none;
+  color: var(--t3);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 80ms, color 80ms;
+  flex-shrink: 0;
+}
+.history-item:hover .history-replay-btn { opacity: 1; }
+.history-replay-btn:hover { color: var(--accent, var(--t1)); }
 
 .history-pagination {
   display: flex;

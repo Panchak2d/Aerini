@@ -78,7 +78,7 @@ function resetTransientState(): void {
 
   // Workflow list items are hidden via inline style.display — reset them
   // directly so the list is not silently filtered after the input is cleared.
-  document.querySelectorAll<HTMLElement>(".workflow-item").forEach(el => {
+  document.querySelectorAll<HTMLElement>(".workflow-item, .workflow-collection-group").forEach(el => {
     el.style.display = "";
   });
 
@@ -285,6 +285,11 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
       const name = item.querySelector(".workflow-item-name")?.textContent?.toLowerCase() ?? "";
       const tags = item.dataset.wfTags ?? "";
       item.style.display = q && !name.includes(q) && !tags.includes(q) ? "none" : "";
+    });
+    document.querySelectorAll<HTMLElement>(".workflow-collection-group").forEach(group => {
+      const hasVisibleItem = !!group.querySelector<HTMLElement>('.workflow-item:not([style*="display: none"])');
+      const isEmptyGroup = !group.querySelector(".workflow-item"); // no items at all, not filtered out
+      group.style.display = q && !hasVisibleItem && !isEmptyGroup ? "none" : "";
     });
   });
 

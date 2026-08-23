@@ -1,4 +1,4 @@
-import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, type WorkflowResult } from "../ipc/workflow";
+import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, REPLAY_NODE_OUTPUT_KEY, type WorkflowResult } from "../ipc/workflow";
 import { TRIGGER_NODE_IDS } from "../node-ids";
 import { serialize } from "../canvas/CanvasSerializer";
 import type { Canvas } from "../canvas/Canvas";
@@ -10,7 +10,7 @@ import {
   syntaxHighlight, extractPreview,
   wireCopyButtons, ICON_CIRCLE_ALERT,
 } from "../output-renderer";
-import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel } from "../run-history";
+import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel, type RunRecord } from "../run-history";
 import { setWorkflowRunning } from "../workflow-manager";
 import { isTauri, escapeHtml } from "../utils";
 import { RunStateMachine } from "./state-machine";
@@ -264,10 +264,14 @@ export class RunManager {
     this.setActiveTab(historyTab);
     tabsEl.appendChild(historyTab);
 
-    const panel = renderHistoryPanel(this.state.currentWorkflowId, (result: WorkflowResult) => {
-      this._activeHistoryPanel = null;
-      this.buildDrawerTabsFromResult(result);
-    });
+    const panel = renderHistoryPanel(
+      this.state.currentWorkflowId,
+      (result: WorkflowResult) => {
+        this._activeHistoryPanel = null;
+        this.buildDrawerTabsFromResult(result);
+      },
+      (record: RunRecord) => this.replayRun(record),
+    );
     this._activeHistoryPanel = panel;
     content.appendChild(panel);
   }
@@ -288,7 +292,11 @@ export class RunManager {
     this.onStatus("Run cancelled");
   }
 
-  async handleRun(currentId: string, currentName: string): Promise<void> {
+  // overrideVars: when supplied, used as initialVariables instead of reading
+  // the Test Input JSON textarea — this is Run Replay's only hook into the
+  // normal run pipeline (timeout race, cancellation, history save, drawer
+  // build all stay shared with a manual Run rather than duplicated).
+  async handleRun(currentId: string, currentName: string, overrideVars?: Record<string, unknown>): Promise<void> {
     this.state.setWorkflowIdentity(currentId, currentName);
     if (this.state.isRunning) {
       this.onToast("A workflow is already running. Wait for it to finish.", "info");
@@ -325,11 +333,15 @@ export class RunManager {
     if (rs) { rs.textContent = ""; rs.style.color = ""; }
 
     let vars: Record<string, unknown> = {};
-    try {
-      const raw = (document.getElementById("run-input") as HTMLTextAreaElement)?.value?.trim();
-      if (raw) vars = JSON.parse(raw);
-    } catch {
-      this.onToast("Test Input JSON is invalid — ignored", "info");
+    if (overrideVars) {
+      vars = overrideVars;
+    } else {
+      try {
+        const raw = (document.getElementById("run-input") as HTMLTextAreaElement)?.value?.trim();
+        if (raw) vars = JSON.parse(raw);
+      } catch {
+        this.onToast("Test Input JSON is invalid — ignored", "info");
+      }
     }
 
     const json = serialize(currentId, currentName, this.canvas.nodes, this.canvas.connectors,
@@ -445,6 +457,40 @@ export class RunManager {
       // Always runs — even if runWorkflow hangs and times out
       this.resetBtns(panelBtn);
     }
+  }
+
+  // Replay a past run using its exact recorded trigger output — reuses the
+  // entire normal run pipeline via handleRun's overrideVars hook (timeout,
+  // cancellation, history save, drawer build). Only the entry trigger node's
+  // output is replayed; every other node re-executes live against today's
+  // workflow definition, same as a normal Run — so behavior can differ if
+  // the workflow was edited since that run.
+  async replayRun(record: RunRecord): Promise<void> {
+    if (this.state.isRunning) {
+      this.onToast("A workflow is already running. Wait for it to finish.", "info");
+      return;
+    }
+    const triggerNode = [...this.canvas.nodes.values()].find(n => TRIGGER_NODE_IDS.has(n.data.node_type_id));
+    if (!triggerNode) {
+      this.onToast("This workflow has no trigger node to replay — nothing to reuse as input.", "error");
+      return;
+    }
+    let result: WorkflowResult;
+    try {
+      result = JSON.parse(record.result_json) as WorkflowResult;
+    } catch {
+      this.onToast("Could not read this run's recorded data.", "error");
+      return;
+    }
+    const recordedOutput = result.node_outputs[triggerNode.data.id];
+    if (recordedOutput === undefined) {
+      this.onToast("This run has no recorded trigger output to replay — the workflow may have changed since.", "error");
+      return;
+    }
+    this.onToast(`Replaying with "${record.workflow_name}"'s recorded trigger input…`, "info");
+    await this.handleRun(this.state.currentWorkflowId, this.state.currentWorkflowName, {
+      [REPLAY_NODE_OUTPUT_KEY]: { node_id: triggerNode.data.id, output: recordedOutput },
+    });
   }
 
   // handleRunSingleNode — builds a subgraph of all ancestors + the target node
@@ -626,10 +672,14 @@ export class RunManager {
     historyTab.addEventListener("click", () => {
       this.setActiveTab(historyTab);
       content.innerHTML = "";
-      const panel = renderHistoryPanel(this.state.currentWorkflowId, (result: WorkflowResult) => {
-        this._activeHistoryPanel = null;
-        this.buildDrawerTabsFromResult(result);
-      });
+      const panel = renderHistoryPanel(
+        this.state.currentWorkflowId,
+        (result: WorkflowResult) => {
+          this._activeHistoryPanel = null;
+          this.buildDrawerTabsFromResult(result);
+        },
+        (record: RunRecord) => this.replayRun(record),
+      );
       this._activeHistoryPanel = panel;
       content.appendChild(panel);
     });

@@ -106,6 +106,23 @@ pub struct WorkflowExecutor {
 // of a second, driftable literal.
 pub(crate) const CANCEL_ERROR_CODE: &str = "CANCELLED";
 
+/// Reserved `ExecutionContext::variables` key that replays a past run's exact
+/// recorded output for one node, instead of executing that node's real logic.
+/// Matched generically in `execute_with_retry` below — the single call site
+/// shared by sequential, parallel, and loop-body execution — so replay works
+/// for any node type (manual trigger, webhook, schedule, or a future one)
+/// with no per-node code. Set by the caller via `run_workflow`'s
+/// `initial_variables`, mirroring `nodes::webhook::WEBHOOK_TRIGGER_PAYLOAD_KEY`'s
+/// established shape/matching convention (a different mechanism, for a
+/// different purpose — that key hands off a live in-flight request; this one
+/// reproduces a historical one).
+///
+/// Value shape: `{"node_id": string, "output": Value}`. `node_id` must equal
+/// the executing node's own id, so only that one node short-circuits — every
+/// other node in the workflow, including an unrelated second trigger-typed
+/// node, executes normally.
+pub const REPLAY_NODE_OUTPUT_KEY: &str = "__aerini_replay_node_output";
+
 impl WorkflowExecutor {
     /// Create an executor with the minimum required components.
     ///
@@ -116,6 +133,16 @@ impl WorkflowExecutor {
         credential_resolver: Arc<dyn CredentialResolver>,
     ) -> Self {
         Self { registry, credential_resolver, config: WorkflowExecutorConfig::default() }
+    }
+
+    /// Replace the node registry on an already-built executor. For a caller
+    /// that keeps a template `WorkflowExecutor` around (e.g. one built once
+    /// at server startup and `.clone()`-d per request) and wants each new
+    /// request to see the latest reloaded registry rather than the one
+    /// baked in at template-construction time.
+    pub fn with_registry(mut self, registry: Arc<NodeRegistry>) -> Self {
+        self.registry = registry;
+        self
     }
 
     /// Restrict `{{$env.VAR}}` expressions to the listed variable names.
@@ -605,6 +632,25 @@ impl WorkflowExecutor {
         let backoff_ms   = node_def.retry.backoff_ms.min(60_000);
         let node_id      = &node_def.id;
 
+        // Run Replay short-circuit: if the caller asked to replay a past run's
+        // recorded output for this exact node, return it verbatim — no real
+        // execution, no side effects (no port bind, no HTTP call, nothing).
+        // Falls through to normal execution below if the key is absent, malformed,
+        // or names a different node.
+        if let Some(replay) = input.context.variables.get(REPLAY_NODE_OUTPUT_KEY) {
+            if replay.get("node_id").and_then(Value::as_str) == Some(node_id.as_str()) {
+                if let Some(output) = replay.get("output") {
+                    return (
+                        NodeOutput::success_with_logs(
+                            output.clone(),
+                            vec!["Replayed from a previous run — recorded output reused verbatim.".to_string()],
+                        ),
+                        1,
+                    );
+                }
+            }
+        }
+
         // one node-level memory-tracking group
         // per attempt, nested inside whichever Run group `run()` registered
         // (nesting handled by tracking-allocator itself — see
@@ -749,6 +795,23 @@ mod tests {
         }
     }
 
+    // Node that returns a fixed, distinguishable output when actually executed —
+    // used to prove the Run Replay short-circuit skipped real execution (its own
+    // output would never match a replay payload's own distinct marker value).
+    struct MarkerNode;
+    #[async_trait::async_trait]
+    impl Node for MarkerNode {
+        fn type_id(&self) -> &'static str { "marker_test" }
+        fn display_name(&self) -> &'static str { "Marker Test" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "1.0" }
+        fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, _input: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::success(serde_json::json!({ "source": "real_execution" }))
+        }
+    }
+
     // Node that sleeps for 60 s — only completes if the timeout does NOT fire.
     struct SlowNode;
     #[async_trait::async_trait]
@@ -847,6 +910,52 @@ mod tests {
         let result = executor.run(Arc::new(workflow), HashMap::new()).await;
         assert!(result.is_ok());
         assert!(result.unwrap().success);
+    }
+
+    // ── Run Replay short-circuit ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn replay_key_matching_node_returns_recorded_output_without_executing() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(MarkerNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = single_node_workflow("marker_test", None);
+
+        let mut vars = HashMap::new();
+        vars.insert(
+            REPLAY_NODE_OUTPUT_KEY.to_string(),
+            serde_json::json!({ "node_id": "n1", "output": { "source": "replayed" } }),
+        );
+
+        let result = executor.run(Arc::new(workflow), vars).await.unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.node_outputs.get("n1"),
+            Some(&serde_json::json!({ "source": "replayed" })),
+            "matching node_id must return the recorded output verbatim, not MarkerNode's real output"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_key_node_id_mismatch_executes_normally() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(MarkerNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = single_node_workflow("marker_test", None);
+
+        let mut vars = HashMap::new();
+        vars.insert(
+            REPLAY_NODE_OUTPUT_KEY.to_string(),
+            serde_json::json!({ "node_id": "some_other_node", "output": { "source": "replayed" } }),
+        );
+
+        let result = executor.run(Arc::new(workflow), vars).await.unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.node_outputs.get("n1"),
+            Some(&serde_json::json!({ "source": "real_execution" })),
+            "node_id mismatch must fall through to real execution, not the replay payload"
+        );
     }
 
     #[tokio::test]

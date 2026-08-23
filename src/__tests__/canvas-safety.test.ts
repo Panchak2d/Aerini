@@ -142,7 +142,7 @@ describe("Canvas.deleteSelected — per-node undo partitioning", () => {
 // endpoint, regardless of how it became dangling.
 // ---------------------------------------------------------------------------
 
-describe("serialize — dangling edge filter (T1-14)", () => {
+describe("serialize — dangling edge filter", () => {
   it("excludes an edge whose from_node is absent from the node map", () => {
     const n2 = makeNode("n2");
     const nodes = new Map([["n2", n2]]); // "n1" deliberately absent

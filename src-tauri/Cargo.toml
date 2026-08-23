@@ -43,6 +43,20 @@ argon2 = "0.5"
 # Base64 decode for write_temp_file — already in workspace via aerini-engine
 base64 = "0.22"
 
+# Plugin signature verification (install-time authenticity/integrity check,
+# commands/plugins.rs). 3.0.0 VERIFIED current stable on crates.io
+# (published 2026-07-06, not yanked; the one historical advisory,
+# RUSTSEC-2022-0093, is fixed as of 2.0 and doesn't apply regardless — this
+# crate is used verify-only, no SigningKey/keypair ever exists in this app).
+# MSRV 1.85 per its own Cargo.toml, satisfied by this workspace's
+# `dtolnay/rust-toolchain@stable` CI (no older toolchain pinned anywhere in
+# this repo). default-features = false: the default "fast"/"zeroize"
+# features exist for signing/precomputed-table performance and secret-key
+# zeroing — irrelevant here since the app only calls
+# VerifyingKey::verify_strict on a public key, never generates or holds a
+# private key. Same minimal-features convention as sysinfo below.
+ed25519-dalek = { version = "3.0.0", default-features = false }
+
 # Structured logging — used for plugin_dir warnings in setup
 tracing = "0.1"
 
@@ -62,6 +76,16 @@ url     = "2"
 # needs none of them), matching this file's existing minimal-features
 # convention (see reqwest, aws-sdk-s3 in aerini-engine/Cargo.toml).
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+# Staging area for multi-node package installs (commands/plugins.rs::install_plugin_pack_from_path):
+# each member needs a real path on disk for PluginLoader::describe_plugin (&Path,
+# not bytes), so extracted members are written to a TempDir, described, and only
+# copied into plugin_dir once every check has passed. Already a workspace
+# dependency (aerini-engine uses it for the same "need a real temp file"
+# pattern); version already resolved in Cargo.lock at 3.27.0, no new
+# transitive dependencies. Also used by this crate's own tests (tempdir-based,
+# matching plugin_loader.rs's existing test style).
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

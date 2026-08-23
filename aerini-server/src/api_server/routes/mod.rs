@@ -6,3 +6,4 @@ pub mod tokens;
 pub mod widget;
 pub mod memory;
 pub mod performance;
+pub mod plugins;

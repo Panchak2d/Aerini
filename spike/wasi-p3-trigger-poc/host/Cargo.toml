@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "aerini-spike-trigger-host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "P8.0 spike (throwaway) -- async host harness for the WASI P3 echo-stream trigger guest. Not wired into aerini-engine/plugin_loader.rs."
+
+[[bin]]
+name = "spike-host"
+path = "src/main.rs"
+
+[dependencies]
+# Same 46.0.1 pin as aerini-engine/Cargo.toml -- this spike exists to answer
+# whether that already-pinned version supports the P3 async path the real
+# batch needs, so pinning anything else would defeat its purpose.
+wasmtime = { version = "46.0.1", features = ["component-model"] }
+# `wasmtime_wasi::p3` (and every fn in it, incl. `add_to_linker`) is gated
+# behind the crate's own "p3" feature; aerini-engine's `wasmtime-wasi = "46.0.1"`
+# line does not enable it, so this crate must request it explicitly.
+wasmtime-wasi = { version = "46.0.1", features = ["p3"] }
+tokio = { version = "1", features = ["full"] }

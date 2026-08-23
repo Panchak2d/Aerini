@@ -86,10 +86,11 @@ pub(super) fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowSummary {
-    pub id:         String,
-    pub name:       String,
-    pub updated_at: String,
-    pub tags:       Vec<String>,
+    pub id:            String,
+    pub name:          String,
+    pub updated_at:    String,
+    pub tags:          Vec<String>,
+    pub collection_id: Option<String>,
 }
 
 /// Outcome of a conditional save via [`WorkflowDb::save_checked`].
@@ -117,7 +118,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 7;
+    pub(super) const SCHEMA_VERSION: i64 = 8;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -211,6 +212,9 @@ impl WorkflowDb {
         }
         if current_version < 7 {
             Self::migrate_v7(conn)?;
+        }
+        if current_version < 8 {
+            Self::migrate_v8(conn)?;
         }
 
         Ok(())
@@ -376,6 +380,21 @@ impl WorkflowDb {
             BEGIN;
             ALTER TABLE workflows ADD COLUMN row_version INTEGER NOT NULL DEFAULT 1;
             PRAGMA user_version = 7;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
+
+    /// Version 8 — adds `collection_id` to `workflows`. Unlike `tags`
+    /// (migrate_v6), this has no `DEFAULT` — a workflow with no collection
+    /// is `NULL`, not an empty-array stand-in, so existing rows and the
+    /// column's absence-state are the same value. Populated from
+    /// `WorkflowMetadata.collection_id` at save time, mirroring the `tags`
+    /// pattern otherwise.
+    fn migrate_v8(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            ALTER TABLE workflows ADD COLUMN collection_id TEXT;
+            PRAGMA user_version = 8;
             COMMIT;
         ").map_err(|e| e.to_string())
     }

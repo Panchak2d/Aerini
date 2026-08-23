@@ -32,7 +32,7 @@ Copy the `.wasm` file to your Aerini plugin directory:
 - **Desktop app:** open the **Plugins** tab in the left activity bar. Click **Browse** to set (or change) your plugin directory, then **Install .wasm** to copy a compiled plugin into it. Installed plugins are listed with their type id and a **Remove** button.
 - **aerini-server:** the directory passed via `--plugin-dir`.
 
-Restart Aerini (or the server) after installing or removing a plugin — the Plugins tab shows a reminder banner until you do. The new (or updated) node type then appears in the palette automatically.
+No restart needed — Aerini reloads the plugin registry live after install or remove. The new (or updated) node type appears in the palette immediately.
 
 ## Customising
 

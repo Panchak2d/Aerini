@@ -62,6 +62,21 @@ const SLACK_NODE = {
 
 const ALL_NODES = [HTTP_NODE, AI_NODE, SLACK_NODE];
 
+const PLUGIN_NODE = {
+  type_id: "custom_plugin_node",
+  display_name: "Custom Plugin",
+  node_type: "action" as const,
+  version: "1.0",
+  input_schema: {},
+  output_schema: {},
+  is_plugin: true,
+  icon: '<circle cx="12" cy="12" r="9" />',
+  ports: {
+    inputs:  [makePort("input",  "left")],
+    outputs: [makePort("output", "right")],
+  },
+};
+
 const NO_INPUT_NODE = {
   type_id: "manual_trigger",
   display_name: "Manual Trigger",
@@ -145,8 +160,8 @@ describe("command palette — name filter", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Command palette — wire-drop mismatch feedback (Batch 10: inline .style.*
-// writes replaced with CSS class hooks; behavior/timing must stay identical)
+// Command palette — wire-drop mismatch feedback (inline .style.* writes
+// replaced with CSS class hooks; behavior/timing must stay identical)
 // ---------------------------------------------------------------------------
 
 describe("command palette — wire-drop mismatch feedback", () => {
@@ -259,7 +274,7 @@ describe("filterByCategory — sidebar palette", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sidebar palette — collapsible category sections (Batch 5)
+// Sidebar palette — collapsible category sections
 // ---------------------------------------------------------------------------
 
 describe("buildSidebarPalette — collapsible categories", () => {
@@ -338,5 +353,65 @@ describe("buildSidebarPalette — collapsible categories", () => {
       expect(el.classList.contains("collapsed")).toBe(true); // still tucked away
       expect(el.classList.contains("hidden")).toBe(false);    // but not filtered out
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugin icon badge — sidebar list and command palette result row
+// ---------------------------------------------------------------------------
+
+describe("plugin icon badge", () => {
+  afterEach(() => {
+    if (document.getElementById("command-palette-overlay")) closePalette();
+    document.body.innerHTML = "";
+  });
+
+  it("sidebar list renders the plugin's sanitized icon in the badge, not a literal \"P\"", () => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="canvas"></div>
+    `;
+    buildSidebarPalette([...ALL_NODES, PLUGIN_NODE], mockCanvas as never, vi.fn());
+
+    const item = document.querySelector<HTMLElement>('.palette-item[data-search*="custom_plugin_node"]')!;
+    const badge = item.querySelector(".palette-plugin-badge")!;
+    expect(badge.querySelector("svg.icon-svg")).not.toBeNull();
+    expect(badge.querySelector("circle")).not.toBeNull();
+    expect(badge.textContent).not.toBe("P");
+  });
+
+  it("command palette result row renders the plugin's sanitized icon in the badge, not a literal \"P\"", () => {
+    document.body.innerHTML = `
+      <div id="command-palette-overlay" class="hidden">
+        <input id="palette-search" type="text" />
+        <div id="palette-results"></div>
+      </div>
+      <div id="canvas"></div>
+    `;
+    initCommandPalette([...ALL_NODES, PLUGIN_NODE], mockCanvas as never, vi.fn());
+    openPalette();
+
+    const row = Array.from(document.querySelectorAll<HTMLElement>(".palette-result"))
+      .find(r => r.textContent?.includes("Custom Plugin"))!;
+    const badge = row.querySelector(".palette-plugin-badge")!;
+    expect(badge.querySelector("svg.icon-svg")).not.toBeNull();
+    expect(badge.querySelector("circle")).not.toBeNull();
+    expect(badge.textContent).not.toBe("P");
+  });
+
+  it("non-plugin nodes render no plugin badge in either the sidebar or the command palette", () => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="command-palette-overlay" class="hidden">
+        <input id="palette-search" type="text" />
+        <div id="palette-results"></div>
+      </div>
+      <div id="canvas"></div>
+    `;
+    buildSidebarPalette(ALL_NODES, mockCanvas as never, vi.fn());
+    initCommandPalette(ALL_NODES, mockCanvas as never, vi.fn());
+    openPalette();
+
+    expect(document.querySelectorAll(".palette-plugin-badge").length).toBe(0);
   });
 });

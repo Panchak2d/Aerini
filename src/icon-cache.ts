@@ -72,13 +72,10 @@ import { getCanvasColors } from "./canvas/theme-colors";
 // against variables.css directly.
 //
 // Reads the LIVE theme tokens (getCanvasColors(), same shared cache Node.ts/
-// Canvas.ts/Connector.ts/Minimap.ts use) instead of a hardcoded array — was
-// Midnight-only hex; getIconBitmap does an exact string-key lookup
-// (`${typeId}:${color}`) with no cross-theme fallback, so a static
-// Midnight-only preload list would silently degrade every node icon to its
-// plain-letter fallback the moment the active theme's accent differs from
-// what was preloaded — caught in this fix's own retrospective scan before
-// shipping (Section 5), not a separate pre-existing bug.
+// Canvas.ts/Connector.ts/Minimap.ts use) rather than a hardcoded list:
+// getIconBitmap does an exact string-key lookup (`${typeId}:${color}`) with
+// no cross-theme fallback, so preloading colors that don't match the active
+// theme would silently degrade every node icon to its plain-letter fallback.
 export function accentColors(): string[] {
   const c = getCanvasColors();
   return [c.catAction, c.catAI, c.catLogic, c.catUtility, c.error];
@@ -97,8 +94,12 @@ export async function preloadAllIcons(): Promise<void> {
   await Promise.allSettled(tasks);
 }
 
+export function wrapIconSvg(inner: string): string {
+  return `<svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+}
+
 export function getIconSvg(typeId: string): string {
   const inner = NODE_SVG_INNER[typeId];
   if (!inner) return "";
-  return `<svg class="icon-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  return wrapIconSvg(inner);
 }

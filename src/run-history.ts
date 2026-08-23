@@ -136,6 +136,7 @@ async function migrateFromLocalStorage(): Promise<void> {
 export function renderHistoryPanel(
   workflowId:   string,
   onRestoreRun: (result: WorkflowResult) => void,
+  onReplayRun:  (record: RunRecord) => void,
 ): HistoryPanel {
   const wrap = document.createElement("div") as unknown as HistoryPanel;
   wrap.className = "history-panel";
@@ -225,7 +226,7 @@ export function renderHistoryPanel(
         currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
         isLoading = false; loadAndRender(); return;
       }
-      for (const record of records) content.appendChild(buildItem(record, onRestoreRun));
+      for (const record of records) content.appendChild(buildItem(record, onRestoreRun, onReplayRun));
       pageLabel.textContent = `Page ${Math.floor(currentOffset / PAGE_SIZE) + 1}`;
       prevBtn.disabled = currentOffset === 0;
       nextBtn.disabled = records.length < PAGE_SIZE;
@@ -240,7 +241,11 @@ export function renderHistoryPanel(
   return wrap;
 }
 
-function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void): HTMLElement {
+function buildItem(
+  record:       RunRecord,
+  onRestoreRun: (r: WorkflowResult) => void,
+  onReplayRun:  (r: RunRecord) => void,
+): HTMLElement {
   const item = document.createElement("div");
   const isInterrupted = record.status === "running" || record.status === "interrupted";
   item.className = `history-item ${isInterrupted ? "history-fail" : record.success ? "history-ok" : "history-fail"}`;
@@ -251,22 +256,26 @@ function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void)
   const dateStr = ranAt.toLocaleDateString([], { month: "short", day: "numeric" });
   const dur     = record.duration_ms < 1000 ? `${record.duration_ms}ms` : `${(record.duration_ms / 1000).toFixed(1)}s`;
   const badgeText = isInterrupted ? "INTERRUPTED" : record.success ? "OK" : "FAIL";
+  // Replay needs a real recorded result — an interrupted/still-running row's
+  // result_json is '' (see save_run_started), nothing to replay from.
+  const replayBtn = isInterrupted ? "" : `<button class="history-replay-btn" title="Run again with this run's recorded trigger input">↻</button>`;
   item.innerHTML = `
     <div class="history-item-row">
       <span class="history-badge ${record.success && !isInterrupted ? "history-badge-ok" : "history-badge-fail"}">${badgeText}</span>
       <span class="history-name">${escapeHtml(record.workflow_name)}</span>
       <span class="history-dur">${isInterrupted ? "" : dur}</span>
+      ${replayBtn}
       <button class="history-del-btn" title="Delete this run">✕</button>
     </div>
     <div class="history-meta"><span title="${dateStr} · ${timeStr}" aria-label="${dateStr} at ${timeStr}">${relativeTime(ranAt)}</span></div>`;
   item.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).classList.contains("history-del-btn")) return;
+    if ((e.target as HTMLElement).closest(".history-del-btn, .history-replay-btn")) return;
     if (isInterrupted) return;
     try { onRestoreRun(JSON.parse(record.result_json) as WorkflowResult); } catch { /* */ }
   });
   item.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
-    if ((e.target as HTMLElement).classList.contains("history-del-btn")) return;
+    if ((e.target as HTMLElement).closest(".history-del-btn, .history-replay-btn")) return;
     e.preventDefault();
     item.click();
   });
@@ -278,6 +287,10 @@ function buildItem(record: RunRecord, onRestoreRun: (r: WorkflowResult) => void)
     } catch (err) {
       console.error("Failed to delete run record:", err);
     }
+  });
+  item.querySelector<HTMLButtonElement>(".history-replay-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onReplayRun(record);
   });
   return item;
 }
