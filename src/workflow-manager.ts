@@ -230,6 +230,9 @@ export class WorkflowManager {
   chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
   hasUnsaved  = false;
   private sortMode = "updated_desc";
+  /** Guards refreshWorkflowList against overlapping calls (see its doc comment). */
+  private _refreshInFlight: Promise<void> | null = null;
+  private _refreshQueued = false;
 
   private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private onUnsavedChange: (u: boolean) => void;
@@ -490,7 +493,28 @@ export class WorkflowManager {
     await this.refreshWorkflowList();
   }
 
+  /** Coalesces overlapping calls. The render below clears #workflow-list
+   *  synchronously and appends only after an async gap (collections load,
+   *  then the workflow-list IPC call) — two calls landing in that gap, e.g.
+   *  back-to-back scheduler-status events, would otherwise each append their
+   *  own copy of every group into the same emptied list. A call arriving
+   *  while one is already in flight just flags another pass and shares the
+   *  in-flight promise instead of starting its own render. */
   async refreshWorkflowList(): Promise<void> {
+    if (this._refreshInFlight) {
+      this._refreshQueued = true;
+      return this._refreshInFlight;
+    }
+    this._refreshInFlight = (async () => {
+      do {
+        this._refreshQueued = false;
+        await this.renderWorkflowList();
+      } while (this._refreshQueued);
+    })().finally(() => { this._refreshInFlight = null; });
+    return this._refreshInFlight;
+  }
+
+  private async renderWorkflowList(): Promise<void> {
     await this.ensureCollectionsLoaded();
     const list = document.getElementById("workflow-list")!;
     list.innerHTML = "";
