@@ -53,6 +53,15 @@ lettre = { version = "0.11.22", default-features = false, features = [
 subtle = "2.6"
 blake3 = "1"
 
+# Plugin signature verification (load-path authenticity/integrity check,
+# plugin_loader::signature). 3.0.0 VERIFIED current stable on crates.io
+# (docs.rs latest tag, 2026-07-06 release, not yanked). default-features =
+# false: the default "fast"/"zeroize" features are signing/precomputed-table
+# performance and secret-key zeroing — irrelevant here, this crate is used
+# verify-only, no SigningKey ever exists in this app. Same convention as
+# src-tauri/Cargo.toml's own ed25519-dalek entry.
+ed25519-dalek = { version = "3.0.0", default-features = false }
+
 # Diagnostics
 tracing = "0.1"
 
@@ -133,16 +142,37 @@ redis = { version = "1.0", features = ["tokio-comp"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 
 # WASM plugin system
-# component-model feature only — component-model-async is NOT enabled (sync WIT interface).
-# wasmtime-wasi-http adds wasi:http/outgoing-handler support.
+# component-model feature only on the sync engine — component-model-async
+# is scoped to the dedicated trigger engine below (sync WIT interface for
+# ordinary action plugins).
+# wasmtime-wasi-http adds wasi:http/outgoing-handler support: "p2" backs
+# the sync plugin engine's HTTP linking, "p3" backs the trigger engine's
+# (see plugin_loader.rs's module doc, "Trigger plugins").
 #
 # `wasmtime-wasi`'s "p3" feature gates `wasmtime_wasi::p3` (WASI 0.3 /
-# component-model-async), used only by the second, dedicated async Engine
-# that hosts trigger-plugin components (`aerini-node-with-trigger` world).
-# The default (p2, sync) plugin engine is unaffected by this feature.
-wasmtime           = { version = "46.0.1", features = ["component-model"] }
-wasmtime-wasi      = { version = "46.0.1", features = ["p3"] }
-wasmtime-wasi-http = { version = "46.0.1", features = ["p2"] }
+# component-model-async), used by the second, dedicated async Engine that
+# hosts trigger-plugin components (`aerini-node-with-trigger` world). The
+# default (p2, sync) plugin engine is unaffected by this feature.
+#
+# All three pinned to an EXACT version (`=46.0.2`) rather than a caret range:
+# both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as
+# "not compliant with semver and not ready for production use" with no
+# patch-release guarantee even for security fixes (VERIFIED against the real
+# crate source, not just docs — checked both 46.0.1 and 46.0.2, p3 modules
+# are byte-identical between them). A caret range on a crate with that
+# disclaimer means any future point release can change or break the p3
+# surfaces this crate depends on with no warning; an exact pin turns the
+# next bump into a deliberate, reviewed upgrade instead of a silent one.
+# Bump only all three together, and re-verify the p3 surfaces this crate
+# depends on (plugin_loader.rs's trigger-engine linking) before doing so.
+wasmtime           = { version = "=46.0.2", features = ["component-model"] }
+wasmtime-wasi      = { version = "=46.0.2", features = ["p3"] }
+wasmtime-wasi-http = { version = "=46.0.2", features = ["p2", "p3"] }
+
+# Pulled in transitively by wasmtime-wasi-http already, but the p3 hook
+# signature (`TriggerHttpHooks::send_request` in plugin_loader.rs) names
+# `bytes::Bytes` directly, which requires it as a direct dependency.
+bytes = "1"
 
 # Security: pin rustls-webpki to patched version (RUSTSEC-2026-0098, -0099, -0104).
 # Transitive via reqwest/sqlx/rustls. Direct dep forces Cargo to unify at >=0.103.13.

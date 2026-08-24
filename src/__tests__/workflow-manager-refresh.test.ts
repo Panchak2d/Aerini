@@ -67,10 +67,7 @@ describe("refreshWorkflowList", () => {
   });
 
   it("does not duplicate groups when a second call lands while the first is still in flight", async () => {
-    let resolveList!: (wfs: WorkflowSummary[]) => void;
-    ipcMocks.listWorkflows.mockImplementation(
-      () => new Promise<WorkflowSummary[]>(res => { resolveList = res; }),
-    );
+    ipcMocks.listWorkflows.mockResolvedValue(makeWorkflows(3));
     const mgr = makeManager();
 
     // Mirrors two scheduler-status events firing back to back: the second
@@ -78,7 +75,6 @@ describe("refreshWorkflowList", () => {
     // listWorkflows IPC call) has resolved.
     const p1 = mgr.refreshWorkflowList();
     const p2 = mgr.refreshWorkflowList();
-    resolveList(makeWorkflows(3));
     await Promise.all([p1, p2]);
 
     const list = document.getElementById("workflow-list")!;

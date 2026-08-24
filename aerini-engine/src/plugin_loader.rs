@@ -51,11 +51,15 @@
 //!
 //! # Outbound HTTP
 //!
-//! Every request a plugin sends through `wasi:http/outgoing-handler` is checked by
-//! [`PluginHttpHooks::send_request`] against this crate's standard SSRF policy — the
-//! same `SsrfPolicy::Strict` the Database and HTTP nodes enforce — before
-//! `wasmtime_wasi_http`'s default send path is allowed to run it. See
-//! [`check_plugin_request_ssrf`] for exactly what is and isn't caught.
+//! Every request a plugin sends through `wasi:http/outgoing-handler` is checked
+//! against this crate's standard SSRF policy — the same `SsrfPolicy::Strict` the
+//! Database and HTTP nodes enforce — before `wasmtime_wasi_http`'s default send
+//! path is allowed to run it. Action plugins go through
+//! [`PluginHttpHooks::send_request`] (`wasi:http` p2); trigger plugins go through
+//! [`TriggerHttpHooks::send_request`] (p3, `trigger_engine`'s async ABI) — both
+//! delegate the actual policy to the same [`check_ssrf_uri`], so the two engines
+//! can't drift apart on what's blocked. See that function for exactly what is and
+//! isn't caught.
 //!
 //! # Plugin storage
 //!
@@ -77,9 +81,9 @@
 //! interface alongside `node`. It is never used for the `node`/`describe`/`execute`
 //! path above, which stays fully synchronous; see `wit/node.wit`'s doc comment on
 //! `interface trigger` for why the two can't share one engine. Trigger plugins get
-//! no `wasi:http` linking and no raw-socket grant — the same effective "no network"
-//! default action plugins have, reached here by simply not linking HTTP at all. See
-//! [`PluginLoader::start_trigger`].
+//! SSRF-filtered `wasi:http` (p3) linked the same way action plugins get p2 — see
+//! "Outbound HTTP" above — but no raw-socket grant, the same effective position
+//! action plugins are in absent an explicit grant. See [`PluginLoader::start_trigger`].
 
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -88,6 +92,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Request;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::OptionalExtension;
@@ -101,6 +107,14 @@ use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
 use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, OutgoingRequestConfig};
 use wasmtime_wasi_http::{WasiHttpCtx, p2::{HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, default_send_request}};
+use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
+use wasmtime_wasi_http::p3::{
+    RequestOptions as P3RequestOptions,
+    WasiHttpCtxView as P3WasiHttpCtxView,
+    WasiHttpHooks as P3WasiHttpHooks,
+    WasiHttpView as P3WasiHttpView,
+    default_send_request as p3_default_send_request,
+};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
@@ -280,10 +294,138 @@ pub enum PluginLoadError {
     #[error("no plugin exporting `aerini-node-with-trigger` with type_id \"{0}\" found in the plugin directory")]
     NoSuchTriggerPlugin(String),
 
+    #[error("plugin signature check failed: {0}")]
+    SignatureRejected(String),
+
     /// Kept for API compatibility; not returned by any current code path.
     #[error("not yet implemented")]
     #[allow(dead_code)]
     NotImplemented,
+}
+
+// ── Plugin signature verification ───────────────────────────────────────────
+
+/// Publisher signature verification for a single `.wasm` file against its
+/// optional `<name>.wasm.sig` sidecar. The single load-time enforcement
+/// point every [`load_plugins`] caller shares — see
+/// [`PluginLoader::load_plugin`]. Also reused by `src-tauri` for its
+/// desktop-only trust store and multi-file pack signing, which have no
+/// equivalent here (`aerini-engine` has no concept of a "pack").
+pub mod signature {
+    use std::path::{Path, PathBuf};
+
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use ed25519_dalek::{Signature, VerifyingKey};
+    use serde::Deserialize;
+
+    pub const SIG_SCHEMA_VERSION: u32 = 1;
+    pub const SIG_ALGORITHM: &str = "ed25519";
+    const SIG_DOMAIN: &[u8] = b"aerini-plugin-sig-v1\n";
+
+    /// One `{name, blake3}` entry inside a [`PluginSignatureFile`]. A list
+    /// (not a single hash) so a multi-file package manifest can reuse this
+    /// exact shape with more than one entry under one signature.
+    #[derive(Deserialize)]
+    pub struct SignedFileEntry {
+        pub name: String,
+        pub blake3: String,
+    }
+
+    /// Shape of an optional `<name>.wasm.sig` sidecar:
+    /// `{schema_version, algorithm, public_key (base64, 32 bytes),
+    /// files: [{name, blake3}], signature (base64, 64 bytes)}`. `name`
+    /// inside each entry is informational only — matching is by content
+    /// hash.
+    #[derive(Deserialize)]
+    pub struct PluginSignatureFile {
+        pub schema_version: u32,
+        pub algorithm: String,
+        pub public_key: String,
+        pub files: Vec<SignedFileEntry>,
+        pub signature: String,
+    }
+
+    /// Outcome of checking a `.wasm` file against its sidecar, if any. Pure
+    /// and read-only.
+    #[derive(Debug, Clone)]
+    pub enum SigCheckResult {
+        /// No `.sig` sidecar next to the file.
+        Unsigned,
+        /// Sidecar present but declares a `schema_version`/`algorithm`/`files`
+        /// shape this build doesn't understand — e.g. from a newer app
+        /// version. Informational, not a failure.
+        Unrecognized,
+        /// Sidecar present but malformed: bad JSON, or a key/signature that
+        /// doesn't decode to the expected byte length.
+        Malformed(String),
+        /// The sidecar's declared content hash doesn't match the actual file.
+        IntegrityMismatch,
+        /// Hash matched but the Ed25519 signature itself doesn't verify.
+        SignatureInvalid,
+        /// Hash and signature both verify, under this public key.
+        Valid(VerifyingKey),
+    }
+
+    /// Path of the optional signature sidecar for a given `.wasm` path.
+    pub fn sig_sidecar_path(wasm_path: &Path) -> PathBuf {
+        let mut p = wasm_path.as_os_str().to_owned();
+        p.push(".sig");
+        PathBuf::from(p)
+    }
+
+    /// Deterministic message the signature is computed over: a
+    /// domain-separation prefix followed by each file entry's
+    /// `name`/`blake3` hash, name-sorted so the result doesn't depend on the
+    /// order `files` happens to be written in.
+    pub fn signed_message(entries: &[SignedFileEntry]) -> Vec<u8> {
+        let mut sorted: Vec<&SignedFileEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut msg = SIG_DOMAIN.to_vec();
+        for e in sorted {
+            msg.extend_from_slice(e.name.as_bytes());
+            msg.push(0);
+            msg.extend_from_slice(e.blake3.as_bytes());
+            msg.push(b'\n');
+        }
+        msg
+    }
+
+    /// Checks `wasm_bytes` (the file's actual current content) against the
+    /// optional sidecar at `sig_sidecar_path(wasm_path)`.
+    pub fn check_signature(wasm_path: &Path, wasm_bytes: &[u8]) -> SigCheckResult {
+        let raw = match std::fs::read_to_string(sig_sidecar_path(wasm_path)) {
+            Ok(s) => s,
+            Err(_) => return SigCheckResult::Unsigned,
+        };
+        let sig: PluginSignatureFile = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(e) => return SigCheckResult::Malformed(e.to_string()),
+        };
+        if sig.schema_version != SIG_SCHEMA_VERSION || sig.algorithm != SIG_ALGORITHM || sig.files.len() != 1 {
+            return SigCheckResult::Unrecognized;
+        }
+
+        let actual_hash = blake3::hash(wasm_bytes).to_hex().to_string();
+        if sig.files[0].blake3 != actual_hash {
+            return SigCheckResult::IntegrityMismatch;
+        }
+
+        let Some(public_key) = BASE64.decode(&sig.public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else {
+            return SigCheckResult::Malformed("public_key is not valid base64 for a 32-byte Ed25519 key".to_string());
+        };
+        let Some(signature_bytes) = BASE64.decode(&sig.signature).ok().and_then(|b| <[u8; 64]>::try_from(b).ok()) else {
+            return SigCheckResult::Malformed("signature is not valid base64 for a 64-byte Ed25519 signature".to_string());
+        };
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key) else {
+            return SigCheckResult::Malformed("public_key is not a valid Ed25519 point".to_string());
+        };
+        let signature = Signature::from_bytes(&signature_bytes);
+
+        match verifying_key.verify_strict(&signed_message(&sig.files), &signature) {
+            Ok(()) => SigCheckResult::Valid(verifying_key),
+            Err(_) => SigCheckResult::SignatureInvalid,
+        }
+    }
 }
 
 // ── WASM Store state ──────────────────────────────────────────────────────────
@@ -367,16 +509,14 @@ impl wit_storage::StorageHost for PluginState {
 /// Per-instance store state for a trigger-plugin component, run on
 /// [`PluginLoader::trigger_engine`].
 ///
-/// Deliberately narrower than [`PluginState`]: no [`WasiHttpCtx`] and no HTTP
-/// linking at all. Raw `wasi:sockets` capability is also left at
+/// HTTP is linked via `wasi:http` p3 ([`TriggerHttpHooks`]), SSRF-filtered
+/// identically to [`PluginState`]'s p2 HTTP -- see "Outbound HTTP" in this
+/// module's own doc comment. Raw `wasi:sockets` capability is left at
 /// `WasiCtxBuilder`'s own default (no `allow_tcp`/`socket_addr_check`
 /// override), which denies every address absent an explicit grant -- the
-/// same effective "no network" position [`make_plugin_state`] already gives
-/// action plugins, just reached without an HTTP linker to leave unlinked in
-/// the first place. Extending outbound HTTP to trigger plugins (mirroring
-/// `check_plugin_request_ssrf`) is real, wanted follow-on work, gated on
-/// first confirming `wasmtime_wasi_http`'s `p3` module's exact linking API
-/// against a real build -- not done here.
+/// same effective position [`make_plugin_state`] leaves action plugins in
+/// for raw sockets. The `storage` import is linked identically to
+/// [`PluginState`]'s -- see `storage` field below.
 ///
 /// One `TriggerPluginState` (and one `Store`) per running trigger instance,
 /// held for that instance's whole lifetime -- unlike [`PluginState`], which
@@ -384,8 +524,14 @@ impl wit_storage::StorageHost for PluginState {
 /// must stay backed by the same store for as long as it's being drained.
 struct TriggerPluginState {
     wasi_ctx: WasiCtx,
+    http_ctx: WasiHttpCtx,
     table: ResourceTable,
     limits: wasmtime::StoreLimits,
+    http_hooks: TriggerHttpHooks,
+    /// This instance's `storage` import backing, if any -- same shape and
+    /// same "scoped by the resolved `type_id`, `None` if the directory's
+    /// storage database couldn't be opened" contract as [`PluginState::storage`].
+    storage: Option<PluginStorageHandle>,
 }
 
 impl WasiView for TriggerPluginState {
@@ -394,11 +540,47 @@ impl WasiView for TriggerPluginState {
     }
 }
 
-fn make_trigger_plugin_state() -> TriggerPluginState {
+impl P3WasiHttpView for TriggerPluginState {
+    fn http(&mut self) -> P3WasiHttpCtxView<'_> {
+        P3WasiHttpCtxView {
+            ctx: &mut self.http_ctx,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
+    }
+}
+
+impl wit_storage::StorageHost for TriggerPluginState {
+    fn get(&mut self, key: String) -> Option<String> {
+        let handle = self.storage.as_ref()?;
+        handle.db.get(&handle.scope, &key)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), wit_storage::StorageError> {
+        let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
+        handle.db.set(&handle.scope, &key, &value)
+    }
+
+    fn delete(&mut self, key: String) {
+        if let Some(handle) = self.storage.as_ref() {
+            handle.db.delete(&handle.scope, &key);
+        }
+    }
+
+    fn list_keys(&mut self, prefix: String) -> Result<Vec<String>, wit_storage::StorageError> {
+        let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
+        handle.db.list_keys(&handle.scope, &prefix)
+    }
+}
+
+fn make_trigger_plugin_state(storage: Option<PluginStorageHandle>) -> TriggerPluginState {
     TriggerPluginState {
         wasi_ctx: WasiCtx::builder().build(),
+        http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
+        http_hooks: TriggerHttpHooks,
+        storage,
     }
 }
 
@@ -496,18 +678,37 @@ impl WasiHttpHooks for PluginHttpHooks {
     }
 }
 
+/// Version-agnostic outcome of [`check_ssrf_uri`] — mapped to the caller's own
+/// protocol-version `error-code` type by each thin wrapper
+/// ([`check_plugin_request_ssrf`] for p2, [`check_plugin_request_ssrf_p3`] for
+/// p3). `p2::bindings::http::types::ErrorCode` and
+/// `p3::bindings::http::types::ErrorCode` are distinct Rust types generated
+/// from two different WIT package versions, even though both declare the same
+/// `destination-not-found` / `destination-IP-prohibited` /
+/// `HTTP-request-URI-invalid` variants this enum mirrors.
+enum SsrfRejection {
+    UriInvalid,
+    Prohibited,
+    NotFound,
+}
+
 /// Applies this crate's standard SSRF policy (`SsrfPolicy::Strict` — the same
 /// policy the Database and HTTP nodes enforce, see `nodes::util::check_ssrf_ip`)
-/// to a WASM plugin's outbound request URI before it is sent.
+/// to a WASM plugin's outbound request URI before it is sent. Shared by both
+/// [`PluginHttpHooks::send_request`] (p2, action plugins) and
+/// [`TriggerHttpHooks::send_request`] (p3, trigger plugins) via their thin
+/// wrappers below, so the two engines can't drift apart on what's blocked.
 ///
 /// IP-literal hosts are checked directly (IPv6 authority brackets are stripped
 /// first — `hyper::Uri::host()` keeps them). Domain names are resolved with a
 /// blocking DNS lookup and every returned address is checked; safe to block on
-/// here since `send_request` only ever runs inside the `tokio::task::spawn_blocking`
-/// closure in `WasmPluginNode::execute`, never on an async worker thread. A missing
-/// or unparsable host, a failed resolution, or an empty result set all reject the
-/// request — fail closed, matching this crate's existing SSRF-check convention
-/// (`nodes::util::check_host_ssrf`).
+/// here since both callers only ever run this inside a blocking context —
+/// `tokio::task::spawn_blocking` for `WasmPluginNode::execute` (p2), the
+/// trigger engine's own blocking-pool-backed I/O for `send_request` (p3, per
+/// `wasmtime_wasi_http::p3`'s own `send_request` contract) — never on an async
+/// worker thread. A missing or unparsable host, a failed resolution, or an
+/// empty result set all reject the request — fail closed, matching this
+/// crate's existing SSRF-check convention (`nodes::util::check_host_ssrf`).
 ///
 /// Residual limits, same caveat `check_host_ssrf` itself documents:
 /// - A DNS-rebinding TOCTOU gap remains between this check and the connect
@@ -518,8 +719,8 @@ impl WasiHttpHooks for PluginHttpHooks {
 ///
 /// Both require network-level egress filtering to close fully — see the
 /// startup warning in `load_plugins`.
-fn check_plugin_request_ssrf(uri: &hyper::Uri) -> Result<(), ErrorCode> {
-    let host = uri.host().ok_or(ErrorCode::HttpRequestUriInvalid)?;
+fn check_ssrf_uri(uri: &hyper::Uri) -> Result<(), SsrfRejection> {
+    let host = uri.host().ok_or(SsrfRejection::UriInvalid)?;
     let port = uri
         .port_u16()
         .unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
@@ -528,29 +729,112 @@ fn check_plugin_request_ssrf(uri: &hyper::Uri) -> Result<(), ErrorCode> {
     // strip them before attempting to parse as an IP address.
     let ip_candidate = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
     if let Ok(ip) = ip_candidate.parse::<std::net::IpAddr>() {
-        return check_ssrf_ip(ip, SsrfPolicy::Strict).map_err(|_| ErrorCode::DestinationIpProhibited);
+        return check_ssrf_ip(ip, SsrfPolicy::Strict).map_err(|_| SsrfRejection::Prohibited);
     }
 
     let lower = host.to_ascii_lowercase();
     if lower == "localhost" || lower.ends_with(".localhost") || lower == "metadata.google.internal" {
-        return Err(ErrorCode::DestinationIpProhibited);
+        return Err(SsrfRejection::Prohibited);
     }
 
-    let addrs = (host, port).to_socket_addrs().map_err(|_| ErrorCode::DestinationNotFound)?;
+    let addrs = (host, port).to_socket_addrs().map_err(|_| SsrfRejection::NotFound)?;
     let mut resolved_any = false;
     for addr in addrs {
         resolved_any = true;
-        check_ssrf_ip(addr.ip(), SsrfPolicy::Strict).map_err(|_| ErrorCode::DestinationIpProhibited)?;
+        check_ssrf_ip(addr.ip(), SsrfPolicy::Strict).map_err(|_| SsrfRejection::Prohibited)?;
     }
     if !resolved_any {
-        return Err(ErrorCode::DestinationNotFound);
+        return Err(SsrfRejection::NotFound);
     }
     Ok(())
 }
 
+/// p2 wrapper around [`check_ssrf_uri`] — see that function's doc comment for
+/// the policy and its residual limits.
+fn check_plugin_request_ssrf(uri: &hyper::Uri) -> Result<(), ErrorCode> {
+    check_ssrf_uri(uri).map_err(|rejection| match rejection {
+        SsrfRejection::UriInvalid => ErrorCode::HttpRequestUriInvalid,
+        SsrfRejection::Prohibited => ErrorCode::DestinationIpProhibited,
+        SsrfRejection::NotFound => ErrorCode::DestinationNotFound,
+    })
+}
+
+/// p3 wrapper around [`check_ssrf_uri`] — see that function's doc comment for
+/// the policy and its residual limits. Used by
+/// [`TriggerHttpHooks::send_request`].
+fn check_plugin_request_ssrf_p3(uri: &hyper::Uri) -> Result<(), P3ErrorCode> {
+    check_ssrf_uri(uri).map_err(|rejection| match rejection {
+        SsrfRejection::UriInvalid => P3ErrorCode::HttpRequestUriInvalid,
+        SsrfRejection::Prohibited => P3ErrorCode::DestinationIpProhibited,
+        SsrfRejection::NotFound => P3ErrorCode::DestinationNotFound,
+    })
+}
+
+/// Trigger-plugin counterpart to [`PluginHttpHooks`], wired through
+/// `wasmtime_wasi_http::p3`'s own `WasiHttpHooks`/`WasiHttpView` traits
+/// instead of `p2`'s — `TriggerPluginState` runs on `trigger_engine`
+/// (`wasm_component_model_async`), and `p3::add_to_linker`'s bound is
+/// `p3::WasiHttpView`, a distinct trait from `p2::WasiHttpView` despite the
+/// identical name (`wasmtime_wasi_http` gives p2 and p3 fully separate
+/// `WasiHttpHooks`/`WasiHttpView`/`WasiHttpCtxView` types; only `WasiHttpCtx`
+/// itself is shared — see `TriggerPluginState::http_ctx`). Same SSRF policy
+/// as `PluginHttpHooks`, via [`check_plugin_request_ssrf_p3`]'s shared
+/// [`check_ssrf_uri`] — the two engines can't drift apart on what's blocked.
+struct TriggerHttpHooks;
+
+impl P3WasiHttpHooks for TriggerHttpHooks {
+    fn send_request(
+        &mut self,
+        request: hyper::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+        options: Option<P3RequestOptions>,
+        fut: Box<dyn std::future::Future<Output = Result<(), P3ErrorCode>> + Send>,
+    ) -> Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (
+                        hyper::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+                        Box<dyn std::future::Future<Output = Result<(), P3ErrorCode>> + Send>,
+                    ),
+                    wasmtime_wasi::TrappableError<P3ErrorCode>,
+                >,
+            > + Send,
+    > {
+        // Not used on either path below: nothing is sent on rejection, and
+        // `wasmtime_wasi_http::p3`'s own default `send_request` implementation
+        // (which the success path mirrors) discards this identically.
+        _ = fut;
+        Box::new(async move {
+            // `check_ssrf_uri` does a blocking DNS lookup for a non-IP-literal
+            // host. Unlike the p2 path -- whose caller, `WasmPluginNode::execute`,
+            // already runs entirely inside a `tokio::task::spawn_blocking`
+            // closure -- this future runs on `trigger_engine`'s ordinary async
+            // task (`start_trigger`'s `store.run_concurrent`), so the check
+            // itself has to be the thing offloaded here, not assumed already
+            // off the async reactor thread.
+            let uri = request.uri().clone();
+            let rejection = tokio::task::spawn_blocking(move || check_plugin_request_ssrf_p3(&uri))
+                .await
+                .map_err(|e| {
+                    wasmtime_wasi::TrappableError::trap(wasmtime::Error::msg(format!(
+                        "SSRF check task panicked: {e}"
+                    )))
+                })?;
+            if let Err(code) = rejection {
+                return Err(code.into());
+            }
+            use http_body_util::BodyExt;
+            let (res, io) = p3_default_send_request(request, options).await?;
+            Ok((res.map(BodyExt::boxed_unsync), Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>))
+        })
+    }
+}
+
 #[cfg(test)]
 mod plugin_http_hooks_tests {
-    use super::{check_plugin_request_ssrf, ErrorCode};
+    use super::{
+        Bytes, ErrorCode, P3ErrorCode, P3WasiHttpHooks, UnsyncBoxBody, check_plugin_request_ssrf,
+        check_plugin_request_ssrf_p3,
+    };
 
     #[test]
     fn public_ip_allowed() {
@@ -573,6 +857,51 @@ mod plugin_http_hooks_tests {
     fn relative_uri_without_host_rejected() {
         let uri: hyper::Uri = "/no-authority".parse().unwrap();
         assert!(matches!(check_plugin_request_ssrf(&uri), Err(ErrorCode::HttpRequestUriInvalid)));
+    }
+
+    // p3 (trigger-plugin) wrapper: same shared `check_ssrf_uri`, only the
+    // outer `error-code` type differs from the p2 tests above -- one normal
+    // case and the one edge case that exercises the mapping (not a re-proof
+    // of `check_ssrf_uri` itself, already fully covered above).
+    #[test]
+    fn public_ip_allowed_p3() {
+        let uri: hyper::Uri = "http://93.184.216.34/".parse().unwrap();
+        assert!(check_plugin_request_ssrf_p3(&uri).is_ok());
+    }
+
+    #[test]
+    fn private_ip_blocked_p3() {
+        let uri: hyper::Uri = "http://192.168.1.1/".parse().unwrap();
+        assert!(matches!(check_plugin_request_ssrf_p3(&uri), Err(P3ErrorCode::DestinationIpProhibited)));
+    }
+
+    // Exercises `TriggerHttpHooks::send_request` itself, not just the pure
+    // `check_plugin_request_ssrf_p3` mapping above -- the SSRF check has to
+    // survive being offloaded through `spawn_blocking` and converted back
+    // into a `TrappableError` without losing its `error-code`; a test on
+    // the pure mapping function alone can't prove that plumbing compiles
+    // or behaves correctly end to end.
+    #[tokio::test]
+    async fn trigger_http_hooks_send_request_rejects_private_ip() {
+        use http_body_util::{BodyExt, Empty};
+        use std::future::Future;
+
+        let body: UnsyncBoxBody<Bytes, P3ErrorCode> = Empty::new().map_err(|_| unreachable!()).boxed_unsync();
+        let request = hyper::Request::builder()
+            .uri("http://192.168.1.1/")
+            .body(body)
+            .expect("request build failed");
+        let fut: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send> = Box::new(async { Ok(()) });
+
+        let mut hooks = super::TriggerHttpHooks;
+        let result = Box::into_pin(hooks.send_request(request, None, fut)).await;
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected the private-IP request to be rejected"),
+        };
+        let code = err.downcast().expect("expected a guest-visible error-code, not a host trap");
+        assert!(matches!(code, P3ErrorCode::DestinationIpProhibited));
     }
 }
 
@@ -1013,6 +1342,16 @@ pub struct PluginLoader {
     /// keyed only by path would risk serving a component compiled for the
     /// wrong engine on a fingerprint match.
     trigger_component_cache: Mutex<HashMap<PathBuf, CachedComponent>>,
+    /// Counts real (cache-miss) compiles against `trigger_component_cache`,
+    /// across both entry points that can populate it
+    /// ([`compile_trigger_component`](PluginLoader::compile_trigger_component)
+    /// and [`compile_trigger_component_sync`](PluginLoader::compile_trigger_component_sync))
+    /// -- both funnel through the one `insert_trigger_component` call site,
+    /// so one counter covers both without the two ever being able to drift
+    /// apart. Same not-`#[cfg(test)]`-gated-at-the-field-level rationale as
+    /// `compile_count` above.
+    #[allow(dead_code)]
+    trigger_compile_count: std::sync::atomic::AtomicUsize,
     /// Opened, cached [`PluginStorage`] databases, keyed by the `plugin_dir`
     /// they back — see [`PluginLoader::plugin_storage`]. A `HashMap` (not a
     /// single `Option`) for the same reason `component_cache` is keyed by
@@ -1021,6 +1360,14 @@ pub struct PluginLoader {
     /// `plugin_dir` in one process, but keying by path costs nothing and
     /// doesn't assume that stays true.
     storage_pools: Mutex<HashMap<PathBuf, Arc<PluginStorage>>>,
+    /// Signature-verification result cache, keyed by plugin path and
+    /// fingerprinted identically to `component_cache` — see
+    /// `verify_signature` for the caching/invalidation contract.
+    signature_cache: Mutex<HashMap<PathBuf, CachedSignature>>,
+    /// Counts real (cache-miss) signature checks — same not-`#[cfg(test)]`-
+    /// gated-at-the-field-level rationale as `compile_count`.
+    #[allow(dead_code)]
+    signature_check_count: std::sync::atomic::AtomicUsize,
 }
 
 /// One cached, already-compiled [`wasmtime::component::Component`] plus the
@@ -1034,6 +1381,14 @@ pub struct PluginLoader {
 struct CachedComponent {
     fingerprint: (Option<SystemTime>, u64),
     component: wasmtime::component::Component,
+}
+
+/// One cached [`signature::SigCheckResult`] plus the file fingerprint
+/// (mtime, length) it was computed from — same shape as [`CachedComponent`],
+/// so repeated hot-reload polling doesn't re-hash an unchanged file.
+struct CachedSignature {
+    fingerprint: (Option<SystemTime>, u64),
+    result: signature::SigCheckResult,
 }
 
 /// Process-wide, lazily-constructed [`PluginLoader`].
@@ -1131,7 +1486,10 @@ impl PluginLoader {
             compile_count: std::sync::atomic::AtomicUsize::new(0),
             trigger_engine,
             trigger_component_cache: Mutex::new(HashMap::new()),
+            trigger_compile_count: std::sync::atomic::AtomicUsize::new(0),
             storage_pools: Mutex::new(HashMap::new()),
+            signature_cache: Mutex::new(HashMap::new()),
+            signature_check_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1199,6 +1557,54 @@ impl PluginLoader {
     #[cfg(test)]
     fn compile_count(&self) -> usize {
         self.compile_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Real (cache-miss) compiles against `trigger_component_cache` so far
+    /// -- see the `trigger_compile_count` field doc above. Test-only, same
+    /// rationale as `compile_count` above.
+    #[cfg(test)]
+    fn trigger_compile_count(&self) -> usize {
+        self.trigger_compile_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Real (cache-miss) signature checks performed by this instance so far
+    /// -- see the `signature_check_count` field doc above. Test-only, same
+    /// rationale as `compile_count` above.
+    #[cfg(test)]
+    fn signature_check_count(&self) -> usize {
+        self.signature_check_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Checks `path`'s signature sidecar (if any), reusing the cached result
+    /// when the file's `(mtime, len)` fingerprint hasn't changed since the
+    /// last check — same fingerprint shape `compile_and_link` uses, so
+    /// repeated hot-reload polling doesn't re-hash an unchanged file.
+    fn verify_signature(&self, path: &Path) -> Result<signature::SigCheckResult, PluginLoadError> {
+        let meta = std::fs::metadata(path)?;
+        let fingerprint = (meta.modified().ok(), meta.len());
+
+        let cached = self
+            .signature_cache
+            .lock()
+            .expect("signature cache mutex poisoned")
+            .get(path)
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| entry.result.clone());
+
+        if let Some(result) = cached {
+            return Ok(result);
+        }
+
+        let bytes = std::fs::read(path)?;
+        let result = signature::check_signature(path, &bytes);
+        self.signature_check_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        self.signature_cache
+            .lock()
+            .expect("signature cache mutex poisoned")
+            .insert(path.to_path_buf(), CachedSignature { fingerprint, result: result.clone() });
+
+        Ok(result)
     }
 
     /// Returns the process-wide shared [`PluginLoader`], constructing it on
@@ -1328,6 +1734,14 @@ impl PluginLoader {
     /// Load a single WASM plugin from `path`.
     ///
     /// Steps:
+    /// 0. Check the signature sidecar, if any (see
+    ///    [`verify_signature`](Self::verify_signature)) — a file whose
+    ///    content doesn't match its declared hash, or whose signature
+    ///    doesn't verify, is rejected outright
+    ///    (→ [`PluginLoadError::SignatureRejected`]) before any compilation
+    ///    is attempted. Unsigned, unrecognized-format, and validly-signed
+    ///    files all proceed normally — publisher-key pinning/trust is a
+    ///    desktop-UI concern layered on top, not enforced here.
     /// 1. Read the file (→ [`PluginLoadError::Io`] on failure).
     /// 2. Compile to a component (→ [`PluginLoadError::WasmCompile`] on failure).
     /// 3. Build a linker with full WASIp2 + HTTP + `storage` and pre-instantiate
@@ -1349,6 +1763,27 @@ impl PluginLoader {
     /// The describe result is cached in [`WasmPluginNode`] for the lifetime
     /// of the process — it is never called again after load time.
     pub fn load_plugin(&self, path: &Path) -> Result<Arc<dyn Node>, PluginLoadError> {
+        match self.verify_signature(path)? {
+            signature::SigCheckResult::IntegrityMismatch => {
+                return Err(PluginLoadError::SignatureRejected(
+                    "file does not match its signed checksum — may be corrupted or tampered".to_string(),
+                ));
+            }
+            signature::SigCheckResult::SignatureInvalid => {
+                return Err(PluginLoadError::SignatureRejected(
+                    "signature sidecar present but does not verify".to_string(),
+                ));
+            }
+            signature::SigCheckResult::Malformed(reason) => {
+                return Err(PluginLoadError::SignatureRejected(format!(
+                    "signature sidecar present but malformed: {reason}"
+                )));
+            }
+            signature::SigCheckResult::Unsigned
+            | signature::SigCheckResult::Unrecognized
+            | signature::SigCheckResult::Valid(_) => {}
+        }
+
         let instance_pre = self.compile_and_link(path)?;
         let node_pre = self.detect_node_pre(instance_pre.clone())?;
 
@@ -1499,6 +1934,37 @@ impl PluginLoader {
         nodes
     }
 
+    /// Cache-only half of the trigger-engine compile path -- `get` (with the
+    /// fingerprint filter) and `insert`, factored out so the async and sync
+    /// compile entry points below share one lock/get/insert implementation
+    /// and can't drift apart on caching semantics even though they differ
+    /// in how they get from "cache miss" to "compiled `Component`".
+    fn cached_trigger_component(
+        &self,
+        path: &Path,
+        fingerprint: (Option<SystemTime>, u64),
+    ) -> Option<wasmtime::component::Component> {
+        self.trigger_component_cache
+            .lock()
+            .expect("trigger component cache mutex poisoned")
+            .get(path)
+            .filter(|entry| entry.fingerprint == fingerprint)
+            .map(|entry| entry.component.clone())
+    }
+
+    fn insert_trigger_component(
+        &self,
+        path: &Path,
+        fingerprint: (Option<SystemTime>, u64),
+        component: wasmtime::component::Component,
+    ) {
+        self.trigger_component_cache
+            .lock()
+            .expect("trigger component cache mutex poisoned")
+            .insert(path.to_path_buf(), CachedComponent { fingerprint, component });
+        self.trigger_compile_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Trigger-engine counterpart to the read+compile+cache half of
     /// `compile_and_link` -- same fingerprint-checked cache contract, against
     /// `trigger_component_cache`/`trigger_engine` instead of
@@ -1508,19 +1974,60 @@ impl PluginLoader {
     /// `aerini-node-with-trigger` at all), so the linker + `instantiate_async`
     /// step lives in `resolve_trigger_instance` right where that outcome is
     /// decided, not bundled in here.
-    fn compile_trigger_component(&self, path: &Path) -> Result<wasmtime::component::Component, PluginLoadError> {
+    ///
+    /// For [`resolve_trigger_instance`](Self::resolve_trigger_instance)'s
+    /// already-async call path, run concurrently with every other trigger's
+    /// live event stream on the same runtime: a cache miss offloads the
+    /// actual `read` + `Component::new` (CPU-bound, can take tens of
+    /// milliseconds for a real component) onto the blocking thread pool via
+    /// `spawn_blocking`, cloning `trigger_engine` into the closure (cheap --
+    /// internally `Arc`-backed) rather than borrowing `self`, so compiling
+    /// one trigger plugin never stalls the async reactor thread everything
+    /// else is scheduled on. The cache lookup and insert stay on the
+    /// calling task either side of the offloaded work -- both are fast and
+    /// don't need to move. See
+    /// [`compile_trigger_component_sync`](Self::compile_trigger_component_sync)
+    /// for the counterpart [`load_plugin`](Self::load_plugin)'s synchronous
+    /// call path uses instead, since it cannot `.await` this one.
+    async fn compile_trigger_component(&self, path: &Path) -> Result<wasmtime::component::Component, PluginLoadError> {
         let meta = std::fs::metadata(path)?;
         let fingerprint = (meta.modified().ok(), meta.len());
 
-        let cached = self
-            .trigger_component_cache
-            .lock()
-            .expect("trigger component cache mutex poisoned")
-            .get(path)
-            .filter(|entry| entry.fingerprint == fingerprint)
-            .map(|entry| entry.component.clone());
+        if let Some(c) = self.cached_trigger_component(path, fingerprint) {
+            return Ok(c);
+        }
 
-        if let Some(c) = cached {
+        let engine = self.trigger_engine.clone();
+        let owned_path = path.to_path_buf();
+        let component = tokio::task::spawn_blocking(move || -> Result<wasmtime::component::Component, PluginLoadError> {
+            let bytes = std::fs::read(&owned_path)?;
+            wasmtime::component::Component::new(&engine, &bytes)
+                .map_err(|e| PluginLoadError::WasmCompile(e.to_string()))
+        })
+        .await
+        .map_err(|e| PluginLoadError::WasmCompile(format!("compile task panicked: {e}")))??;
+
+        self.insert_trigger_component(path, fingerprint, component.clone());
+
+        Ok(component)
+    }
+
+    /// Synchronous counterpart to
+    /// [`compile_trigger_component`](Self::compile_trigger_component),
+    /// sharing its cache via [`cached_trigger_component`](Self::cached_trigger_component)/
+    /// [`insert_trigger_component`](Self::insert_trigger_component). Used
+    /// only by [`probe_trigger_capable`](Self::probe_trigger_capable),
+    /// reached from [`load_plugin`](Self::load_plugin)'s synchronous public
+    /// signature -- kept synchronous because that signature is depended on
+    /// by a caller that is itself not `async` (the desktop app's startup
+    /// sequence). Not `spawn_blocking`-wrapped: there is no async reactor to
+    /// protect here, the same accepted trade-off `compile_and_link`'s own
+    /// synchronous read+compile already makes for ordinary action plugins.
+    fn compile_trigger_component_sync(&self, path: &Path) -> Result<wasmtime::component::Component, PluginLoadError> {
+        let meta = std::fs::metadata(path)?;
+        let fingerprint = (meta.modified().ok(), meta.len());
+
+        if let Some(c) = self.cached_trigger_component(path, fingerprint) {
             return Ok(c);
         }
 
@@ -1528,25 +2035,36 @@ impl PluginLoader {
         let component = wasmtime::component::Component::new(&self.trigger_engine, &bytes)
             .map_err(|e| PluginLoadError::WasmCompile(e.to_string()))?;
 
-        self.trigger_component_cache
-            .lock()
-            .expect("trigger component cache mutex poisoned")
-            .insert(path.to_path_buf(), CachedComponent { fingerprint, component: component.clone() });
+        self.insert_trigger_component(path, fingerprint, component.clone());
 
         Ok(component)
     }
 
     /// Type-level check for whether the `.wasm` file at `path` exports
     /// `aerini-node-with-trigger`, run once at [`load_plugin`](Self::load_plugin)
-    /// time. Reuses `compile_trigger_component`'s cache; the import check
-    /// against a throwaway linker and `AeriniNodeWithTriggerPre::new` are
-    /// both type-level only -- no guest code executes, unlike
-    /// `resolve_trigger_instance`'s `instantiate_async` + `describe()` call.
+    /// time. Reuses `compile_trigger_component_sync`'s cache -- the same
+    /// `trigger_component_cache` a later `resolve_trigger_instance` call for
+    /// this same file will also hit. The import check against a throwaway
+    /// linker and `AeriniNodeWithTriggerPre::new` are both type-level only
+    /// -- no guest code executes, unlike `resolve_trigger_instance`'s
+    /// `instantiate_async` + `describe()` call. Links the same import
+    /// surface `resolve_trigger_instance` links (`wasi:p3` + `wasi:http` p3 +
+    /// `storage`) so a plugin that imports `http` or `storage` isn't
+    /// undercounted here relative to what actually resolves later.
     fn probe_trigger_capable(&self, path: &Path) -> bool {
-        let Ok(component) = self.compile_trigger_component(path) else { return false };
+        let Ok(component) = self.compile_trigger_component_sync(path) else { return false };
 
         let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
         if wasmtime_wasi::p3::add_to_linker(&mut linker).is_err() {
+            return false;
+        }
+        if wasmtime_wasi_http::p3::add_to_linker(&mut linker).is_err() {
+            return false;
+        }
+        if wit_storage::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+            &mut linker,
+            |state| state,
+        ).is_err() {
             return false;
         }
 
@@ -1572,6 +2090,17 @@ impl PluginLoader {
     ) -> Result<(wasmtime::Store<TriggerPluginState>, wit_trigger::AeriniNodeWithTrigger), PluginLoadError> {
         let entries = std::fs::read_dir(dir).map_err(PluginLoadError::Io)?;
 
+        // Looked up once per resolve, not once per candidate file: every
+        // store this loop builds is trying to match this same `type_id`,
+        // so one handle (or `None`, if `dir`'s storage database couldn't be
+        // opened) covers every candidate -- same scoping convention as
+        // `WasmPluginNode::execute`'s own `storage_handle` (scoped by
+        // `type_id`, not by placement).
+        let storage_handle = self.plugin_storage(dir).map(|db| PluginStorageHandle {
+            db,
+            scope: type_id.to_string(),
+        });
+
         for entry in entries {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
@@ -1579,14 +2108,23 @@ impl PluginLoader {
                 continue;
             }
 
-            let Ok(component) = self.compile_trigger_component(&path) else { continue };
+            let Ok(component) = self.compile_trigger_component(&path).await else { continue };
 
             let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
             if wasmtime_wasi::p3::add_to_linker(&mut linker).is_err() {
                 continue;
             }
+            if wasmtime_wasi_http::p3::add_to_linker(&mut linker).is_err() {
+                continue;
+            }
+            if wit_storage::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+                &mut linker,
+                |state| state,
+            ).is_err() {
+                continue;
+            }
 
-            let mut store = make_trigger_store(&self.trigger_engine, make_trigger_plugin_state());
+            let mut store = make_trigger_store(&self.trigger_engine, make_trigger_plugin_state(storage_handle.clone()));
 
             let Ok(bindings) = wit_trigger::AeriniNodeWithTrigger::instantiate_async(&mut store, &component, &linker).await else {
                 continue;
@@ -1996,10 +2534,11 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) -> PluginLoa
     // cannot shadow a built-in node type (e.g. "http_request", "shell_exec").
     registry.seal_builtins();
 
-    // SECURITY NOTICE: WASM plugins' outbound HTTP (wasi:http/outgoing-handler) is
-    // checked against the same SSRF policy as the Database and HTTP nodes before
-    // any request is sent (see `check_plugin_request_ssrf`) — RFC 1918, loopback,
-    // link-local, and cloud metadata addresses are rejected. That check has the
+    // SECURITY NOTICE: WASM plugins' outbound HTTP (wasi:http/outgoing-handler,
+    // both action and trigger plugins) is checked against the same SSRF policy
+    // as the Database and HTTP nodes before any request is sent (see
+    // `check_ssrf_uri`) — RFC 1918, loopback, link-local, and cloud metadata
+    // addresses are rejected. That check has the
     // same DNS-rebinding TOCTOU gap documented on `nodes::util::check_host_ssrf`,
     // and a plugin still runs with the full trust of whatever else this process
     // can reach once a request clears it. Treat the plugin directory as a trust
@@ -2103,6 +2642,61 @@ mod tests {
         assert!(
             matches!(err, PluginLoadError::MissingInterface),
             "expected MissingInterface, got: {err:?}"
+        );
+    }
+
+    /// Normal case: `load_plugin` must reject a `.wasm` file whose sidecar
+    /// signature declares a content hash that doesn't match the file —
+    /// before any compilation is attempted, not just logged and let through.
+    #[test]
+    fn load_plugin_rejects_tampered_signature() {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let l = loader();
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let sig_path = signature::sig_sidecar_path(tmp.path());
+        let sig_json = serde_json::json!({
+            "schema_version": 1,
+            "algorithm": "ed25519",
+            "public_key": B64.encode([0u8; 32]),
+            "files": [{"name": "plugin.wasm", "blake3": "0".repeat(64)}],
+            "signature": B64.encode([0u8; 64]),
+        })
+        .to_string();
+        std::fs::write(&sig_path, sig_json).expect("sig sidecar write failed");
+
+        let result = l.load_plugin(tmp.path());
+        let err = result.err().expect("expected the tampered signature to reject the load");
+        assert!(
+            matches!(err, PluginLoadError::SignatureRejected(_)),
+            "expected SignatureRejected, got: {err:?}"
+        );
+
+        let _ = std::fs::remove_file(&sig_path);
+    }
+
+    /// Edge case: repeated `verify_signature` calls against the same,
+    /// unchanged file must hash it exactly once, not on every call — same
+    /// fingerprint-cache contract `component_cache` already provides,
+    /// checked here via `signature_check_count` instead of timing.
+    #[test]
+    fn verify_signature_reuses_cached_result_for_unchanged_file() {
+        let l = loader();
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        for _ in 0..3 {
+            let _ = l.verify_signature(tmp.path());
+        }
+
+        assert_eq!(
+            l.signature_check_count(),
+            1,
+            "expected exactly one real signature check across three verify_signature calls on an unchanged file"
         );
     }
 
@@ -2241,5 +2835,93 @@ mod tests {
             2,
             "file content/length changed at the same path — must recompile, not reuse the stale cached Component"
         );
+    }
+
+    /// Async entry point must classify a missing file identically to the
+    /// sync action-plugin path — `Io`, not `WasmCompile` — even though the
+    /// read now happens inside a spawned blocking task.
+    #[tokio::test]
+    async fn compile_trigger_component_nonexistent_file_returns_io_error() {
+        let l = loader();
+        let result = l.compile_trigger_component(Path::new("/nonexistent/path/to/plugin.wasm")).await;
+        assert!(result.is_err(), "expected Io error, got Ok");
+        assert!(
+            matches!(result.err().unwrap(), PluginLoadError::Io(_)),
+            "expected Io error classification to survive the spawn_blocking offload"
+        );
+    }
+
+    /// The async (`spawn_blocking`-backed) and sync compile entry points
+    /// share one cache: compiling via one and then the other for the same
+    /// unchanged file must not trigger a second real compile.
+    #[tokio::test]
+    async fn compile_trigger_component_reuses_cache_across_sync_and_async_paths() {
+        let l = loader();
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let _ = l.compile_trigger_component_sync(tmp.path());
+        let _ = l.compile_trigger_component(tmp.path()).await;
+
+        assert_eq!(
+            l.trigger_compile_count(),
+            1,
+            "expected exactly one real compile across the sync and async entry points for an unchanged file"
+        );
+    }
+
+    /// Normal case: `TriggerPluginState`'s `StorageHost` delegates to the
+    /// backing `PluginStorage` exactly like `PluginState`'s does — a value
+    /// set through the handle is visible through a `get` on the same
+    /// instance.
+    #[test]
+    fn trigger_plugin_state_storage_round_trips_through_handle() {
+        use wit_storage::StorageHost as _;
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let db = Arc::new(PluginStorage::open(&dir.keep()).expect("PluginStorage::open failed"));
+        let mut state = make_trigger_plugin_state(Some(PluginStorageHandle {
+            db,
+            scope: "trigger-plugin-a".to_string(),
+        }));
+
+        assert_eq!(state.get("k1".to_string()), None);
+        state.set("k1".to_string(), "v1".to_string()).expect("set failed");
+        assert_eq!(state.get("k1".to_string()), Some("v1".to_string()));
+    }
+
+    /// Edge case: a `None` storage handle (directory's storage DB
+    /// unavailable) must degrade exactly per `wit/node.wit`'s documented
+    /// contract — `get` empty, `set`/`list_keys` return `Unavailable`,
+    /// `delete` a silent no-op — never panic.
+    #[test]
+    fn trigger_plugin_state_storage_degrades_when_handle_is_none() {
+        use wit_storage::StorageHost as _;
+        let mut state = make_trigger_plugin_state(None);
+
+        assert_eq!(state.get("k1".to_string()), None);
+        assert!(matches!(
+            state.set("k1".to_string(), "v1".to_string()),
+            Err(wit_storage::StorageError::Unavailable)
+        ));
+        assert!(matches!(
+            state.list_keys("".to_string()),
+            Err(wit_storage::StorageError::Unavailable)
+        ));
+        state.delete("k1".to_string()); // must not panic
+    }
+
+    /// `probe_trigger_capable`'s throwaway linker also links `storage` and
+    /// `wasi:http` p3 alongside `wasi:p3` — this must not change its answer
+    /// for a component that imports none of them: still `false`, since it
+    /// doesn't export `trigger` either.
+    #[test]
+    fn probe_trigger_capable_returns_false_for_component_without_trigger_export() {
+        let l = loader();
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        assert!(!l.probe_trigger_capable(tmp.path()));
     }
 }

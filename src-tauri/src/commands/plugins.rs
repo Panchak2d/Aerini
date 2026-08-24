@@ -6,6 +6,10 @@ use aerini_engine::db::WorkflowDb;
 use aerini_engine::model::NodeType;
 use aerini_engine::node::{NodeRegistry, Reloadable};
 use aerini_engine::nodes::register_builtins;
+use aerini_engine::plugin_loader::signature::{
+    check_signature, sig_sidecar_path, signed_message, PluginSignatureFile, SigCheckResult, SignedFileEntry,
+    SIG_ALGORITHM, SIG_SCHEMA_VERSION,
+};
 use aerini_engine::plugin_loader::{load_plugins, PluginLoadReport, PluginLoader};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -64,113 +68,22 @@ fn node_type_to_category(nt: &NodeType) -> &'static str {
 //   "signature": "<base64, 64 raw bytes>"
 // }
 //
-// `files` is a list (not a single hash) so a future multi-file package
-// manifest can reuse this exact format with more entries under one
-// signature, without a schema change. `name` inside each entry is
-// informational only — matching is by content hash, consistent with the
-// type_id-keyed identity used elsewhere in this file, not by filename.
+// `files` is a list (not a single hash) so a multi-file package manifest can
+// reuse this exact format with more entries under one signature, without a
+// schema change (`check_pack_signature` below does exactly that). `name`
+// inside each entry is informational only — matching is by content hash,
+// consistent with the type_id-keyed identity used elsewhere in this file,
+// not by filename.
 //
-// The signed message is never the raw JSON (JSON re-serialization isn't
-// guaranteed byte-stable across writers) — it's built deterministically by
-// `signed_message` from `files` alone, with a domain-separation prefix so
-// this signature can't be replayed as valid for an unrelated protocol.
-
-const SIG_SCHEMA_VERSION: u32 = 1;
-const SIG_ALGORITHM: &str = "ed25519";
-const SIG_DOMAIN: &[u8] = b"aerini-plugin-sig-v1\n";
-
-#[derive(Deserialize)]
-struct SignedFileEntry {
-    name: String,
-    blake3: String,
-}
-
-#[derive(Deserialize)]
-struct PluginSignatureFile {
-    schema_version: u32,
-    algorithm: String,
-    public_key: String,
-    files: Vec<SignedFileEntry>,
-    signature: String,
-}
-
-/// Outcome of checking a `.wasm` file against its sidecar, if any. Pure and
-/// read-only — never consults or updates the trust store.
-enum SigCheckResult {
-    /// No `.sig` sidecar next to the file.
-    Unsigned,
-    /// Sidecar present but declares a `schema_version`/`algorithm`/`files`
-    /// shape this build doesn't understand — e.g. from a newer app version.
-    /// Informational, not a failure.
-    Unrecognized,
-    /// Sidecar present but malformed: bad JSON, or a key/signature that
-    /// doesn't decode to the expected byte length.
-    Malformed(String),
-    /// The sidecar's declared content hash doesn't match the actual file.
-    IntegrityMismatch,
-    /// Hash matched but the Ed25519 signature itself doesn't verify.
-    SignatureInvalid,
-    /// Hash and signature both verify, under this public key.
-    Valid(VerifyingKey),
-}
-
-/// Path of the optional signature sidecar for a given `.wasm` path.
-fn sig_sidecar_path(wasm_path: &Path) -> PathBuf {
-    let mut p = wasm_path.as_os_str().to_owned();
-    p.push(".sig");
-    PathBuf::from(p)
-}
-
-/// Deterministic message the signature is computed over: a domain-separation
-/// prefix followed by each file entry's `name`/`blake3` hash, name-sorted so
-/// the result doesn't depend on the order `files` happens to be written in.
-fn signed_message(entries: &[SignedFileEntry]) -> Vec<u8> {
-    let mut sorted: Vec<&SignedFileEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut msg = SIG_DOMAIN.to_vec();
-    for e in sorted {
-        msg.extend_from_slice(e.name.as_bytes());
-        msg.push(0);
-        msg.extend_from_slice(e.blake3.as_bytes());
-        msg.push(b'\n');
-    }
-    msg
-}
-
-fn check_signature(wasm_path: &Path, wasm_bytes: &[u8]) -> SigCheckResult {
-    let raw = match std::fs::read_to_string(sig_sidecar_path(wasm_path)) {
-        Ok(s) => s,
-        Err(_) => return SigCheckResult::Unsigned,
-    };
-    let sig: PluginSignatureFile = match serde_json::from_str(&raw) {
-        Ok(s) => s,
-        Err(e) => return SigCheckResult::Malformed(e.to_string()),
-    };
-    if sig.schema_version != SIG_SCHEMA_VERSION || sig.algorithm != SIG_ALGORITHM || sig.files.len() != 1 {
-        return SigCheckResult::Unrecognized;
-    }
-
-    let actual_hash = blake3::hash(wasm_bytes).to_hex().to_string();
-    if sig.files[0].blake3 != actual_hash {
-        return SigCheckResult::IntegrityMismatch;
-    }
-
-    let Some(public_key) = BASE64.decode(&sig.public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else {
-        return SigCheckResult::Malformed("public_key is not valid base64 for a 32-byte Ed25519 key".to_string());
-    };
-    let Some(signature_bytes) = BASE64.decode(&sig.signature).ok().and_then(|b| <[u8; 64]>::try_from(b).ok()) else {
-        return SigCheckResult::Malformed("signature is not valid base64 for a 64-byte Ed25519 signature".to_string());
-    };
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key) else {
-        return SigCheckResult::Malformed("public_key is not a valid Ed25519 point".to_string());
-    };
-    let signature = Signature::from_bytes(&signature_bytes);
-
-    match verifying_key.verify_strict(&signed_message(&sig.files), &signature) {
-        Ok(()) => SigCheckResult::Valid(verifying_key),
-        Err(_) => SigCheckResult::SignatureInvalid,
-    }
-}
+// `SigCheckResult`/`PluginSignatureFile`/`SignedFileEntry`/`signed_message`/
+// `sig_sidecar_path`/`check_signature` live in
+// `aerini_engine::plugin_loader::signature` (imported above) — the single
+// verification path `load_plugins` itself now enforces on every load,
+// shared by `aerini-server` and desktop alike. This file reuses those same
+// types for two things `aerini-engine` has no concept of: the desktop-only
+// trust store below, and multi-file `.aerinipkg` package signing
+// (`check_pack_signature`), which generalizes the same sidecar shape to N
+// files under one signature.
 
 // --- Multi-node plugin packages (`.aerinipkg`) ---
 //
@@ -512,15 +425,24 @@ fn signature_status_message(wasm_path: &Path, wasm_bytes: &[u8], trust: &HashMap
     }
 }
 
-/// Best-effort, log-only signature audit of every `.wasm` in `dir`, run
-/// before a reload. Never blocks the reload — a file may have reached
-/// `plugin_dir` by any means (the app's own install command, a manual file
-/// copy, a pre-signing install, a synced directory), and already-published
-/// plugins with no signature at all must keep loading regardless. This
-/// exists purely so a genuinely suspicious file — corrupted/tampered, or
-/// signed by a key that doesn't match what was previously trusted for that
-/// `type_id` — shows up in logs even when it never went through
-/// `install_plugin_from_path`'s blocking checks. Plain "unsigned" is
+/// Best-effort, log-only signature audit of every `.wasm`/pack in `dir`,
+/// run immediately before a reload. Never blocks anything itself — for
+/// standalone `.wasm` files, the actual blocking now happens one step
+/// later, in `load_plugins` → `load_plugin`
+/// (`aerini_engine::plugin_loader`), which rejects a tampered/invalid/
+/// malformed file outright before compiling it, and whose caller
+/// (`load_plugins_from_dir`) already logs that rejection by path. This
+/// function's own warning for the same file, when it fires, duplicates
+/// that rejection but adds the plugin's declared `type_id` (via
+/// `describe_plugin`, which — unlike `load_plugin` — doesn't check the
+/// signature, so it still succeeds against a tampered file) for easier
+/// identification in logs. Two things here have no equivalent in the
+/// shared load path, so this function remains their sole enforcement
+/// point: publisher-key trust pinning (a signature that verifies, but
+/// under a different key than previously trusted for that `type_id`/pack),
+/// and pack-level signatures (`check_pack_signature`, below) — a pack's
+/// aggregate `.sig` covers a manifest plus member set as one unit, which
+/// `load_plugin`'s per-file check has no concept of. Plain "unsigned" is
 /// expected and common (every pre-signing plugin) and isn't logged here to
 /// avoid noise; see `list_installed_plugins`'s `signature_status` for the
 /// full per-plugin picture in the UI.
