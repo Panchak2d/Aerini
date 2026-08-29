@@ -146,7 +146,7 @@ Press `Space`, type `code`, and click **Code (JS)**.
 
 Connect HTTP Request → Code: click and hold the **Success** output circle on HTTP Request (the top-right circle, labelled "Success"), drag to the input circle on the left side of the Code node, and release. Do not drag from the Error port — that only fires when the HTTP request itself fails.
 
-> **Code (JS) requires Node.js 18 or later** installed on your computer. You can check by opening a terminal and running `node --version`. If Node.js isn't installed, grab it from [nodejs.org](https://nodejs.org) — the LTS version is fine.
+Code (JS) runs on a Node.js runtime bundled with Aerini — nothing to install separately.
 
 Double-click the Code node to open its config. In the **Code** field, paste:
 
@@ -266,8 +266,8 @@ Two SQLite database files live there: `workflows.db` (your workflows and run his
 **The node turned red. What do I do?**
 Click the **Errors** tab in the output drawer. It shows the exact error message and which node failed. Common causes: wrong API key, bad URL, or a network issue.
 
-**Code (JS) node says "node not found."**
-Node.js isn't installed or isn't on your PATH. Open a terminal and run `node --version`. If that fails, install Node.js from [nodejs.org](https://nodejs.org), then close and reopen Aerini.
+**Code (JS) node says the bundled Node.js runtime is missing or corrupt.**
+Aerini ships its own Node.js runtime for this node — it's not your system install, so a system `node --version` check won't help. Reinstall Aerini to restore the bundled runtime.
 
 **Expressions show as blank in the output.**
 The expression path is wrong. Check the **Logs** tab — it lists warnings for unresolved expressions, including the path that failed. Use the expression picker (press `{{` in any text field) to browse the correct paths rather than typing them manually.

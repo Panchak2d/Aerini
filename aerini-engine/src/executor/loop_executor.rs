@@ -895,7 +895,7 @@ mod tests {
         let all_results = loop_out["all_results"].as_array().unwrap();
 
         // No body ever produced output → push_loop_result must never have fired.
-        // Pre-fix behaviour (unconditional push) would yield [null, null].
+        // An unconditional push (ignoring output:None) would yield [null, null].
         assert!(
             all_results.is_empty(),
             "expected empty all_results when every body returns output:None; \
@@ -1112,8 +1112,8 @@ mod tests {
     //   on_true  -> true_body  (increments true_counter)
     //   on_false -> false_body (increments false_counter)
     // Over 3 iterations, true_counter must be 3 and false_counter must be 0.
-    // Pre-fix behaviour would have produced false_counter == 3 as well, since
-    // both branches executed unconditionally every iteration.
+    // If branch gating were broken, false_counter would also be 3, since
+    // both branches would execute unconditionally every iteration.
     #[tokio::test]
     async fn loop_body_if_branch_gating_only_taken_branch_executes() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1250,8 +1250,8 @@ mod tests {
         );
         assert_eq!(
             false_counter.load(Ordering::SeqCst), 0,
-            "on_false branch must never fire — cond always takes on_true; pre-fix this \
-             would also be 3 (both branches ran unconditionally every iteration)"
+            "on_false branch must never fire — cond always takes on_true; broken branch \
+             gating would put this at 3 too (both branches running unconditionally every iteration)"
         );
     }
 
@@ -1388,8 +1388,8 @@ mod tests {
         assert_eq!(case1_counter.load(Ordering::SeqCst), 0, "case_1 must never fire — switch always takes case_2");
         assert_eq!(
             case2_counter.load(Ordering::SeqCst), 2,
-            "case_2 must fire every iteration (2 items); pre-fix this and case_1/default \
-             would all have fired every iteration"
+            "case_2 must fire every iteration (2 items); broken case gating would have \
+             case_1/default fire every iteration too"
         );
         assert_eq!(default_counter.load(Ordering::SeqCst), 0, "default must never fire — switch always takes case_2");
     }
@@ -1520,8 +1520,8 @@ mod tests {
         );
         assert_eq!(
             recovery_counter.load(Ordering::SeqCst), 3,
-            "on_error target must run once per failed item — pre-fix this would be 0, since \
-             the loop aborted on the very first failure before this node could ever run"
+            "on_error target must run once per failed item — broken on_error routing would \
+             leave this at 0, since the loop would abort on the very first failure before this node could ever run"
         );
 
         let loop_out = result.node_outputs.get("loop_node").expect("loop_node must have output");
@@ -1877,8 +1877,8 @@ mod tests {
         );
         assert_eq!(
             recovery_counter.load(Ordering::SeqCst), 2,
-            "on_failure target must run once per failed item — pre-fix this would be 0, since \
-             the loop aborted on the very first failure before this node could ever run"
+            "on_failure target must run once per failed item — broken on_failure routing would \
+             leave this at 0, since the loop would abort on the very first failure before this node could ever run"
         );
     }
 
@@ -1927,8 +1927,7 @@ mod tests {
 
         assert!(
             !result.success,
-            "an unrouted body-node failure must still abort the whole loop, unchanged from \
-             pre-fix behavior"
+            "an unrouted body-node failure must still abort the whole loop"
         );
         assert_eq!(
             fail_counter.load(Ordering::SeqCst), 1,

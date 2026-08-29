@@ -52,7 +52,7 @@ export interface WorkflowSummary {
   /** Exclusive Workflows-sidebar collection membership. null/absent = Uncategorized.
    *  Populated today in browser/localStorage mode. In Tauri/desktop mode this is
    *  `undefined` until the backend (workflows.collection_id column + WorkflowSummary
-   *  Rust struct) ships — see PLAN.md's Batch 2 backlog. */
+   *  Rust struct) ships. */
   collection_id?: string | null;
 }
 
@@ -189,11 +189,10 @@ export const getVersion = (id: string) =>
 export const deleteVersion = (id: string) =>
   invoke<void>("delete_version", { id });
 
-export const checkNodejsAvailable = () =>
-  invoke<boolean>("check_nodejs_available");
-
-export const getNodejsVersion = () =>
-  invoke<string | null>("get_nodejs_version");
+/** Resolves to the bundled Node.js version string, or rejects with a message
+ *  describing why it didn't spawn (missing/corrupt bundle). */
+export const checkBundledNode = (): Promise<string> =>
+  invoke<string>("check_bundled_node");
 
 export interface ExportAllResult {
   zip_path: string;

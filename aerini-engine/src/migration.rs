@@ -286,10 +286,10 @@ mod tests {
         fn noop(_raw: &mut serde_json::Value) {}
 
         // A 2-node cycle (0.8 -> 0.9 -> 0.8 -> ...) that never reaches
-        // CURRENT_VERSION ("1.0"). Pre-fix, apply()'s loop would spin forever
-        // on this input with no timeout and no error — this test would hang
-        // the test runner rather than fail cleanly if the cycle-detection
-        // guard were ever removed.
+        // CURRENT_VERSION ("1.0"). Without the cycle-detection guard,
+        // apply()'s loop would spin forever on this input with no timeout
+        // and no error — this test would hang the test runner rather than
+        // fail cleanly if that guard were ever removed.
         let eng = MigrationEngine {
             migrations: vec![
                 Migration { from: "0.8", to: "0.9", apply: noop },

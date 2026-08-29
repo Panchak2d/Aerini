@@ -8,9 +8,10 @@ import {
 
 describe("resolveCanvasColors", () => {
   it("reads every token from the given getVar, trimmed", () => {
-    const vars: Record<string, string> = { "--color-surface-1": "  #f0e8d6  " };
+    const vars: Record<string, string> = { "--color-surface-1": "  #f0e8d6  ", "--brand-github": "  #181717  " };
     const colors = resolveCanvasColors((name) => vars[name] ?? "");
     expect(colors.surface1).toBe("#f0e8d6");
+    expect(colors.brandGithub).toBe("#181717");
   });
 
   it("falls back to the exact pre-batch Midnight literals when a lookup returns empty", () => {
@@ -21,6 +22,12 @@ describe("resolveCanvasColors", () => {
     expect(colors.actionRun).toBe("#34d399");
     expect(colors.error).toBe("#f87171");
     expect(colors.catTrigger).toBe("#8aa9c9");
+    // Midnight's dark surfaces make GitHub/Notion's real near-black mark
+    // illegible, so the canvas-bitmap fallback (no theme CSS reachable) is
+    // white, not the literal brand hex — matches --brand-github/-notion's
+    // own :root default in variables.css.
+    expect(colors.brandGithub).toBe("#ffffff");
+    expect(colors.brandNotion).toBe("#ffffff");
   });
 });
 

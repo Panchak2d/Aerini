@@ -955,7 +955,7 @@ fn make_plugin_state(storage: Option<PluginStorageHandle>) -> PluginState {
 // ── Plugin storage (WIT `storage` import backing) ──────────────────────────────
 
 /// File name of the per-`plugin_dir` storage database — a dotfile sidecar
-/// matching P5's `.aerini-plugin-trust.json` naming convention exactly (same
+/// matching the `.aerini-plugin-trust.json` naming convention exactly (same
 /// directory, same "hidden management file living next to the `.wasm`s"
 /// pattern), scanned past by every existing `.wasm`-extension-filtered
 /// directory walk in this crate and in `commands/plugins.rs` without any
@@ -1511,9 +1511,9 @@ impl PluginLoader {
     /// which is the same path as the `plugin_dir` passed to
     /// [`load_plugins`]/[`load_plugins_from_dir`](Self::load_plugins_from_dir)
     /// in every real call path in this crate — installs place `.wasm`
-    /// files flat, directly in `plugin_dir`, with no subdirectories
-    /// (P2's single-file installs; P6.1's pack members, "flat, same
-    /// directory as single-file installs").
+    /// files flat, directly in `plugin_dir`, with no subdirectories —
+    /// true for both single-file installs and pack members, which are
+    /// placed flat in the same directory as single-file installs.
     ///
     /// A failure to open the database (e.g. a read-only `plugin_dir`) is
     /// logged once per distinct `plugin_dir` and does not fail plugin

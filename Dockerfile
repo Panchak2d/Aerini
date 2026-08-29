@@ -6,8 +6,29 @@ FROM rust:1-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y musl-tools curl ca-certificates xz-utils && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl
+
+# Node.js for the Code node's server-side sandbox. Version is read from the
+# repo-root NODE_VERSION file below, shared with scripts/fetch-node-binaries.sh
+# (desktop) so both fetch from one source instead of two separate pins.
+# Official nodejs.org Linux builds are glibc/libstdc++ dynamically linked, not
+# static — this is why the runtime stage below is cc-debian12, not static-debian12.
+COPY NODE_VERSION ./NODE_VERSION
+RUN NODE_VERSION="$(head -n1 NODE_VERSION | tr -d '\r')" && \
+    if ! echo "$NODE_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then \
+      echo "ERROR: NODE_VERSION file must have a bare semver as its first line, got: '$NODE_VERSION'" >&2; \
+      exit 1; \
+    fi && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/node-shasums.txt && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && \
+    NODE_EXPECTED_SHA256="$(awk -v f="node-v${NODE_VERSION}-linux-x64.tar.xz" '$2==f {print $1; exit}' /tmp/node-shasums.txt)" && \
+    [ -n "$NODE_EXPECTED_SHA256" ] && \
+    echo "${NODE_EXPECTED_SHA256}  /tmp/node.tar.xz" | sha256sum -c - && \
+    tar -xJf /tmp/node.tar.xz -C /tmp && \
+    cp "/tmp/node-v${NODE_VERSION}-linux-x64/bin/node" /app/node-bundled && \
+    chmod +x /app/node-bundled && \
+    rm -rf /tmp/node.tar.xz /tmp/node-shasums.txt "/tmp/node-v${NODE_VERSION}-linux-x64"
 
 COPY Cargo.toml Cargo.lock ./
 COPY aerini-engine ./aerini-engine
@@ -15,7 +36,7 @@ COPY aerini-server ./aerini-server
 
 # Exclude src-tauri from the workspace — it has Tauri/desktop dependencies that
 # cannot build in a headless container. aerini-server does not depend on it.
-RUN printf '[workspace]\nmembers = ["aerini-engine", "aerini-server"]\nresolver = "2"\n' > Cargo.toml
+RUN printf '[workspace]\nmembers = ["aerini-engine", "aerini-server"]\nresolver = "2"\n\n[workspace.package]\nversion = "0.4.0"\nedition = "2021"\n' > Cargo.toml
 
 RUN cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 
@@ -25,20 +46,24 @@ RUN cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 RUN mkdir -p /data && chown 65532:65532 /data
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-# distroless/static is the correct pairing for a statically linked MUSL binary:
-# no glibc, no shell, no package manager. Minimal attack surface.
+# aerini-server itself is a statically linked MUSL binary and would be happy on
+# distroless/static, but the bundled Node.js binary below is not — official
+# nodejs.org Linux builds are dynamically linked against glibc and libstdc++.
+# cc-debian12 is distroless/static plus exactly those two libraries (it exists
+# specifically for C++-linked runtimes), still no shell, no package manager.
 # The nonroot variant runs as uid 65532 automatically — no useradd needed.
 #
-# HEALTHCHECK needs a wget binary. distroless/static has none, so we copy the
+# HEALTHCHECK needs a wget binary. This base has none, so we copy the
 # statically compiled wget from busybox:musl. It is ~1 MB and adds no runtime
 # attack surface because it is only invoked by the Docker daemon's health prober,
 # not by the container process itself.
 FROM busybox:1.38-musl@sha256:8635836765b0c4c43970660219739baa58b0883c2e429e4b8918f7dd1519455c AS busybox
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7bb25d9f7c31d2bdd1982feb4dafcaf137703c7075dbe2febb41c24212b946f
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 
 COPY --from=busybox  /bin/wget                                                    /usr/local/bin/wget
 COPY --from=builder  /app/target/x86_64-unknown-linux-musl/release/aerini-server  /usr/local/bin/aerini-server
+COPY --from=builder  /app/node-bundled                                            /usr/local/bin/node-bundled
 COPY --from=builder  --chown=65532:65532 /data                                   /data
 
 VOLUME ["/data"]

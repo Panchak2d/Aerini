@@ -31,6 +31,7 @@ export interface CanvasThemeColors {
   actionNav: string; actionRun: string; warning: string; error: string; ai: string;
   catAction: string; catAI: string; catLogic: string; catUtility: string; catTrigger: string;
   wire: string; wireHover: string;
+  brandGithub: string; brandNotion: string;
 }
 
 const FALLBACK: CanvasThemeColors = {
@@ -40,6 +41,7 @@ const FALLBACK: CanvasThemeColors = {
   actionNav: "#4d9eff", actionRun: "#34d399", warning: "#f59e0b", error: "#f87171", ai: "#a78bfa",
   catAction: "#4d9eff", catAI: "#a78bfa", catLogic: "#34d399", catUtility: "#f59e0b", catTrigger: "#8aa9c9",
   wire: "#686f78", wireHover: "#858d97",
+  brandGithub: "#ffffff", brandNotion: "#ffffff",
 };
 
 /** Pure token → literal mapping. `getVar` is whatever resolves a custom
@@ -67,6 +69,8 @@ export function resolveCanvasColors(getVar: (name: string) => string): CanvasThe
     catTrigger:    v("--cat-trigger", FALLBACK.catTrigger),
     wire:          v("--color-wire", FALLBACK.wire),
     wireHover:     v("--color-wire-hover", FALLBACK.wireHover),
+    brandGithub:   v("--brand-github", FALLBACK.brandGithub),
+    brandNotion:   v("--brand-notion", FALLBACK.brandNotion),
   };
 }
 
@@ -83,9 +87,9 @@ export function resolveCanvasColors(getVar: (name: string) => string): CanvasThe
 // default `environment: "node"` (no `document` at all) — danger-badge.test.ts,
 // node-kind-hierarchy.test.ts, canvas-safety.test.ts(jsdom, but variables.css
 // is never linked into its DOM) among others. Both paths fall back to
-// FALLBACK above, which is byte-for-byte the same hex every one of these
-// files hardcoded before this fix — zero-visual-diff wiring for Midnight,
-// only Paper (and any future theme) actually changes.
+// FALLBACK above, which is byte-for-byte the same hex these files hardcode
+// for Midnight — zero-visual-diff wiring for Midnight, only Paper (and any
+// future theme) actually changes.
 let _cache: CanvasThemeColors | null = null;
 let _observerAttached = false;
 
@@ -153,15 +157,13 @@ export function tintOver(fg: string, bg: string, t: number): string {
   return rgbToHex(fr * t + br * (1 - t), fgc * t + bgc * (1 - t), fb * t + bb * (1 - t));
 }
 
-/** Per-kind node-header tint. Previously 4 hardcoded near-black hexes
- * (Node.ts's TYPE_META_BASE.dim), fixed regardless of theme — the header
- * stayed near-black even on Paper. Replaced with the kind's own accent at
- * low alpha, composited over the node body (drawn first, same draw() call,
- * always opaque) — automatically theme-correct for Midnight, Paper, and any
- * future theme. DISCLOSED: this also changes Midnight's exact header hue —
- * was a fixed near-black per kind, now a translucent tint of that kind's own
- * accent — a deliberate, requested part of this fix (accepted design call),
- * not a side effect. The four kinds stay visually distinct by hue. */
+/** Per-kind node-header tint: the kind's own accent at low alpha, composited
+ * over the node body (drawn first, same draw() call, always opaque) —
+ * automatically theme-correct for Midnight, Paper, and any future theme.
+ * Deliberately renders as a translucent tint of the kind's own accent rather
+ * than a fixed near-black on every theme, including Midnight — an
+ * intentional design choice, not a bug, so it should not be "corrected"
+ * back to a flat near-black. The four kinds stay visually distinct by hue. */
 export function headerTint(accentHex: string): string {
   return accentHex + "26"; // ~15% alpha, composited over the opaque body fill
 }
@@ -170,14 +172,13 @@ export interface NoteColorSet { bg: string; border: string; text: string; }
 
 /** Note-node color palette, keyed by the 5 names NoteEditor.ts writes to
  * config.color (confirmed against panels/NoteEditor.ts's own NOTE_COLORS
- * array — Rule 23). Previously 5 hardcoded bg/border/text hex triads,
- * correct on Midnight only. Now derived from the same base semantic tokens
- * every other themed element uses: "default" reads the neutral surface/
- * border/text tokens; the 4 hue names reuse the matching status token
- * (yellow→warning, blue→actionNav, green→actionRun, red→error) — bg via
- * tintOver (must stay opaque, see above), border/text via the existing
- * alpha-suffix pattern. Zero new tokens; a future custom theme that defines
- * the 5 base status colors gets correct note colors for free. */
+ * array). Derived from the same base semantic tokens every other themed
+ * element uses: "default" reads the neutral surface/border/text tokens; the
+ * 4 hue names reuse the matching status token (yellow→warning,
+ * blue→actionNav, green→actionRun, red→error) — bg via tintOver (must stay
+ * opaque, see above), border/text via the existing alpha-suffix pattern.
+ * Zero new tokens; a future custom theme that defines the 5 base status
+ * colors gets correct note colors for free. */
 export function resolveNoteColors(colors: CanvasThemeColors): Record<string, NoteColorSet> {
   const t = 0.16; // tint strength — subtle, keeps text-on-bg legible without drowning the hue
   return {

@@ -44,7 +44,7 @@ describe("run-history legacy migration", () => {
     expect(migrated.length).toBe(2);
     for (const call of migrated) {
       const record = (call[1] as { record: { workflow_id: string; workflow_name: string } }).record;
-      // Bucket is fixed, NOT the calling workflow's id (the pre-fix bug).
+      // Bucket is fixed, NOT the calling workflow's id.
       expect(record.workflow_id).toBe(mod.LEGACY_HISTORY_WORKFLOW_ID);
       expect(record.workflow_id).not.toBe("wf_real123");
     }
@@ -57,7 +57,7 @@ describe("run-history legacy migration", () => {
     expect((realCall![1] as { record: { workflow_id: string } }).record.workflow_id).toBe("wf_real123");
   });
 
-  it("regression: does not reproduce the pre-fix bug, bucket id does not depend on which workflow calls first", async () => {
+  it("bucket id does not depend on which workflow calls first", async () => {
     vi.resetModules();
     const modA = await import("../run-history");
     seedLegacyBlob([{ id: "old-x", workflowName: "Old X", ranAt: "2026-01-01T00:00:00Z", success: true, durationMs: 1, result: { success: true, logs: [] } }]);

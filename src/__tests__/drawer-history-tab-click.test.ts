@@ -48,7 +48,7 @@ describe("openHistoryDrawer — History tab click wiring", () => {
     expect(document.getElementById("output-content")!.classList.contains("hidden")).toBe(true);
     expect(document.getElementById("output-content-performance")!.classList.contains("hidden")).toBe(false);
 
-    // Click back to History — this used to be a silent no-op.
+    // Click back to History — must actually switch the active tab.
     historyTab.click();
     expect(historyTab.classList.contains("active")).toBe(true);
     expect(perfTab.classList.contains("active")).toBe(false);

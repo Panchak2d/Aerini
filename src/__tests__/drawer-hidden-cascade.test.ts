@@ -25,7 +25,7 @@ function buildDom(collapsed: boolean) {
   `;
 }
 
-describe("output-drawer collapsed-state CSS cascade (R2C regression)", () => {
+describe("output-drawer collapsed-state CSS cascade", () => {
   it("edge case (the bug): collapsed drawer header is NOT display:none, despite base.css's global .hidden rule", () => {
     buildDom(true);
     const drawer = document.getElementById("output-drawer")!;

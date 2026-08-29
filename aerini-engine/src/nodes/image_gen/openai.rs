@@ -46,7 +46,7 @@ pub(super) async fn gen_gpt_image(client: reqwest::Client, req: GptImageRequest<
     let record = crate::provider::ProviderRegistry::global()
         .get(req.source)
         .expect("gpt_image record always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let resp = match crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post("https://api.openai.com/v1/images/generations"),
@@ -116,7 +116,7 @@ pub(super) async fn gen_gpt_image(client: reqwest::Client, req: GptImageRequest<
 // Response: same {"data":[{"b64_json":"..."}]} format as the generations endpoint.
 // developers.openai.com/api/reference/resources/images/methods/edit, June 2026.
 // Supports up to 16 reference images per OpenAI spec.
-// reqwest 0.13 "multipart" feature required (added to Cargo.toml in P10).
+// reqwest 0.13 "multipart" feature required (enabled in Cargo.toml).
 async fn gen_gpt_image_edit(client: reqwest::Client, req: GptImageRequest<'_>) -> NodeOutput {
     let ts   = Utc::now().timestamp_millis();
     let mut logs: Vec<String> = Vec::new();
@@ -159,7 +159,7 @@ async fn gen_gpt_image_edit(client: reqwest::Client, req: GptImageRequest<'_>) -
     let record = crate::provider::ProviderRegistry::global()
         .get(req.source)
         .expect("gpt_image record always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let resp = match crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post("https://api.openai.com/v1/images/edits"),

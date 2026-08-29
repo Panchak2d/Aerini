@@ -85,9 +85,8 @@ impl TriggerGuest for HeartbeatTrigger {
         // dropping `tx` when its fixed sequence ends. A real build is
         // needed to confirm whether an unresponsive `write_all` on a
         // dropped receiver stalls this task forever or is unblocked by the
-        // component-model-async runtime on its own. Flagged, not resolved,
-        // per Rule 15 -- do not treat this loop's shutdown behavior as
-        // verified.
+        // component-model-async runtime on its own. Flagged, not resolved —
+        // do not treat this loop's shutdown behavior as verified.
         wasip3::spawn(async move {
             let mut tick: u64 = 0;
             loop {

@@ -15,7 +15,7 @@ describe("accentColors", () => {
     );
   });
 
-  it("tracks live --color-* custom properties instead of a hardcoded array (the regression this batch fixed)", () => {
+  it("tracks live --color-* custom properties instead of a hardcoded array", () => {
     document.documentElement.style.setProperty("--cat-action", "rgb(1, 1, 1)");
     document.documentElement.style.setProperty("--color-error", "rgb(2, 2, 2)");
 

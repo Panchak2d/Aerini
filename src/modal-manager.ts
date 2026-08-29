@@ -189,8 +189,8 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
     const rawParams = (n.parameters as Record<string, unknown>) ?? {};
 
     // translate n8n's decision-logic config
-    // into Aerini's, not just the output port each branch lands on (that
-    // part was Batch G). Best-effort only — see translateIfCondition/
+    // into Aerini's, not just the output port each branch lands on.
+    // Best-effort only — see translateIfCondition/
     // translateSwitchConfig's own doc comments for exactly what shape is
     // (and isn't) translated. Anything not confidently translatable is left
     // unconfigured rather than guessed at, and surfaced as an import-time
@@ -544,8 +544,8 @@ function translateIfCondition(params: Record<string, unknown>, sourceName: strin
  * field dispatched to N literal matches, not per-rule independent
  * conditions the way n8n's rules mode allows, so anything wider (a
  * different field per rule, a non-equality operator, more than 8 rules,
- * n8n's legacy typeVersion-1 value1/rules.rules shape — not independently
- * verified this batch, deliberately not guessed at) is left untranslated.
+ * n8n's legacy typeVersion-1 value1/rules.rules shape — not verified against
+ * n8n's docs, deliberately not guessed at) is left untranslated.
  */
 function translateSwitchConfig(params: Record<string, unknown>, sourceName: string | null, n8nNodeName: string): SwitchTranslation {
   const mode = typeof params.mode === "string" ? params.mode : "rules";

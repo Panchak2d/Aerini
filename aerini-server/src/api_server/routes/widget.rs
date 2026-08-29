@@ -120,14 +120,12 @@ pub async fn trigger_widget(
     // to avoid stalling the async reactor, matching the pattern every
     // workflows.rs CRUD handler already uses for `s.db.*` calls.
     //
-    // NOTICED BUT NOT FIXED (Rule 6 — out of scope, pre-existing,
-    // untouched by this patch): `routes/scheduler.rs`'s list_scheduler /
-    // start_job / stop_job call `s.scheduler.*` (which hits the same
-    // blocking rusqlite pool) directly on the async handler, with no
-    // spawn_blocking. This file does not follow that precedent — it
-    // follows workflows.rs's safer one instead, since both precedents
-    // already coexist in the shipped codebase and the safer one is the
-    // defensible default for new code.
+    // `routes/scheduler.rs`'s list_scheduler / start_job / stop_job call
+    // `s.scheduler.*` (which hits the same blocking rusqlite pool) directly
+    // on the async handler, with no spawn_blocking. This file does not
+    // follow that precedent — it follows workflows.rs's safer one instead,
+    // since both precedents already coexist in the shipped codebase and the
+    // safer one is the defensible default for new code.
     let row = {
         let db = Arc::clone(&s.db);
         let wf_id = workflow_id.clone();

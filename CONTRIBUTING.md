@@ -39,15 +39,19 @@ it differently, but the executor and scheduler use only the trait.
 | Tool | Version |
 |------|---------|
 | Rust (stable) | 1.77+ |
-| Node.js | 18+ |
+| Node.js | 18+ (only to run `npm`/Vite — not needed to use the Code (JS) node, see below) |
 | Tauri CLI | 2.x (`cargo install tauri-cli --version "^2"`) |
-| Node.js on PATH | Required for the Code (JS) node at runtime |
+
+The Code (JS) node runs on a Node.js runtime bundled into Aerini, not your system install. Before the first `npm run dev`, stage it:
 
 ```bash
 npm install
+./scripts/fetch-node-binaries.sh   # downloads + checksum-verifies bundled Node.js, one time per clone
 npm run dev       # Vite dev server + Tauri window
 npm run build     # production bundle → src-tauri/target/release/bundle/
 ```
+
+`fetch-node-binaries.sh` needs `curl`, `tar`, `unzip` (or `powershell.exe`), and `sha256sum`/`shasum` on PATH, plus network access to nodejs.org. Skipping it fails the Rust build with `resource path 'binaries/node-bundled-...' doesn't exist`.
 
 > ⚠️ **`dist/` is intentionally committed — do not delete it or add it to `.gitignore`.**
 >
@@ -249,7 +253,7 @@ Delete this directory to reset all workflows, credentials, and run history durin
 | Tool | Version | Install |
 |------|---------|---------|
 | Rust | 1.77+ | [rustup.rs](https://rustup.rs/) |
-| Node.js | 18+ | [nodejs.org](https://nodejs.org/) — required to build the frontend and for the Code (JS) node |
+| Node.js | 18+ | [nodejs.org](https://nodejs.org/) — required to build the frontend (`npm`/Vite) only |
 | Tauri CLI | 2.x | `cargo install tauri-cli --version "^2" --locked` |
 
 ### Steps
@@ -258,8 +262,11 @@ Delete this directory to reset all workflows, credentials, and run history durin
 git clone https://github.com/Panchak2d/aerini
 cd aerini
 npm install
+./scripts/fetch-node-binaries.sh
 npm run dev
 ```
+
+`fetch-node-binaries.sh` downloads and checksum-verifies the Node.js runtime that gets bundled into Aerini for the Code (JS) node, staging it under `src-tauri/binaries/`. One-time per clone; the build fails without it.
 
 `npm run dev` compiles the Rust code on the first run, which takes 2–5 minutes. After that, the Aerini window opens.
 
@@ -291,6 +298,8 @@ For a static Linux binary (recommended for server deployments):
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 ```
+
+The Docker image (`Dockerfile`) stages its own bundled Node.js at build time — no extra step. A locally-built `aerini-server` binary run outside Docker does **not** get one staged automatically; the Code (JS) node will fail with "Bundled Node.js runtime is missing or corrupt" until you either copy a `node-bundled` binary next to the built executable or set `AERINI_NODE_BIN` to a Node.js path.
 
 ---
 

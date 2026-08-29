@@ -288,6 +288,7 @@
 .palette-item.hidden { display: none; }
 .palette-item.collapsed { display: none; }
 .palette-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.palette-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .palette-name { font-size: 12px; color: var(--t1); }
 
 .dot-ai      { background: var(--purple); }
@@ -296,6 +297,16 @@
 .dot-utility { background: var(--cat-utility); }
 .dot-trigger { background: var(--cat-trigger); }
 .dot-other   { background: var(--t3); }
+
+/* Monochrome node icons pick up the category accent via currentColor; brand
+   icons (Discord/GitHub/etc. — see icon-cache.ts) ignore this, they carry
+   their own fill color baked into the markup. */
+.palette-icon--ai      { color: var(--purple); }
+.palette-icon--action  { color: var(--cat-action); }
+.palette-icon--logic   { color: var(--cat-logic); }
+.palette-icon--utility { color: var(--cat-utility); }
+.palette-icon--trigger { color: var(--cat-trigger); }
+.palette-icon--other   { color: var(--t3); }
 
 .workflow-scroll {
   flex: 1;

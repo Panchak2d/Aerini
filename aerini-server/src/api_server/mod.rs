@@ -332,15 +332,23 @@ pub async fn run(cfg: ServerConfig) {
         WorkflowDb::open(&data_dir.join("aerini.db"), db_pool_size)
             .expect("Cannot open workflow database")
     );
+    // Spawned onto a blocking-pool thread: with keyring's async-secret-service
+    // backend, the OsKeychain path makes a blocking D-Bus round trip, and
+    // keyring's own docs warn that calling it directly on a thread already
+    // driving a Tokio runtime (this fn runs under #[tokio::main]) can
+    // deadlock or panic the runtime. See keyring::secret_service module docs,
+    // "Tokio runtime caution".
+    let creds_db_path = data_dir.join("credentials.db");
+    let creds_key_source = if use_keychain {
+        KeySource::OsKeychain { fallback: data_dir.join("aerini.key") }
+    } else {
+        KeySource::File(data_dir.join("aerini.key"))
+    };
     let creds = Arc::new(
-        CredentialStore::open(
-            &data_dir.join("credentials.db"),
-            if use_keychain {
-                KeySource::OsKeychain { fallback: data_dir.join("aerini.key") }
-            } else {
-                KeySource::File(data_dir.join("aerini.key"))
-            },
-        ).expect("Cannot open credential store")
+        tokio::task::spawn_blocking(move || CredentialStore::open(&creds_db_path, creds_key_source))
+            .await
+            .expect("Credential store init task panicked")
+            .expect("Cannot open credential store")
     );
 
     let mut registry = NodeRegistry::new();

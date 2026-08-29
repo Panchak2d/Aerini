@@ -184,8 +184,8 @@ export function initStatusBarFields(
   // 150ms, not 300ms: #run-dropdown-wrap's success/error data-run-state also
   // only holds for 300ms (toolbar.ts's onRunResult) before reverting to
   // "idle" — a poll period equal to that window's length risks a bad phase
-  // alignment missing it entirely (self-audit finding). Half the window
-  // guarantees at least one tick lands inside it every time.
+  // alignment missing it entirely. Half the window guarantees at least one
+  // tick lands inside it every time.
   setInterval(() => {
     const nNodes  = canvas.nodes.size;
     const nConn   = canvas.connectors.size;

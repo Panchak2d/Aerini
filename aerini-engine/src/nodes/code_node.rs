@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::process::Command;
@@ -8,7 +9,7 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
 
-static NODE_BIN: OnceLock<&'static str> = OnceLock::new();
+static NODE_BIN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 /// Guards the macOS partial-sandbox warning so it fires once per process, not once per execution.
 #[cfg(target_os = "macos")]
 static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
@@ -59,7 +60,7 @@ export async function resolve(specifier, context, nextResolve) {
 }
 "#;
 
-/// Code node — runs a JavaScript snippet using the system Node.js installation.
+/// Code node — runs a JavaScript snippet using Aerini's bundled Node.js runtime.
 /// The snippet has access to `input` (the incoming data) and `context` (all node outputs).
 /// Return a value by calling `output(value)` — whatever you pass becomes the node output.
 ///
@@ -162,7 +163,7 @@ impl Node for CodeNode {
             ));
         }
 
-        // Issue #1: When sandbox is enabled, delete network globals that bypass the
+        // When sandbox is enabled, delete network globals that bypass the
         // ESM loader hook (fetch, WebSocket, XMLHttpRequest require no import in Node 18+).
         let sandbox_network_kill = if sandbox_enabled {
             r#"// Sandbox: remove network globals not catchable by the ESM loader hook.
@@ -208,17 +209,13 @@ function output(v) {{ __result = v; }}
 
         let start = std::time::Instant::now();
 
-        // Detect node binary once per process lifetime; cached via OnceLock.
-        let node_bin = *NODE_BIN.get_or_init(|| {
-            if std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
-                .arg("node")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            { "node" } else { "nodejs" }
-        });
+        // Resolve the bundled node binary once per process lifetime; cached via OnceLock.
+        let node_bin = match NODE_BIN.get_or_init(resolve_node_bin) {
+            Ok(path) => path,
+            Err(msg) => return NodeOutput::failure(
+                NodeError::unrecoverable("NODE_NOT_FOUND", msg.clone())
+            ),
+        };
 
         // In sandbox mode, write the loader to a temp file.
         // Temp file is cleaned up when the guard drops at end of scope.
@@ -249,7 +246,7 @@ function output(v) {{ __result = v; }}
         let _loader_tempfile: Option<()> = None;
 
         let mut cmd = Command::new(node_bin);
-        // Issue #2: kill_on_drop ensures the subprocess is killed on ANY drop path
+        // kill_on_drop ensures the subprocess is killed on ANY drop path
         // (workflow-level timeout, abort, panic-unwind), not just the per-node timeout branch.
         cmd.kill_on_drop(true);
         cmd.arg("--input-type=module");
@@ -264,7 +261,7 @@ function output(v) {{ __result = v; }}
             // Suppress the loader experimental warning — it's noise for end users.
             cmd.arg("--no-warnings");
         }
-        // Issue #1: In sandbox mode, clear the inherited environment so process.env
+        // In sandbox mode, clear the inherited environment so process.env
         // cannot expose server secrets. Re-add PATH (required for Node to find its own
         // binaries) and any operator-approved vars from --allow-env-vars.
         if sandbox_enabled {
@@ -355,12 +352,21 @@ function output(v) {{ __result = v; }}
 
         let mut child = match spawn_result {
             Ok(c)  => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return NodeOutput::failure(
-                NodeError::unrecoverable(
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::error!(
+                    "code_node: bundled Node.js binary did not spawn (ENOENT) at the resolved \
+                     path: {}. The runtime is bundled with this install; this indicates a \
+                     missing or corrupt bundled binary, not an absent system Node.js.",
+                    e
+                );
+                return NodeOutput::failure(NodeError::unrecoverable(
                     "NODE_NOT_FOUND",
-                    format!("Node.js not found on this system: {}. Install Node.js to use the Code node.", e)
-                )
-            ),
+                    format!(
+                        "Bundled Node.js runtime is missing or corrupt: {}. Reinstall or redeploy this application to restore it.",
+                        e
+                    )
+                ));
+            }
             Err(e) => return NodeOutput::failure(
                 NodeError::unrecoverable(
                     "SANDBOX_INIT_FAILED",
@@ -486,6 +492,87 @@ function output(v) {{ __result = v; }}
     }
 }
 
+// ── Node binary resolution ───────────────────────────────────────────────────────
+// Bundled-only: no PATH search, no `which`/`where`, ever. The desktop app's Tauri
+// sidecar and the server's Docker image both place the bundled runtime next to
+// their own executable under this same filename, so one resolver covers both.
+
+/// Filename of the bundled runtime next to the current executable.
+fn bundled_bin_name() -> &'static str {
+    if cfg!(windows) { "node-bundled.exe" } else { "node-bundled" }
+}
+
+/// Resolves the bundled node binary's path: an explicit override env var if set,
+/// otherwise the bundled binary next to the running executable. Never touches PATH.
+fn resolve_node_bin() -> Result<PathBuf, String> {
+    resolve_node_bin_from(std::env::var("AERINI_NODE_BIN").ok(), std::env::current_exe())
+}
+
+/// Cached outcome of `bundled_node_health_check`. A container image or installed
+/// app doesn't repair itself mid-process, so a spawn failure or success is stable
+/// for the process's lifetime — cached once to avoid spawning a subprocess on
+/// every caller (e.g. a polled `/api/health` route).
+static NODE_HEALTH: OnceLock<Result<String, String>> = OnceLock::new();
+
+/// Confirms the bundled Node.js runtime actually spawns and reports a version,
+/// beyond just resolving a path for it (`resolve_node_bin` never touches disk).
+/// Returns the reported version on success, or a message describing why the
+/// spawn failed — a resolvable-but-unspawnable binary means the bundle itself
+/// is missing or corrupt, since resolution never depends on PATH.
+pub fn bundled_node_health_check() -> Result<String, String> {
+    NODE_HEALTH.get_or_init(|| {
+        let path = resolve_node_bin()?;
+        bundled_node_health_check_from(&path)
+    }).clone()
+}
+
+/// Spawns the given path with `--version` and reports the outcome. Split out from
+/// `bundled_node_health_check` so tests can exercise it without the process-wide
+/// `OnceLock` cache above.
+fn bundled_node_health_check_from(path: &std::path::Path) -> Result<String, String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!(
+            "Bundled Node.js runtime is missing or corrupt: {}. Reinstall or redeploy this application to restore it.",
+            e
+        ))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Bundled Node.js runtime exited with a non-zero status while checking its version ({}). Reinstall or redeploy this application to restore it.",
+            output.status
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("Bundled Node.js runtime returned non-UTF8 version output: {}.", e))
+}
+
+fn resolve_node_bin_from(
+    env_override: Option<String>,
+    current_exe: std::io::Result<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = env_override.filter(|p| !p.trim().is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let exe_path = current_exe.map_err(|e| {
+        format!(
+            "Could not determine the running executable's location to find the bundled \
+             Node.js runtime: {}. This is an environment/packaging problem, not a missing \
+             Node.js install.",
+            e
+        )
+    })?;
+    let exe_dir = exe_path.parent().ok_or_else(|| {
+        format!(
+            "Running executable path '{}' has no parent directory; cannot locate the \
+             bundled Node.js runtime next to it.",
+            exe_path.display()
+        )
+    })?;
+    Ok(exe_dir.join(bundled_bin_name()))
+}
+
 // ── Sandbox helpers ────────────────────────────────────────────────────────────
 
 /// Write the sandbox ESM loader script to a named temp file.
@@ -538,6 +625,47 @@ mod tests {
         let err = out.error.expect("expected NodeError");
         assert_eq!(err.code, "CODE_DISABLED");
         assert!(!err.recoverable);
+    }
+
+    #[test]
+    fn resolve_node_bin_prefers_env_override() {
+        let resolved = resolve_node_bin_from(
+            Some("/custom/path/my-node".to_string()),
+            Ok(PathBuf::from("/usr/local/bin/aerini-server")),
+        );
+        assert_eq!(resolved, Ok(PathBuf::from("/custom/path/my-node")));
+    }
+
+    #[test]
+    fn resolve_node_bin_falls_back_to_bundled_name_next_to_exe() {
+        let resolved = resolve_node_bin_from(None, Ok(PathBuf::from("/usr/local/bin/aerini-server")));
+        assert_eq!(
+            resolved,
+            Ok(PathBuf::from("/usr/local/bin").join(bundled_bin_name()))
+        );
+    }
+
+    #[test]
+    fn resolve_node_bin_errors_when_exe_path_unavailable_rather_than_falling_back_to_path_search() {
+        // A bare filename here would let Command::new()'s own OS-level exec fall back to
+        // a PATH search, which is the one thing this bundled-only resolver must never do.
+        let err = std::io::Error::other("current_exe unavailable");
+        let resolved = resolve_node_bin_from(None, Err(err));
+        assert!(resolved.is_err());
+    }
+
+    // No normal-case (successful spawn) test: it would require a real executable
+    // present in the test environment, which is exactly the kind of
+    // environment-dependency this bundled-only design exists to avoid. The
+    // NotFound case below is this function's entire reason for existing —
+    // distinguishing "resolves to a path" from "actually runs."
+    #[test]
+    fn bundled_node_health_check_reports_missing_or_corrupt_on_spawn_failure() {
+        let err = bundled_node_health_check_from(std::path::Path::new(
+            "/definitely/does/not/exist/node-bundled",
+        ));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("missing or corrupt"));
     }
 
     #[tokio::test]

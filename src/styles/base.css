@@ -76,4 +76,3 @@ input[type="datetime-local"] { color-scheme: dark; }
 }
 
 .toast { position: fixed; bottom: 34px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; padding: 8px 16px; border-radius: 8px; z-index: 1000; max-width: 400px; text-align: center; pointer-events: none; transition: opacity 280ms; color: #000; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
-.toast--warning { background: var(--amber); }

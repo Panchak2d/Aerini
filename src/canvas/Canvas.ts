@@ -625,9 +625,10 @@ export class Canvas {
     if (this.selectedConn && !dc.includes(this.selectedConn)) { dc.push(this.selectedConn); this.connectors.delete(this.selectedConn.data.id); }
     for (const c of dc) this.clearDynamicPortExpr(c);
     // Each node's undo action only carries the connectors that actually touch
-    // that node. A shared dc array previously let undoing one node from a
-    // multi-node delete also resurrect connectors whose other endpoint is a
-    // still-deleted sibling — a dangling from_node/to_node reference.
+    // that node, not the full shared dc array: undoing one node from a
+    // multi-node delete must not also resurrect connectors whose other
+    // endpoint is a still-deleted sibling — a dangling from_node/to_node
+    // reference.
     for (const n of dn) {
       const ownConns = dc.filter(c => c.data.from_node === n.data.id || c.data.to_node === n.data.id);
       this.pushUndo({ type: "delete_node", node: n, connectors: ownConns });

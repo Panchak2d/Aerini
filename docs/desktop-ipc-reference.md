@@ -147,7 +147,7 @@ Small, mostly one-off commands that don't fit a category above.
 | `save_file_dialog` | `content: string`, `filename: string` | path or `null` | Native "save as" dialog, writes `content` to the chosen path. |
 | `save_export_zip` | `zip_path: string`, `filename: string` | path or `null` | Native "save as" for a previously generated export zip — copies the temp file to the chosen path and deletes the temp file. |
 | `write_temp_file` | `filename: string`, `data: string` | `string` (temp path) | Writes to a temp directory for later use by `save_export_zip` or similar. Strips path separators and collapses `..` from `filename`. |
-| `check_nodejs_available` | — | `boolean` | Runs `node --version`; used to show a warning banner if the Code (JS) node won't work. |
+| `check_bundled_node` | — | `string` (version) or rejects | Spawns the bundled Node.js runtime with `--version`; resolves with its version string, or rejects with a message describing why it didn't spawn (missing/corrupt bundle) — used to show a warning banner if the Code (JS) node won't work. |
 | `get_autostart` / `set_autostart` | — / `enabled: boolean` | `boolean` / `()` | "Launch on system startup" toggle, via the OS autostart mechanism. |
 | `close_window` | — | `()` | Hides the main window (minimize-to-tray), doesn't quit. |
 | `force_quit` | — | `()` | Stops all scheduled jobs and exits the process — the real "Quit" action. Note this is a hard stop, not a drain; any run in progress at this moment ends up `interrupted` in the history (see [Background Runs](background-runs.md#run-history-and-the-interrupted-status)). |

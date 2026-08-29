@@ -1,16 +1,14 @@
 # Code (JS) Node
 
-The Code node runs a JavaScript snippet you write, using your machine's Node.js installation. It's the escape hatch for logic that no built-in node covers: custom data transforms, conditional computations, parsing unusual formats, or anything else that's easier to write as code than to assemble from nodes.
+The Code node runs a JavaScript snippet you write, using a Node.js 18+ runtime bundled with Aerini. It's the escape hatch for logic that no built-in node covers: custom data transforms, conditional computations, parsing unusual formats, or anything else that's easier to write as code than to assemble from nodes.
 
 ---
 
 ## Requirements
 
-Node.js 18 or later must be installed and available on your PATH. It's only required if you use this node — other Aerini features don't need it.
+None — the runtime ships inside Aerini. You don't need Node.js installed on your machine, and this node never looks at your system PATH.
 
-To check: open a terminal and run `node --version`. If you see `v18.x.x` or higher, you're set. If the command isn't found, install Node.js from [nodejs.org](https://nodejs.org) (the LTS version works fine), then restart Aerini.
-
-If Node.js isn't found when the node runs, Aerini returns a clear error message with installation instructions rather than a cryptic failure.
+If the bundled runtime is ever missing or corrupt (a broken install), the node returns a clear error telling you to reinstall or redeploy Aerini rather than a cryptic failure.
 
 ---
 

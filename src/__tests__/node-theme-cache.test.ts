@@ -38,7 +38,7 @@ function makeMockCtx() {
   return { ctx, fillRectCalls };
 }
 
-describe("Node.ts catAccents cache invalidation on theme switch (Batch 9)", () => {
+describe("Node.ts catAccents cache invalidation on theme switch", () => {
   it("re-reads --cat-action after <html data-theme> changes; does not invalidate on an unrelated property change", async () => {
     document.documentElement.removeAttribute("data-theme");
     document.documentElement.style.setProperty("--cat-action", "rgb(1, 2, 3)");

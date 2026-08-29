@@ -460,11 +460,11 @@ mod tests {
     }
 
     // MinIO's primary real-world deployment is self-hosted on
-    // localhost/LAN. Under the pre-fix SsrfPolicy::Strict, a loopback
-    // endpoint was unconditionally rejected. The AllowLocal escape hatch
-    // must actually open for it now — `build_client` never touches the
-    // network itself (client construction only), so a successful `Ok`
-    // here proves the SSRF check is what changed, not a live server.
+    // localhost/LAN. Under SsrfPolicy::Strict, a loopback endpoint is
+    // unconditionally rejected; the AllowLocal escape hatch must actually
+    // open for it — `build_client` never touches the network itself (client
+    // construction only), so a successful `Ok` here proves the SSRF check
+    // permits it, not a live server.
     #[tokio::test]
     async fn minio_endpoint_allows_loopback() {
         let cfg = cfg_for("minio", "http://127.0.0.1:9000");

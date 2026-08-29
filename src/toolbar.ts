@@ -1,11 +1,10 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import { RunManager, getBgJobs } from "./run-manager";
-import { stopScheduledWorkflow, parseSchedulerError, getNodejsVersion, exportAllWorkflows } from "./ipc/workflow";
+import { stopScheduledWorkflow, parseSchedulerError, exportAllWorkflows } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
 import { checkForUpdate } from "./ipc/update";
-import { setNodejsAvailability } from "./banners";
 import { invoke } from "@tauri-apps/api/core";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
@@ -360,22 +359,6 @@ export function bindToolbar(
     } finally {
       btn.disabled = false;
     }
-  });
-
-  $("btn-recheck-nodejs")?.addEventListener("click", async () => {
-    if (!isTauri()) return;
-    const btn = $("btn-recheck-nodejs") as HTMLButtonElement;
-    const statusEl = document.getElementById("nodejs-check-status");
-    btn.disabled = true;
-    if (statusEl) statusEl.textContent = "Checking…";
-    // Minimum 1s before the button re-enables, regardless of how fast the
-    // subprocess check resolves — debounces spam-clicking without a separate
-    // cooldown flag to track.
-    const minDelay = new Promise(resolve => setTimeout(resolve, 1000));
-    const [version] = await Promise.all([getNodejsVersion().catch(() => null), minDelay]);
-    setNodejsAvailability(version !== null, canvas);
-    if (statusEl) statusEl.textContent = version ? `Found ${version}.` : "Still not found.";
-    btn.disabled = false;
   });
 
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;

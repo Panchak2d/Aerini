@@ -63,8 +63,9 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// database access — the single canonical list consulted by every execution
 /// entry point: desktop `run_workflow`, desktop `SchedulerDaemon` job-start,
 /// `aerini-server` `serve_mode`/`api_mode` startup gating, and export
-/// packaging. AUDIT_REPORT.md T2-1/T2-6 — previously six independently
-/// written, inconsistent checks; every one of them now reads this list.
+/// packaging. Keeping one list here — instead of a separate check
+/// independently written at each entry point — is what keeps all of them
+/// consistent; every entry point reads this list.
 ///
 /// The frontend keeps its own UI-only list, `DANGEROUS_NODE_IDS` in
 /// `src/node-ids.ts` — the two crates share no build step, so keep them in

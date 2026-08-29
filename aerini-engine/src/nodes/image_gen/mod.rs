@@ -86,7 +86,7 @@ use self::nanobanana::gen_nano_banana;
 use self::flux::{gen_flux, FluxRequest};
 use self::a1111::{gen_a1111, A1111Params};
 use self::comfyui::gen_comfyui;
-use self::shared::extract_reference_images;
+use crate::nodes::ai_prompt::extract_port_attachments;
 
 pub struct ImageGenNode;
 
@@ -236,7 +236,7 @@ impl Node for ImageGenNode {
 
         // Reference images from the "Reference Images" input port.
         // Canvas injects {{SourceNode.output.files}} into config["reference_images_expr"].
-        let ref_images = extract_reference_images(&cfg["reference_images_expr"]);
+        let ref_images = extract_port_attachments(&cfg["reference_images_expr"]);
 
         match provider {
             // -- NanoBanana / Gemini -----------------------------------------

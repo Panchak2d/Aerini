@@ -30,11 +30,12 @@
 //     token   https://oauth2.googleapis.com/token   (Google's generic token endpoint — shared with YouTube)
 //     scope   https://www.googleapis.com/auth/spreadsheets
 //
-// `google_sheets.rs` previously required a raw, manually-pasted
-// access token with no refresh path (~1h expiry, then a silent 401). It now goes
-// through this same store/refresh/full-flow pipeline as a fourth platform,
-// "google_sheets", reusing the existing Google token-exchange/refresh functions
-// (they don't hardcode a scope — only `build_auth_url` does) — see `get_tokens`.
+// `google_sheets.rs` goes through this same store/refresh/full-flow pipeline
+// as a fourth platform, "google_sheets", reusing the existing Google
+// token-exchange/refresh functions (they don't hardcode a scope — only
+// `build_auth_url` does) — see `get_tokens`. This avoids a raw,
+// manually-pasted access token with no refresh path (~1h expiry, then a
+// silent 401).
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};

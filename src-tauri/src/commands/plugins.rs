@@ -832,8 +832,8 @@ pub async fn install_plugin_from_path(
 /// `<pack_id>.aerini-pack.json` in `plugin_dir`. Without `overwrite`, a
 /// matching existing pack returns `pack_already_installed:`. With it, the
 /// pack's entire member set is replaced — members no longer listed are
-/// removed, new ones added (P2/P5's update semantics, applied at the pack
-/// level).
+/// removed, new ones added, applying the same update semantics as a
+/// single-file install at the pack level.
 ///
 /// A member `type_id` — or member filename — already owned by a *different*
 /// pack or a standalone plugin is always a hard `pack_member_conflict:`,
@@ -963,9 +963,10 @@ pub async fn install_plugin_pack_from_path(
     }
 
     // Internal duplicate: two members of *this same* incoming pack claiming
-    // the same `type_id`. Not one of P2's soft, last-loaded-wins collisions
-    // — a self-consistent package should never ship this, so it's rejected
-    // as malformed rather than silently resolved by load order.
+    // the same `type_id`. Not a soft, last-loaded-wins collision like a
+    // plugin-directory-wide `type_id` clash — a self-consistent package
+    // should never ship this, so it's rejected as malformed rather than
+    // silently resolved by load order.
     let mut seen_type_ids: HashMap<&str, &str> = HashMap::new();
     for (name, type_id) in &member_type_ids {
         if let Some(other_name) = seen_type_ids.insert(type_id.as_str(), name.as_str()) {

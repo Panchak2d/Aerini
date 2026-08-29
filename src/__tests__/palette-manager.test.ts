@@ -294,12 +294,13 @@ describe("buildSidebarPalette — collapsible categories", () => {
     return Array.from(document.querySelectorAll<HTMLButtonElement>(".palette-category"));
   }
 
-  // Locates a category's header by walking back from its first item, rather
-  // than matching on label text — buildCategories()'s label capitalization
-  // ("Action", "Ai") is a pre-existing, unrelated quirk, not something this
-  // test should assume or depend on.
-  function headerFor(cat: string): HTMLButtonElement {
-    let el: Element | null = document.querySelector(`.palette-item[data-cat="${cat}"]`);
+  // Locates the header immediately preceding a specific item, found via its
+  // unique data-search substring — not by data-cat. The "action" node_type
+  // now renders as several independent subheaders (Core Actions/Files &
+  // Storage/Integrations/Triggers), so two items can share data-cat="action"
+  // while living under entirely different headers.
+  function headerForItem(search: string): HTMLButtonElement {
+    let el: Element | null = document.querySelector(`.palette-item[data-search*="${search}"]`);
     while (el && !el.classList.contains("palette-category")) el = el.previousElementSibling;
     return el as HTMLButtonElement;
   }
@@ -314,45 +315,46 @@ describe("buildSidebarPalette — collapsible categories", () => {
     });
   });
 
-  it("clicking a header collapses only its own items, leaving other categories untouched", () => {
-    const actionsHeader = headerFor("action");
-    const aiHeader       = headerFor("ai");
+  it("clicking a header collapses only its own subheader's items, leaving sibling Action subheaders and other categories untouched", () => {
+    // http_request -> "Core Actions", slack -> "Integrations" — both
+    // data-cat="action", but different subheaders (the split this batch adds).
+    const coreActionsHeader  = headerForItem("http request");
+    const integrationsHeader = headerForItem("slack");
+    expect(coreActionsHeader).not.toBe(integrationsHeader);
 
-    actionsHeader.click();
-    expect(actionsHeader.classList.contains("collapsed")).toBe(true);
-    expect(actionsHeader.getAttribute("aria-expanded")).toBe("false");
-    expect(aiHeader.classList.contains("collapsed")).toBe(false);
+    coreActionsHeader.click();
+    expect(coreActionsHeader.classList.contains("collapsed")).toBe(true);
+    expect(coreActionsHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(integrationsHeader.classList.contains("collapsed")).toBe(false);
 
-    const actionItems = document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]');
-    expect(actionItems.length).toBeGreaterThan(0);
-    actionItems.forEach(el => expect(el.classList.contains("collapsed")).toBe(true));
-
-    const aiItems = document.querySelectorAll<HTMLElement>('.palette-item[data-cat="ai"]');
-    aiItems.forEach(el => expect(el.classList.contains("collapsed")).toBe(false));
+    const httpItem  = document.querySelector<HTMLElement>('.palette-item[data-search*="http request"]')!;
+    const slackItem = document.querySelector<HTMLElement>('.palette-item[data-search*="slack"]')!;
+    const aiItem    = document.querySelector<HTMLElement>('.palette-item[data-search*="ai prompt"]')!;
+    expect(httpItem.classList.contains("collapsed")).toBe(true);
+    expect(slackItem.classList.contains("collapsed")).toBe(false);
+    expect(aiItem.classList.contains("collapsed")).toBe(false);
   });
 
   it("clicking a collapsed header a second time re-expands it", () => {
-    const actionsHeader = headerFor("action");
-    actionsHeader.click();
-    actionsHeader.click();
+    const header = headerForItem("http request");
+    header.click();
+    header.click();
 
-    expect(actionsHeader.classList.contains("collapsed")).toBe(false);
-    expect(actionsHeader.getAttribute("aria-expanded")).toBe("true");
-    document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]').forEach(el =>
-      expect(el.classList.contains("collapsed")).toBe(false)
-    );
+    expect(header.classList.contains("collapsed")).toBe(false);
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    const httpItem = document.querySelector<HTMLElement>('.palette-item[data-search*="http request"]')!;
+    expect(httpItem.classList.contains("collapsed")).toBe(false);
   });
 
   it("collapse state (.collapsed) is independent of filter state (.hidden) — a collapsed-but-matching category stays reachable", () => {
-    const actionsHeader = headerFor("action");
-    actionsHeader.click();
-    filterByCategory("action"); // matches the very items we just collapsed
+    const header = headerForItem("http request");
+    header.click();
+    filterByCategory("action"); // matches http_request and slack alike (both data-cat="action")
 
-    expect(actionsHeader.classList.contains("hidden")).toBe(false); // header itself never hidden by filtering
-    document.querySelectorAll<HTMLElement>('.palette-item[data-cat="action"]').forEach(el => {
-      expect(el.classList.contains("collapsed")).toBe(true); // still tucked away
-      expect(el.classList.contains("hidden")).toBe(false);    // but not filtered out
-    });
+    expect(header.classList.contains("hidden")).toBe(false); // header itself never hidden by filtering
+    const httpItem = document.querySelector<HTMLElement>('.palette-item[data-search*="http request"]')!;
+    expect(httpItem.classList.contains("collapsed")).toBe(true); // still tucked away
+    expect(httpItem.classList.contains("hidden")).toBe(false);   // but not filtered out
   });
 });
 

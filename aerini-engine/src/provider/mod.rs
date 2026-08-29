@@ -98,8 +98,6 @@ impl ProviderRegistry {
     /// Detect provider id from `base_url` for `provider = "auto"` in AI nodes.
     ///
     /// Returns one of `"anthropic"`, `"gemini"`, or `"openai"` (default).
-    /// Mirrors the detection logic previously inlined in `ai_prompt.rs` and
-    /// `ai_agent.rs`; migrating callers happens in P14c.
     pub fn detect_from_url(base_url: &str) -> &'static str {
         let url = base_url.to_lowercase();
         if url.contains("anthropic.com") {
@@ -281,10 +279,9 @@ mod tests {
 
     #[test]
     fn apply_auth_header_key_skips_empty_key() {
-        // HeaderKey branch previously added `x-api-key: ` (empty
-        // value) unconditionally, unlike BearerToken's own `!is_empty()`
-        // guard for the identical case. Must now omit the header entirely,
-        // matching BearerToken's behavior for an empty key.
+        // HeaderKey branch must omit the header entirely when the key is
+        // empty, matching BearerToken's own `!is_empty()` guard for the
+        // identical case.
         let record = ProviderRecord {
             id: "test",
             display_name: "Test",

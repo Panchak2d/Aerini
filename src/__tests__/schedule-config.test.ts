@@ -27,7 +27,7 @@ describe("localToIso", () => {
     expect(localToIso("2025-06-15T09:00")).toBe("2025-06-15T13:00:00Z");
   });
 
-  it("regression: does NOT reproduce the pre-fix bug of treating local time as UTC", () => {
+  it("does not treat a local wall-clock time as if it were already UTC", () => {
     process.env.TZ = "Asia/Kolkata";
     expect(localToIso("2025-06-15T09:00")).not.toBe("2025-06-15T09:00:00Z");
   });

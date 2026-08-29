@@ -30,7 +30,7 @@ beforeEach(() => {
   `;
 });
 
-describe("updateAlwaysOnBtn — S12-5 tooltip restoration", () => {
+describe("updateAlwaysOnBtn — tooltip restoration", () => {
   it("removes data-tooltip when the workflow has a schedulable trigger", async () => {
     await updateAlwaysOnBtn(stubCanvas(["schedule"]), wfManager);
     const wrap = document.getElementById("always-on-wrap")!;

@@ -57,6 +57,11 @@ desktop.ini
 *.deb
 *.rpm
 
+# Bundled Node runtime, fetched by scripts/fetch-node-binaries.sh. Linux/macOS
+# binaries have no extension, so the *.exe rule above doesn't catch them.
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
 
 *.log
 *.tmp

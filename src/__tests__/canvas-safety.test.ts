@@ -222,7 +222,7 @@ describe("checkDangerousNodes — scoped to the given node set", () => {
 // ---------------------------------------------------------------------------
 // checkDangerousNodes must also prompt for plugin nodes: they get resolved
 // credential values merged into their input and have outbound HTTP access by
-// design, but sat outside DANGEROUS_NODE_IDS entirely (finding #4).
+// design, but sit outside DANGEROUS_NODE_IDS entirely.
 // ---------------------------------------------------------------------------
 
 describe("checkDangerousNodes — plugin nodes", () => {

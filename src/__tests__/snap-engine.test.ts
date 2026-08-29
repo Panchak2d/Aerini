@@ -42,7 +42,7 @@ function stubCanvas(nodes: CanvasNode[]): Canvas {
   return { nodes: map } as unknown as Canvas;
 }
 
-describe("SnapEngine.computeSnap — S9-7 y-axis alignment", () => {
+describe("SnapEngine.computeSnap — y-axis alignment", () => {
   it("produces a horizontal guide when two differently-tall nodes share a top edge (normal case)", () => {
     const moving = makeNode("a", 0, 100, 1);   // height 82
     const other  = makeNode("b", 400, 100, 3); // height 138 — heights differ, tops match

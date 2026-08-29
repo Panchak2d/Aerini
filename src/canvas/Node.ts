@@ -568,7 +568,7 @@ function trunc(s: string, max: number): string {
  * Small filled warning-triangle glyph, centered at (cx, cy). Drawn immediately
  * left of the category label for node types in DANGEROUS_NODE_IDS. Cosmetic
  * only — draws a marker, never blocks or warns on its own (the real gate is
- * aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS, Batch L).
+ * aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS).
  */
 function drawDangerBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number): void {
   const s = 5;

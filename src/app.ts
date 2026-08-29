@@ -2,7 +2,7 @@ import { Canvas } from "./canvas/Canvas";
 import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
-import { getNodeTypes } from "./ipc/workflow";
+import { getNodeTypes, checkBundledNode } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import { initStatusBarFields } from "./statusbar-fields";
@@ -24,7 +24,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { preloadAllIcons } from "./icon-cache";
 
 import { showConfirm } from "./confirm";
-import { refreshNodejsAvailability, reshowNodejsBannerIfStillMissing, recheckNodejsOnFocusRegain } from "./banners";
 import { initInterpolationAutocomplete } from "./interpolation";
 import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
@@ -58,7 +57,7 @@ async function init() {
   // visible in a production/Tauri cold start.
   initSidebarSections();
 
-  // Lazy BgJobsPanel — deferred after first paint (Part A, P30)
+  // Lazy BgJobsPanel — deferred after first paint
   function _deferBgPanel(fn: () => void): void {
     if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 200 });
     else setTimeout(fn, 0);
@@ -81,8 +80,8 @@ async function init() {
     }));
   }
 
-  function toast(msg: string, type: "success" | "error" | "info" = "info") {
-    const colors = { success: "var(--green)", error: "var(--red)", info: "var(--blue)" };
+  function toast(msg: string, type: "success" | "error" | "info" | "warning" = "info") {
+    const colors = { success: "var(--green)", error: "var(--red)", info: "var(--blue)", warning: "var(--amber)" };
     const t = document.createElement("div");
     t.className = "toast"; t.style.background = colors[type]; t.textContent = msg;
     document.body.appendChild(t);
@@ -152,7 +151,6 @@ async function init() {
       wfManager.parallelExecution,
       wfManager.maxConcurrentNodes,
     );
-    if (isTauri()) reshowNodejsBannerIfStillMissing(canvas);
   };
 
   canvas.onCanvasChanged = () => {
@@ -336,8 +334,7 @@ async function init() {
   initOnboarding(canvas, wfManager);
 
   if (isTauri()) {
-    refreshNodejsAvailability(canvas).catch(() => {});
-    window.addEventListener("focus", () => recheckNodejsOnFocusRegain(canvas));
+    checkBundledNode().catch((msg: string) => toast(msg, "warning"));
   }
 
   if (isTauri()) {

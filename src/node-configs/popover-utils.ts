@@ -111,17 +111,14 @@ export const CRON_PRESETS = [
 
 let _cselIdCounter = 0;
 
-// previously each `openDropdown` call added its own
-// `document`-level "mousedown" listener, removed only if that exact
-// dropdown's own outside-click handler happened to fire. Any other close
-// path (Escape, the popover being torn down, a different node's popover
-// opening) left that listener attached to `document` forever, referencing
-// a detached `wrap`. Fix: one shared, capture-phase listener bound once
-// for the whole module, backed by a live registry of currently-open
-// instances — closing an entry (however it closes) removes it from the
-// registry; a `wrap` that got disconnected from the DOM without going
-// through `closeDropdown()` at all is swept on the very next mousedown
-// anywhere, instead of leaking for the rest of the app session.
+// One shared, capture-phase "mousedown" listener bound once for the whole
+// module, backed by a live registry of currently-open instances, rather than
+// each `openDropdown` call adding its own document-level listener. Closing
+// an entry (however it closes: its own outside-click handler, Escape, or the
+// popover being torn down) removes it from the registry; a `wrap` that got
+// disconnected from the DOM without going through `closeDropdown()` at all
+// is swept on the very next mousedown anywhere, instead of leaking a
+// listener referencing a detached `wrap` for the rest of the app session.
 interface OpenDropdownEntry { wrap: HTMLElement; close: () => void; }
 const openDropdownRegistry = new Set<OpenDropdownEntry>();
 let delegatedOutsideClickBound = false;

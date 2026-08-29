@@ -438,8 +438,8 @@ mod tests {
         }
     }
 
-    // residual: proves the new allow_local escape hatch actually
-    // opens (previously check_db_url_ssrf had no way to permit this at all).
+    // Proves the allow_local escape hatch actually permits a private-IP
+    // connection when the policy is AllowLocal.
     #[tokio::test]
     async fn private_ip_connection_url_allowed_when_policy_is_allow_local() {
         use crate::nodes::util::SsrfPolicy;

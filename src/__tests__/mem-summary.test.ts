@@ -86,7 +86,7 @@ describe("formatBytes", () => {
   });
 
   it("edge case (the bug this guards against): small-but-real readings below 1MB no longer read as 0.0", () => {
-    expect(formatBytes(50 * 1024)).toBe("50.0 KB"); // was "0.0 MB" pre-fix
+    expect(formatBytes(50 * 1024)).toBe("50.0 KB");
     expect(formatBytes(512)).toBe("0.5 KB");
   });
 

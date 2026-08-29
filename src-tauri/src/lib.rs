@@ -384,29 +384,13 @@ fn force_quit(
 }
 
 #[tauri::command]
-async fn check_nodejs_available() -> bool {
-    std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+async fn check_bundled_node() -> Result<String, String> {
+    aerini_engine::nodes::code_node::bundled_node_health_check()
 }
 
-#[tauri::command]
-async fn get_nodejs_version() -> Option<String> {
-    std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-}
-
-/// Cancel a specific in-flight manual run by its `run_id`. No-op if that
-/// `run_id` isn't currently active — matches the previous "no-op when idle"
-/// contract, now scoped to one run instead of whatever happened to be the
-/// single global slot's contents.
+/// Cancel a specific in-flight manual run by its `run_id`. Runs are tracked
+/// independently by ID, so this is a no-op if that particular `run_id` isn't
+/// currently active, and it never affects any other concurrently active run.
 #[tauri::command]
 fn cancel_run(run_id: String, active_run: tauri::State<'_, Arc<ActiveRunToken>>) {
     active_run.cancel(&run_id);
@@ -744,8 +728,7 @@ pub fn run() {
             save_export_zip,
             close_window,
             force_quit,
-            check_nodejs_available,
-            get_nodejs_version,
+            check_bundled_node,
             cancel_run,
             get_autostart,
             set_autostart,

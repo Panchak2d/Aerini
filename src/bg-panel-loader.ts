@@ -1,4 +1,4 @@
-// Shared lazy-loader for the deferred BgJobsPanel module (P30).
+// Shared lazy-loader for the deferred BgJobsPanel module.
 // Single module-level cache so app.ts, toolbar.ts, and scheduler-events.ts
 // all share the same loaded-module reference instead of each keeping a
 // redundant local copy of the same import()-caching pattern.

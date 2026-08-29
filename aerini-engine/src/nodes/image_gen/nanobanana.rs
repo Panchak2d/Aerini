@@ -98,7 +98,7 @@ async fn call_nano_banana_once(
     let record = crate::provider::ProviderRegistry::global()
         .get("nano_banana")
         .expect("nano_banana always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let resp = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"),

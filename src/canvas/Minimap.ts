@@ -16,14 +16,13 @@ export interface MinimapColors {
 // constraint). `colors` is theme-colors.ts's shared, already-resolved,
 // already-fallback-safe token set.
 //
-// colConn: previously `${colors.border}33` — reasonable while #minimap-canvas's
-// own CSS background was a hardcoded dark literal (workspace.css) regardless of
-// theme, since border+low-alpha reads fine on a background that's always dark.
-// That background is now theme-aware (same batch), which would have left this
-// line at ~1.0:1 contrast on Paper's now-light minimap — the exact border-derived-
-// wire problem already fixed on the main canvas (Connector.ts). Reuses that same
-// dedicated --color-wire token (pre-flattened solid, no alpha suffix needed) so
-// both places stay in sync by construction, not by two separately-tuned values.
+// colConn uses the dedicated --color-wire token (pre-flattened solid, no
+// alpha suffix needed) rather than a border-plus-alpha composite: since
+// #minimap-canvas's own CSS background is theme-aware, a border+low-alpha
+// value would read fine on a dark background but land at ~1.0:1 contrast on
+// Paper's light minimap. Reusing --color-wire keeps this in sync with the
+// same border-derived-wire fix on the main canvas (Connector.ts) by
+// construction, not by two separately-tuned values.
 export function resolveMinimapColors(colors: CanvasThemeColors): MinimapColors {
   return {
     colConn:     colors.wire,
@@ -69,12 +68,10 @@ export class Minimap {
 
     // getCanvasColors() is theme-colors.ts's shared cache — cheap here even
     // though draw() runs every frame: real work (getComputedStyle) happens
-    // once per theme switch, not once per frame. Previously this class read
-    // its own one-time, construction-only snapshot, so a live theme switch
-    // left the minimap showing stale colors until it was reconstructed —
-    // now it re-derives every frame from the same cache Node.ts/Canvas.ts/
-    // Connector.ts already share, so a switch is reflected on the very next
-    // frame like everywhere else on the canvas.
+    // once per theme switch, not once per frame. Re-deriving from the shared
+    // cache every frame (rather than caching a construction-only snapshot on
+    // this class) keeps a live theme switch reflected on the very next
+    // frame, same as Node.ts/Canvas.ts/Connector.ts elsewhere on the canvas.
     const mm = resolveMinimapColors(getCanvasColors());
 
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;

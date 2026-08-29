@@ -67,6 +67,10 @@ jobs:
           HUSKY: '0'
         run: npm ci
 
+      - name: Fetch and stage Node binaries
+        shell: bash
+        run: bash scripts/fetch-node-binaries.sh
+
       # macOS builds are unsigned and unnotarized. Gatekeeper will warn users on first launch.
       # To suppress the warning: right-click the app → Open → Open. This is expected behaviour
       # for open-source releases without an Apple Developer account.

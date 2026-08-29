@@ -40,7 +40,7 @@ export function applyTheme(id: string): void {
   const theme = isKnownTheme(id) ? id : DEFAULT_THEME;
   if (theme === DEFAULT_THEME) {
     // Midnight is the bare :root block — no attribute means "use it",
-    // exactly matching the app's existing pre-Batch-9 default state.
+    // matching the app's default state.
     document.documentElement.removeAttribute("data-theme");
   } else {
     document.documentElement.setAttribute("data-theme", theme);
@@ -66,8 +66,8 @@ export function applyTheme(id: string): void {
  *
  * DISCLOSED TRADEOFF: index.html has one script entry point, a deferred
  * `type="module"` (app.ts) — no inline script precedes it. tauri.conf.json's
- * CSP is `script-src 'self'` with no `unsafe-inline` (unchanged by this
- * batch — Aerini_AI_UI_Refactor_Rules.md §3 forbids relaxing CSP), which
+ * CSP is `script-src 'self'` with no `unsafe-inline` (Aerini_AI_UI_Refactor_Rules.md
+ * §3 forbids relaxing CSP), which
  * rules out the usual inline-head-script FOUC fix. In this Tauri webview
  * `index.html`/`main.css` are local files with effectively-zero fetch
  * latency, so the residual risk (default theme paints for one frame before

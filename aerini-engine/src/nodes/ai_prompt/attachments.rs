@@ -194,4 +194,67 @@ mod attachment_tests {
         assert_eq!(pa.logs.len(), 1, "null entry must emit a skip log");
         assert!(pa.logs[0].contains("missing data"));
     }
+
+    // ── extract_port_attachments ─────────────────────────────────────────────
+
+    #[test]
+    fn bare_array_value_returned_as_is() {
+        let val = json!([{"filename": "a.png"}, {"filename": "b.png"}]);
+        let out = extract_port_attachments(&val);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["filename"], "a.png");
+    }
+
+    #[test]
+    fn bare_object_with_files_key_extracted() {
+        let val = json!({"files": [{"filename": "x.png"}], "count": 1});
+        let out = extract_port_attachments(&val);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["filename"], "x.png");
+    }
+
+    #[test]
+    fn bare_object_without_files_key_returns_empty() {
+        let val = json!({"count": 0});
+        assert!(extract_port_attachments(&val).is_empty());
+    }
+
+    #[test]
+    fn string_json_array_parsed() {
+        let val = json!(r#"[{"filename":"a.png"}]"#);
+        let out = extract_port_attachments(&val);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["filename"], "a.png");
+    }
+
+    #[test]
+    fn string_json_object_with_files_parsed() {
+        let val = json!(r#"{"files":[{"filename":"b.png"}]}"#);
+        let out = extract_port_attachments(&val);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["filename"], "b.png");
+    }
+
+    #[test]
+    fn empty_string_returns_empty() {
+        let val = json!("");
+        assert!(extract_port_attachments(&val).is_empty());
+    }
+
+    #[test]
+    fn whitespace_string_returns_empty() {
+        let val = json!("   ");
+        assert!(extract_port_attachments(&val).is_empty());
+    }
+
+    #[test]
+    fn invalid_json_string_returns_empty() {
+        let val = json!("{not valid json");
+        assert!(extract_port_attachments(&val).is_empty());
+    }
+
+    #[test]
+    fn null_value_returns_empty() {
+        assert!(extract_port_attachments(&Value::Null).is_empty());
+    }
 }

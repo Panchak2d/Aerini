@@ -68,7 +68,7 @@ impl TokenStore {
                 created_at TEXT NOT NULL,
                 revoked_at TEXT
             );
-            -- Per-workflow SSE ACL (P3-2).
+            -- Per-workflow SSE ACL.
             -- Row presence = token is restricted to that workflow's events.
             -- Tokens with NO rows in this table see ALL events (backward compat).
             -- Admin-scoped tokens always see all events regardless of this table.
@@ -237,7 +237,7 @@ impl TokenStore {
          .unwrap_or(true)
     }
 
-    // ── Per-workflow SSE ACL (P3-2) ──────────────────────────────────────────
+    // ── Per-workflow SSE ACL ──────────────────────────────────────────────
 
     /// Grant a token access to a specific workflow's SSE events.
     /// Once ANY ACL row exists for a token, it is restricted to those workflows only.

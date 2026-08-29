@@ -18,7 +18,14 @@ use crate::token_store::TokenRecord;
 use super::state::{ApiState, require_read, require_write};
 
 pub async fn health() -> Json<Value> {
-    Json(json!({"status":"ok","version":aerini_engine::ENGINE_VERSION}))
+    let node_bundled = match tokio::task::spawn_blocking(
+        aerini_engine::nodes::code_node::bundled_node_health_check,
+    ).await {
+        Ok(Ok(version)) => json!({"status": "ok", "version": version}),
+        Ok(Err(e))      => json!({"status": "error", "message": e}),
+        Err(e)          => json!({"status": "error", "message": e.to_string()}),
+    };
+    Json(json!({"status":"ok","version":aerini_engine::ENGINE_VERSION,"node_bundled":node_bundled}))
 }
 
 #[derive(Deserialize)]

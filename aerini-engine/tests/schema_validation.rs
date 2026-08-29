@@ -1,4 +1,4 @@
-//! P28 — Schema validation sweep.
+//! Schema validation sweep.
 //!
 //! Iterates every registered built-in node, calls `input_schema()` and
 //! `output_schema()` on each, and asserts that the returned value is a

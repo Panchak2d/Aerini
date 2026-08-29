@@ -1,8 +1,9 @@
 // the dialog is one shared set of DOM elements (#confirm-modal and
-// friends) — two overlapping showConfirm() calls used to stack two
-// independent sets of onOk/onCancel listeners on the same OK/Cancel buttons,
-// so a single click could silently resolve(true) two unrelated confirmations
-// at once (e.g. a double-triggered Run firing handleRun() twice). _queue
+// friends) — without serialization, two overlapping showConfirm() calls
+// would stack two independent sets of onOk/onCancel listeners on the same
+// OK/Cancel buttons, so a single click could silently resolve(true) two
+// unrelated confirmations at once (e.g. a double-triggered Run firing
+// handleRun() twice). _queue
 // serializes every call through this module: a call that arrives while one
 // is already showing doesn't open a second overlapping dialog — it waits for
 // the current one to fully resolve and clean up (listeners removed, modal

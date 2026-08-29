@@ -70,7 +70,7 @@ impl Node for TransformNode {
         let source: Value = if source_node_value.is_null() {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "SOURCE_NODE_REQUIRED",
-                "source_node is required. Leaving it blank previously merged every upstream node's output into one object keyed by node id, which silently broke any \"from\" pointer written for a single node's shape (e.g. \"/body/name\") unless it also accounted for the node-id wrapping. Set source_node to the specific node you want to pull data from.",
+                "source_node is required. Without it, there is no single node's shape for the mappings' \"from\" pointers (e.g. \"/body/name\") to resolve against. Set source_node to the specific node you want to pull data from.",
             ));
         } else if let Some(source_node) = source_node_value.as_str() {
             match input.context.node_outputs.get(source_node) {

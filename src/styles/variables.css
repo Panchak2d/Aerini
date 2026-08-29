@@ -96,6 +96,12 @@
   --cat-logic:   var(--color-action-run);
   --cat-utility: var(--color-warning);
 
+  /* GitHub/Notion's canonical brand mark is near-black -- illegible on this
+     theme's dark surfaces, so the sidebar/canvas node icon shows white here
+     and the true brand color only on Paper (see override below). */
+  --brand-github: #ffffff;
+  --brand-notion: #ffffff;
+
   --kind-border-trigger: 3px solid;
   --kind-border-ai:      3px double;
   --kind-border-action:  2px solid;
@@ -139,4 +145,7 @@ html[data-theme="paper"] {
   --color-wire-hover: #6e6651;
 
   --cat-trigger: #436382;
+
+  --brand-github: #181717;
+  --brand-notion: #000000;
 }

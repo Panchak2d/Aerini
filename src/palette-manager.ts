@@ -36,6 +36,25 @@ function togglePaletteCategory(header: HTMLElement): void {
 
 const CATEGORY_ORDER = ["trigger", "action", "ai", "logic", "utility", "other"];
 
+// Frontend-only sub-grouping of the backend's single "action" node_type,
+// mirroring TRIGGER_NODE_IDS below: node.node_type stays "action" for every
+// node here, only the palette's section header changes. Any action node not
+// listed in INTEGRATION_NODE_IDS/FILES_STORAGE_NODE_IDS/TRIGGER_NODE_IDS
+// falls into "Core Actions" by default, so a new action node with no entry
+// here still gets a home instead of silently disappearing from the palette.
+const INTEGRATION_NODE_IDS = new Set([
+  "slack", "discord", "github", "google_sheets", "notion", "telegram", "stripe", "sendgrid",
+]);
+const FILES_STORAGE_NODE_IDS = new Set(["file", "save_to_folder", "s3_storage", "social_upload"]);
+const ACTION_SUBHEADER_ORDER = ["Triggers", "Core Actions", "Files & Storage", "Integrations"];
+
+function actionSubheader(typeId: string): string {
+  if (TRIGGER_NODE_IDS.has(typeId)) return "Triggers";
+  if (INTEGRATION_NODE_IDS.has(typeId)) return "Integrations";
+  if (FILES_STORAGE_NODE_IDS.has(typeId)) return "Files & Storage";
+  return "Core Actions";
+}
+
 function buildCategories(nodes: NodeDescriptor[]): Category[] {
   const groups = new Map<string, NodeDescriptor[]>();
   for (const node of nodes) {
@@ -43,9 +62,27 @@ function buildCategories(nodes: NodeDescriptor[]): Category[] {
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat)!.push(node);
   }
-  return CATEGORY_ORDER
-    .filter(k => groups.has(k))
-    .map(k => ({ label: k.charAt(0).toUpperCase() + k.slice(1), nodes: groups.get(k)! }));
+
+  const categories: Category[] = [];
+  for (const key of CATEGORY_ORDER) {
+    const nodesInCat = groups.get(key);
+    if (!nodesInCat) continue;
+    if (key !== "action") {
+      categories.push({ label: key.charAt(0).toUpperCase() + key.slice(1), nodes: nodesInCat });
+      continue;
+    }
+    const buckets = new Map<string, NodeDescriptor[]>();
+    for (const n of nodesInCat) {
+      const label = actionSubheader(n.type_id);
+      if (!buckets.has(label)) buckets.set(label, []);
+      buckets.get(label)!.push(n);
+    }
+    for (const label of ACTION_SUBHEADER_ORDER) {
+      const bucketNodes = buckets.get(label);
+      if (bucketNodes?.length) categories.push({ label, nodes: bucketNodes });
+    }
+  }
+  return categories;
 }
 
 
@@ -137,12 +174,15 @@ export function buildSidebarPalette(
         display_name: preset.label,
         type_id: base.type_id,
       };
-      const dotClass = `dot-${base.node_type}`;
+      const iconSvg = getIconSvg(base.type_id);
+      const iconHtml = iconSvg
+        ? `<span class="palette-icon palette-icon--${base.node_type}">${iconSvg}</span>`
+        : `<span class="palette-dot dot-${base.node_type}"></span>`;
       const item = document.createElement("div");
       item.className = "palette-item palette-preset";
       item.dataset.search = preset.label.toLowerCase();
       item.dataset.cat = "preset";
-      item.innerHTML = `<span class="palette-dot ${dotClass}"></span><span class="palette-name">${preset.label}</span><span class="palette-preset-tag">preset</span>`;
+      item.innerHTML = `${iconHtml}<span class="palette-name">${preset.label}</span><span class="palette-preset-tag">preset</span>`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -182,11 +222,16 @@ export function buildSidebarPalette(
       // schedule/webhook/manual_trigger still group under "Actions". Only
       // the chip-filter attribute and dot color swap to "trigger".
       const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
-      item.dataset.cat = isTrigger ? "trigger" : desc.node_type;
+      const catKey = isTrigger ? "trigger" : desc.node_type;
+      item.dataset.cat = catKey;
       const pluginBadge = desc.is_plugin
         ? `<span class="palette-plugin-badge" title="Plugin node">${getPluginIconSvg(desc.icon)}</span>`
         : "";
-      item.innerHTML = `<span class="palette-dot dot-${isTrigger ? "trigger" : desc.node_type}"></span><span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginBadge}`;
+      const iconSvg = getIconSvg(desc.type_id);
+      const iconHtml = iconSvg
+        ? `<span class="palette-icon palette-icon--${catKey}">${iconSvg}</span>`
+        : `<span class="palette-dot dot-${catKey}"></span>`;
+      item.innerHTML = `${iconHtml}<span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginBadge}`;
 
       item.addEventListener("click", () => {
         blurSearch();

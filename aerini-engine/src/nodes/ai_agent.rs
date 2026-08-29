@@ -605,7 +605,7 @@ async fn call_gemini_agent(
     let record = crate::provider::ProviderRegistry::global()
         .get("gemini")
         .expect("gemini always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let response = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(&endpoint).header("Content-Type", "application/json"),
@@ -676,7 +676,7 @@ async fn call_openai_agent(
     let record = crate::provider::ProviderRegistry::global()
         .get("openai")
         .expect("openai always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let req = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(format!("{}/chat/completions", base_url))
@@ -745,7 +745,7 @@ async fn call_anthropic_agent(
     let record = crate::provider::ProviderRegistry::global()
         .get("anthropic")
         .expect("anthropic always registered");
-    // registry-managed: auth header (P14d)
+    // registry-managed: auth header
     let req = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(format!("{}/v1/messages", base_url))

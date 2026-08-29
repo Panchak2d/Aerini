@@ -60,7 +60,7 @@ describe("Canvas.zoomIn / zoomOut", () => {
   });
 });
 
-describe("Canvas.fitToScreen — Batch 2 callback wiring", () => {
+describe("Canvas.fitToScreen — callback wiring", () => {
   it("does nothing (fires no callbacks) when there are no nodes", () => {
     const fake = makeFakeCanvas({ nodes: new Map() });
     Canvas.prototype.fitToScreen.call(fake);

@@ -1,5 +1,4 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use serde_json::Value;
 
 use crate::error::NodeError;
 use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
@@ -106,41 +105,9 @@ pub(super) async fn download_to_base64(client: &reqwest::Client, url: &str) -> R
     Ok(BASE64.encode(&bytes))
 }
 
-// Parses the reference_images_expr config key written by Canvas.ts when a wire
-// is connected to the "Reference Images" port.  The expression engine serialises
-// resolved arrays as JSON strings; this mirrors extract_port_attachments() in
-// ai_prompt.rs.  Unification with a shared utility is deferred to P25.
-pub(super) fn extract_reference_images(val: &Value) -> Vec<Value> {
-    if let Some(s) = val.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() { return vec![]; }
-        let parsed: Value = match serde_json::from_str(trimmed) {
-            Ok(v)  => v,
-            Err(_) => return vec![],
-        };
-        return match parsed {
-            Value::Array(arr)    => arr,
-            Value::Object(ref o) => o.get("files")
-                .and_then(|f| f.as_array())
-                .cloned()
-                .unwrap_or_default(),
-            _                    => vec![],
-        };
-    }
-    match val {
-        Value::Array(arr)    => arr.clone(),
-        Value::Object(ref o) => o.get("files")
-            .and_then(|f| f.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        _                    => vec![],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     // ── mime_to_ext ───────────────────────────────────────────────────────────
 
@@ -196,78 +163,12 @@ mod tests {
         assert_eq!(strip_data_uri_prefix("data:image/jpeg;base64,/9j/xyz"), "/9j/xyz");
     }
 
-    // ── extract_reference_images ──────────────────────────────────────────────
-    // NOTE: CommonImageParams::from_input was not extracted in P15 (width/height
-    // defaults diverge per provider — deferred to P25). Tests cover
-    // extract_reference_images instead, which is the other pure-logic utility here.
-
-    #[test]
-    fn bare_array_value_returned_as_is() {
-        let val = json!([{"filename": "a.png"}, {"filename": "b.png"}]);
-        let out = extract_reference_images(&val);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0]["filename"], "a.png");
-    }
-
-    #[test]
-    fn bare_object_with_files_key_extracted() {
-        let val = json!({"files": [{"filename": "x.png"}], "count": 1});
-        let out = extract_reference_images(&val);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["filename"], "x.png");
-    }
-
-    #[test]
-    fn bare_object_without_files_key_returns_empty() {
-        let val = json!({"count": 0});
-        assert!(extract_reference_images(&val).is_empty());
-    }
-
-    #[test]
-    fn string_json_array_parsed() {
-        let val = json!(r#"[{"filename":"a.png"}]"#);
-        let out = extract_reference_images(&val);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["filename"], "a.png");
-    }
-
-    #[test]
-    fn string_json_object_with_files_parsed() {
-        let val = json!(r#"{"files":[{"filename":"b.png"}]}"#);
-        let out = extract_reference_images(&val);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["filename"], "b.png");
-    }
-
-    #[test]
-    fn empty_string_returns_empty() {
-        let val = json!("");
-        assert!(extract_reference_images(&val).is_empty());
-    }
-
-    #[test]
-    fn whitespace_string_returns_empty() {
-        let val = json!("   ");
-        assert!(extract_reference_images(&val).is_empty());
-    }
-
-    #[test]
-    fn invalid_json_string_returns_empty() {
-        let val = json!("{not valid json");
-        assert!(extract_reference_images(&val).is_empty());
-    }
-
-    #[test]
-    fn null_value_returns_empty() {
-        assert!(extract_reference_images(&Value::Null).is_empty());
-    }
-
     // ── read_bytes_response_capped ─────────────────────────────────
     // download_to_base64 itself can't be unit-tested here: check_host_ssrf_from_url
     // rejects a loopback mock URL before the download logic ever runs. Testing
     // the capped-read helper directly (same split as util.rs's own
     // read_json_response_capped, which likewise doesn't do its own SSRF check)
-    // covers the actual bug (S1-3/S2-6's unbounded buffering) without needing to
+    // covers unbounded buffering during the read without needing to
     // fight the SSRF guard. Same raw-mock idiom as
     // util.rs::read_json_response_capped_tests / ai_prompt/openai.rs's
     // backward_compat_tests.

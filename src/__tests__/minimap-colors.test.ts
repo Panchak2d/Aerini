@@ -13,6 +13,7 @@ function makeColors(overrides: Partial<CanvasThemeColors>): CanvasThemeColors {
     actionNav: "#000", actionRun: "#000", warning: "#000", error: "#000", ai: "#000",
     catAction: "#000", catAI: "#000", catLogic: "#000", catUtility: "#000", catTrigger: "#000",
     wire: "#000", wireHover: "#000",
+    brandGithub: "#000", brandNotion: "#000",
     ...overrides,
   };
 }

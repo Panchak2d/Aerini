@@ -86,21 +86,20 @@ async function loadPage(workflowId: string, offset: number, filter: string): Pro
   return invoke<RunRecord[]>("list_run_records", { workflowId, offset, limit: PAGE_SIZE, filter });
 }
 
-// previously the pre-SQLite localStorage schema stored no per-record
-// workflow id at all — only a display-name string (`workflowName` below) —
-// so no per-record attribution is recoverable from the old data. Stamping
-// every migrated record with whichever real workflow happened to save the
-// first post-upgrade run (the prior behavior) silently misattributed every
-// OTHER workflow's history to that one, and the source blob was deleted
-// immediately after, making it unrecoverable. Fix: collapse all legacy
-// records into one fixed, non-real-workflow bucket instead of guessing an
-// owner. Each record still carries its own original `workflow_name` string
-// (set below, unchanged from before), so the run's real source stays
-// visible per-item even though the grouping key no longer distinguishes
-// them — this is what "single bucket" trades away (no per-workflow
-// filtering of legacy runs) to stop the misattribution. `LEGACY_HISTORY_WORKFLOW_ID`
-// can never collide with a real workflow id: `workflow-manager.ts` always
-// generates ids as `wf_${...}`.
+// The pre-SQLite localStorage schema stores no per-record workflow id at
+// all — only a display-name string (`workflowName` below) — so no
+// per-record attribution is recoverable from that data. Guessing an owner
+// (e.g. stamping every migrated record with whichever real workflow happens
+// to save the first post-upgrade run) would silently misattribute every
+// OTHER workflow's history to that one, with no way to undo it once the
+// source blob is gone. All legacy records are collapsed into one fixed,
+// non-real-workflow bucket instead. Each record still carries its own
+// original `workflow_name` string (set below), so the run's real source
+// stays visible per-item even though the grouping key no longer
+// distinguishes them — this is what "single bucket" trades away (no
+// per-workflow filtering of legacy runs) to avoid misattribution.
+// `LEGACY_HISTORY_WORKFLOW_ID` can never collide with a real workflow id:
+// `workflow-manager.ts` always generates ids as `wf_${...}`.
 export const LEGACY_HISTORY_WORKFLOW_ID = "__legacy_history_import__";
 
 let _migrationDone = false;

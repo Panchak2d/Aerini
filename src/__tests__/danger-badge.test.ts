@@ -7,7 +7,7 @@ describe("DANGEROUS_NODE_IDS", () => {
     expect(DANGEROUS_NODE_IDS).toEqual(new Set(["shell_exec", "code", "database"]));
   });
 
-  it("no longer contains file (regression guard for the Batch L residual)", () => {
+  it("does not contain file", () => {
     expect(DANGEROUS_NODE_IDS.has(NODE_IDS.FILE)).toBe(false);
   });
 });

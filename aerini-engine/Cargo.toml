@@ -82,7 +82,6 @@ tempfile = "3"
 # Runtime deps are exactly 4 tiny, long-standing crates: bitflags, itoa, memchr,
 # ryu — no lopdf, no kuchiki, no azul-*, no bincode, no hyphenation.
 #
-# Replaces printpdf (see PATCH NOTES / git history for the prior dependency).
 # printpdf 0.9.1 (its only published version) hard-pins `lopdf = "0.39.0"`
 # (non-optional — pulled regardless of feature flags), which carries
 # RUSTSEC-2026-0187 (stack overflow via deeply nested PDF *objects*, triggered
@@ -94,9 +93,7 @@ tempfile = "3"
 #
 # pdf-writer is a pure *writer* — it has no PDF parser at all, so it cannot
 # have a "parsing untrusted input" vulnerability class by construction, not
-# just "currently unreachable in our usage." This is a real fix, not a risk
-# acceptance: see git history for the now-removed .cargo/audit.toml ignore
-# entries this replaced.
+# just "currently unreachable in our usage."
 pdf-writer = "0.15.0"
 docx-rs    = "0.4.20"
 
@@ -111,12 +108,16 @@ tracking-allocator = "0.4"
 jsonschema = { version = "0.46", default-features = false }
 
 # OS keychain integration
-# All four feature flags are safe to list together — each is gated behind
+# All five feature flags are safe to list together — each is gated behind
 # platform detection inside the keyring crate itself.
 # apple-native  → macOS Keychain (security-framework)
 # windows-native → Windows Credential Manager (windows-sys)
-# sync-secret-service + crypto-rust → Linux SecretService (D-Bus, pure-Rust crypto)
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# async-secret-service + tokio + crypto-rust → Linux SecretService via zbus,
+# a pure-Rust D-Bus client with no libdbus/pkg-config dependency, required
+# for musl cross-compilation. keyring's own Entry API stays fully
+# synchronous either way — don't swap this back to sync-secret-service,
+# which pulls in dbus-secret-service/libdbus-sys and has no musl path.
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"] }
 
 # Database node — Postgres + MySQL
 # no default-features: avoids pulling in compile-time query macros (DATABASE_URL not needed).
@@ -131,9 +132,8 @@ sqlx = { version = "0.8", default-features = false, features = ["postgres", "mys
 redis = { version = "1.0", features = ["tokio-comp"] }
 
 # S3 / object storage node
-# Migrated from rust-s3 0.37 (required reqwest 0.12, causing dual reqwest in the tree)
-# to the AWS-maintained SDK which uses aws-smithy-runtime → hyper 1.0 directly.
-# No reqwest dependency — eliminates the dual reqwest issue entirely.
+# Uses the AWS-maintained SDK (aws-smithy-runtime → hyper 1.0 directly) —
+# no reqwest dependency, so it can't reintroduce a dual-reqwest tree.
 #
 # Features:
 #   behavior-version-latest  — sets BehaviorVersion::latest() automatically; no explicit call needed

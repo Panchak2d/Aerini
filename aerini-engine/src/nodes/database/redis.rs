@@ -24,7 +24,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
 
     // Use redis::cmd() raw API for all operations — stable across crate versions.
     // redis_cmd_with_retry handles connection caching and evict-and-retry on IoError.
-    // residual: explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
+    // Explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
     // doc comment for why this is not gated behind __caller_is_admin the way
     // allow_raw_sql is (that gate is never set true on desktop today).
     let ssrf_policy = if input.input["allow_local"].as_bool().unwrap_or(false) {

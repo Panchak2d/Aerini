@@ -22,7 +22,7 @@ describe("InputHandler — F-key focus-mode toggle", () => {
     expect(canvas.toggleFocusMode).toHaveBeenCalledTimes(2);
   });
 
-  it("Issue #6 fix: Ctrl+F and Cmd+F (no Shift) toggle focus mode", () => {
+  it("Ctrl+F and Cmd+F (no Shift) toggle focus mode", () => {
     const canvas = makeFakeCanvas();
     const input = new InputHandler(canvas as unknown as Canvas);
 

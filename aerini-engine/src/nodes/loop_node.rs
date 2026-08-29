@@ -134,7 +134,7 @@ impl Node for LoopNode {
         let source_data: Value = if source_node_value.is_null() {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "SOURCE_NODE_REQUIRED",
-                "source_node is required. Leaving it blank previously searched every upstream node's output for the first array match at array_field, which could iterate the wrong node's data whenever more than one predecessor exposed an array at the same field path. Set source_node to the specific node whose array you want to iterate.",
+                "source_node is required. Without it, there is no way to tell which node's array to iterate whenever more than one predecessor exposes an array at the same field path. Set source_node to the specific node whose array you want to iterate.",
             ));
         } else if let Some(source_node) = source_node_value.as_str() {
             match input.context.node_outputs.get(source_node) {

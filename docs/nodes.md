@@ -471,11 +471,9 @@ Sensitive values in the logged command (passwords, API keys) are automatically r
 
 `type_id: code`
 
-Runs a JavaScript snippet using the system `node` binary. Useful for data transformation that expressions can't handle.
+Runs a JavaScript snippet using a Node.js runtime bundled with Aerini. Useful for data transformation that expressions can't handle.
 
-> **Requires Node.js 18+** on your PATH. Only needed if you use this node — not a global prerequisite for Aerini.
-> If Node.js is not found when this node runs, you will see a clear error message.
-> Install from [nodejs.org](https://nodejs.org).
+> Bundled — nothing to install separately, and no system Node.js on PATH required. If the bundled runtime is missing or corrupt, you'll see a clear error message telling you to reinstall Aerini.
 
 | Parameter | Type | Notes |
 |---|---|---|
@@ -496,7 +494,7 @@ const tax = price * 0.2;
 output({ price, tax, total: price + tax });
 ```
 
-Code runs as an ES module (`--input-type=module`). Use `import` syntax, not `require()`. Only built-in Node.js modules are available — npm packages are not supported. Node.js must be installed and on PATH.
+Code runs as an ES module (`--input-type=module`). Use `import` syntax, not `require()`. Only built-in Node.js modules are available — npm packages are not supported.
 
 In server mode, disabled by default — pass `--allow-code` to enable.
 

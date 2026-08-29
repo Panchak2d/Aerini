@@ -93,7 +93,7 @@ beforeEach(() => {
   mkModalDom();
 });
 
-describe("initModals — theme select wiring (Batch 9)", () => {
+describe("initModals — theme select wiring", () => {
   it("populates the select from the THEMES registry and applies a change as data-theme", () => {
     document.documentElement.removeAttribute("data-theme");
     initModals([], () => {});
@@ -110,7 +110,7 @@ describe("initModals — theme select wiring (Batch 9)", () => {
   });
 });
 
-describe("convertN8nWorkflow — If node branch port mapping (T1-8 / S12-2)", () => {
+describe("convertN8nWorkflow — If node branch port mapping", () => {
   it("maps n8n output index 0 to on_true and index 1 to on_false, not a generic 'output'/'out_1' guess", () => {
     initModals([IF_DESCRIPTOR], () => {});
 
@@ -139,7 +139,7 @@ describe("convertN8nWorkflow — If node branch port mapping (T1-8 / S12-2)", ()
   });
 });
 
-describe("convertN8nWorkflow — Switch node case port mapping (T1-8 / S12-2)", () => {
+describe("convertN8nWorkflow — Switch node case port mapping", () => {
   it("maps sequential rule outputs to case_1.. and an out-of-range/fallback index to default", () => {
     initModals([SWITCH_DESCRIPTOR], () => {});
 
@@ -237,7 +237,7 @@ function n8nNodeParams(name: string, type: string, parameters: Record<string, un
   return { name, type, position: [0, 0], parameters };
 }
 
-describe("convertN8nWorkflow — If node condition translation (T1-8 residual)", () => {
+describe("convertN8nWorkflow — If node condition translation", () => {
   it("translates a single v2 filter condition (string equals) against its one predecessor", () => {
     initModals([IF_DESCRIPTOR], () => {});
     const n8n = {
@@ -341,7 +341,7 @@ describe("convertN8nWorkflow — If node condition translation (T1-8 residual)",
   });
 });
 
-describe("convertN8nWorkflow — Switch node condition translation (T1-8 residual)", () => {
+describe("convertN8nWorkflow — Switch node condition translation", () => {
   it("translates rules-mode equals rules into field/cases/source_node, matching the existing case_N port mapping", () => {
     initModals([SWITCH_DESCRIPTOR], () => {});
     const n8n = {
@@ -419,7 +419,7 @@ describe("convertN8nWorkflow — Switch node condition translation (T1-8 residua
   });
 });
 
-describe("showImportPreview — n8n condition-translation warnings surfaced pre-import (T1-8 residual)", () => {
+describe("showImportPreview — n8n condition-translation warnings surfaced pre-import", () => {
   it("renders warnings in the requirements list and strips the ephemeral field before handing off to the confirm callback", () => {
     let confirmed: Record<string, unknown> | null = null;
     initModals([IF_DESCRIPTOR], obj => { confirmed = obj; });

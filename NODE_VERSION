@@ -1,0 +1,24 @@
+24.19.0
+
+# Single source of truth for the Node.js version bundled with Aerini (desktop
+# sidecar and the server's Docker image). scripts/fetch-node-binaries.sh and
+# the Dockerfile's builder-stage fetch both read this file instead of each
+# hardcoding the version separately. Only the first line is parsed; it must
+# be a bare semver (e.g. 24.19.0), no "v" prefix, no surrounding text.
+#
+# Bump triggers:
+#   - Node security release affecting the active line (see
+#     https://nodejs.org/en/security/ and the nodejs-sec announcement list at
+#     https://groups.google.com/forum/#!forum/nodejs-sec): bump promptly, on
+#     its own schedule, not batched with the next planned release.
+#   - LTS-to-LTS boundary (e.g. this line's LTS window ending): planned bump,
+#     not urgent by itself.
+#
+# Forward blocker for any bump past Node 24 LTS:
+#   aerini-engine/src/nodes/code_node.rs's sandbox loader (write_sandbox_loader)
+#   declares its module resolution hook as `export async function resolve(...)`,
+#   run via --experimental-loader. That mechanism's replacement, Node's
+#   module.registerHooks(), only accepts synchronous hooks -- an async resolve
+#   hook cannot move to registerHooks() without first being rewritten to
+#   synchronous I/O. Node 24 LTS does not force this yet, but bumping past it
+#   (Node 26+) requires that rewrite first, or the loader breaks.

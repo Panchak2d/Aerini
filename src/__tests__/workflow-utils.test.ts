@@ -67,7 +67,7 @@ describe("CredentialPanel buildCredTypeSelect, listener leak", () => {
     const adds    = addSpy.mock.calls.filter(c => c[0] === "mousedown");
     const removes = removeSpy.mock.calls.filter(c => c[0] === "mousedown");
     // 3 renders → 3 listeners added, but the first 2 are cleaned up before
-    // the next render adds its own. Pre-fix: 3 added, 0 ever removed.
+    // the next render adds its own — none should accumulate unremoved.
     expect(adds.length).toBe(3);
     expect(removes.length).toBe(2);
   });
@@ -96,8 +96,8 @@ describe("popover-utils mkCustomSelect, dropdown leak", () => {
     b.querySelector<HTMLButtonElement>(".csel-trigger")!.click();
 
     const capturingMousedownAdds = addSpy.mock.calls.filter(c => c[0] === "mousedown" && c[2] === true);
-    // Pre-fix: one new document listener per open() call (2 here, growing
-    // unboundedly with usage). Post-fix: exactly one, shared.
+    // Exactly one shared listener regardless of how many selects have been
+    // opened — not one new document listener per open() call.
     expect(capturingMousedownAdds.length).toBe(1);
   });
 

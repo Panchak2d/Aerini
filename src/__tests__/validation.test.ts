@@ -75,7 +75,7 @@ describe("validateWorkflow — database, db_type-conditional required fields", (
     expect(validateWorkflow(canvasOf(ok))).toEqual([]);
   });
 
-  it("postgres: requires connection_url + query, NOT db_path (regression: pre-fix falsely required db_path here)", () => {
+  it("postgres: requires connection_url + query, NOT db_path", () => {
     const node = makeNode("n1", "database", {
       db_type: "postgres", connection_url: "postgres://localhost/db", query: "SELECT 1",
     });

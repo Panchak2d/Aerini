@@ -88,7 +88,7 @@ describe("initStatusBarFields", () => {
     expect(label.textContent).toBe("Error");
   });
 
-  it("mem-chip and its popover still render inside the new container (regression guard for R2C/R2D)", () => {
+  it("mem-chip and its popover still render inside the new container", () => {
     initStatusBarFields(makeFakeCanvas(), makeFakeWfManager());
     expect(document.querySelector("#canvas-stat-bar #mem-chip")).not.toBeNull();
     expect(document.querySelector("#canvas-stat-bar #mem-popover")).not.toBeNull();
@@ -204,9 +204,8 @@ describe("initMemChip", () => {
     // 2.0 + 3.0 + 4.0 = 9.0 MB -- ALL live runs, not "all except wf-1".
     expect(badge.textContent).toBe("9.0 MB");
 
-    // wf-1 (the open workflow) is now the ONLY run left. Previously this
-    // dropped the badge's total to 0 (wf-1 was excluded by definition) and
-    // hid it -- the exact "disappears" bug from real usage (Issue #4).
+    // wf-1 (the open workflow) is now the ONLY run left. It must not be
+    // excluded from the total just because it's the open workflow --
     // wf-1 still has live memory, so the badge must keep showing it.
     vi.mocked(getMemoryBreakdown).mockResolvedValue([wf1]);
     refresh();

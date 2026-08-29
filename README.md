@@ -92,10 +92,10 @@ See [Embedding aerini-engine](docs/embedding.md) for a complete working example,
 | Tool | Version | Why |
 |---|---|---|
 | Rust (stable) | 1.77+ | Builds the engine and desktop shell |
-| Node.js | 18+ | Required at runtime for the Code (JS) node |
+| Node.js | 18+ | Only to run `npm`/Vite while building from source — not needed to use the app |
 | Tauri CLI | 2.x | Packages the desktop app |
 
-Node.js must be on your PATH, not just installed. The Code (JS) node spawns it as a subprocess at runtime; it needs to be reachable as `node` in a terminal.
+The Code (JS) node runs on a Node.js runtime bundled with Aerini itself. You don't need Node.js installed to use that node — only to build Aerini from source (above).
 
 ---
 
@@ -105,8 +105,11 @@ Node.js must be on your PATH, not just installed. The Code (JS) node spawns it a
 git clone https://github.com/Panchak2d/aerini
 cd aerini
 npm install
+./scripts/fetch-node-binaries.sh
 npm run dev
 ```
+
+`fetch-node-binaries.sh` downloads and checksum-verifies the Node.js runtime that gets bundled into Aerini (used by the Code (JS) node) and stages it under `src-tauri/binaries/`. Required once per clone — the build fails without it. Needs `curl`, `tar`, `unzip` (or `powershell.exe` on Windows), and `sha256sum`/`shasum` on your PATH, plus network access to nodejs.org.
 
 The first build takes 2-5 minutes while Rust compiles. After that, changes rebuild in seconds.
 

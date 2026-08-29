@@ -1,9 +1,8 @@
-//! Batch 3 (Performance Monitor Redesign — see `PLAN.md`): read-side Tauri
-//! IPC surface over `perf_monitor`'s in-memory live state and the SQLite
-//! `performance_reports` table Batch 2 persists. Additive only — none of
-//! Batch 1/2's files change shape here; this only exposes what they already
-//! built. Frontend wiring (MEM chip repoint, panel UI) is Batch 5/6's job,
-//! not this one — nothing calls these commands yet.
+//! Read-side Tauri IPC surface over `perf_monitor`'s in-memory live state and
+//! the SQLite `performance_reports` table. Additive only — exposes what
+//! `perf_monitor` and the database layer already provide, without changing
+//! their shape. Frontend wiring (MEM chip repoint, panel UI) is separate,
+//! future work — nothing calls these commands yet.
 
 use std::sync::Arc;
 
@@ -16,8 +15,8 @@ use aerini_engine::{
 /// if it isn't running right now. Mirrors `get_memory_breakdown`'s shape
 /// exactly (sync, no Tauri state, no `Result`): both are cheap in-memory
 /// reads over a registry the engine already owns process-wide, and neither
-/// can fail. First real caller of `perf_monitor::get_live_snapshot`
-/// (Batch 1 exposed it for this; nothing used it before now).
+/// can fail. First real caller of `perf_monitor::get_live_snapshot` —
+/// nothing calls it yet from the frontend.
 #[tauri::command]
 pub fn get_live_performance(workflow_id: String) -> Option<PerformanceReport> {
     perf_monitor::get_live_snapshot(&workflow_id)
@@ -27,10 +26,8 @@ pub fn get_live_performance(workflow_id: String) -> Option<PerformanceReport> {
 /// `None` if it has never run this session, or its recent slot was
 /// cleared. Mirrors `get_live_performance` exactly (sync, no Tauri state,
 /// no `Result`) — same cheap in-memory read, cannot fail. First real
-/// caller of `perf_monitor::get_recent_report` (Batch 1 exposed it for
-/// this; deferred from Batch 3 for lack of a caller — `PLAN.md`'s own
-/// backlog named this Batch 5's job, alongside the MEM chip repoint that
-/// actually calls it).
+/// caller of `perf_monitor::get_recent_report` — wiring an actual caller
+/// (the MEM chip repoint) is separate, future frontend work.
 #[tauri::command]
 pub fn get_recent_performance(workflow_id: String) -> Option<PerformanceReport> {
     perf_monitor::get_recent_report(&workflow_id)

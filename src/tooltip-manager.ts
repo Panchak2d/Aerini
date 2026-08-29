@@ -1,4 +1,4 @@
-// Tooltip manager — WCAG 1.4.13 compliant (P31)
+// Tooltip manager — WCAG 1.4.13 compliant
 // Replaces the CSS-only ::after tooltip with a JS-driven div[role="tooltip"].
 // Criteria satisfied:
 //   1. Dismissible  — Escape hides without moving focus

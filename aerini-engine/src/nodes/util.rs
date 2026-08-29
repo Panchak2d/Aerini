@@ -98,11 +98,13 @@ pub fn traverse_dotpath(data: &Value, path: &str) -> Value {
 /// deterministic order, instead of the raw `HashMap`'s unspecified (and
 /// empirically randomized, per `RandomState`) iteration order.
 ///
-/// Root-cause fix for the family:
-/// `output_node.rs`, `json_node.rs`, `text_splitter.rs`, `merge.rs`, and
-/// `loop_node.rs` each previously called `.iter()`/`.values()` directly on
-/// `node_outputs`, so "most recent", "first found", and "array order"
-/// semantics all silently differed between runs of an identical workflow.
+/// Callers must use this instead of iterating `context.node_outputs`
+/// directly: `output_node.rs`, `json_node.rs`, `text_splitter.rs`,
+/// `merge.rs`, and `loop_node.rs` all rely on it so that "most recent",
+/// "first found", and "array order" semantics stay identical between runs
+/// of the same workflow, rather than depending on the raw `HashMap`'s
+/// unspecified (and empirically randomized, per `RandomState`) iteration
+/// order.
 ///
 /// Ordering: nodes appear in `context.execution_order` order (see
 /// `ExecutionState::mark_succeeded` in `context.rs` — completion order, with
@@ -395,9 +397,9 @@ async fn check_host_ssrf_from_url_impl(raw_url: &str, allow_local: bool) -> Resu
 /// as special schemes and returns `None` from `port()` when no port is
 /// specified.
 ///
-/// T1-4 / S2-2 residual, Tier 3 pattern #8: database connections can
-/// legitimately target either a remote host (`SsrfPolicy::Strict`, the
-/// default every existing caller keeps getting) or a self-hosted local/LAN
+/// Database connections can legitimately target either a remote host
+/// (`SsrfPolicy::Strict`, the default every existing caller keeps getting)
+/// or a self-hosted local/LAN
 /// instance the caller explicitly configured (`SsrfPolicy::AllowLocal`,
 /// opt-in only). Unlike `ai_prompt`/`ai_agent`/`image_gen::a1111`/`comfyui`
 /// (nodes whose *entire* purpose is reaching a local server, so those pass
@@ -539,7 +541,7 @@ mod ssrf_allow_local_tests {
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
     fn v6(s: &str) -> IpAddr { IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()) }
 
-    // Previously-blocked ranges that must now be permitted for local providers.
+    // Ranges permitted only under SsrfPolicy::AllowLocal; blocked under the default Strict policy.
     #[test]
     fn loopback_now_allowed()       { assert!(check_ssrf_ip(v4(127, 0, 0, 1), SsrfPolicy::AllowLocal).is_ok()); }
     #[test]

@@ -30,7 +30,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
     let allow_raw_sql = caller_is_admin
         && input.input["allow_raw_sql"].as_bool().unwrap_or(false);
     let inline_warning = super::check_query_for_inline_values(&query);
-    // residual: explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
+    // Explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
     // doc comment for why this is not gated behind __caller_is_admin the way
     // allow_raw_sql is (that gate is never set true on desktop today).
     let ssrf_policy = if input.input["allow_local"].as_bool().unwrap_or(false) {
