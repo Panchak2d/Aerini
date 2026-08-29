@@ -57,7 +57,7 @@ RUN mkdir -p /data && chown 65532:65532 /data
 # statically compiled wget from busybox:musl. It is ~1 MB and adds no runtime
 # attack surface because it is only invoked by the Docker daemon's health prober,
 # not by the container process itself.
-FROM busybox:1.38-musl@sha256:8635836765b0c4c43970660219739baa58b0883c2e429e4b8918f7dd1519455c AS busybox
+FROM busybox:1.38-musl@sha256:32b5cdad7cce41dfd53d0ae06baebcf8357a147ee7694dc706911c373bc30c37 AS busybox
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 
