@@ -18,8 +18,12 @@ static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 /// Intercepts `import` resolution and blocks dangerous built-in modules.
 /// Written to a temp file because Node.js loaders cannot be passed inline.
 ///
-/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os
-/// These cover: subprocess spawning, filesystem access, raw network access.
+/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os, module
+/// These cover: subprocess spawning, filesystem access, raw network access, and — via
+/// `module`'s `createRequire()` — a CommonJS `require()` that would otherwise reach every
+/// other entry on this list. `process.getBuiltinModule()` reaches the same builtins without
+/// an `import` and so never hits this hook; `execute()`'s sandbox prelude overrides it with
+/// the same blocklist.
 /// Allowed: crypto, util, path, stream, events, url, buffer, string_decoder, querystring
 ///
 /// Compatibility: --experimental-loader works on all Node.js 18+ versions.
@@ -45,18 +49,62 @@ const BLOCKED = new Set([
   'node:vm',            'vm',
   'node:repl',          'repl',
   'node:domain',        'domain',
+  'node:module',        'module',
 ]);
 
 export async function resolve(specifier, context, nextResolve) {
   if (BLOCKED.has(specifier)) {
     throw new Error(
       `[Aerini sandbox] Import of '${specifier}' is blocked. ` +
-      `Filesystem, module-imported network access, and subprocess access are blocked in sandboxed Code nodes. ` +
+      `Filesystem, module-imported network access, subprocess access, and CommonJS require() ` +
+      `(via the 'module' builtin) are blocked in sandboxed Code nodes. ` +
       `Global fetch() and WebSocket are also disabled. ` +
       `Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments.`
     );
   }
   return nextResolve(specifier, context);
+}
+"#;
+
+/// Prelude injected into the wrapper script before user code, when sandbox mode
+/// is active. Removes globals that reach the same capabilities
+/// `SANDBOX_LOADER_CONTENT`'s resolve hook blocks, without going through an
+/// `import` at all: `fetch`/`WebSocket`/`XMLHttpRequest` are built-in globals
+/// since Node 18, and `process.getBuiltinModule()` returns any builtin module
+/// directly from the `process` global. Blocking `module` here (mirroring the
+/// loader's own list) is what matters most: `module.createRequire()` hands
+/// back a full CommonJS `require()`, which reaches every other blocked
+/// builtin regardless of what the loader hook does.
+const SANDBOX_GLOBALS_HARDENING: &str = r#"delete globalThis.fetch;
+delete globalThis.WebSocket;
+delete globalThis.XMLHttpRequest;
+{
+  const __sandboxBlockedBuiltins = new Set([
+    'node:child_process', 'child_process',
+    'node:fs',            'fs',
+    'node:fs/promises',   'fs/promises',
+    'node:net',           'net',
+    'node:http',          'http',
+    'node:https',         'https',
+    'node:http2',         'http2',
+    'node:dgram',         'dgram',
+    'node:dns',           'dns',
+    'node:dns/promises',  'dns/promises',
+    'node:os',            'os',
+    'node:cluster',       'cluster',
+    'node:worker_threads','worker_threads',
+    'node:vm',            'vm',
+    'node:repl',          'repl',
+    'node:domain',        'domain',
+    'node:module',        'module',
+  ]);
+  const __sandboxOriginalGetBuiltinModule = process.getBuiltinModule.bind(process);
+  process.getBuiltinModule = (id) => {
+    if (__sandboxBlockedBuiltins.has(id)) {
+      throw new Error(`[Aerini sandbox] Access to '${id}' via process.getBuiltinModule is blocked.`);
+    }
+    return __sandboxOriginalGetBuiltinModule(id);
+  };
 }
 "#;
 
@@ -163,16 +211,10 @@ impl Node for CodeNode {
             ));
         }
 
-        // When sandbox is enabled, delete network globals that bypass the
-        // ESM loader hook (fetch, WebSocket, XMLHttpRequest require no import in Node 18+).
-        let sandbox_network_kill = if sandbox_enabled {
-            r#"// Sandbox: remove network globals not catchable by the ESM loader hook.
-// fetch() is a built-in global since Node 18 — no import needed, so the loader
-// resolve hook never fires. Delete before user code runs.
-delete globalThis.fetch;
-delete globalThis.WebSocket;
-delete globalThis.XMLHttpRequest;
-"#
+        // When sandbox is enabled, remove globals that reach the same capabilities the
+        // ESM loader hook blocks, without going through it at all.
+        let sandbox_globals_hardening = if sandbox_enabled {
+            SANDBOX_GLOBALS_HARDENING
         } else {
             ""
         };
@@ -201,7 +243,7 @@ function output(v) {{ __result = v; }}
   process.stdout.write(JSON.stringify({{ ok: false, error: err.message ?? String(err) }}));
 }});
 "#,
-            sandbox_network_kill,
+            sandbox_globals_hardening,
             serde_json::to_string(direct_input).unwrap_or_else(|_| "{}".to_string()),
             serde_json::to_string(name_outputs).unwrap_or_else(|_| "{}".to_string()),
             code,
@@ -616,6 +658,20 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn sandbox_loader_blocks_module_builtin() {
+        assert!(SANDBOX_LOADER_CONTENT.contains("'node:module'"));
+        assert!(SANDBOX_LOADER_CONTENT.contains("'module'"));
+    }
+
+    #[test]
+    fn sandbox_globals_hardening_overrides_get_builtin_module() {
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("process.getBuiltinModule = "));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("'module'"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:child_process'"));
     }
 
     #[tokio::test]

@@ -29,6 +29,11 @@ pub struct CreateTokenBody {
     #[serde(default = "default_token_scopes")]
     pub scopes: Vec<String>,
     pub expires_in_secs: Option<u64>,
+    /// Optional: restrict this token's SSE access (`/api/events`) to exactly
+    /// these workflow ids, granted atomically in this same call instead of
+    /// requiring a separate `POST /api/tokens/:id/workflows/:wf_id` per id.
+    #[serde(default)]
+    pub workflow_ids: Vec<String>,
 }
 
 fn default_token_scopes() -> Vec<String> {
@@ -57,16 +62,19 @@ pub async fn create_token_handler(
         }))).into_response();
     }
     let scopes_ref: Vec<&str> = b.scopes.iter().map(|s| s.as_str()).collect();
-    match s.token_store.create_token(&b.label, &scopes_ref, b.expires_in_secs) {
-        Ok(raw) => (StatusCode::CREATED, Json(json!({
-            "token":      raw,
-            "label":      b.label,
-            "scopes":     b.scopes,
-            "expires_in_secs": b.expires_in_secs,
-            "note":       "Save this token — it will not be shown again."
-        }))).into_response(),
-        Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
-    }
+    let (token_id, raw) = match s.token_store.create_token_with_workflows(&b.label, &scopes_ref, b.expires_in_secs, &b.workflow_ids) {
+        Ok(pair) => pair,
+        Err(e)   => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+    };
+    (StatusCode::CREATED, Json(json!({
+        "token":       raw,
+        "token_id":    token_id,
+        "label":       b.label,
+        "scopes":      b.scopes,
+        "expires_in_secs": b.expires_in_secs,
+        "workflow_ids": b.workflow_ids,
+        "note":        "Save this token — it will not be shown again."
+    }))).into_response()
 }
 
 pub async fn revoke_token_handler(

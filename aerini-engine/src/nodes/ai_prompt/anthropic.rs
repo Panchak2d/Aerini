@@ -4,7 +4,7 @@ use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_err_msg};
+use super::shared::{send_and_parse, extract_provider_error};
 
 // Anthropic (Claude)
 // Docs: https://docs.anthropic.com/en/api/messages
@@ -79,8 +79,7 @@ pub(super) async fn call_anthropic(
     };
 
     // Anthropic error: { "type": "error", "error": { "type": "...", "message": "..." } }
-    if let Some(err_obj) = resp_json["error"].as_object() {
-        let msg = extract_err_msg(err_obj, "Unknown Anthropic error");
+    if let Some(msg) = extract_provider_error(&resp_json, "Unknown Anthropic error") {
         return if status == 429 || status == 529 {
             NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
         } else {

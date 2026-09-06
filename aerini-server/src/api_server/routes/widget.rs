@@ -4,15 +4,16 @@
 //!
 //! # Why this gateway exists instead of POSTing the browser straight to the
 //! webhook port
-//! `aerini-engine/src/nodes/webhook.rs`'s raw hyper listener sets no
-//! `Access-Control-*` headers and has no `OPTIONS` handling on any response
-//! path (confirmed by a full read of that file this session) — a
-//! cross-origin browser POST straight to the webhook URL is unconditionally
-//! blocked by the browser's CORS preflight. Rather than add CORS handling to
-//! that listener (touching the already-once-fixed, concurrency-sensitive
-//! trigger code), this route reuses the `CorsLayer` already on the main API
-//! router (`api_server/mod.rs`) and forwards the validated request as a
-//! loopback call. `webhook.rs` itself is untouched by this patch.
+//! Not CORS: the listener this relays to for an active background job
+//! (`scheduler/runner.rs`'s `run_job_loop`) already answers `OPTIONS`
+//! preflights and sets a wildcard `Access-Control-*` response of its own
+//! (`CORS_HEADER_LINES`). The actual reason is that listener only ever binds
+//! `127.0.0.1` — unreachable from a visitor's browser on another machine no
+//! matter what headers it sends. `aerini-server` itself can bind publicly
+//! (`--bind 0.0.0.0`), so this route runs on that public-facing side and
+//! forwards the validated request to the trigger listener as a loopback
+//! call, the same way any other reverse-proxy-in-front-of-a-loopback-service
+//! setup works.
 //!
 //! # Auth model
 //! This route is deliberately registered outside `auth_middleware` (no
@@ -88,10 +89,11 @@ fn relay_client() -> &'static reqwest::Client {
 #[derive(Deserialize)]
 pub struct WidgetTriggerBody {
     /// The Webhook node's shared secret, as configured by the workflow
-    /// author and passed through by the widget's `data-secret` attribute.
-    /// Forwarded verbatim as `x-webhook-secret`; never compared in this
-    /// handler (see module doc — single source of truth stays in
-    /// `webhook.rs`).
+    /// author and passed through by the widget's `data-secret` attribute —
+    /// or a short-lived signed token from `mint_widget_token` (see there for
+    /// when to prefer that over embedding the raw secret). Forwarded
+    /// verbatim as `x-webhook-secret`; never compared in this handler (see
+    /// module doc — single source of truth stays in `webhook.rs`).
     pub secret: String,
     /// Forwarded verbatim as the loopback request's JSON body. Shape is
     /// whatever the target workflow's Webhook node expects — the chat
@@ -99,6 +101,107 @@ pub struct WidgetTriggerBody {
     /// desktop Chat Panel (`src/panels/ChatPanel.ts::handleSend`).
     #[serde(default)]
     pub body: Value,
+}
+
+/// Shared by `trigger_widget` and `mint_widget_token`: loads the workflow's
+/// live scheduler row and extracts the Webhook trigger's effective
+/// `(port, path, secret)`, or an `Err(response)` the caller should return
+/// immediately as-is.
+async fn load_webhook_trigger(
+    s: &ApiState,
+    workflow_id: &str,
+) -> Result<(u16, String, String), axum::response::Response> {
+    let row = {
+        let db = Arc::clone(&s.db);
+        let wf_id = workflow_id.to_string();
+        match tokio::task::spawn_blocking(move || db.scheduler_get(&wf_id)).await {
+            Ok(Ok(Some(r))) => r,
+            Ok(Ok(None)) => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "workflow is not scheduled — start it first"})),
+                )
+                    .into_response());
+            }
+            Ok(Err(e)) => {
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+                );
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response());
+            }
+        }
+    };
+
+    if row.status != "active" {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("workflow is not running (status: {})", row.status)
+            })),
+        )
+            .into_response());
+    }
+
+    let trigger: TriggerKind = match serde_json::from_str(&row.trigger_kind) {
+        Ok(t) => t,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("corrupt trigger_kind in scheduler row: {}", e)
+                })),
+            )
+                .into_response());
+        }
+    };
+
+    match trigger {
+        TriggerKind::Webhook { port, path, secret, .. } => Ok((port, path, secret)),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "workflow's trigger is '{}', not Webhook — the embeddable widget only works with a Webhook-triggered workflow",
+                    other.label()
+                )
+            })),
+        )
+            .into_response()),
+    }
+}
+
+/// `--allow-shell`/`--allow-code`/`--allow-database` (`main.rs`) are process-wide:
+/// turning one on for an internal, admin-only workflow also unlocks that node
+/// type for every other workflow the same server process runs. Every other
+/// trigger path requires a server Bearer token, so that's an accepted
+/// tradeoff for an operator who already trusts their token holders. This
+/// route doesn't — it's reachable by any anonymous visitor of a page that
+/// embeds the widget — so it applies its own gate on top, independent of
+/// the flags: a dangerous node blocks the public relay regardless of
+/// whether the flag enabling it was meant for this workflow or a different
+/// one. Returns `None` when `nodes` contains none of
+/// `aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS`.
+fn dangerous_node_block(nodes: &[aerini_engine::model::WorkflowNode]) -> Option<axum::response::Response> {
+    if aerini_engine::nodes::dangerous_node_types_present(nodes).is_empty() {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "this workflow contains a Shell Command, Code, or Database node — \
+                          the public widget relay refuses to trigger it, regardless of the \
+                          server's --allow-shell/--allow-code/--allow-database flags"
+            })),
+        )
+            .into_response(),
+    )
 }
 
 /// POST /api/widget/:workflow_id/trigger
@@ -116,25 +219,30 @@ pub async fn trigger_widget(
     Path(workflow_id): Path<String>,
     Json(b): Json<WidgetTriggerBody>,
 ) -> impl IntoResponse {
-    // scheduler_get / load are synchronous rusqlite calls — spawn_blocking
-    // to avoid stalling the async reactor, matching the pattern every
-    // workflows.rs CRUD handler already uses for `s.db.*` calls.
-    //
-    // `routes/scheduler.rs`'s list_scheduler / start_job / stop_job call
-    // `s.scheduler.*` (which hits the same blocking rusqlite pool) directly
-    // on the async handler, with no spawn_blocking. This file does not
-    // follow that precedent — it follows workflows.rs's safer one instead,
-    // since both precedents already coexist in the shipped codebase and the
-    // safer one is the defensible default for new code.
-    let row = {
+    let (port, path, _secret) = match load_webhook_trigger(&s, &workflow_id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // Loaded once, ahead of the relay, so the dangerous-node gate can run
+    // before anything is forwarded to the workflow's listener — the listener
+    // acks (and the scheduler starts the run) as soon as it accepts the
+    // request, before the workflow body executes, so checking after relaying
+    // would already be too late to stop it. Reused below for output_node_id,
+    // avoiding a second workflow load.
+    let workflow = {
         let db = Arc::clone(&s.db);
         let wf_id = workflow_id.clone();
-        match tokio::task::spawn_blocking(move || db.scheduler_get(&wf_id)).await {
-            Ok(Ok(Some(r))) => r,
+        match tokio::task::spawn_blocking(move || db.load(&wf_id)).await {
+            Ok(Ok(Some(wf))) => wf,
             Ok(Ok(None)) => {
+                // Fail closed: a scheduler row can outlive its workflow
+                // definition (e.g. deleted without stopping its job first).
+                // The dangerous-node gate below has nothing to check in that
+                // case, so refuse rather than relay against an unknown workflow.
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": "workflow is not scheduled — start it first"})),
+                    Json(json!({"error": "workflow definition not found"})),
                 )
                     .into_response();
             }
@@ -152,44 +260,9 @@ pub async fn trigger_widget(
         }
     };
 
-    if row.status != "active" {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("workflow is not running (status: {})", row.status)
-            })),
-        )
-            .into_response();
+    if let Some(resp) = dangerous_node_block(&workflow.nodes) {
+        return resp;
     }
-
-    let trigger: TriggerKind = match serde_json::from_str(&row.trigger_kind) {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("corrupt trigger_kind in scheduler row: {}", e)
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let (port, path) = match trigger {
-        TriggerKind::Webhook { port, path, .. } => (port, path),
-        other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!(
-                        "workflow's trigger is '{}', not Webhook — the embeddable widget only works with a Webhook-triggered workflow",
-                        other.label()
-                    )
-                })),
-            )
-                .into_response();
-        }
-    };
 
     let target = format!("http://127.0.0.1:{}{}", port, path);
     let relay_result = relay_client()
@@ -235,20 +308,15 @@ pub async fn trigger_widget(
         return (code, Json(json!({"error": hint}))).into_response();
     }
 
-    // Only computed on the success path — an unauthenticated caller with the
-    // wrong secret never learns the workflow's internal node IDs.
-    let output_node_id = {
-        let db = Arc::clone(&s.db);
-        let wf_id = workflow_id.clone();
-        match tokio::task::spawn_blocking(move || db.load(&wf_id)).await {
-            Ok(Ok(Some(wf))) => wf
-                .nodes
-                .iter()
-                .find(|n| n.node_type_id.as_str() == "output")
-                .map(|n| n.id.clone()),
-            _ => None,
-        }
-    };
+    // Computed from the `workflow` already loaded above for the dangerous-node
+    // gate — an unauthenticated caller with the wrong secret only reaches this
+    // line after a successful upstream relay, so a failed attempt never
+    // reveals the workflow's internal node IDs.
+    let output_node_id = workflow
+        .nodes
+        .iter()
+        .find(|n| n.node_type_id.as_str() == "output")
+        .map(|n| n.id.clone());
 
     (
         StatusCode::OK,
@@ -258,4 +326,129 @@ pub async fn trigger_widget(
         })),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MintTokenBody {
+    /// The Webhook node's real, static, configured secret. This must be the
+    /// raw secret, never a previously-minted token — minting a token from a
+    /// token would defeat the expiry (a caller could keep re-minting to stay
+    /// permanently valid). Enforced below by comparing directly against the
+    /// scheduler row's stored secret rather than going through `webhook.rs`'s
+    /// dual-mode check.
+    pub secret: String,
+    /// Requested lifetime in seconds. Clamped server-side to
+    /// `[1, SIGNED_TOKEN_MAX_LIFETIME_SECS]` (currently 24h) regardless of
+    /// what's requested here — see `webhook::mint_signed_token`.
+    #[serde(default = "default_ttl_secs")]
+    pub ttl_secs: i64,
+}
+
+fn default_ttl_secs() -> i64 {
+    300 // 5 minutes — short enough that a page-source leak of the minted
+        // token (as opposed to the raw secret) is only useful briefly.
+}
+
+/// POST /api/widget/:workflow_id/mint-token
+///
+/// For the "recommended for production" embedding pattern in
+/// widget-embedding.md: the workflow author's own backend — which already
+/// holds the real secret to have configured the Webhook node in the first
+/// place — calls this **server-side** (never from a browser) to exchange
+/// that secret for a short-lived signed token, then serves only the token to
+/// visitors. Unlike the raw secret, a token captured from page source
+/// self-expires instead of granting standing access.
+///
+/// Deliberately outside `auth_middleware` like `trigger_widget` — this is
+/// authenticated by the workflow's own secret, not a server Bearer token,
+/// for the same reason `trigger_widget` is: the caller here is the site
+/// owner's backend, which has no server admin token of its own to send.
+pub async fn mint_widget_token(
+    State(s): State<ApiState>,
+    Path(workflow_id): Path<String>,
+    Json(b): Json<MintTokenBody>,
+) -> impl IntoResponse {
+    let (_port, path, configured_secret) = match load_webhook_trigger(&s, &workflow_id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    if configured_secret.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "this Webhook node has no secret configured — nothing to mint a token from"})),
+        )
+            .into_response();
+    }
+
+    // Constant-time compare, same rationale as webhook.rs's own check: this
+    // endpoint is exactly as much of a secret-guessing oracle (401 vs 200)
+    // as the trigger endpoint, and sits behind the same rate limiter.
+    use subtle::ConstantTimeEq as _;
+    let expected_hash = blake3::hash(configured_secret.as_bytes());
+    let provided_hash = blake3::hash(b.secret.as_bytes());
+    if expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() != 1 {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "secret did not match this workflow's Webhook node"})),
+        )
+            .into_response();
+    }
+
+    let ttl = b.ttl_secs.clamp(1, 24 * 60 * 60);
+    let token = aerini_engine::nodes::webhook::mint_signed_token(&configured_secret, &path, ttl);
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "token": token,
+            "expires_at": expires_at.to_rfc3339(),
+            "ttl_secs": ttl
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod dangerous_node_gate_tests {
+    use super::*;
+    use aerini_engine::model::{NodeType, WorkflowNode};
+    use std::collections::HashMap;
+
+    fn node(id: &str, node_type_id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id:            id.to_string(),
+            node_type_id:  node_type_id.to_string(),
+            node_type:     NodeType::Utility,
+            name:          id.to_string(),
+            config:        serde_json::json!({}),
+            credentials:   HashMap::new(),
+            input_schema:  serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry:         Default::default(),
+            fallback_node: None,
+            disabled:      false,
+            position:      Default::default(),
+        }
+    }
+
+    // Normal case: an ordinary chat-workflow shape (Webhook + Output, no
+    // dangerous node type) must relay through untouched.
+    #[test]
+    fn allows_workflow_with_no_dangerous_nodes() {
+        let nodes = vec![node("n1", "webhook"), node("n2", "output")];
+        assert!(dangerous_node_block(&nodes).is_none());
+    }
+
+    // Shell/Code/Database node present: --allow-shell/--allow-code/
+    // --allow-database are process-wide, so this must block regardless of
+    // whether one of those flags happens to be on for a different workflow
+    // on the same server.
+    #[test]
+    fn blocks_workflow_containing_a_dangerous_node() {
+        let nodes = vec![node("n1", "webhook"), node("n2", "shell_exec")];
+        let resp = dangerous_node_block(&nodes).expect("must block");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }

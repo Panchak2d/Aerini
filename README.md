@@ -23,33 +23,43 @@ Aerini is a local-first tool for individuals and small setups. For workflows tha
 
 | Guide | What it covers |
 |---|---|
-| [Getting Started](docs/getting-started.md) | Install, build your first workflow, run it, schedule it |
-| [Concepts](docs/concepts.md) | What a workflow is, what nodes are, how everything fits together |
-| [Nodes Reference](docs/nodes.md) | All 39 nodes: parameters, outputs, and what each one does |
-| [Expressions](docs/expressions.md) | `{{...}}` syntax for wiring node outputs into other nodes |
-| [Credentials](docs/credentials.md) | Storing API keys securely and getting them from every supported service |
-| [Background Runs](docs/background-runs.md) | Schedules, webhook triggers, run history |
-| [Server Deployment](docs/server-deploy.md) | Running workflows 24/7 on a Linux server |
-| [Security](docs/security.md) | Encryption, dangerous nodes, SSRF protection, server hardening |
-| [Widget Embedding](docs/widget-embedding.md) | Dropping the chat widget into a web page, token scoping, security tradeoffs |
-| [Local Models](docs/local-models.md) | Using Ollama and other OpenAI-compatible local servers with AI Prompt |
+| [Introduction](docs/index.md) | What Aerini is, why use it, what it can and can't do |
+| [Getting Started](docs/getting-started/getting-started.md) | Install, build your first workflow, run it, schedule it |
+| [Concepts](docs/getting-started/concepts.md) | What a workflow is, what nodes are, how everything fits together |
+| [Glossary](docs/glossary.md) | Plain-language definitions of every term used across these docs |
+| [Nodes Reference](docs/guide/nodes.md) | Every built-in node: parameters, outputs, and what each one does |
+| [Expressions](docs/guide/expressions.md) | `{{...}}` syntax for wiring node outputs into other nodes |
+| [Credentials](docs/guide/credentials.md) | Storing API keys securely and getting them from every supported service |
+| [Background Runs](docs/guide/background-runs.md) | Schedules, webhook triggers, run history |
+| [Examples](docs/guide/examples.md) | Index of worked example workflows in [`examples/`](examples/) |
+| [Troubleshooting](docs/troubleshooting.md) | Common problems, organized by symptom |
+| [FAQ](docs/faq.md) | Short answers to common questions |
+| [Security](docs/guide/security.md) | Encryption, dangerous nodes, SSRF protection, server hardening |
+| [Widget Embedding](docs/guide/widget-embedding.md) | Dropping the chat widget into a web page, token scoping, security tradeoffs |
+| [Local Models](docs/guide/local-models.md) | Using Ollama and other OpenAI-compatible local servers with AI Prompt |
+| [Server Deployment](docs/operations/server-deploy.md) | Running workflows 24/7 on a Linux server |
+| [Server CLI Reference](docs/operations/server-cli-reference.md) | Every `aerini-server serve`/`api` flag |
+| [Server API Reference](docs/operations/server-api-reference.md) | REST endpoints, SSE events, and scoped tokens exposed by `aerini-server --api` |
+| [Updating](docs/operations/updating.md) | Manual desktop update checks, server binary updates, workflow schema migration |
 
 Developer guides:
 
 | Guide | What it covers |
 |---|---|
-| [Architecture](docs/architecture.md) | How the engine, Tauri shell, and server binary fit together |
-| [Embedding aerini-engine](docs/embedding.md) | Use the engine as a Rust library in your own program |
-| [Custom Node Authoring](docs/node-authoring.md) | Adding new node types to Aerini |
-| [Plugin Authoring](docs/plugin-authoring.md) | Writing and distributing `.wasm` plugin nodes |
-| [Desktop IPC Reference](docs/desktop-ipc-reference.md) | Every command the frontend can call into the Tauri shell |
-| [Schema Migrations](docs/schema-migrations.md) | How workflow format changes are handled across versions |
+| [Architecture](docs/development/architecture.md) | How the engine, Tauri shell, and server binary fit together |
+| [Embedding aerini-engine](docs/development/embedding.md) | Use the engine as a Rust library in your own program |
+| [Custom Node Authoring](docs/development/node-authoring.md) | Adding new built-in node types to Aerini |
+| [Plugin Authoring](docs/development/plugin-authoring.md) | Writing and distributing `.wasm` plugin nodes |
+| [Desktop IPC Reference](docs/development/desktop-ipc-reference.md) | Every command the frontend can call into the Tauri shell |
+| [Workflow File Format](docs/reference/workflow-file-format.md) | The `.aerini`/`.json` workflow file schema |
+| [Schema Migrations](docs/reference/schema-migrations.md) | How workflow format changes are handled across versions |
+| [Testing](docs/development/testing.md) | Where tests live and how to run them |
 
 ---
 
 ## Node categories
 
-Aerini ships 39 built-in nodes:
+Aerini ships 40 built-in nodes:
 
 **Triggers:** Manual Trigger, Schedule, Webhook
 
@@ -63,7 +73,7 @@ Aerini ships 39 built-in nodes:
 
 **Integrations:** Slack, Discord, GitHub, Google Sheets, Notion, Telegram, Stripe
 
-**Data & Utility:** Transform Data, JSON, Set Variable, Get Variable, Output
+**Data & Utility:** Transform Data, JSON, Set Variable, Get Variable, Output, Text to File
 
 ---
 
@@ -73,17 +83,17 @@ Aerini supports `.wasm` plugin nodes. Write a new node type in Rust, compile it 
 
 The Settings panel also lists installed plugins and surfaces any that failed to load (with the reason) instead of just dropping them, so a bad build doesn't disappear silently.
 
-See [Plugin Authoring](docs/plugin-authoring.md) to get started, or copy `examples/plugin-template/` as a starting point.
+See [Plugin Authoring](docs/development/plugin-authoring.md) to get started, or copy `examples/plugin-template/` as a starting point.
 
 ---
 
 ## Embedding the engine
 
-`aerini-engine` is a standalone Rust crate — the workflow model, executor, scheduler, and node registry don't depend on Tauri or any UI. You can pull it into your own Rust program, register your own nodes alongside (or instead of) the 39 built-ins, supply your own credential resolver and event sink, and run workflows headless — no desktop app, no database required unless you want run history.
+`aerini-engine` is a standalone Rust crate — the workflow model, executor, scheduler, and node registry don't depend on Tauri or any UI. You can pull it into your own Rust program, register your own nodes alongside (or instead of) the 40 built-ins, supply your own credential resolver and event sink, and run workflows headless — no desktop app, no database required unless you want run history.
 
 This is the same engine that powers the desktop app and `aerini-server`, so anything documented for those (retries, parallel execution, expressions, plugins) works the same way when embedded.
 
-See [Embedding aerini-engine](docs/embedding.md) for a complete working example, the stable API surface, and what's safe to depend on across versions.
+See [Embedding aerini-engine](docs/development/embedding.md) for a complete working example, the stable API surface, and what's safe to depend on across versions.
 
 ---
 
@@ -100,6 +110,10 @@ The Code (JS) node runs on a Node.js runtime bundled with Aerini itself. You don
 ---
 
 ## Installing
+
+**Most people want this.** Download the installer for your OS from the [Releases page](https://github.com/Panchak2d/aerini/releases) — `.dmg` (macOS), `.msi`/`.exe` (Windows), or `.deb`/`.AppImage` (Linux). No terminal, no Rust, no Node.js required. Run it like any other desktop app. See [Getting Started](docs/getting-started/getting-started.md) for what to do next.
+
+### Building from source (contributors / unsupported platforms)
 
 ```bash
 git clone https://github.com/Panchak2d/aerini
@@ -145,7 +159,7 @@ For enterprise or volume licensing: see [CONTACT.md](CONTACT.md)
 
 ## Privacy
 
-Aerini collects no telemetry, analytics, usage data, or crash reports. Beyond what you explicitly configure in your workflows, the only outbound connection Aerini's own UI makes is loading the Inter font from Google Fonts over HTTPS — see [Security §1](docs/security.md#1-desktop-security-model) for details. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
+Aerini collects no telemetry, analytics, usage data, or crash reports. Beyond what you explicitly configure in your workflows, the only outbound connection Aerini's own UI makes is loading the Inter font from Google Fonts over HTTPS — see [Security §Desktop security model](docs/guide/security.md#desktop-security-model) for details. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
 
 ## Contributing
 

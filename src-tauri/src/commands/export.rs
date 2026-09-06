@@ -436,17 +436,14 @@ pub async fn export_all_workflows(
                 let wf = db_clone.load(&summary.id)?
                     .ok_or_else(|| format!("Workflow {} disappeared during export", summary.id))?;
 
-                let file = serde_json::json!({
-                    "aerini_version": "1",
-                    "schema_version": wf.schema_version,
-                    "id": wf.id,
-                    "name": wf.name,
-                    "description": wf.description,
-                    "author": wf.metadata.author,
-                    "tags": wf.metadata.tags,
-                    "nodes": wf.nodes,
-                    "edges": wf.edges,
-                });
+                let mut file = serde_json::to_value(&wf).map_err(|e| e.to_string())?;
+                // collection_id is sidebar-local folder organization, not a
+                // portable property of the workflow itself; same exclusion
+                // the single-workflow export applies.
+                if let Some(metadata) = file.get_mut("metadata") {
+                    metadata["collection_id"] = serde_json::Value::Null;
+                }
+                file["aerini_version"] = serde_json::Value::String("1".to_string());
                 let content = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
 
                 let base = safe_filename(&wf.name);

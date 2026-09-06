@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use aerini_engine::executor::{CredentialResolver, WorkflowExecutor};
+use aerini_engine::executor::{CredentialResolveError, CredentialResolver, WorkflowExecutor};
 use aerini_engine::model::{
     CanvasPosition, NodeType, RetryPolicy, Workflow, WorkflowEdge, WorkflowNode,
 };
@@ -25,8 +25,8 @@ struct NoopResolver;
 
 #[async_trait]
 impl CredentialResolver for NoopResolver {
-    async fn resolve(&self, _id: &str) -> Option<String> {
-        None
+    async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+        Err(CredentialResolveError::NotFound)
     }
 }
 

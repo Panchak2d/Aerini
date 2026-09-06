@@ -19,12 +19,18 @@ export class ContextMenu {
     menu.className = "ctx-menu";
     menu.setAttribute("role", "menu");
 
+    let dismiss: (ev: MouseEvent) => void;
+    const closeMenu = () => {
+      menu.remove();
+      document.removeEventListener("mousedown", dismiss, true);
+    };
+
     const addItem = (label: string, icon: string, danger: boolean, action: () => void) => {
       const item = document.createElement("button");
       item.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
       item.setAttribute("role", "menuitem");
       item.innerHTML = `<span class="ctx-menu-icon">${icon}</span><span>${label}</span>`;
-      item.addEventListener("mousedown", (e) => { e.preventDefault(); menu.remove(); action(); });
+      item.addEventListener("mousedown", (e) => { e.preventDefault(); closeMenu(); action(); });
       menu.appendChild(item);
     };
 
@@ -92,10 +98,9 @@ export class ContextMenu {
     menu.style.left = `${left}px`;
     menu.style.top  = `${top}px`;
 
-    const dismiss = (ev: MouseEvent) => {
+    dismiss = (ev: MouseEvent) => {
       if (!menu.contains(ev.target as Node)) {
-        menu.remove();
-        document.removeEventListener("mousedown", dismiss, true);
+        closeMenu();
       }
     };
     setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);

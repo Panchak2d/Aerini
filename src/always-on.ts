@@ -3,19 +3,20 @@ import type { WorkflowManager } from "./workflow-manager";
 import type { ScheduledJobRow } from "./ipc/workflow";
 import { getScheduledJobs, setAlwaysOn, startScheduledWorkflow } from "./ipc/workflow";
 import { isTauri } from "./utils";
-import { TRIGGER_NODE_IDS } from "./node-ids";
+import { NODE_IDS } from "./node-ids";
 import { hideTooltipFor } from "./tooltip-manager";
 
 type Toast = (msg: string, type: "success" | "error" | "info") => void;
 
 const NO_TRIGGER_TOOLTIP = "Add a Schedule or Webhook trigger to enable Run on launch";
+const SCHEDULABLE_TRIGGER_IDS = new Set([NODE_IDS.SCHEDULE, NODE_IDS.WEBHOOK]);
 
 export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManager): Promise<void> {
   const btn = document.getElementById("btn-always-on") as HTMLButtonElement | null;
   if (!btn) return;
 
   const hasSchedulableTrigger = [...canvas.nodes.values()].some(n =>
-    TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
+    SCHEDULABLE_TRIGGER_IDS.has(n.data.node_type_id as string)
   );
 
   const wrap = document.getElementById("always-on-wrap");
@@ -49,15 +50,29 @@ export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManag
     : "Run on launch is OFF — click to make this workflow start automatically when Aerini opens.";
 }
 
-export function bindAlwaysOnToggle(wfManager: WorkflowManager, toast: Toast): void {
+export function bindAlwaysOnToggle(canvas: Canvas, wfManager: WorkflowManager, toast: Toast): void {
   const btn = document.getElementById("btn-always-on") as HTMLButtonElement | null;
   if (!btn) return;
 
   btn.addEventListener("click", async () => {
     const isActive = btn.classList.contains("btn-always-on--active");
+    const enabling = !isActive;
+
+    if (enabling) {
+      const scheduleNode = [...canvas.nodes.values()].find(n => n.data.node_type_id === NODE_IDS.SCHEDULE);
+      const mode  = scheduleNode?.data.config["mode"] as string | undefined;
+      const runAt = scheduleNode?.data.config["run_at"] as string | undefined;
+      if (mode === "once" && runAt && new Date(runAt).getTime() <= Date.now()) {
+        toast(
+          "This Schedule is a one-time run already in the past — turning on Run on launch would fire it again on every app launch. Set a new date, or switch to Interval or Cron.",
+          "error",
+        );
+        return;
+      }
+    }
+
     btn.disabled = true;
     try {
-      const enabling = !isActive;
       if (enabling) {
         const snapshot = await wfManager.prepareForBgRun();
         if (!snapshot) { btn.disabled = false; return; }

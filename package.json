@@ -8,6 +8,9 @@
     "vite:dev": "npx vite",
     "vite:build": "npx vite build",
     "preview": "npx vite preview",
+    "docs:dev": "npx vitepress dev docs",
+    "docs:build": "npx vitepress build docs",
+    "docs:preview": "npx vitepress preview docs",
     "prepare": "husky",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -19,7 +22,13 @@
     "jsdom": "^29.1.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
+    "vitepress": "^1.6.4",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "vitepress": {
+      "vite": "6.4.3"
+    }
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

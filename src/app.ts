@@ -281,12 +281,16 @@ async function init() {
   initCommandPalette(allNodes, canvas, setStatus);
   initModals(allNodes, (obj) => {
     try {
-      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings } = deserialize(JSON.stringify(obj));
+      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(JSON.stringify(obj));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
       wfManager.parallelExecution  = parallelExecution;
       wfManager.maxConcurrentNodes = maxConcurrentNodes;
+      wfManager.unlimitedDuration  = unlimitedDuration;
+      wfManager.maxDurationSecs    = maxDurationSecs;
       wfManager.chatSettings       = chatSettings;
+      wfManager.currentTags        = tags;
+      wfManager.currentCollectionId = collectionId;
       wfManager.currentId = id; wfManager.currentName = name;
       wfManager.markUnsaved(false); setTitle(name);
       document.getElementById("output-drawer")!.classList.add("hidden");

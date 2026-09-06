@@ -18,6 +18,7 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +62,26 @@ pub struct WorkflowResult {
 
 // ── Credential resolver ───────────────────────────────────────────────────────
 
+/// Why [`CredentialResolver::resolve`] could not produce a value. Distinguishes
+/// root causes so the executor's warning names what actually happened (deleted,
+/// corrupted, unreachable store) instead of a single generic "not found" — the
+/// three collapse to indistinguishable outcomes for the user otherwise.
+#[derive(Debug, Clone, Error)]
+pub enum CredentialResolveError {
+    /// No entry exists for this ID in the backing store (deleted, or the
+    /// workflow references an ID from a different install's store).
+    #[error("not found")]
+    NotFound,
+    /// An entry exists but could not be read back (decryption failure, corrupt
+    /// record).
+    #[error("unreadable: {0}")]
+    Unreadable(String),
+    /// The resolver failed independent of the specific credential (e.g. the
+    /// backing store's connection could not be acquired).
+    #[error("store error: {0}")]
+    StoreError(String),
+}
+
 /// Provides resolved credential values to the executor at run time.
 ///
 /// The executor calls `resolve(credential_id)` for each credential reference in
@@ -72,11 +93,14 @@ pub struct WorkflowResult {
 /// **Embedders:** implement this trait for whatever secret store fits your context.
 #[async_trait::async_trait]
 pub trait CredentialResolver: Send + Sync + 'static {
-    /// Return the plaintext value for `credential_id`, or `None` if not found.
+    /// Return the plaintext value for `credential_id`, or an error describing why
+    /// it couldn't be resolved.
     ///
-    /// `None` causes the corresponding credential field to resolve to an empty string
-    /// in the node's input. The executor does not treat a missing credential as a hard failure.
-    async fn resolve(&self, credential_id: &str) -> Option<String>;
+    /// An `Err` leaves the corresponding field absent from the node's input (not
+    /// set to an empty string) and logs a warning naming the credential and the
+    /// reason. The executor does not treat a missing credential as a hard failure
+    /// — the node still runs.
+    async fn resolve(&self, credential_id: &str) -> Result<String, CredentialResolveError>;
 }
 
 // ── Executor ──────────────────────────────────────────────────────────────────
@@ -520,14 +544,22 @@ impl WorkflowExecutor {
             }
         }
 
-        let (mut resolved_input, expr_warnings) =
+        let (mut resolved_input, mut expr_warnings) =
             crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.config.env_allowlist.as_deref());
 
         if !node_def.credentials.is_empty() {
             if let Some(obj) = resolved_input.as_object_mut() {
                 for (key, credential_id) in &node_def.credentials {
-                    if let Some(secret) = self.credential_resolver.resolve(credential_id).await {
-                        obj.insert(key.clone(), Value::String(secret));
+                    match self.credential_resolver.resolve(credential_id).await {
+                        Ok(secret) => {
+                            obj.insert(key.clone(), Value::String(secret));
+                        }
+                        Err(reason) => {
+                            expr_warnings.push(format!(
+                                "Credential '{}' (field '{}') could not be resolved — {}. Field left unset.",
+                                credential_id, key, reason
+                            ));
+                        }
                     }
                 }
             }
@@ -775,8 +807,8 @@ mod tests {
     struct NoopCredentials;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCredentials {
-        async fn resolve(&self, _id: &str) -> Option<String> {
-            None
+        async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+            Err(CredentialResolveError::NotFound)
         }
     }
 
@@ -857,6 +889,105 @@ mod tests {
             max_concurrent_nodes: None,
             settings: Default::default(),
         }
+    }
+
+    // ── Credential resolution ────────────────────────────────────────────────
+
+    struct CaptureInputNode;
+    #[async_trait::async_trait]
+    impl Node for CaptureInputNode {
+        fn type_id(&self)       -> &'static str { "capture_input_test" }
+        fn display_name(&self)  -> &'static str { "Capture Input Test" }
+        fn node_type(&self)     -> NodeType     { NodeType::Utility }
+        fn version(&self)       -> &'static str { "1.0" }
+        fn input_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        async fn execute(&self, input: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::success(input.input.clone())
+        }
+    }
+
+    struct FixedCredential(&'static str);
+    #[async_trait::async_trait]
+    impl CredentialResolver for FixedCredential {
+        async fn resolve(&self, _credential_id: &str) -> Result<String, CredentialResolveError> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    fn single_node_workflow_with_credential(key: &str, credential_id: &str) -> Workflow {
+        let mut credentials = HashMap::new();
+        credentials.insert(key.to_string(), credential_id.to_string());
+        let node = WorkflowNode {
+            id: "n1".to_string(),
+            node_type_id: "capture_input_test".to_string(),
+            node_type: NodeType::Utility,
+            name: "Test Node".to_string(),
+            config: serde_json::json!({}),
+            credentials,
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf1".to_string(),
+            name: "Test Workflow".to_string(),
+            description: String::new(),
+            nodes: vec![node],
+            edges: vec![],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_resolution_success_inserts_field_with_no_warning() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(CaptureInputNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("sk-secret")));
+        let workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.node_outputs.get("n1"),
+            Some(&serde_json::json!({ "api_key": "sk-secret" })),
+            "resolved credential must be injected into the node's input exactly as before"
+        );
+        assert!(
+            result.logs.iter().all(|e| !e.message.contains("Credential")),
+            "a successful resolution must not log a credential warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_resolution_failure_logs_warning_and_leaves_field_unset() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(CaptureInputNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let workflow = single_node_workflow_with_credential("api_key", "cred_missing");
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+        assert!(result.success, "an unresolved credential must not fail the node");
+        assert_eq!(
+            result.node_outputs.get("n1"),
+            Some(&serde_json::json!({})),
+            "field must stay unset, not inserted as an empty string or otherwise"
+        );
+
+        let warning = result.logs.iter().find(|e| e.message.contains("cred_missing"));
+        assert!(warning.is_some(), "resolution failure must be logged");
+        let warning = warning.unwrap();
+        assert!(matches!(warning.level, LogLevel::Warn));
+        assert_eq!(warning.node_id.as_deref(), Some("n1"));
     }
 
     // ── Serde tests ───────────────────────────────────────────────────────────

@@ -565,7 +565,7 @@ impl WorkflowExecutor {
 //       entry; a prior body's output for the same iteration must be preserved.
 #[cfg(test)]
 mod tests {
-    use super::super::{CredentialResolver, WorkflowExecutor};
+    use super::super::{CredentialResolveError, CredentialResolver, WorkflowExecutor};
     use crate::error::EngineError;
     use crate::migration::CURRENT_VERSION;
     use crate::model::{NodeInput, NodeOutput, NodeType, Workflow, WorkflowEdge, WorkflowNode};
@@ -580,8 +580,8 @@ mod tests {
     struct NoopCreds;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCreds {
-        async fn resolve(&self, _: &str) -> Option<String> {
-            None
+        async fn resolve(&self, _: &str) -> Result<String, CredentialResolveError> {
+            Err(CredentialResolveError::NotFound)
         }
     }
 
@@ -1100,13 +1100,11 @@ mod tests {
         assert_eq!(all_results[2]["seq"], 2, "iteration 2 output must be seq=2");
     }
 
-    // ── regression: If-style branch gating inside a loop body ──────
+    // ── If-style branch gating inside a loop body ──────
     //
-    // Before the fix: collect_loop_body_nodes's BFS pulled every reachable node
-    // into body_set with no from_port filter, and execute_loop_node ran every
-    // body node every iteration unconditionally — an If/Switch node's branch
-    // selection was never honoured inside a loop body; both branches fired
-    // every iteration regardless of which one the condition node "took".
+    // An If/Switch node's branch selection must be honoured for every node in
+    // a loop body, not just top-level nodes: only the edge matching the taken
+    // branch/port may execute, once per iteration.
     //
     // Wires: loop_body -> cond (always emits branch:"on_true") ->
     //   on_true  -> true_body  (increments true_counter)
@@ -1255,9 +1253,9 @@ mod tests {
         );
     }
 
-    // ── regression: Switch-style ("port" field) gating in a loop ────
+    // ── Switch-style ("port" field) gating in a loop ────
     //
-    // Same bug, Switch's port shape instead of If's branch shape: a "switch" node
+    // Same property, Switch's port shape instead of If's branch shape: a "switch" node
     // emitting `{"port": "case_2"}` must activate only its case_2 edge inside a
     // loop body, not case_1 or default as well.
     #[tokio::test]

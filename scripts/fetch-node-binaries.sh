@@ -71,6 +71,74 @@ sha256_of() {
   fi
 }
 
+# Official nodejs.org Linux/macOS builds embed a full native debug symbol table
+# directly in the executable; official Windows builds never do, regardless of
+# any flag, since MSVC always writes debug info to a separate .pdb and never
+# into the .exe itself. `strip` removes that embedded table only - it can't
+# affect which JS the runtime executes, since it never touches V8 or Node's own
+# JS engine, only native debug metadata. Best-effort: a host stripping a
+# foreign-architecture binary (e.g. fetching the arm64 build from an x86_64 dev
+# machine in local all-4 mode) may lack a strip build that understands that
+# architecture - fall back to the unstripped binary rather than failing the
+# whole fetch over a size optimization.
+strip_if_safe() {
+  local file="$1" before after tmp errfile
+  if ! command -v strip >/dev/null 2>&1; then
+    echo "  note: 'strip' not found on this host - staging unstripped"
+    return
+  fi
+  before=$(wc -c < "$file")
+  tmp="$(mktemp "${WORK_DIR}/strip-XXXXXX")"
+  errfile="$(mktemp "${WORK_DIR}/strip-err-XXXXXX")"
+  cp "$file" "$tmp"
+  if strip "$tmp" 2>"$errfile"; then
+    after=$(wc -c < "$tmp")
+    mv "$tmp" "$file"
+    chmod +x "$file"
+    echo "  stripped: ${before} -> ${after} bytes"
+  else
+    echo "  note: strip failed on this binary (likely a cross-architecture host tool) - staging unstripped:"
+    sed 's/^/    /' "$errfile"
+    rm -f "$tmp"
+  fi
+}
+
+# Confirms the staged binary actually runs and reports the version we just
+# fetched - catches a corrupt archive, a bad extraction-path assumption, or a
+# strip pass that broke the binary, none of which the SHA256 check above can
+# catch (that only confirms the download matched the archive, not that the
+# binary inside still runs). Only meaningful when this host can actually
+# execute a binary built for the given triple.
+host_triple() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}:${arch}" in
+    Linux:x86_64)    echo "x86_64-unknown-linux-gnu" ;;
+    Linux:aarch64)   echo "aarch64-unknown-linux-gnu" ;;
+    Darwin:arm64)    echo "aarch64-apple-darwin" ;;
+    MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) echo "x86_64-pc-windows-msvc" ;;
+    *) echo "" ;;
+  esac
+}
+
+verify_runs() {
+  local staged="$1" triple="$2" out
+  if [ "$(host_triple)" != "$triple" ]; then
+    echo "  verify: skipped (this host cannot execute a ${triple} binary)"
+    return
+  fi
+  if ! out="$("$staged" --version 2>&1)"; then
+    echo "ERROR: ${staged} failed to execute (--version): ${out}" >&2
+    exit 1
+  fi
+  if [ "$out" != "v${NODE_VERSION}" ]; then
+    echo "ERROR: ${staged} ran but reported '${out}', expected v${NODE_VERSION}" >&2
+    exit 1
+  fi
+  echo "  verify: PASS (${staged} --version -> ${out})"
+}
+
 verify_sha256() {
   local file="$1" remote_name="$2"
   local expected actual
@@ -119,8 +187,12 @@ for entry in "${TARGETS[@]}"; do
   cp "$src_bin" "$staged"
   [ "$kind" != "zip" ] && chmod +x "$staged"
 
+  # zip targets are today's one PE (.exe) build - never stripped, see strip_if_safe.
+  [ "$kind" = "tar" ] && strip_if_safe "$staged"
+
   size_mb=$(( $(wc -c < "$staged") / 1024 / 1024 ))
   echo "staged ${staged} (${size_mb} MB, sha256 verified against ${archive})"
+  verify_runs "$staged" "$triple"
 done
 
 echo

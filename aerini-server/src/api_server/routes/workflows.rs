@@ -44,6 +44,13 @@ pub struct SseParams {
     /// will be forwarded. Subject to token ACL — will 403 if the token's ACL
     /// does not include the requested workflow.
     pub workflow_id: Option<String>,
+    /// Optional: additionally drop `scheduler-status` events carrying a
+    /// `last_result` whose triggering request's `session_id` doesn't match.
+    /// A workflow-scoped token is shared by every visitor of an embedded
+    /// widget (see routes::widget) — without this, one visitor's SSE
+    /// connection receives every other visitor's reply too. Opt-in and
+    /// additive: a connection that omits this behaves exactly as before.
+    pub session_id: Option<String>,
 }
 
 pub async fn list_workflows(
@@ -295,6 +302,27 @@ pub async fn run_workflow(
     }
 }
 
+/// Whether a parsed SSE event should be forwarded to a connection scoped to
+/// `want` (a widget visitor's session_id). Only a `scheduler-status` event
+/// carrying a `last_result` is session-filtered at all; anything else (a
+/// heartbeat, a "running" status with no result yet, or a non-widget
+/// workflow whose trigger payload never carried a session_id) passes through
+/// unfiltered, so this can't silently break a caller that isn't the widget.
+fn event_passes_session_filter(parsed: &Value, want: &str) -> bool {
+    let is_status_with_result = parsed.get("event").and_then(|e| e.as_str()) == Some("scheduler-status")
+        && !parsed["payload"]["last_result"].is_null();
+    if !is_status_with_result {
+        return true;
+    }
+    let Some(node_outputs) = parsed["payload"]["last_result"]["node_outputs"].as_object() else {
+        return true;
+    };
+    let session_ids: Vec<&str> = node_outputs.values()
+        .filter_map(|out| out["body"]["session_id"].as_str())
+        .collect();
+    session_ids.is_empty() || session_ids.contains(&want)
+}
+
 pub async fn sse_events(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
@@ -353,13 +381,16 @@ pub async fn sse_events(
         }
     };
 
-    let rx     = s.sse_tx.subscribe();
+    let rx         = s.sse_tx.subscribe();
+    let session_id = q.session_id.clone();
     let stream = BroadcastStream::new(rx)
         .filter_map(move |msg| {
             let raw = msg.ok()?;
             // If there is an active filter, parse the event JSON and check workflow_id.
+            let needs_parse = effective_filter.is_some() || session_id.is_some();
+            let parsed: Option<Value> = if needs_parse { serde_json::from_str(&raw).ok() } else { None };
+
             if let Some(ref filter) = effective_filter {
-                let parsed: Option<Value> = serde_json::from_str(&raw).ok();
                 let wf_id = parsed
                     .as_ref()
                     .and_then(|v| v.get("payload"))
@@ -374,6 +405,24 @@ pub async fn sse_events(
                     _ => return None,
                 }
             }
+
+            // Session-scoping (widget use case): only applies to a
+            // `scheduler-status` event that actually carries a result, and
+            // only when that result's originating request itself carried a
+            // session_id (i.e. came from the widget relay, see
+            // routes::widget::WidgetTriggerBody). Any other event — a
+            // heartbeat, a "running" status with no last_result yet, or a
+            // non-widget workflow whose trigger payload has no session_id —
+            // passes through unfiltered, so this can't silently break a
+            // caller that isn't the widget.
+            if let Some(ref want) = session_id {
+                if let Some(v) = &parsed {
+                    if !event_passes_session_filter(v, want) {
+                        return None;
+                    }
+                }
+            }
+
             Some(Ok::<axum::response::sse::Event, std::convert::Infallible>(
                 axum::response::sse::Event::default().data(raw)
             ))
@@ -399,6 +448,61 @@ pub async fn sse_events(
             .interval(Duration::from_secs(30))
             .text("ping"),
     ).into_response()
+}
+
+#[cfg(test)]
+mod session_filter_tests {
+    use super::event_passes_session_filter;
+    use serde_json::json;
+
+    // Normal case: a scheduler-status event whose webhook node output
+    // carries the requesting visitor's own session_id must pass.
+    #[test]
+    fn passes_when_session_id_matches() {
+        let event = json!({
+            "event": "scheduler-status",
+            "payload": { "last_result": { "node_outputs": {
+                "webhook_1": { "body": { "session_id": "visitor-a" } }
+            }}}
+        });
+        assert!(event_passes_session_filter(&event, "visitor-a"));
+    }
+
+    // The actual vulnerability F1 fixed: a reply meant for one visitor must
+    // not be forwarded to a differently-scoped connection.
+    #[test]
+    fn drops_when_session_id_differs() {
+        let event = json!({
+            "event": "scheduler-status",
+            "payload": { "last_result": { "node_outputs": {
+                "webhook_1": { "body": { "session_id": "visitor-a" } }
+            }}}
+        });
+        assert!(!event_passes_session_filter(&event, "visitor-b"));
+    }
+
+    // Edge case: events with no session_id anywhere in their node outputs
+    // (non-widget workflows, or a widget trigger predating this field)
+    // must still pass — this fix is opt-in, not a breaking default.
+    #[test]
+    fn passes_when_event_carries_no_session_id() {
+        let heartbeat = json!({ "event": "heartbeat" });
+        assert!(event_passes_session_filter(&heartbeat, "visitor-a"));
+
+        let running = json!({
+            "event": "scheduler-status",
+            "payload": { "last_result": null }
+        });
+        assert!(event_passes_session_filter(&running, "visitor-a"));
+
+        let no_session_field = json!({
+            "event": "scheduler-status",
+            "payload": { "last_result": { "node_outputs": {
+                "webhook_1": { "body": { "message": "hi" } }
+            }}}
+        });
+        assert!(event_passes_session_filter(&no_session_field, "visitor-a"));
+    }
 }
 
 #[cfg(test)]

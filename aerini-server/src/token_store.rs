@@ -96,6 +96,28 @@ impl TokenStore {
     /// Create a new token. Returns the raw (unhashed) token string — shown once.
     /// `expires_in_secs`: optional TTL in seconds. None = non-expiring.
     pub fn create_token(&self, label: &str, scopes: &[&str], expires_in_secs: Option<u64>) -> rusqlite::Result<String> {
+        self.create_token_with_id(label, scopes, expires_in_secs).map(|(_, raw)| raw)
+    }
+
+    /// Same as [`create_token`](Self::create_token), also returning the new
+    /// token's id — needed by callers that must act on the token immediately
+    /// after creation (e.g. granting a workflow ACL) without a second lookup.
+    pub fn create_token_with_id(&self, label: &str, scopes: &[&str], expires_in_secs: Option<u64>) -> rusqlite::Result<(String, String)> {
+        self.create_token_with_workflows(label, scopes, expires_in_secs, &[])
+    }
+
+    /// Same as [`create_token_with_id`], additionally granting SSE ACL access
+    /// to each of `workflow_ids` in the same transaction as the token row
+    /// itself — a failure partway through the ACL grants rolls back the
+    /// token row too, instead of leaving an orphaned, partially-scoped token
+    /// behind. `create_token_with_id` is this with an empty slice.
+    pub fn create_token_with_workflows(
+        &self,
+        label: &str,
+        scopes: &[&str],
+        expires_in_secs: Option<u64>,
+        workflow_ids: &[String],
+    ) -> rusqlite::Result<(String, String)> {
         // 32 bytes from OsRng → 256 bits of entropy, URL-safe base64 encoded.
         // Replaces UUID v4 which had only 122 bits due to fixed version/variant bits.
         let mut raw_bytes = [0u8; 32];
@@ -105,17 +127,27 @@ impl TokenStore {
         let hash     = hash_token(&self.key, &raw);
         let scopes_j = serde_json::to_string(scopes).unwrap_or_else(|_| "[]".to_string());
         let now      = Utc::now();
+        let now_s    = now.to_rfc3339();
         let expires_at: Option<String> = expires_in_secs.map(|secs| {
             let secs_i64 = i64::try_from(secs).unwrap_or(i64::MAX);
             (now + chrono::Duration::seconds(secs_i64)).to_rfc3339()
         });
-        let conn     = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO tokens (token_id, token_hash, label, scopes, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![token_id, hash, label, scopes_j, now.to_rfc3339(), expires_at],
+            params![token_id, hash, label, scopes_j, now_s, expires_at],
         )?;
-        Ok(raw)
+        for wf_id in workflow_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO token_workflow_acl (token_id, workflow_id, granted_at)
+                 VALUES (?1, ?2, ?3)",
+                params![token_id, wf_id, now_s],
+            )?;
+        }
+        tx.commit()?;
+        Ok((token_id, raw))
     }
 
     /// Import an existing raw token (e.g. from `AERINI_TOKEN` migration).
@@ -296,5 +328,43 @@ impl TokenStore {
         } else {
             Ok(Some(ids.into_iter().collect()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_temp_store() -> TokenStore {
+        let dir = std::env::temp_dir().join(format!("aerini-token-store-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        TokenStore::open(&dir.join("tokens.db"), [7u8; 32]).expect("open token store")
+    }
+
+    /// All workflow_ids passed to `create_token_with_workflows` must be
+    /// granted in the same call — no separate `acl_grant` needed afterward.
+    #[test]
+    fn create_token_with_workflows_grants_all_ids() {
+        let store = open_temp_store();
+        let ids = vec!["wf_a".to_string(), "wf_b".to_string()];
+        let (token_id, _raw) = store
+            .create_token_with_workflows("widget-reader", &["read"], None, &ids)
+            .expect("create token with workflows");
+        let mut granted = store.acl_list(&token_id).expect("acl_list");
+        granted.sort();
+        assert_eq!(granted, vec!["wf_a".to_string(), "wf_b".to_string()]);
+    }
+
+    /// An empty `workflow_ids` slice must behave exactly like the old
+    /// `create_token_with_id` — a token with no ACL rows (unrestricted).
+    /// Guards the refactor where `create_token_with_id` now delegates to
+    /// `create_token_with_workflows(..., &[])`.
+    #[test]
+    fn create_token_with_workflows_empty_slice_leaves_token_unrestricted() {
+        let store = open_temp_store();
+        let (token_id, _raw) = store
+            .create_token_with_id("no-restriction", &["read"], None)
+            .expect("create token");
+        assert!(store.acl_list(&token_id).expect("acl_list").is_empty());
     }
 }

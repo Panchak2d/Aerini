@@ -274,15 +274,15 @@ impl EventSink for TauriEventSink {
     }
 }
 
-/// Read a .aerini workflow file from an absolute path.
-/// Restricted to .aerini extension only.
+/// Read a .aerini or .json workflow file from an absolute path.
+/// Restricted to those two extensions.
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
     let canonical = std::fs::canonicalize(&path)
         .map_err(|e| format!("Could not resolve path '{}': {}", path, e))?;
     let canonical_str = canonical.to_string_lossy();
-    if !canonical_str.ends_with(".aerini") {
-        return Err("Only .aerini files can be opened this way.".to_string());
+    if !canonical_str.ends_with(".aerini") && !canonical_str.ends_with(".json") {
+        return Err("Only .aerini or .json files can be opened this way.".to_string());
     }
     std::fs::read_to_string(&canonical)
         .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))
@@ -512,7 +512,6 @@ pub fn run() {
     aerini_engine::mem_tracking::install();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(
@@ -528,11 +527,23 @@ pub fn run() {
                 WorkflowDb::open(&data_dir.join("workflows.db"), 8)
                     .expect("Failed to open workflow database")
             );
+            let cred_db_path = data_dir.join("credentials.db");
+            let cred_key_fallback = data_dir.join(".cred.key");
+            // OsKeychain's Linux backend blocks the calling thread to reach the
+            // secret service, and this hook runs on Tauri's own Tokio runtime —
+            // do the open on a dedicated blocking thread, not here.
             let cred_store = Arc::new(
-                CredentialStore::open(
-                    &data_dir.join("credentials.db"),
-                    KeySource::OsKeychain { fallback: data_dir.join(".cred.key") },
-                ).expect("Failed to open credential store")
+                tauri::async_runtime::block_on(async move {
+                    tokio::task::spawn_blocking(move || {
+                        CredentialStore::open(
+                            &cred_db_path,
+                            KeySource::OsKeychain { fallback: cred_key_fallback },
+                        )
+                    })
+                    .await
+                    .expect("Credential store init task panicked")
+                })
+                .expect("Failed to open credential store")
             );
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));

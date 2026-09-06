@@ -4,7 +4,7 @@ use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_err_msg};
+use super::shared::{send_and_parse, extract_provider_error};
 
 // Gemini
 // Docs: https://ai.google.dev/api/generate-content
@@ -89,8 +89,7 @@ pub(super) async fn call_gemini(
     };
 
     // Gemini error: { "error": { "code": 400, "message": "...", "status": "..." } }
-    if let Some(err_obj) = resp_json["error"].as_object() {
-        let msg = extract_err_msg(err_obj, "Unknown Gemini error");
+    if let Some(msg) = extract_provider_error(&resp_json, "Unknown Gemini error") {
         return if status == 429 {
             NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
         } else {

@@ -12,6 +12,7 @@ pub(crate) use attachments::{
     process_attachments,
     extract_port_attachments,
 };
+pub(crate) use shared::extract_provider_error;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -197,11 +198,11 @@ mod tests {
         assert!(!err.recoverable);
     }
 
-    /// `base_url` was SSRF-checked under `SsrfPolicy::Strict`,
-    /// which blocks loopback unconditionally — despite this node's own schema
-    /// advertising local-model (Ollama) support. Spin up a real local server
-    /// and confirm a loopback `base_url` now reaches it (any outcome other
-    /// than `SSRF_BLOCKED` proves the request was not rejected pre-flight).
+    /// `base_url` is SSRF-checked under `SsrfPolicy::AllowLocal`, which
+    /// permits loopback, matching this node's own schema advertising
+    /// local-model (Ollama) support. Spin up a real local server and confirm
+    /// a loopback `base_url` reaches it (any outcome other than
+    /// `SSRF_BLOCKED` proves the request was not rejected pre-flight).
     async fn spawn_minimal_openai_mock() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

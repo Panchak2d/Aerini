@@ -5,7 +5,7 @@ import {
   type WorkflowSummary, type VersionRow,
 } from "./ipc/workflow";
 import { invoke } from "@tauri-apps/api/core";
-import { serialize, deserialize, type ChatSettings, DEFAULT_CHAT_SETTINGS } from "./canvas/CanvasSerializer";
+import { serialize, deserialize, type ChatSettings, type WorkflowDocument, DEFAULT_CHAT_SETTINGS } from "./canvas/CanvasSerializer";
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import type { Connector } from "./canvas/Connector";
@@ -225,6 +225,8 @@ export class WorkflowManager {
   maxConcurrentNodes  = 8;
   /** Desktop-only opt-out of the 24h manual-run ceiling. Serialised into workflow JSON. */
   unlimitedDuration   = false;
+  /** Wall-clock limit for the whole run, in seconds. undefined = no limit. Serialised into workflow JSON. */
+  maxDurationSecs: number | undefined = undefined;
   /** Per-workflow Chat Panel feature toggles. Serialised into workflow JSON
    *  under "settings.chat"; read by ChatPanel.applyToggles() on panel open. */
   chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
@@ -281,7 +283,7 @@ export class WorkflowManager {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
     this.autoSaveTimer = setTimeout(async () => {
       if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
       if (isTauri()) {
         try { await saveWorkflow(json); } catch (e) { console.error("Aerini: autosave failed", e); }
       } else {
@@ -478,8 +480,8 @@ export class WorkflowManager {
         }
         const raw = isTauri() ? await loadWorkflow(id) : lsLoad(id);
         if (!raw) continue;
-        const { name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags } = deserialize(raw);
-        const json = serialize(id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId);
+        const { name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, maxDurationSecs } = deserialize(raw);
+        const json = serialize(id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId, maxDurationSecs);
         if (isTauri()) await saveWorkflow(json);
         else lsSave(id, name, json, tags, collectionId);
       } catch (e) {
@@ -519,7 +521,40 @@ export class WorkflowManager {
     const list = document.getElementById("workflow-list")!;
     list.innerHTML = "";
     list.classList.toggle("select-mode", this.selectMode);
-    let wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
+
+    // Tauri's listWorkflows() can fail (DB read error). Swallowing that to
+    // `[]` would render identically to a genuinely empty library -- "you
+    // have no workflows" is a much scarier (and wrong) message than a load
+    // error. loadFailed keeps the two apart.
+    let wfs: WorkflowSummary[];
+    let loadFailed = false;
+    if (isTauri()) {
+      try { wfs = await listWorkflows(); }
+      catch (e) { console.error("Aerini: listWorkflows failed:", e); wfs = []; loadFailed = true; }
+    } else {
+      wfs = lsList();
+    }
+
+    if (loadFailed) {
+      const err = document.createElement("div");
+      err.className = "workflow-list-empty";
+      const icon = document.createElement("div");
+      icon.className = "workflow-list-empty-icon";
+      icon.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12.01" y2="16.5"/></svg>`;
+      err.appendChild(icon);
+      const text = document.createElement("div");
+      text.className = "workflow-list-empty-text";
+      text.textContent = "Couldn't load your workflows.";
+      err.appendChild(text);
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn-sm";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => this.refreshWorkflowList());
+      err.appendChild(retry);
+      list.appendChild(err);
+      return;
+    }
 
     // Running workflows appear only in Background Runs: exclude from this list
     wfs = wfs.filter(wf => !isWorkflowRunning(wf.id));
@@ -546,7 +581,14 @@ export class WorkflowManager {
     if (!wfs.length) {
       const empty = document.createElement("div");
       empty.className = "workflow-list-empty";
-      empty.textContent = "No saved workflows";
+      const icon = document.createElement("div");
+      icon.className = "workflow-list-empty-icon";
+      icon.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="8.5" y="14" width="7" height="7" rx="1.5"/><path d="M6.5 10v1.5A2.5 2.5 0 0 0 9 14M17.5 10v1.5A2.5 2.5 0 0 1 15 14"/></svg>`;
+      empty.appendChild(icon);
+      const text = document.createElement("div");
+      text.className = "workflow-list-empty-text";
+      text.textContent = "No workflows yet — click + to create one.";
+      empty.appendChild(text);
       list.appendChild(empty);
       return;
     }
@@ -560,6 +602,15 @@ export class WorkflowManager {
     for (const { collection, items } of visibleCollectionGroups(groupWorkflowsByCollection(wfs, this.collections))) {
       list.appendChild(this.buildCollectionGroup(collection, items));
     }
+
+    // Roving tabindex: buildWorkflowItem only marks the *open* workflow
+    // tabbable. If none of the rendered items is the open one (e.g. it's
+    // filtered out, or nothing is open yet), the list would have no
+    // keyboard entry point at all -- fall back to the first row.
+    if (!list.querySelector('.workflow-item[tabindex="0"]')) {
+      list.querySelector<HTMLElement>(".workflow-item")?.setAttribute("tabindex", "0");
+    }
+
     this.updateBulkBar();
   }
 
@@ -582,7 +633,7 @@ export class WorkflowManager {
 
     const chev = document.createElement("span");
     chev.className = "workflow-collection-chev";
-    chev.textContent = "▾";
+    chev.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`;
     header.appendChild(chev);
 
     const dot = document.createElement("span");
@@ -625,7 +676,9 @@ export class WorkflowManager {
       const name = document.createElement("span");
       name.className = "workflow-collection-name" + (isUncategorized ? " workflow-collection-name-muted" : "");
       name.textContent = collection?.name ?? "Uncategorized";
-      name.title = isUncategorized ? "Uncategorized" : "Double-click to rename";
+      // Full name in the tooltip too, not just the rename hint -- otherwise
+      // a name long enough to ellipsis has no way to be read in full.
+      name.title = isUncategorized ? "Uncategorized" : `${collection.name} • Double-click to rename`;
       if (!isUncategorized) {
         name.addEventListener("dblclick", e => { e.stopPropagation(); this.startCollectionRename(collection.id); });
       }
@@ -655,7 +708,15 @@ export class WorkflowManager {
       }
 
       const toggle = () => this.toggleCollectionCollapsed(collection?.id ?? null);
-      header.addEventListener("click", toggle);
+      header.addEventListener("click", (e: MouseEvent) => {
+        // Pre-existing latent bug, found auditing the same pattern just added
+        // for workflow-item rename: double-clicking the name to rename it
+        // fires two ordinary clicks before the dblclick handler above runs,
+        // each toggling collapse/expand -- a visible flicker right before the
+        // rename input appears. e.detail (click count) skips the repeats.
+        if (e.detail > 1) return;
+        toggle();
+      });
       header.addEventListener("keydown", e => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
       });
@@ -698,7 +759,15 @@ export class WorkflowManager {
     item.className = "workflow-item" + (selected ? " selected" : "");
     item.dataset.wfId = wf.id;
     item.draggable = true;
-    if (wf.id === this.currentId) item.classList.add("active");
+    // Roving tabindex: only the open workflow is tabbable by default (falls
+    // back to the first row in renderWorkflowList if none is open/visible).
+    // aria-current marks it as the current item in the set for assistive tech.
+    item.tabIndex = -1;
+    if (wf.id === this.currentId) {
+      item.classList.add("active");
+      item.tabIndex = 0;
+      item.setAttribute("aria-current", "true");
+    }
 
     // Run state indicator dot. wf is never running here (filtered above in
     // refreshWorkflowList), so the wrapper starts empty; setWorkflowRunning()
@@ -724,6 +793,10 @@ export class WorkflowManager {
     const nameEl = document.createElement("span");
     nameEl.className = "workflow-item-name";
     nameEl.textContent = wf.name;
+    // Double-click to rename in place -- mirrors the collection header's own
+    // rename gesture exactly, so renaming a workflow no longer requires
+    // opening it first and double-clicking the canvas title bar.
+    nameEl.addEventListener("dblclick", e => { e.stopPropagation(); this.startItemRename(nameEl, wf); });
 
     const tags = wf.tags ?? [];
     item.dataset.wfTags = tags.join(" ").toLowerCase();
@@ -732,7 +805,10 @@ export class WorkflowManager {
     const savedLabel = !isNaN(updatedAt.getTime())
       ? `Last saved: ${updatedAt.toLocaleDateString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" })}`
       : "";
-    item.title = tags.length ? `${savedLabel}${savedLabel ? " • " : ""}Tags: ${tags.join(", ")}` : savedLabel;
+    // Full name first -- otherwise a name long enough to ellipsis in the row
+    // has no way to be read in full (the rest of the tooltip only ever
+    // carried save-date/tags, never the name itself).
+    item.title = [wf.name, savedLabel, tags.length ? `Tags: ${tags.join(", ")}` : ""].filter(Boolean).join(" • ");
 
     let tagsEl: HTMLElement | null = null;
     if (tags.length) {
@@ -757,7 +833,7 @@ export class WorkflowManager {
 
     const delBtn = document.createElement("button");
     delBtn.className = "workflow-item-del";
-    delBtn.textContent = "✕";
+    delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>`;
     delBtn.title = "Delete workflow";
     delBtn.addEventListener("click", async e => {
       e.stopPropagation();
@@ -801,12 +877,45 @@ export class WorkflowManager {
     item.appendChild(dupBtn);
     item.appendChild(delBtn);
 
-    item.addEventListener("click", (e: MouseEvent) => {
+    // Shared by mouse click and Enter/Space so keyboard activation matches
+    // click behavior exactly (select-mode toggle / ctrl-toggle / shift-range
+    // / plain load), instead of duplicating the branching twice.
+    const activate = (mods: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => {
       if (this.selectMode) { this.toggleSelected(wf.id); return; }
-      if (e.ctrlKey || e.metaKey) { this.toggleSelected(wf.id); return; }
-      if (e.shiftKey) { this.selectRange(wf.id); return; }
-      // Plain click, not in select mode: existing behavior is to open onto canvas.
+      if (mods.ctrlKey || mods.metaKey) { this.toggleSelected(wf.id); return; }
+      if (mods.shiftKey) { this.selectRange(wf.id); return; }
+      // Plain click/Enter, not in select mode: existing behavior is to open onto canvas.
       this.handleLoad(wf.id);
+    };
+
+    item.addEventListener("click", (e: MouseEvent) => {
+      // e.detail is the click count within the double-click window (1, then
+      // 2, ...). Without this guard, double-clicking the name to rename it
+      // would first fire two ordinary clicks -- each one reloading the
+      // workflow onto the canvas -- before the dblclick handler below ever
+      // runs. Only the first click of any click/dblclick sequence activates;
+      // the row's own dblclick listener (name) handles the rest.
+      if (e.detail > 1) return;
+      activate(e);
+    });
+
+    item.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        activate(e);
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        this.moveItemFocus(item, e.key);
+      } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+        e.preventDefault();
+        const r = item.getBoundingClientRect();
+        this.openItemContextMenu(r.left + 24, r.top + r.height / 2, wf, item);
+      }
+    });
+
+    item.addEventListener("contextmenu", (e: MouseEvent) => {
+      e.preventDefault();
+      this.openItemContextMenu(e.clientX, e.clientY, wf, item);
     });
 
     item.addEventListener("dragstart", (e: DragEvent) => {
@@ -820,6 +929,173 @@ export class WorkflowManager {
     item.addEventListener("dragend", () => item.classList.remove("dragging"));
 
     return item;
+  }
+
+  /** Roving-tabindex focus move for the flat, currently-rendered `.workflow-item`
+   *  order. `offsetParent !== null` filters out rows hidden by the search
+   *  filter (sidebar-sections.ts sets style.display = "none" on both the item
+   *  and, when appropriate, its whole collection group) without duplicating
+   *  that visibility logic here. Collapsed collections don't need filtering:
+   *  their items simply aren't in the DOM. */
+  private moveItemFocus(current: HTMLElement, key: string): void {
+    const list = document.getElementById("workflow-list");
+    if (!list) return;
+    const visible = Array.from(list.querySelectorAll<HTMLElement>(".workflow-item"))
+      .filter(el => el.offsetParent !== null);
+    if (!visible.length) return;
+    const idx = visible.indexOf(current);
+    let next: HTMLElement | undefined;
+    if      (key === "ArrowDown") next = visible[Math.min(idx + 1, visible.length - 1)];
+    else if (key === "ArrowUp")   next = visible[Math.max(idx - 1, 0)];
+    else if (key === "Home")      next = visible[0];
+    else if (key === "End")       next = visible[visible.length - 1];
+    if (!next || next === current) return;
+    current.tabIndex = -1;
+    next.tabIndex = 0;
+    next.focus();
+  }
+
+  /** Double-click-to-rename for a sidebar row, mirroring
+   *  buildCollectionGroup's inline collection-rename input one-for-one. */
+  private startItemRename(nameEl: HTMLElement, wf: WorkflowSummary): void {
+    const inp = document.createElement("input");
+    inp.className = "workflow-item-rename-input";
+    inp.value = wf.name;
+    inp.autocomplete = "off";
+    nameEl.replaceWith(inp);
+    inp.focus(); inp.select();
+
+    let settled = false;
+    const restore = (text: string): HTMLElement => {
+      const span = document.createElement("span");
+      span.className = "workflow-item-name";
+      span.textContent = text;
+      span.addEventListener("dblclick", e => { e.stopPropagation(); this.startItemRename(span, wf); });
+      inp.replaceWith(span);
+      return span;
+    };
+    const commit = () => {
+      if (settled) return;
+      settled = true;
+      const value = inp.value.trim();
+      if (!value || value === wf.name) { restore(wf.name); return; }
+      restore(value); // optimistic: renameWorkflowById re-syncs from disk if the save actually fails
+      void this.renameWorkflowById(wf.id, value);
+    };
+    inp.addEventListener("blur", commit);
+    inp.addEventListener("keydown", e => {
+      e.stopPropagation(); // don't let Enter/Escape reach the row's own roving-nav handler
+      if (e.key === "Enter") inp.blur();
+      if (e.key === "Escape") { settled = true; restore(wf.name); }
+    });
+  }
+
+  /** Renames a workflow by id from the sidebar list, whether or not it's
+   *  currently open.
+   *
+   *  For the *open* workflow this only updates in-memory state and marks it
+   *  unsaved -- mirroring startRename (the canvas title-bar rename), which
+   *  never eagerly persists either. Eagerly saving here would also silently
+   *  persist whatever unsaved canvas edits happen to be live, which a
+   *  sidebar-row rename click doesn't imply. The row's own text was already
+   *  updated optimistically by startItemRename's caller, and a refresh here
+   *  would revert it to the still-on-disk old name, so this branch does not
+   *  refresh the list.
+   *
+   *  For any other workflow there's no live canvas at risk, so this persists
+   *  immediately via the same load -> deserialize -> mutate -> serialize ->
+   *  save idiom duplicateWorkflow/moveWorkflowsToCollection already use, then
+   *  refreshes -- needed so a name-based sort order picks up the new name. */
+  async renameWorkflowById(id: string, trimmedName: string): Promise<void> {
+    if (id === this.currentId) {
+      this.currentName = trimmedName;
+      this.markUnsaved(true);
+      this.onTitleChange(trimmedName);
+      return;
+    }
+    try {
+      const raw = isTauri() ? await loadWorkflow(id) : lsLoad(id);
+      if (!raw) {
+        this.onToast("Could not find workflow to rename", "error");
+        await this.refreshWorkflowList();
+        return;
+      }
+      const { name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(raw);
+      if (trimmedName === name) return;
+      const json = serialize(id, trimmedName, nodes, connectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId, maxDurationSecs);
+      if (isTauri()) await saveWorkflow(json);
+      else lsSave(id, trimmedName, json, tags, collectionId);
+      await this.refreshWorkflowList();
+    } catch (e) {
+      this.onToast(`Rename failed: ${e}`, "error");
+      await this.refreshWorkflowList(); // re-sync the row back to its real, on-disk name
+    }
+  }
+
+  /** Right-click / ContextMenu-key menu for a single sidebar row. Reuses the
+   *  .ctx-menu styling and icon set canvas/ContextMenu.ts already defines for
+   *  node right-click menus, so both of the app's context menus look and
+   *  behave identically -- this file doesn't import that class itself since
+   *  it's typed against Canvas/CanvasNode, not a workflow row. */
+  private openItemContextMenu(x: number, y: number, wf: WorkflowSummary, item: HTMLElement): void {
+    document.getElementById("wf-item-ctx-menu")?.remove();
+    const menu = document.createElement("div");
+    menu.id = "wf-item-ctx-menu";
+    menu.className = "ctx-menu";
+    menu.setAttribute("role", "menu");
+
+    const addItem = (label: string, icon: string, danger: boolean, action: () => void) => {
+      const btn = document.createElement("button");
+      btn.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
+      btn.setAttribute("role", "menuitem");
+      btn.innerHTML = `<span class="ctx-menu-icon">${icon}</span><span>${label}</span>`;
+      btn.addEventListener("mousedown", ev => { ev.preventDefault(); menu.remove(); action(); });
+      menu.appendChild(btn);
+    };
+    const addSep = () => {
+      const sep = document.createElement("div");
+      sep.className = "ctx-menu-sep";
+      menu.appendChild(sep);
+    };
+
+    addItem(
+      "Rename",
+      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+      false,
+      () => {
+        const nameEl = item.querySelector<HTMLElement>(".workflow-item-name");
+        if (nameEl) this.startItemRename(nameEl, wf);
+      }
+    );
+    addItem(
+      "Duplicate",
+      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+      false,
+      () => { void this.duplicateWorkflow(wf.id, wf.name); }
+    );
+    addSep();
+    addItem(
+      "Delete",
+      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
+      true,
+      // Reuses the row's own delete button click handler (running-check +
+      // confirm dialog included) instead of re-implementing it here.
+      () => item.querySelector<HTMLButtonElement>(".workflow-item-del")?.click()
+    );
+
+    document.body.appendChild(menu);
+    const mw = menu.offsetWidth  || 178;
+    const mh = menu.offsetHeight || 120;
+    menu.style.left = `${x + mw > window.innerWidth  - 8 ? x - mw : x}px`;
+    menu.style.top  = `${y + mh > window.innerHeight - 8 ? y - mh : y}px`;
+
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) {
+        menu.remove();
+        document.removeEventListener("mousedown", dismiss, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
   }
 
   // -- Bulk action bar ------------------------------------------------------
@@ -1014,10 +1290,11 @@ export class WorkflowManager {
     try {
       const json = isTauri() ? await loadWorkflow(id) : lsLoad(id);
       if (!json) { this.onStatusChange("Workflow not found"); return; }
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
+      this.maxDurationSecs = maxDurationSecs;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.currentCollectionId = collectionId;
@@ -1058,7 +1335,7 @@ export class WorkflowManager {
       // parsed JSON, so any validation deserialize() performs (e.g. dropping
       // edges whose from_node/to_node isn't present in the node list) is
       // applied here too.
-      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
+      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(json);
 
       const newId   = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const newName = `${name} (copy)`;
@@ -1087,7 +1364,7 @@ export class WorkflowManager {
         newConnectors.set(newEdgeId, conn);
       }
 
-      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId);
+      const dupJson = serialize(newId, newName, newNodes, newConnectors, parallelExecution, maxConcurrentNodes, chatSettings, tags, unlimitedDuration, collectionId, maxDurationSecs);
       if (isTauri()) await saveWorkflow(dupJson);
       else lsSave(newId, newName, dupJson, tags, collectionId);
       await this.refreshWorkflowList();
@@ -1101,10 +1378,11 @@ export class WorkflowManager {
   async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
     const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
     try {
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(json);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(json);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
+      this.maxDurationSecs = maxDurationSecs;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.currentCollectionId = collectionId;
@@ -1130,7 +1408,7 @@ export class WorkflowManager {
       if (!name?.trim()) { this.onStatusChange("Save cancelled"); return; }
       this.onTitleChange(this.currentName);
     }
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
     this.onStatusChange("Saving…");
     try {
       if (isTauri()) {
@@ -1164,6 +1442,7 @@ export class WorkflowManager {
     this.parallelExecution  = false;
     this.maxConcurrentNodes = 8;
     this.unlimitedDuration  = false;
+    this.maxDurationSecs    = undefined;
     this.chatSettings       = { ...DEFAULT_CHAT_SETTINGS };
     this.markUnsaved(false);
     this.canvas.nodes.clear();
@@ -1201,7 +1480,7 @@ export class WorkflowManager {
 
   /** Serializes the live in-memory canvas exactly as a save would, without persisting it. */
   getCurrentJson(): string {
-    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+    return serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
   }
 
   /** Restore a version by ID; loads its snapshot onto the canvas. */
@@ -1219,10 +1498,11 @@ export class WorkflowManager {
     try {
       const snapshot = await getVersion(versionId);
       if (!snapshot) return null;
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId } = deserialize(snapshot);
+      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(snapshot);
       this.parallelExecution = parallelExecution;
       this.maxConcurrentNodes = maxConcurrentNodes;
       this.unlimitedDuration = unlimitedDuration;
+      this.maxDurationSecs = maxDurationSecs;
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.currentCollectionId = collectionId;
@@ -1258,7 +1538,7 @@ export class WorkflowManager {
     if (!isTauri()) return false;
     const persisted = await loadWorkflow(this.currentId);
     if (!persisted) return false;
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
     await saveVersion(this.currentId, json, message.trim() || undefined);
     return true;
   }
@@ -1282,7 +1562,7 @@ export class WorkflowManager {
     const id   = this.currentId;
     const name = this.currentName;
     const json = serialize(id, name, this.canvas.nodes, this.canvas.connectors,
-      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
+      this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
     // Persist to storage. This is required, not optional.
     // The scheduler daemon looks up the workflow from the DB by ID;
     // if the save fails the scheduler will immediately error on first run.
@@ -1308,12 +1588,14 @@ export class WorkflowManager {
       return;
     }
 
-    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId);
-    const obj  = JSON.parse(json) as { id: string; name: string; nodes: unknown[]; edges: unknown[]; metadata?: { author?: string; tags?: string[] } };
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
+    const obj  = JSON.parse(json) as WorkflowDocument;
     // collection_id is deliberately not copied into the exported file; it's
     // this sidebar's local folder organization, not a portable property of
-    // the workflow itself.
-    const file = { aerini_version:"1", schema_version:"1.0", id:obj.id, name:obj.name, description:"", author:obj.metadata?.author ?? "", tags:obj.metadata?.tags ?? [], nodes:obj.nodes, edges:obj.edges };
+    // the workflow itself. Every other field mirrors the native schema so
+    // re-importing this file is lossless.
+    obj.metadata.collection_id = null;
+    const file = { aerini_version: "1", ...obj };
     const content  = JSON.stringify(file, null, 2);
     const filename = `${(this.currentName || "workflow").replace(/\s+/g, "-").toLowerCase()}.aerini`;
 

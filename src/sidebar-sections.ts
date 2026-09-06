@@ -36,11 +36,13 @@ export function initSidebarSections(): void {
  * value are all no-ops.
  *
  * Issues addressed:
- *   1. Search bars — hidden class stripped by toggle, stays stripped through
+ *   1. Search bar — hidden class stripped by toggle, stays stripped through
  *      a hot bundle reload. The visible result is a blank styled input in the
- *      sidebar (the originally reported bug).
+ *      sidebar (the originally reported bug). Only Background Runs still has
+ *      a toggle; Workflows search is always visible (see bindWorkflowSectionControls).
  *   2. Stale input values — bar is hidden but typed text remains; the workflow
- *      list is filtered with no visible indication why.
+ *      list is filtered with no visible indication why. The always-visible
+ *      workflow search input is cleared the same way, just without a bar/button pair.
  *   3. Orphaned dropdowns — sort/filter dropdowns are appended to document.body
  *      and removed only by their own dismiss listener. If that listener is lost
  *      the element is stuck: visible, interactive, and broken.
@@ -59,7 +61,6 @@ export function initSidebarSections(): void {
 function resetTransientState(): void {
   // 1 + 2 — Search bars and stale input values
   const searches = [
-    { bar: "wf-search-bar", btn: "btn-wf-search-toggle", input: "wf-search" },
     { bar: "bg-search-bar", btn: "btn-bg-search-toggle", input: "bg-search" },
   ] as const;
 
@@ -74,6 +75,14 @@ function resetTransientState(): void {
       // is "" so the listener starts from a clean state.
       inp.dispatchEvent(new Event("input"));
     }
+  }
+
+  // Workflow search has no show/hide toggle (always visible), but still
+  // needs its stale value cleared the same way.
+  const wfSearch = document.getElementById("wf-search") as HTMLInputElement | null;
+  if (wfSearch && wfSearch.value !== "") {
+    wfSearch.value = "";
+    wfSearch.dispatchEvent(new Event("input"));
   }
 
   // Workflow list items are hidden via inline style.display — reset them
@@ -257,7 +266,8 @@ export function updateBgRunningState(hasRunning: boolean): void {
 }
 
 export function bindSectionSearchToggles(): void {
-  bindSearchToggle("btn-wf-search-toggle", "wf-search-bar", "wf-search");
+  // Workflows search is always visible (see bindWorkflowSectionControls) --
+  // only Background Runs still hides its search behind a toggle button.
   bindSearchToggle("btn-bg-search-toggle", "bg-search-bar", "bg-search");
 }
 
@@ -286,11 +296,33 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
       const tags = item.dataset.wfTags ?? "";
       item.style.display = q && !name.includes(q) && !tags.includes(q) ? "none" : "";
     });
-    document.querySelectorAll<HTMLElement>(".workflow-collection-group").forEach(group => {
+    const groups = document.querySelectorAll<HTMLElement>(".workflow-collection-group");
+    let anyGroupVisible = false;
+    groups.forEach(group => {
       const hasVisibleItem = !!group.querySelector<HTMLElement>('.workflow-item:not([style*="display: none"])');
       const isEmptyGroup = !group.querySelector(".workflow-item"); // no items at all, not filtered out
-      group.style.display = q && !hasVisibleItem && !isEmptyGroup ? "none" : "";
+      const hide = q && !hasVisibleItem && !isEmptyGroup;
+      group.style.display = hide ? "none" : "";
+      if (!hide) anyGroupVisible = true;
     });
+
+    // A search that matches nothing previously left the list area completely
+    // blank with no explanation. Only shown when there's actually a library
+    // to search (groups.length > 0) -- otherwise the "No workflows yet…"
+    // empty state (workflow-manager.ts) already covers it, and stacking both
+    // messages would be redundant.
+    let noMatch = document.getElementById("wf-search-no-match");
+    if (q && groups.length > 0 && !anyGroupVisible) {
+      if (!noMatch) {
+        noMatch = document.createElement("div");
+        noMatch.id = "wf-search-no-match";
+        noMatch.className = "workflow-list-empty";
+        document.getElementById("workflow-list")?.appendChild(noMatch);
+      }
+      noMatch.textContent = `No workflows match "${search.value.trim()}"`;
+    } else {
+      noMatch?.remove();
+    }
   });
 
   const SORT_OPTIONS = [

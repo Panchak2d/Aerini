@@ -16,7 +16,6 @@ aerini-engine = { path = "../aerini-engine" }
 
 # Tauri
 tauri              = { version = "2.0", features = ["tray-icon"] }
-tauri-plugin-shell    = "2.0"
 tauri-plugin-dialog   = "2.0"
 # tauri-plugin-fs is used Rust-side only (std::fs in lib.rs commands).
 # No fs:allow-* capabilities are granted in capabilities/default.json — the webview

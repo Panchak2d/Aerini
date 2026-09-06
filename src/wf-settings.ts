@@ -36,6 +36,8 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
     maxConcInput.value    = String(wfManager.maxConcurrentNodes);
     concurrencyRow.hidden = !wfManager.parallelExecution;
     (document.getElementById("wf-setting-unlimited-duration") as HTMLInputElement).checked = wfManager.unlimitedDuration;
+    (document.getElementById("wf-setting-max-duration") as HTMLInputElement).value = wfManager.maxDurationSecs === undefined ? "" : String(wfManager.maxDurationSecs);
+    (document.getElementById("wf-setting-max-duration-row") as HTMLElement).hidden = wfManager.unlimitedDuration;
 
     const cs = wfManager.chatSettings;
     (document.getElementById("wf-setting-chat-attachments") as HTMLInputElement).checked = cs.allow_attachments;
@@ -82,8 +84,24 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
   });
 
   document.getElementById("wf-setting-unlimited-duration")!.addEventListener("change", (e) => {
-    wfManager.unlimitedDuration = (e.target as HTMLInputElement).checked;
+    const checked = (e.target as HTMLInputElement).checked;
+    wfManager.unlimitedDuration = checked;
     wfManager.markUnsaved(true);
+    document.getElementById("wf-setting-max-duration-row")!.hidden = checked;
+  });
+
+  document.getElementById("wf-setting-max-duration")!.addEventListener("change", (e) => {
+    const raw = (e.target as HTMLInputElement).value.trim();
+    if (raw === "") {
+      wfManager.maxDurationSecs = undefined;
+      wfManager.markUnsaved(true);
+      return;
+    }
+    const val = parseInt(raw, 10);
+    if (!isNaN(val) && val >= 10 && val <= 86400) {
+      wfManager.maxDurationSecs = val;
+      wfManager.markUnsaved(true);
+    }
   });
 
   document.getElementById("wf-setting-chat-attachments")!.addEventListener("change", (e) => {

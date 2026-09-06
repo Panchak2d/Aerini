@@ -6,9 +6,9 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-CwcrLTAv.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-CYORUThy.js">
-  <link rel="stylesheet" crossorigin href="./assets/style-CvE2yzT5.css">
+  <script type="module" crossorigin src="./assets/index-D4XH9pif.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-BkczGuxH.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-DaCnaZIC.css">
 </head>
 <body>
 
@@ -108,21 +108,22 @@
                 <line x1="12" y1="12.5" x2="12" y2="17.5"/><line x1="9.5" y1="15" x2="14.5" y2="15"/>
               </svg>
             </button>
+            <div class="zone-action-sep" aria-hidden="true"></div>
             <button class="zone-action-btn" id="btn-wf-select-mode" title="Select multiple" aria-label="Select multiple workflows" aria-pressed="false">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12.5 2.2 2.2L16 9.5"/>
               </svg>
-            </button>
-            <button class="zone-action-btn" id="btn-wf-search-toggle" title="Search workflows" aria-label="Search workflows" aria-expanded="false">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
             </button>
             <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" aria-label="Sort workflows" data-sort="updated_desc">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
             </button>
           </div>
         </div>
-        <div class="zone-search hidden" id="wf-search-bar">
-          <input id="wf-search" type="text" placeholder="Filter workflows…" aria-label="Filter workflows" autocomplete="off" spellcheck="false" />
+        <div class="zone-search" id="wf-search-bar">
+          <div class="wf-search-input-wrap">
+            <svg class="wf-search-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="wf-search" type="text" placeholder="Filter workflows…" aria-label="Filter workflows" autocomplete="off" spellcheck="false" />
+          </div>
         </div>
         <button class="workflow-bgruns-pill hidden" id="wf-bgruns-pill" type="button">
           <span class="workflow-bgruns-pill-dot"></span>
@@ -518,6 +519,9 @@
           <div class="shortcut-row"><span>New workflow</span><div class="shortcut-keys"><kbd>Ctrl+N</kbd></div></div>
           <div class="shortcut-row"><span>Run workflow</span><div class="shortcut-keys"><kbd>Ctrl+Enter</kbd></div></div>
           <div class="shortcut-row"><span>Show shortcuts</span><div class="shortcut-keys"><kbd>?</kbd></div></div>
+          <div class="shortcut-row"><span>Navigate workflow list</span><div class="shortcut-keys"><kbd>↑</kbd><kbd>↓</kbd></div></div>
+          <div class="shortcut-row"><span>Open / rename in list</span><div class="shortcut-keys"><kbd>Enter</kbd><span class="shortcut-hint">Dbl-click to rename</span></div></div>
+          <div class="shortcut-row"><span>Workflow row menu</span><div class="shortcut-keys"><kbd>Right-click</kbd></div></div>
         </div>
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Node Config</div>
@@ -592,16 +596,6 @@
           <div class="settings-row">
             <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>
             <input type="checkbox" id="setting-autofit" class="settings-toggle" checked />
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">Environment</div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">Node.js</div>
-              <div class="settings-desc" id="nodejs-check-status">Required for Code nodes.</div>
-            </div>
-            <button id="btn-recheck-nodejs" class="btn-sm">Recheck Node.js</button>
           </div>
         </div>
         <div class="settings-group">
@@ -680,6 +674,13 @@
               <div class="settings-desc">Manual runs of this workflow normally stop after 24h. Enable only if this workflow is expected to run longer (e.g. chained long waits). The Stop button still works while this is on.</div>
             </div>
             <input type="checkbox" id="wf-setting-unlimited-duration" class="settings-toggle">
+          </div>
+          <div class="settings-row" id="wf-setting-max-duration-row">
+            <div>
+              <div class="settings-label">Max duration (seconds)</div>
+              <div class="settings-desc">Stops the run after this many seconds. Leave blank for no limit. 10–86400 (24h).</div>
+            </div>
+            <input type="number" id="wf-setting-max-duration" class="settings-number-input" min="10" max="86400" placeholder="No limit">
           </div>
         </div>
         <div class="settings-group">

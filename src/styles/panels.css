@@ -154,7 +154,20 @@
 
 .dot-ai { background:var(--purple); }
 
-.workflow-list-empty { color:var(--t3); font-size:11px; padding:10px 8px; text-align:center; }
+.workflow-list-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--t3);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 22px 14px 16px;
+  text-align: center;
+}
+.workflow-list-empty-icon { color: var(--t3); opacity: .5; display: flex; }
+.workflow-list-empty-text { max-width: 190px; }
+.workflow-list-empty .btn-sm { margin-top: 2px; }
 .workflow-rename-input { background:var(--bg1); border:1px solid var(--blue); border-radius:5px; color:var(--t1); font-size:13px; font-weight:500; padding:2px 8px; width:180px; outline:none; }
 
 #status-hint { font-size:10px; color:var(--t3); margin-left:auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; letter-spacing:.01em; }
@@ -1229,7 +1242,7 @@
 /* Running workflow item highlight */
 .workflow-item.wf-is-running {
   border-left: 2px solid var(--green);
-  padding-left: 5px;
+  padding-left: 8px;
 }
 
 

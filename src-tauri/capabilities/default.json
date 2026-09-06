@@ -14,16 +14,6 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-is-visible",
-    "shell:allow-open",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/node-bundled",
-          "sidecar": true
-        }
-      ]
-    },
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-ask",

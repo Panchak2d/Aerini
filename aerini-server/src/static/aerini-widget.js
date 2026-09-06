@@ -375,7 +375,12 @@
     if (sseAbort) sseAbort.abort();
     sseAbort = new AbortController();
 
-    var url = SERVER + "/api/events?workflow_id=" + encodeURIComponent(WORKFLOW_ID);
+    // session_id scopes the stream server-side to just this visitor's own
+    // replies — without it, every visitor sharing this page's data-token
+    // would receive every other visitor's messages too (the token is
+    // workflow-scoped, not visitor-scoped; see widget-embedding.md).
+    var url = SERVER + "/api/events?workflow_id=" + encodeURIComponent(WORKFLOW_ID) +
+      "&session_id=" + encodeURIComponent(SESSION_ID);
     fetch(url, {
       headers: { Authorization: "Bearer " + TOKEN, Accept: "text/event-stream" },
       signal: sseAbort.signal,

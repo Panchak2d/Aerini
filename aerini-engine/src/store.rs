@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
 use crate::error::EngineError;
-use crate::executor::CredentialResolver;
+use crate::executor::{CredentialResolveError, CredentialResolver};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialEntry {
@@ -537,22 +537,26 @@ pub struct StoreCredentialResolver {
 
 #[async_trait::async_trait]
 impl CredentialResolver for StoreCredentialResolver {
-    async fn resolve(&self, credential_id: &str) -> Option<String> {
+    async fn resolve(&self, credential_id: &str) -> Result<String, CredentialResolveError> {
         // `CredentialStore::retrieve` is a synchronous fn — it
         // acquires a blocking `std::sync::Mutex<rusqlite::Connection>` and
         // runs the query + AES-256-GCM decrypt inline. `resolve` is called
         // on every node execution that references a credential, so running
         // that synchronously here would hold the calling tokio worker
         // thread for the duration of the lock + query on every such call.
-        // Offload to the blocking thread pool instead. A `spawn_blocking`
-        // panic degrades to `None` ("no credential"), matching this
-        // method's own pre-existing `.ok().flatten()` behavior on a DB
-        // error — both were already "credential unavailable" outcomes.
+        // Offload to the blocking thread pool instead.
         let store         = Arc::clone(&self.store);
         let credential_id = credential_id.to_string();
-        tokio::task::spawn_blocking(move || store.retrieve(&credential_id).ok().flatten())
-            .await
-            .unwrap_or(None)
+        let joined = tokio::task::spawn_blocking(move || store.retrieve(&credential_id)).await;
+
+        match joined {
+            Ok(Ok(Some(secret))) => Ok(secret),
+            Ok(Ok(None)) => Err(CredentialResolveError::NotFound),
+            Ok(Err(EngineError::Encryption(msg))) => Err(CredentialResolveError::Unreadable(msg)),
+            Ok(Err(EngineError::Database(msg))) => Err(CredentialResolveError::StoreError(msg)),
+            Ok(Err(other)) => Err(CredentialResolveError::StoreError(other.to_string())),
+            Err(join_err) => Err(CredentialResolveError::StoreError(join_err.to_string())),
+        }
     }
 }
 
@@ -704,5 +708,72 @@ mod tests {
             Some("irreplaceable-secret".to_string()),
             "restoring the exported key must recover the original credential"
         );
+    }
+
+    // ── StoreCredentialResolver::resolve — no prior test exercised this method,
+    // only the lower-level CredentialStore::retrieve it wraps. ─────────────────
+
+    #[tokio::test]
+    async fn store_resolver_returns_secret_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+        let store = Arc::new(CredentialStore::open(&db_path, KeySource::File(key_path)).unwrap());
+        store.store(&CreateCredentialRequest {
+            id: "cred1".to_string(),
+            name: "Test Cred".to_string(),
+            value: "secret-value".to_string(),
+            cred_type: "api_key".to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+        }).unwrap();
+
+        let resolver = StoreCredentialResolver { store };
+        assert_eq!(resolver.resolve("cred1").await.unwrap(), "secret-value");
+    }
+
+    #[tokio::test]
+    async fn store_resolver_returns_not_found_for_missing_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+        let store = Arc::new(CredentialStore::open(&db_path, KeySource::File(key_path)).unwrap());
+
+        let resolver = StoreCredentialResolver { store };
+        assert!(matches!(
+            resolver.resolve("does-not-exist").await,
+            Err(CredentialResolveError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn store_resolver_returns_unreadable_for_corrupt_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("creds.sqlite");
+        let key_path = dir.path().join("key.b64");
+        let store = Arc::new(CredentialStore::open(&db_path, KeySource::File(key_path)).unwrap());
+        store.store(&CreateCredentialRequest {
+            id: "cred1".to_string(),
+            name: "Test Cred".to_string(),
+            value: "secret-value".to_string(),
+            cred_type: "api_key".to_string(),
+            provider: None,
+            model: None,
+            base_url: None,
+        }).unwrap();
+
+        let raw = Connection::open(&db_path).unwrap();
+        raw.execute(
+            "UPDATE credentials SET nonce = ?1 WHERE id = 'cred1'",
+            params![vec![0u8; 5]],
+        ).unwrap();
+        drop(raw);
+
+        let resolver = StoreCredentialResolver { store };
+        assert!(matches!(
+            resolver.resolve("cred1").await,
+            Err(CredentialResolveError::Unreadable(_))
+        ));
     }
 }

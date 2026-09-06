@@ -6,14 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ## [Unreleased]
 
-### Added
-- Multi-node plugin packages (`.aerinipkg`): bundle several plugin nodes into one signed, installable unit. The Plugins tab install picker and drag-drop both accept `.aerinipkg` alongside single `.wasm` files, packs are grouped in the plugin list with their own "Remove pack" action, and `docs/plugin-authoring.md` documents the package format
+### Security
+- Widget relay (`POST /api/widget/:id/trigger`): now refuses with `403` to trigger any workflow containing a Shell Command, Code, or Database node, unconditionally. `--allow-shell`/`--allow-code`/`--allow-database` are server-wide, not per-workflow, so enabling one for an unrelated internal workflow previously also left that node type reachable through this route on any other, publicly-embedded workflow the same server runs
 
-### Planned (v0.4)
-- Workflow versioning and history
-- Improved run history UI
+### Planned (v0.5)
+- Sub-workflows
 - More trigger types (file watch, database poll)
-- Export / import workflow bundles
+- Workflow bundle import (restore from an `aerini-backup-*.zip`)
+
+---
+
+## [0.4.0]
+
+### Added
+- Workflow Settings → Execution now has a Max duration (seconds) control, so `max_duration_secs` can be set from the desktop UI instead of only by hand-editing the workflow file or scripting the engine directly. Hidden while Unlimited Duration is on; blank means no limit; enforces the same 10–86400s range the executor already clamps to
+- Multi-node plugin packages (`.aerinipkg`): bundle several plugin nodes into one signed, installable unit. The Plugins tab install picker and drag-drop both accept `.aerinipkg` alongside single `.wasm` files, packs are grouped in the plugin list with their own "Remove pack" action, and `docs/plugin-authoring.md` documents the package format
+- Version History panel: named snapshots via Save Snapshot (message optional), Compare against the current canvas through a diff view, Restore, Delete, and a filter box once more than a few versions exist
+- Run History panel: filter runs by All / Success / Failed, pagination, and a "Clear all" action per workflow, with relative timestamps ("2m ago", "yesterday")
+- "Export All" (toolbar → Export): bundles every saved workflow into one `aerini-backup-<date>.zip` of individual `.aerini` files, so a full-library backup doesn't mean exporting one at a time
+
+### Security
+- Code (JS) sandbox (`--code-sandbox`): blocked the `module` builtin (`import('node:module')`) and overrode `process.getBuiltinModule()`, both of which could hand sandboxed code a working `createRequire()` and, through it, `child_process`/`fs`/`net`/etc. — unrestricted access the sandbox exists to block, reachable through neither of its ESM-loader-based or global-deletion mitigations
 
 ---
 

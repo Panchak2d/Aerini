@@ -133,8 +133,18 @@ impl WorkflowDb {
                 )
             });
 
+        // r2d2 defaults min_idle to max_size, so .build() would otherwise warm up
+        // every pooled connection concurrently via r2d2's own worker threads. On a
+        // brand-new database file, each connection's with_init races the others to
+        // switch journal_mode to WAL — SQLite's WAL "0-to-1 client" recovery needs a
+        // brief exclusive lock, and more than one connection contending for it at
+        // once can surface "database is locked" even with busy_timeout set. Capping
+        // eager warm-up to one connection removes that race; later connections join
+        // an already-WAL database cleanly, however many and however concurrent, so
+        // this does not limit the pool's real capacity under load.
         let pool = Pool::builder()
             .max_size(pool_size.max(1) as u32)
+            .min_idle(Some(1))
             .build(manager)
             .map_err(|e| e.to_string())?;
 
@@ -521,6 +531,43 @@ mod tests {
         let row2 = db2.get_run("run-2").expect("get_run failed").expect("row missing");
         assert_eq!(row1.status, "success", "completed run must be untouched");
         assert_eq!(row2.status, "interrupted", "orphaned running row must become interrupted");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn fresh_open_only_warms_one_connection() {
+        let path = temp_path("warm_one");
+        cleanup(&path);
+
+        let db = WorkflowDb::open(&path, 16).expect("open failed");
+        let state = db.pool.state();
+        assert_eq!(state.connections, 1, "only one connection should be eagerly warmed on open");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn pool_still_grows_to_max_size_under_concurrent_load() {
+        let path = temp_path("grows_under_load");
+        cleanup(&path);
+
+        let db = std::sync::Arc::new(WorkflowDb::open(&path, 8).expect("open failed"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8).map(|_| {
+            let db = std::sync::Arc::clone(&db);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let conn = db.pool.get().expect("pool.get failed under concurrent load");
+                barrier.wait();
+                let _: i64 = conn.query_row("SELECT 1", [], |r| r.get(0)).expect("query failed");
+            })
+        }).collect();
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        assert_eq!(db.pool.state().connections, 8, "pool must still reach max_size once demand requires it");
 
         cleanup(&path);
     }

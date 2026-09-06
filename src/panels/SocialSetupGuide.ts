@@ -47,7 +47,7 @@ const PLATFORMS: PlatformDef[] = [
       `Set Application type to <strong>Desktop app</strong>. Give it a name and click <strong>Create</strong>.`,
       `Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the dialog.`,
       `Under <strong>Authorized redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
-      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>YouTube OAuth</strong>. Paste your Client ID and Client Secret.`,
+      `On the <strong>Social Upload</strong> node, set <strong>Platform</strong> to YouTube and paste your Client ID and Client Secret into the node's own Client ID / Client Secret fields.`,
     ],
     notes: [
       "Your app starts in 'Testing' mode. Add your Google account as a test user under OAuth consent screen → Test users.",
@@ -68,7 +68,7 @@ const PLATFORMS: PlatformDef[] = [
       `Go to <strong>App settings → Basic</strong>. Note your <strong>App ID</strong> (Client ID) and <strong>App Secret</strong> (Client Secret).`,
       `Under <strong>Instagram → Settings → Valid OAuth Redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
       `Request the <strong>instagram_content_publish</strong> permission under <strong>App Review → Permissions and Features</strong>. For testing, add your Instagram account under <strong>Roles → Instagram Testers</strong>.`,
-      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>Instagram OAuth</strong>. Paste your App ID and App Secret.`,
+      `On the <strong>Social Upload</strong> node, set <strong>Platform</strong> to Instagram and paste your App ID and App Secret into the node's own Client ID / Client Secret fields.`,
     ],
     notes: [
       "Business or Creator accounts are required for content publishing. Personal accounts are not supported by the Instagram API.",
@@ -86,7 +86,7 @@ const PLATFORMS: PlatformDef[] = [
       `In the <strong>Login Kit</strong> settings, add the redirect URI exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
       `Request the <strong>video.publish</strong> scope under <strong>Content Posting API → Scopes</strong>. For sandbox testing, use the sandbox environment.`,
       `Copy your <strong>Client Key</strong> (Client ID) and <strong>Client Secret</strong> from the app's <strong>App info</strong> page.`,
-      `In Aerini, open <strong>Connections</strong> and add a new credential of type <strong>TikTok OAuth</strong>. Paste your Client Key and Client Secret.`,
+      `On the <strong>Social Upload</strong> node, set <strong>Platform</strong> to TikTok and paste your Client Key and Client Secret into the node's own Client ID / Client Secret fields.`,
     ],
     notes: [
       "TikTok apps default to sandbox mode. In sandbox, posts are private and visible only to your account. Submit for review to enable public publishing.",

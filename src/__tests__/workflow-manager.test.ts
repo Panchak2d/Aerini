@@ -170,6 +170,10 @@ describe("deserialize — defaults", () => {
     expect(deserialize(emptyJson).unlimitedDuration).toBe(false);
   });
 
+  it("defaults maxDurationSecs to undefined", () => {
+    expect(deserialize(emptyJson).maxDurationSecs).toBeUndefined();
+  });
+
   it("defaults chatSettings to DEFAULT_CHAT_SETTINGS", () => {
     expect(deserialize(emptyJson).chatSettings).toEqual(DEFAULT_CHAT_SETTINGS);
   });
@@ -199,6 +203,24 @@ describe("serialize/deserialize — unlimited_duration flag", () => {
   it("restores unlimited_duration: true through a full serialize → deserialize cycle", () => {
     const json = serialize("wf_ud", "UD On", new Map(), new Map(), undefined, undefined, undefined, undefined, true);
     expect(deserialize(json).unlimitedDuration).toBe(true);
+  });
+});
+
+describe("serialize/deserialize — max_duration_secs field", () => {
+  it("omits max_duration_secs from JSON when undefined (sparse-output convention)", () => {
+    const doc = JSON.parse(serialize("wf_md_off", "MD Off", new Map(), new Map()));
+    expect(doc.max_duration_secs).toBeUndefined();
+  });
+
+  it("restores an explicit value through a full serialize → deserialize cycle", () => {
+    const json = serialize("wf_md", "MD On", new Map(), new Map(), undefined, undefined, undefined, undefined, undefined, undefined, 300);
+    expect(deserialize(json).maxDurationSecs).toBe(300);
+  });
+
+  it("treats a hand-edited literal null the same as absent (Option<u64>'s None)", () => {
+    const doc = JSON.parse(serialize("wf_md_null", "MD Null", new Map(), new Map()));
+    doc.max_duration_secs = null;
+    expect(deserialize(JSON.stringify(doc)).maxDurationSecs).toBeUndefined();
   });
 });
 
@@ -364,12 +386,13 @@ describe("duplicateWorkflow — dangling-edge filter", () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleExport: must carry metadata.author/tags from the serialized document
-// instead of building the exported file object from scratch.
+// handleExport: must export the full native schema (the same shape
+// serialize() produces, minus collection_id) instead of a hand-picked
+// field subset, so re-importing an exported file is lossless.
 // ---------------------------------------------------------------------------
 
 describe("handleExport", () => {
-  it("carries author and tags from the serialized metadata instead of dropping them", () => {
+  it("carries author and tags in their real nested metadata location", () => {
     const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue("workspace/export-me.aerini");
@@ -379,6 +402,7 @@ describe("handleExport", () => {
       currentId: "wf_exp", currentName: "Export Me",
       parallelExecution: false, maxConcurrentNodes: 8,
       chatSettings: DEFAULT_CHAT_SETTINGS, currentTags: ["prod", "webhook"],
+      unlimitedDuration: false, currentCollectionId: null,
       onToast: vi.fn(),
     };
 
@@ -387,8 +411,36 @@ describe("handleExport", () => {
     const call = invokeMock.mock.calls.find(c => c[0] === "save_file_dialog");
     expect(call).toBeDefined();
     const file = JSON.parse((call![1] as { content: string }).content);
-    expect(file.tags).toEqual(["prod", "webhook"]);
-    expect(file.author).toBe("user");
+    expect(file.metadata.tags).toEqual(["prod", "webhook"]);
+    expect(file.metadata.author).toBe("user");
+  });
+
+  it("preserves non-default execution settings and never leaks collection_id", () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue("workspace/export-me.aerini");
+
+    const fakeThis = {
+      canvas: { nodes: new Map([["n1", makeNode("n1", 0, 0)]]), connectors: new Map() },
+      currentId: "wf_exp", currentName: "Export Me",
+      parallelExecution: true, maxConcurrentNodes: 16,
+      chatSettings: DEFAULT_CHAT_SETTINGS, currentTags: [],
+      unlimitedDuration: true, currentCollectionId: "col_work",
+      maxDurationSecs: 3600,
+      onToast: vi.fn(),
+    };
+
+    WorkflowManager.prototype.handleExport.call(fakeThis as never);
+
+    const call = invokeMock.mock.calls.find(c => c[0] === "save_file_dialog");
+    const file = JSON.parse((call![1] as { content: string }).content);
+    expect(file.parallel_execution).toBe(true);
+    expect(file.max_concurrent_nodes).toBe(16);
+    expect(file.unlimited_duration).toBe(true);
+    expect(file.max_duration_secs).toBe(3600);
+    // Sidebar-local folder organization; never portable through an export.
+    expect(file.metadata.collection_id).toBeNull();
+    expect(file.aerini_version).toBe("1");
   });
 });
 
@@ -402,7 +454,7 @@ describe("handleNew", () => {
     const fakeThis = {
       hasUnsaved: false,
       currentId: "wf_old", currentName: "Old Name", currentTags: ["stale"],
-      parallelExecution: true, maxConcurrentNodes: 16,
+      parallelExecution: true, maxConcurrentNodes: 16, maxDurationSecs: 300 as number | undefined,
       chatSettings: { ...DEFAULT_CHAT_SETTINGS, show_branding: false },
       canvas: { nodes: new Map([["n1", makeNode("n1", 0, 0)]]), connectors: new Map(), clearSelection: vi.fn() },
       markUnsaved: vi.fn(),
@@ -415,6 +467,7 @@ describe("handleNew", () => {
 
     expect(fakeThis.currentTags).toEqual([]);
     expect(fakeThis.currentName).toBe("Untitled");
+    expect(fakeThis.maxDurationSecs).toBeUndefined();
   });
 
   it("assigns the passed collectionId, defaulting to Uncategorized (null) when omitted", async () => {
@@ -444,6 +497,60 @@ describe("handleNew", () => {
 // prepareForBgRun: the browser (non-Tauri) save path went through lsSave()
 // with a hardcoded 3-arg call that silently dropped tags.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// renameWorkflowById: sidebar-list rename (double-click / context menu).
+// ---------------------------------------------------------------------------
+
+describe("renameWorkflowById", () => {
+  beforeEach(() => {
+    installLocalStorageStub();
+  });
+
+  it("persists the new name for a workflow that is not currently open", async () => {
+    const n1 = makeNode("n1", 0, 0);
+    const json = serialize("wf_other", "Old Name", new Map([["n1", n1]]), new Map());
+    lsSaveRaw("wf_other", "Old Name", json);
+
+    const fakeThis = { currentId: "wf_open", onToast: vi.fn(), refreshWorkflowList: vi.fn(async () => {}) };
+    await WorkflowManager.prototype.renameWorkflowById.call(fakeThis as never, "wf_other", "New Name");
+
+    const stored = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    expect(JSON.parse(stored["wf_other"].json).name).toBe("New Name");
+    expect(fakeThis.refreshWorkflowList).toHaveBeenCalled();
+  });
+
+  it("updates only in-memory state (no disk write) when renaming the currently open workflow", async () => {
+    const json = serialize("wf_open", "Old Name", new Map(), new Map());
+    lsSaveRaw("wf_open", "Old Name", json);
+
+    const fakeThis = {
+      currentId: "wf_open", currentName: "Old Name",
+      markUnsaved: vi.fn(), onTitleChange: vi.fn(),
+      refreshWorkflowList: vi.fn(async () => {}), onToast: vi.fn(),
+    };
+    await WorkflowManager.prototype.renameWorkflowById.call(fakeThis as never, "wf_open", "New Name");
+
+    expect(fakeThis.currentName).toBe("New Name");
+    expect(fakeThis.markUnsaved).toHaveBeenCalledWith(true);
+    expect(fakeThis.onTitleChange).toHaveBeenCalledWith("New Name");
+    // Still "Old Name" on disk -- an eager save here would also persist any
+    // unrelated unsaved canvas edits, which a sidebar rename doesn't imply.
+    const stored = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    expect(JSON.parse(stored["wf_open"].json).name).toBe("Old Name");
+    expect(fakeThis.refreshWorkflowList).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when the name is unchanged", async () => {
+    const json = serialize("wf_same", "Same Name", new Map(), new Map());
+    lsSaveRaw("wf_same", "Same Name", json);
+
+    const fakeThis = { currentId: "wf_open", onToast: vi.fn(), refreshWorkflowList: vi.fn(async () => {}) };
+    await WorkflowManager.prototype.renameWorkflowById.call(fakeThis as never, "wf_same", "Same Name");
+
+    expect(fakeThis.refreshWorkflowList).not.toHaveBeenCalled();
+  });
+});
 
 describe("prepareForBgRun — browser (non-Tauri) path", () => {
   beforeEach(() => {

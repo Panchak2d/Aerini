@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment};
+use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment, extract_provider_error};
 
 /// AI Agent node — autonomous ReAct loop (Reason → Act → Observe).
 ///
@@ -628,11 +628,7 @@ async fn call_gemini_agent(
         .await
         .map_err(AgentApiError::Unrecoverable)?;
 
-    if let Some(err) = json["error"].as_object() {
-        let msg = err.get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown Gemini API error")
-            .to_string();
+    if let Some(msg) = extract_provider_error(&json, "Unknown Gemini API error") {
         // Matches ai_prompt/gemini.rs's own 429-only recoverable check.
         return Err(if status == 429 {
             AgentApiError::Recoverable(msg)
@@ -698,11 +694,7 @@ async fn call_openai_agent(
         .await
         .map_err(AgentApiError::Unrecoverable)?;
 
-    if let Some(err) = json["error"].as_object() {
-        let msg = err.get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown API error")
-            .to_string();
+    if let Some(msg) = extract_provider_error(&json, "Unknown API error") {
         // Matches ai_prompt/openai.rs's own 429-only recoverable check.
         return Err(if status == 429 {
             AgentApiError::Recoverable(msg)
@@ -767,11 +759,7 @@ async fn call_anthropic_agent(
         .await
         .map_err(AgentApiError::Unrecoverable)?;
 
-    if let Some(err) = json["error"].as_object() {
-        let msg = err.get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown Anthropic API error")
-            .to_string();
+    if let Some(msg) = extract_provider_error(&json, "Unknown Anthropic API error") {
         // Matches ai_prompt/anthropic.rs's own 429-or-529 recoverable check.
         return Err(if status == 429 || status == 529 {
             AgentApiError::Recoverable(msg)

@@ -10,6 +10,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use blake3;
+use base64::Engine as _;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use once_cell::sync::Lazy;
@@ -45,6 +46,68 @@ static ACTIVE_PORTS: Lazy<DashSet<u16>> = Lazy::new(DashSet::new);
 /// after use): a `Get Variable` node reading this exact reserved key back is
 /// not a leak, it's the same payload the trigger node already returned.
 pub const WEBHOOK_TRIGGER_PAYLOAD_KEY: &str = "__aerini_webhook_payload";
+
+/// Prefix marking a signed, time-limited trigger token rather than the raw
+/// static secret. A caller who already holds the secret (typically the
+/// workflow author's own backend) can mint one of these with
+/// [`mint_signed_token`] and hand only the token — not the secret itself —
+/// to an untrusted context such as a browser. Unlike the raw secret, a
+/// captured token self-invalidates at its embedded expiry instead of
+/// granting the holder standing access forever. See
+/// docs/guide/widget-embedding.md, "Recommended for production" section.
+const SIGNED_TOKEN_PREFIX: &str = "awh1.";
+
+/// Hard ceiling on a minted token's lifetime, enforced at verification time
+/// regardless of what `ttl_secs` a caller passes to [`mint_signed_token`] —
+/// bounds the damage of a minting bug or an overly generous caller-chosen TTL.
+const SIGNED_TOKEN_MAX_LIFETIME_SECS: i64 = 24 * 60 * 60;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// MAC over `path` and `expiry`, keyed by the webhook's own secret. `path`
+/// binds a token to one specific Webhook node's URL — a token minted for one
+/// node's secret+path can't be replayed against a different node that
+/// happens to share the same secret string.
+fn signed_token_mac(secret: &str, path: &str, expiry: i64) -> blake3::Hash {
+    let key: [u8; 32] = *blake3::hash(secret.as_bytes()).as_bytes();
+    blake3::keyed_hash(&key, format!("{path}|{expiry}").as_bytes())
+}
+
+/// Mint a signed trigger token for a webhook configured with `secret` at
+/// `path`, valid for `ttl_secs` (clamped to `[1, SIGNED_TOKEN_MAX_LIFETIME_SECS]`).
+/// Called from `routes::widget`'s token-minting endpoint.
+pub fn mint_signed_token(secret: &str, path: &str, ttl_secs: i64) -> String {
+    let ttl    = ttl_secs.clamp(1, SIGNED_TOKEN_MAX_LIFETIME_SECS);
+    let expiry = unix_now() + ttl;
+    let mac    = signed_token_mac(secret, path, expiry);
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.as_bytes());
+    format!("{SIGNED_TOKEN_PREFIX}{expiry}.{sig_b64}")
+}
+
+/// Validates a token of the form `awh1.<expiry_unix>.<sig>` against `secret`/`path`.
+/// Constant-time signature comparison, same rationale as the raw-secret path below.
+fn validate_signed_token(secret: &str, path: &str, rest: &str) -> bool {
+    let Some((expiry_str, sig_b64)) = rest.split_once('.') else { return false };
+    let Ok(expiry) = expiry_str.parse::<i64>() else { return false };
+    let now = unix_now();
+    // Rejects both expired tokens and ones whose expiry sits further out than
+    // the mint-time ceiling could ever have produced (a forged huge expiry
+    // would also fail the signature check below, but reject it up front too).
+    if expiry <= now || expiry - now > SIGNED_TOKEN_MAX_LIFETIME_SECS {
+        return false;
+    }
+    let Ok(provided_sig) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig_b64) else { return false };
+    if provided_sig.len() != 32 {
+        return false;
+    }
+    let expected = signed_token_mac(secret, path, expiry);
+    expected.as_bytes().ct_eq(provided_sig.as_slice()).unwrap_u8() == 1
+}
 
 pub struct WebhookNode;
 
@@ -444,25 +507,41 @@ async fn handle_request(
             .expect("static response builder parameters are infallible")));
     }
 
-    // Secret validation via constant-time comparison to prevent timing attacks.
-    // Both sides are hashed with BLAKE3 to normalise to a fixed 32-byte length
-    // before the ct_eq call — prevents the length oracle present in direct
-    // ct_eq comparison of differently-lengthed slices.
+    // Secret validation. Accepts either the raw static secret (constant-time
+    // compare, both sides BLAKE3-hashed first to normalise length and avoid
+    // a length oracle), or a signed short-lived token minted from that same
+    // secret (see `mint_signed_token` / `SIGNED_TOKEN_PREFIX`) — the latter
+    // lets a caller hand out a credential that self-expires instead of the
+    // permanent secret itself.
     //
-    // SECURITY NOTE — replay attacks: this check validates only that the caller
-    // knows the secret. It does NOT cryptographically bind the secret to the
-    // request body. A captured valid request can be replayed in full. For
-    // integrations that send HMAC-SHA256 body signatures (Stripe: Stripe-Signature,
-    // GitHub: X-Hub-Signature-256), add a downstream Code node that verifies the
-    // platform's native signature header against the raw body bytes.
+    // SECURITY NOTE — replay attacks: neither form cryptographically binds
+    // the credential to the request body. A captured valid request can be
+    // replayed in full until the credential (secret, or token expiry) is no
+    // longer valid. For integrations that send HMAC-SHA256 body signatures
+    // (Stripe: Stripe-Signature, GitHub: X-Hub-Signature-256), add a
+    // downstream Code node that verifies the platform's native signature
+    // header against the raw body bytes.
     if !st.secret.is_empty() {
         let provided = headers
             .get("x-webhook-secret")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let expected_hash = blake3::hash(st.secret.as_bytes());
-        let provided_hash = blake3::hash(provided.as_bytes());
-        if expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() != 1 {
+        let ok = if let Some(rest) = provided.strip_prefix(SIGNED_TOKEN_PREFIX) {
+            // Structurally a token attempt — but if it doesn't validate as
+            // one, still fall back to plain equality: a secret whose literal
+            // value happens to start with "awh1." must keep working exactly
+            // as it always has, not silently start rejecting valid callers.
+            validate_signed_token(&st.secret, &st.path, rest) || {
+                let expected_hash = blake3::hash(st.secret.as_bytes());
+                let provided_hash = blake3::hash(provided.as_bytes());
+                expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() == 1
+            }
+        } else {
+            let expected_hash = blake3::hash(st.secret.as_bytes());
+            let provided_hash = blake3::hash(provided.as_bytes());
+            expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() == 1
+        };
+        if !ok {
             return Ok(with_cors(Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Full::new(Bytes::new()))
@@ -692,5 +771,44 @@ mod tests {
         tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("port must be free immediately after a cancelled run");
+    }
+
+    /// A token minted by `mint_signed_token` must validate against the same
+    /// secret/path it was minted for. Unlike the header-integration secret
+    /// check above, these are plain functions with no `hyper::Request`
+    /// dependency, so they're directly unit-testable.
+    #[test]
+    fn signed_token_roundtrip_succeeds() {
+        let token = mint_signed_token("s3cr3t", "/hook", 60);
+        let rest = token.strip_prefix(SIGNED_TOKEN_PREFIX).expect("token must carry the expected prefix");
+        assert!(validate_signed_token("s3cr3t", "/hook", rest));
+    }
+
+    /// A token minted for one secret must not validate against a different
+    /// one — the whole point of signing rather than embedding the secret
+    /// itself in the token.
+    #[test]
+    fn signed_token_rejects_wrong_secret() {
+        let token = mint_signed_token("s3cr3t", "/hook", 60);
+        let rest = token.strip_prefix(SIGNED_TOKEN_PREFIX).unwrap();
+        assert!(!validate_signed_token("wrong-secret", "/hook", rest));
+    }
+
+    /// An expired token (ttl clamped to 1s, then checked after it's elapsed)
+    /// must be rejected even though the signature itself is valid — this is
+    /// the entire reason to prefer a token over the raw secret.
+    #[test]
+    fn signed_token_rejects_after_expiry() {
+        let token = mint_signed_token("s3cr3t", "/hook", 1);
+        let rest = token.strip_prefix(SIGNED_TOKEN_PREFIX).unwrap();
+        let (expiry_str, _) = rest.split_once('.').unwrap();
+        let expiry: i64 = expiry_str.parse().unwrap();
+        // Directly re-derive with a past expiry rather than sleeping in a
+        // unit test: same code path (`validate_signed_token`'s expiry
+        // check), deterministic, no real time dependency.
+        let past = expiry - 120;
+        let rest_expired = signed_token_mac("s3cr3t", "/hook", past);
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rest_expired.as_bytes());
+        assert!(!validate_signed_token("s3cr3t", "/hook", &format!("{past}.{sig_b64}")));
     }
 }

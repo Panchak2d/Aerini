@@ -100,6 +100,84 @@ impl RateLimiter {
     }
 }
 
+/// Same sliding-window algorithm as [`RateLimiter`], keyed by an arbitrary
+/// `String` instead of `IpAddr`. Not merged into `RateLimiter` as a generic:
+/// `RateLimiter` is public API with its own call sites and tests fixed to
+/// `IpAddr`, and introducing a type parameter there would touch every one of
+/// them for a single new caller. This exists for the widget trigger route's
+/// per-workflow_id limit (routes::widget), where the key is caller-supplied
+/// and unauthenticated, so it is capped at 128 bytes before use — same
+/// reasoning as any untrusted-input-as-map-key case, unbounded key length is
+/// an unbounded-memory footgun.
+pub struct KeyedRateLimiter {
+    map:          DashMap<String, VecDeque<Instant>>,
+    max_requests: usize,
+    window:       Duration,
+}
+
+impl KeyedRateLimiter {
+    pub fn new(max_requests: u32, window_secs: u64) -> Self {
+        Self {
+            map:          DashMap::new(),
+            max_requests: max_requests as usize,
+            window:       Duration::from_secs(window_secs),
+        }
+    }
+
+    pub fn spawn_eviction_task(self: Arc<Self>) {
+        let weak = Arc::downgrade(&self);
+        let interval = self.window;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match weak.upgrade() {
+                    None => break,
+                    Some(rl) => {
+                        let cutoff = Instant::now() - rl.window;
+                        rl.map.retain(|_, timestamps| {
+                            timestamps.retain(|&ts| ts > cutoff);
+                            !timestamps.is_empty()
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    /// Returns `true` if a request keyed by `key` is within the rate limit.
+    /// `key` is truncated to 128 bytes first (see struct doc).
+    pub fn is_allowed(&self, key: &str) -> bool {
+        let key: String = key.chars().take(128).collect();
+        let now    = Instant::now();
+        let cutoff = now - self.window;
+
+        let allowed = {
+            let mut entry = self.map.entry(key).or_default();
+            while entry.front().map(|&ts| ts <= cutoff).unwrap_or(false) {
+                entry.pop_front();
+            }
+            if entry.len() < self.max_requests {
+                entry.push_back(now);
+                true
+            } else {
+                false
+            }
+        };
+
+        if self.map.len() > 10_000 {
+            let cutoff2 = now - self.window;
+            self.map.retain(|_, timestamps| {
+                timestamps.retain(|&ts| ts > cutoff2);
+                !timestamps.is_empty()
+            });
+        }
+
+        allowed
+    }
+}
+
 fn insert_common_security_headers(h: &mut axum::http::HeaderMap) {
     h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
     h.insert("x-frame-options",        HeaderValue::from_static("DENY"));

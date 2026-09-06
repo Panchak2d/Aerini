@@ -231,7 +231,7 @@ export function bindToolbar(
   });
 
   $("btn-save").addEventListener("click",    () => wfManager.handleSave());
-  bindAlwaysOnToggle(wfManager, toast);
+  bindAlwaysOnToggle(canvas, wfManager, toast);
   $("btn-versions").addEventListener("click", () =>
     import("./panels/VersionPanel").then(m => m.showVersionPanel(wfManager, toast))
   );

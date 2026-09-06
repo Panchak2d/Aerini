@@ -205,6 +205,17 @@
 .zone-action-btn:hover { color: var(--t1); background: var(--bg4); }
 .zone-action-btn.active { color: var(--blue); }
 
+/* Groups a row of icon-only zone actions (e.g. "create" vs "organize" in the
+   Workflows toolbar) so a dense icon row reads as related clusters rather
+   than one undifferentiated strip. */
+.zone-action-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--bd);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
 /* Generic scrollable zone body, Plugins zone. Other zones each
    have their own purpose-named scroll class (.palette-scroll/.workflow-scroll/
    .bg-jobs-list); Plugins' content is .settings-group/.settings-row markup
@@ -244,6 +255,17 @@
   background: var(--bg4);
 }
 .zone-search input::placeholder { color: var(--t3); }
+
+.wf-search-input-wrap { position: relative; display: flex; align-items: center; }
+.wf-search-icon {
+  position: absolute;
+  left: 9px;
+  color: var(--t3);
+  pointer-events: none;
+  transition: color 120ms ease;
+}
+.wf-search-input-wrap:focus-within .wf-search-icon { color: var(--t2); }
+#wf-search { padding-left: 26px; }
 
 .palette-scroll { flex: 1; overflow-y: auto; padding: 4px 6px 8px; min-height: 0; scroll-behavior: smooth; }
 .palette-category {
@@ -311,7 +333,7 @@
 .workflow-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 3px 6px;
+  padding: 4px 6px 8px;
   min-height: 0;
   scroll-behavior: smooth;
 }
@@ -319,7 +341,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 6px;
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -330,7 +352,19 @@
   transition: background 120ms ease, color 120ms ease;
 }
 .workflow-item:hover { background: var(--bg4); color: var(--t1); }
-.workflow-item.active { background: var(--bg3); color: var(--t1); }
+/* The open workflow is the single most important state in this panel, so it
+   gets its own accent -- previously identical to a plain :hover (same
+   background, no border), the weakest possible signal for that state.
+   Reuses the app's own "active accent bar" idiom (see .activity-btn.active::before)
+   rather than inventing a new visual language. */
+.workflow-item.active {
+  background: var(--bg3);
+  color: var(--t1);
+  border-left: 2px solid var(--blue);
+  padding-left: 8px;
+}
+.workflow-item.active .workflow-item-name { font-weight: 600; }
+.workflow-item:focus-visible { outline-offset: -2px; }
 .workflow-item-name {
   flex: 1;
   overflow: hidden;
@@ -364,9 +398,11 @@
   border: none;
   color: transparent;
   cursor: pointer;
-  font-size: 11px;
   padding: 2px 4px;
   border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transition: color 120ms ease, background 120ms ease;
   flex-shrink: 0;
 }
@@ -396,6 +432,7 @@
   opacity: 0;
   cursor: grab;
   text-align: center;
+  transition: opacity 120ms ease;
 }
 .workflow-item:hover .workflow-item-drag-handle { opacity: 1; }
 
@@ -404,10 +441,34 @@
   border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
   color: var(--t1);
 }
+/* Equal specificity to .active and .selected alone, so this wins when both
+   apply and both signals stay visible: the open-workflow accent bar plus the
+   selected tint, instead of one silently overwriting the other. */
+.workflow-item.active.selected {
+  background: color-mix(in srgb, var(--blue) 14%, var(--bg3));
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  border-left: 2px solid var(--blue);
+  padding-left: 8px;
+  color: var(--t1);
+}
 .workflow-item.dragging { opacity: .4; }
 
+/* Double-click-to-rename input, sized/styled to match .workflow-collection-rename-input. */
+.workflow-item-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg1);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  color: var(--t1);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 5px;
+  outline: none;
+}
+
 /* -- Collection groups (collapsible folders) -- */
-.workflow-collection-group { margin-bottom: 2px; border-radius: 7px; }
+.workflow-collection-group { margin-bottom: 4px; border-radius: 7px; }
 .workflow-collection-group.drop-target {
   background: color-mix(in srgb, var(--blue) 8%, transparent);
   outline: 1.5px dashed var(--blue);
@@ -416,8 +477,8 @@
 .workflow-collection-header {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 6px 6px;
+  gap: 6px;
+  padding: 7px 7px;
   border-radius: 6px;
   cursor: pointer;
   user-select: none;
@@ -428,10 +489,11 @@
 .workflow-collection-header:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
 .workflow-collection-chev {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 13px;
   flex-shrink: 0;
-  text-align: center;
-  font-size: 9px;
   color: var(--t3);
   transition: transform 150ms ease;
 }
@@ -449,17 +511,30 @@
 .workflow-collection-name {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--t1);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--t2);
+  opacity: .9;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: opacity 120ms ease;
 }
-.workflow-collection-name-muted { color: var(--t3); font-weight: 500; }
-.workflow-collection-count { flex-shrink: 0; font-size: 10.5px; color: var(--t3); }
-.workflow-collection-new-btn { opacity: 0; flex-shrink: 0; width: 20px; height: 20px; }
-.workflow-collection-menu-btn { opacity: 0; flex-shrink: 0; width: 20px; height: 20px; }
+.workflow-collection-header:hover .workflow-collection-name { opacity: 1; }
+.workflow-collection-name-muted { color: var(--t3); opacity: 1; }
+.workflow-collection-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--t3);
+  background: var(--bg4);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.workflow-collection-new-btn,
+.workflow-collection-menu-btn { opacity: 0; flex-shrink: 0; width: 20px; height: 20px; transition: opacity 120ms ease, color 120ms ease, background 120ms ease; }
 .workflow-collection-rename-input {
   flex: 1;
   min-width: 0;
@@ -483,14 +558,18 @@
 }
 
 /* -- Background-runs cross-link pill -- */
+/* Green, not amber: this is the same "something is running" state as
+   .wf-run-dot and the activity-bar's has-running badge, both already green.
+   Amber (the app's warning color elsewhere) miscast a neutral status as a
+   caution and disagreed with those other two indicators for one state. */
 .workflow-bgruns-pill {
   display: flex;
   align-items: center;
   gap: 7px;
   margin: 6px 6px 0;
   padding: 6px 9px;
-  background: color-mix(in srgb, var(--amber) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--amber) 28%, transparent);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 28%, transparent);
   border-radius: 7px;
   font: inherit;
   font-size: 11.5px;
@@ -499,13 +578,13 @@
   flex-shrink: 0;
   text-align: left;
 }
-.workflow-bgruns-pill:hover { background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.workflow-bgruns-pill:hover { background: color-mix(in srgb, var(--green) 14%, transparent); }
 .workflow-bgruns-pill.hidden { display: none; }
 .workflow-bgruns-pill-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--amber);
+  background: var(--green);
   flex-shrink: 0;
   animation: wf-pulse 1.4s ease-in-out infinite;
 }

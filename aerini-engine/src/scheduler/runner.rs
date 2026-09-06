@@ -1221,7 +1221,7 @@ async fn parse_http_request(
 #[cfg(test)]
 mod integration_tests {
     use crate::db::WorkflowDb;
-    use crate::executor::CredentialResolver;
+    use crate::executor::{CredentialResolveError, CredentialResolver};
     use crate::model::{NodeType, Workflow, WorkflowEdge, WorkflowNode};
     use crate::node::{NodeRegistry, Reloadable};
     use crate::nodes::register_builtins;
@@ -1233,7 +1233,9 @@ mod integration_tests {
     struct NoopCredentials;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCredentials {
-        async fn resolve(&self, _id: &str) -> Option<String> { None }
+        async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+            Err(CredentialResolveError::NotFound)
+        }
     }
 
     /// Captures every emitted `scheduler-status` payload so the test can

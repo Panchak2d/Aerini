@@ -6,7 +6,7 @@ FROM rust:1-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y musl-tools curl ca-certificates xz-utils && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y musl-tools curl ca-certificates xz-utils binutils && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl
 
 # Node.js for the Code node's server-side sandbox. Version is read from the
@@ -14,6 +14,11 @@ RUN rustup target add x86_64-unknown-linux-musl
 # (desktop) so both fetch from one source instead of two separate pins.
 # Official nodejs.org Linux builds are glibc/libstdc++ dynamically linked, not
 # static — this is why the runtime stage below is cc-debian12, not static-debian12.
+# The official build embeds a full native debug symbol table; strip removes it
+# (native debug metadata only, never touches V8/JS execution) — binutils is
+# installed above for this. The post-strip --version check confirms the binary
+# still runs before it's allowed into the image, the same check
+# scripts/fetch-node-binaries.sh runs for the desktop targets.
 COPY NODE_VERSION ./NODE_VERSION
 RUN NODE_VERSION="$(head -n1 NODE_VERSION | tr -d '\r')" && \
     if ! echo "$NODE_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then \
@@ -28,6 +33,8 @@ RUN NODE_VERSION="$(head -n1 NODE_VERSION | tr -d '\r')" && \
     tar -xJf /tmp/node.tar.xz -C /tmp && \
     cp "/tmp/node-v${NODE_VERSION}-linux-x64/bin/node" /app/node-bundled && \
     chmod +x /app/node-bundled && \
+    strip /app/node-bundled && \
+    [ "$(/app/node-bundled --version)" = "v${NODE_VERSION}" ] && \
     rm -rf /tmp/node.tar.xz /tmp/node-shasums.txt "/tmp/node-v${NODE_VERSION}-linux-x64"
 
 COPY Cargo.toml Cargo.lock ./
@@ -70,6 +77,14 @@ VOLUME ["/data"]
 
 ENV AERINI_DATA_DIR=/data
 ENV AERINI_PORT=7700
+# 0.0.0.0 here is the container's *internal* listen address, not a host-facing
+# exposure setting — Docker only forwards traffic that an explicit `-p`/`ports:`
+# mapping publishes, and a process bound to 127.0.0.1 inside the container never
+# sees packets arriving over the container's virtual network interface at all.
+# The actual access boundary is the host-side mapping (docker-compose.yml pins
+# it to 127.0.0.1:7700, i.e. host-loopback-only); don't "fix" this back to
+# 127.0.0.1 to restrict exposure — that belongs in the `-p`/`ports:` mapping.
+ENV AERINI_BIND=0.0.0.0
 
 EXPOSE 7700
 

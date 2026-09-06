@@ -76,8 +76,8 @@ impl Node for SocialUploadNode {
                     "type": "string",
                     "description": "Privacy level. YouTube: public|private|unlisted. TikTok: public_to_everyone|mutual_follow_friends|self_only"
                 },
-                "client_id":     { "type": "string",  "description": "OAuth client ID / client key — resolved from Connections (credential store)" },
-                "client_secret": { "type": "string",  "description": "OAuth client secret — resolved from Connections (credential store)" }
+                "client_id":     { "type": "string",  "description": "OAuth client ID / client key. Entered directly here; not currently offered as a saved-credential picker field." },
+                "client_secret": { "type": "string",  "description": "OAuth client secret. Entered directly here; not currently offered as a saved-credential picker field." }
             }
         })
     }

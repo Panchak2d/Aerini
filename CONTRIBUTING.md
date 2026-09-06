@@ -10,7 +10,7 @@ The codebase is split into three Cargo crates and a TypeScript frontend.
 Before your first pull request can be merged, you must sign the
 [Contributor License Agreement](CLA.md).
 
-**Individual contributors:** This project uses [CLA Assistant](https://cla-assistant.io). On your first PR it posts a comment with a one-click sign link — GitHub OAuth, done in seconds.
+**Individual contributors:** This project uses [CLA Assistant](https://cla-assistant.io). On your first PR it posts a comment with a one-click sign link: GitHub OAuth, done in seconds.
 
 **Corporate contributors (contributing on behalf of your employer):**
 Your company must sign the Corporate CLA before any code from your employees
@@ -22,14 +22,14 @@ can be merged. See [CLA.md](CLA.md) Section C8 for instructions. See
 ## Architecture
 
 ```
-aerini-engine/     — core library: Node trait, executor, scheduler, DB, 39 nodes
-src-tauri/        — Tauri shell: IPC commands, tray, app lifecycle
-aerini-server/     — headless binary for server-side workflow execution
-src/              — TypeScript/Vite frontend (vanilla TS, no framework)
+aerini-engine/     core library: Node trait, executor, scheduler, DB, 40 nodes
+src-tauri/        Tauri shell: IPC commands, tray, app lifecycle
+aerini-server/     headless binary for server-side workflow execution
+src/              TypeScript/Vite frontend (vanilla TS, no framework)
 ```
 
 `aerini-engine` has zero Tauri dependency. Both `src-tauri` and `aerini-server` depend on it.
-The decoupling point is the `EventSink` trait — the Tauri app and the server binary implement
+The decoupling point is the `EventSink` trait. The Tauri app and the server binary implement
 it differently, but the executor and scheduler use only the trait.
 
 ---
@@ -39,8 +39,9 @@ it differently, but the executor and scheduler use only the trait.
 | Tool | Version |
 |------|---------|
 | Rust (stable) | 1.77+ |
-| Node.js | 18+ (only to run `npm`/Vite — not needed to use the Code (JS) node, see below) |
+| Node.js | 18+ (only to run `npm`/Vite, not needed to use the Code (JS) node, see below) |
 | Tauri CLI | 2.x (`cargo install tauri-cli --version "^2"`) |
+| Linux system packages | `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`, `xdg-utils` (only needed to build or test the `aerini` desktop crate on Linux; not needed for `aerini-engine` or `aerini-server` alone) |
 
 The Code (JS) node runs on a Node.js runtime bundled into Aerini, not your system install. Before the first `npm run dev`, stage it:
 
@@ -51,12 +52,12 @@ npm run dev       # Vite dev server + Tauri window
 npm run build     # production bundle → src-tauri/target/release/bundle/
 ```
 
-`fetch-node-binaries.sh` needs `curl`, `tar`, `unzip` (or `powershell.exe`), and `sha256sum`/`shasum` on PATH, plus network access to nodejs.org. Skipping it fails the Rust build with `resource path 'binaries/node-bundled-...' doesn't exist`.
+`fetch-node-binaries.sh` needs `curl`, `tar`, `unzip` (or `powershell.exe`), and `sha256sum`/`shasum` on PATH, plus network access to nodejs.org. Skipping it fails the Rust build with `resource path 'binaries/node-bundled-...' doesn't exist`. `strip` is optional: when present, the script uses it to remove the ~14% of each Linux/macOS binary that's just an embedded debug symbol table (Windows builds don't have one to remove); its absence is not an error, the binary is staged unstripped instead.
 
-> ⚠️ **`dist/` is intentionally committed — do not delete it or add it to `.gitignore`.**
+> ⚠️ **`dist/` is intentionally committed: do not delete it or add it to `.gitignore`.**
 >
 > Tauri reads compiled frontend assets from `dist/` at build time. Without it, `cargo tauri build` fails.
-> Only sourcemaps (`dist/**/*.map`) are gitignored — `dist/` itself is not.
+> Only sourcemaps (`dist/**/*.map`) are gitignored; `dist/` itself is not.
 >
 > When contributing: rebuild with `npm run build` before `cargo tauri build` if you changed the frontend,
 > but **do not commit the rebuilt `dist/`** unless you are a maintainer cutting a release.
@@ -65,10 +66,10 @@ npm run build     # production bundle → src-tauri/target/release/bundle/
 
 ## Adding a new node
 
-All 39 built-in nodes follow the same pattern. Copy any existing node file as a starting point
+All 40 built-in nodes follow the same pattern. Copy any existing node file as a starting point
 (e.g. `aerini-engine/src/nodes/delay.rs` for a simple action node).
 
-### 1 — Create the file
+### 1. Create the file
 
 `aerini-engine/src/nodes/your_node.rs`
 
@@ -77,8 +78,8 @@ Implement the `Node` trait:
 ```rust
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use crate::model::{NodeInput, NodeOutput};
-use crate::node::{Node, NodeType};
+use crate::model::{NodeInput, NodeOutput, NodeType};
+use crate::node::Node;
 
 pub struct YourNode;
 
@@ -108,7 +109,7 @@ impl Node for YourNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        let param = input.params.get("param_name")
+        let param = input.input.get("param_name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -117,7 +118,7 @@ impl Node for YourNode {
 }
 ```
 
-### 2 — Register it
+### 2. Register it
 
 In `aerini-engine/src/nodes/mod.rs`, add to `register_builtins()`:
 
@@ -127,7 +128,7 @@ pub mod your_node;
 registry.register(Arc::new(your_node::YourNode));
 ```
 
-### 3 — Add the icon
+### 3. Add the icon
 
 In `src/utils.ts`, add an entry to `NODE_ICONS`:
 
@@ -135,7 +136,7 @@ In `src/utils.ts`, add an entry to `NODE_ICONS`:
 your_node: "🔧",   // single emoji or SVG string
 ```
 
-### 4 — Done
+### 4. Done
 
 The node appears in the canvas palette automatically. No other files require changes.
 
@@ -144,53 +145,57 @@ The node appears in the canvas palette automatically. No other files require cha
 ## Node authoring rules
 
 - **No `.unwrap()` in production paths.** Use `?`, `if let`, or `.expect("reason")`.
-- **No noise comments.** Comment only non-obvious logic — never restate what the code does.
+- **No noise comments.** Comment only non-obvious logic; never restate what the code does.
 - **Implicit returns.** No `return` at end of function body.
 - **Error propagation via `?`**, not manual `match`, where semantics are equivalent.
 - **HTTP clients:** use the crate-level `OnceLock<reqwest::Client>` pattern from existing
   integration nodes (see `slack.rs`, `github.rs`). Do not create a new client per request.
-- **Secrets:** receive credential IDs, not values. Resolve via `input.resolve_credential()`.
-  Never log or expose raw credential values.
-- **SSRF:** if your node makes outbound HTTP requests, wrap with `check_ssrf()` from `http.rs`
-  or implement equivalent protection.
+- **Secrets:** the executor resolves any credential-backed config field before `execute()`
+  runs; the plaintext value is already in `input.input` like any other field, there is no
+  `resolve_credential()` method to call. Never log or echo that value back into `logs` or
+  an error message.
+- **SSRF:** `check_ssrf()` in `http.rs` is private to that module and isn't reachable from
+  a new node file directly. If your node makes outbound HTTP requests to a user-supplied
+  host, reimplement equivalent protection (scheme allowlist, IP-literal rejection, DNS
+  pre-resolution against private ranges).
 
 ---
 
-## Protected zones — do not touch
+## Protected zones: do not touch
 
 These interfaces are frozen. Any change breaks the IPC contract, serde wire format, or
 `generate_handler!` registry and will silently fail at runtime.
 
-**Tauri IPC commands** — all entries in `generate_handler!` in `src-tauri/src/lib.rs`.
+**Tauri IPC commands:** all entries in `generate_handler!` in `src-tauri/src/lib.rs`.
 Adding is fine. Renaming or removing breaks the TypeScript frontend.
 
-**Serde wire contracts** — field names on these types are JSON API:
+**Serde wire contracts.** Field names on these types are JSON API:
 `Workflow`, `WorkflowNode`, `WorkflowEdge`, `NodeInput`, `NodeOutput`, `WorkflowResult`,
 `NodeDescriptor`, `ScheduledJobRow`, `SchedulerStatusEvent`, `SchedulerError`, `PortConflict`,
 `CredentialEntry`, `RunRecord`, `VersionRow`, `TriggerKind`.
 
-**`async_trait` impls** — all 39 `impl Node for X`, both `CredentialResolver` impls,
+**`async_trait` impls:** all 40 `impl Node for X`, both `CredentialResolver` impls,
 both `SchedulerDb` impls, all `EventSink` impls. Zero direct call sites is intentional
 (dyn dispatch). Do not remove any impl even if nothing visibly calls it.
 
-**`#[allow(dead_code)]` items** — these are author-intentional. Never remove the annotation
+**`#[allow(dead_code)]` items.** These are author-intentional. Never remove the annotation
 or the item without confirming the intent with a maintainer.
 
-**`subtle::ConstantTimeEq` usage** — `webhook.rs`, `scheduler/mod.rs`, `status_server.rs`.
+**`subtle::ConstantTimeEq` usage:** `webhook.rs`, `scheduler/mod.rs`, `status_server.rs`.
 Do not replace with `==`. Timing-safe comparison is required for secret validation.
 
-**`#[cfg(unix)]` in `store.rs`** — sets `chmod 600` on the key file. Do not remove.
+**`#[cfg(unix)]` in `store.rs`.** Sets `chmod 600` on the key file. Do not remove.
 
 ---
 
 ## Code conventions
 
 ### Rust
-- No `.unwrap()` in production paths — `?`, `expect("descriptive reason")`, or `if let`
+- No `.unwrap()` in production paths: use `?`, `expect("descriptive reason")`, or `if let`
 - Implicit returns (no trailing `return`)
-- `async_trait` stays — MSRV not confirmed for native async traits
-- `spawn_blocking` in Tauri commands stays — SQLite is sync, pattern is correct
-- `thiserror` for all public error types — do not add `anyhow` errors to public APIs
+- `async_trait` stays (MSRV not confirmed for native async traits)
+- `spawn_blocking` in Tauri commands stays (SQLite is sync; the pattern is correct)
+- `thiserror` for all public error types: do not add `anyhow` errors to public APIs
 
 ### TypeScript
 - No `any` where a type can be inferred or declared
@@ -200,13 +205,13 @@ Do not replace with `==`. Timing-safe comparison is required for secret validati
 
 ### CSS
 - CSS custom properties over repeated literal values
-- Backward-compat aliases (`--blue`, `--green`, etc.) in `main.css` must stay — used in TS
+- Backward-compat aliases (`--blue`, `--green`, etc.) in `main.css` must stay; they're used in TS
 
 ---
 
 ## Testing
 
-`aerini-engine` has a unit test suite for `expression.rs` (30+ tests). Run with:
+`aerini-engine`'s expression engine lives under `expression/` (`mod.rs`, `parser.rs`, `functions.rs`, `resolver.rs`), not a single `expression.rs` file. All of its tests, 52 in total, live in `resolver.rs`. Run with:
 
 ```bash
 cargo test -p aerini-engine
@@ -215,9 +220,12 @@ cargo test -p aerini-engine
 For new nodes, add at least one `#[cfg(test)]` block covering:
 - Normal execution path
 - Missing/null input handling
-- Any credential resolution path (mock the resolver)
+- Any credential-backed field, using a `NodeInput` with the field already populated
+  (there is no resolver to mock, see the Secrets rule above)
 
-There is no end-to-end test harness yet. Manual verification steps go in your PR description.
+`aerini-engine/tests/workflow_integration.rs` is an end-to-end harness: it builds a `Workflow` from scratch and runs it through the real executor, covering a full trigger-to-output chain, both branches of an If node, loop iteration counts, cycle detection, and a disconnected node. Manual verification steps for anything it doesn't cover still go in your PR description.
+
+See [Testing](docs/development/testing.md) for how all three Rust crates and the frontend suite fit together, and which of them CI runs for you automatically versus which need a manual `cargo test -p <crate>`.
 
 ---
 
@@ -225,9 +233,9 @@ There is no end-to-end test harness yet. Manual verification steps go in your PR
 
 1. Fork, branch from `main`, keep the branch focused on one change.
 2. Run `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` and fix all warnings before opening.
-3. Run `cargo test -p aerini-engine` — all tests must pass.
-4. If you touch any IPC command or serde type — call it out explicitly in the PR description.
-5. If you add a node — include a short description of what it does and what credentials it needs.
+3. Run `cargo test -p aerini-engine`. All tests must pass.
+4. If you touch any IPC command or serde type, call it out explicitly in the PR description.
+5. If you add a node, include a short description of what it does and what credentials it needs.
 6. Keep the PR title in the form `[node] Add YourNode` / `[fix] Description` / `[refactor] Scope`.
 
 ---
@@ -253,7 +261,7 @@ Delete this directory to reset all workflows, credentials, and run history durin
 | Tool | Version | Install |
 |------|---------|---------|
 | Rust | 1.77+ | [rustup.rs](https://rustup.rs/) |
-| Node.js | 18+ | [nodejs.org](https://nodejs.org/) — required to build the frontend (`npm`/Vite) only |
+| Node.js | 18+ | [nodejs.org](https://nodejs.org/), required to build the frontend (`npm`/Vite) only |
 | Tauri CLI | 2.x | `cargo install tauri-cli --version "^2" --locked` |
 
 ### Steps
@@ -299,7 +307,7 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 ```
 
-The Docker image (`Dockerfile`) stages its own bundled Node.js at build time — no extra step. A locally-built `aerini-server` binary run outside Docker does **not** get one staged automatically; the Code (JS) node will fail with "Bundled Node.js runtime is missing or corrupt" until you either copy a `node-bundled` binary next to the built executable or set `AERINI_NODE_BIN` to a Node.js path.
+The Docker image (`Dockerfile`) stages its own bundled Node.js at build time. No extra step is required. A locally-built `aerini-server` binary run outside Docker does **not** get one staged automatically; the Code (JS) node will fail with "Bundled Node.js runtime is missing or corrupt" until you either copy a `node-bundled` binary next to the built executable or set `AERINI_NODE_BIN` to a Node.js path.
 
 ---
 
@@ -309,7 +317,7 @@ The Docker image (`Dockerfile`) stages its own bundled Node.js at build time —
 
 Only affects `npm run build` on Linux (the Tauri step that produces an `.AppImage`). `npm run dev` and `npm run vite:build` are unaffected.
 
-**Cause:** Missing `libfuse2` — AppImages require FUSE to mount themselves, and Ubuntu 22.04+ / Fedora / Arch do not ship it by default.
+**Cause:** Missing `libfuse2`. AppImages require FUSE to mount themselves, and Ubuntu 22.04+ / Fedora / Arch do not ship it by default.
 
 **Fix:**
 

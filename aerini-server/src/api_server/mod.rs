@@ -5,11 +5,15 @@
 //!                      GET /aerini-widget.js  (no auth — static asset, see routes::widget)
 //!                      POST /api/widget/:workflow_id/trigger  (no auth — gated by the
 //!                           workflow's own Webhook secret instead, see routes::widget)
+//!                      POST /api/widget/:workflow_id/mint-token  (no Bearer auth — gated
+//!                           by the workflow's own Webhook secret; caller is the workflow
+//!                           author's own backend, see routes::widget)
 //!
 //! Routes:
 //!   GET    /api/health
 //!   GET    /aerini-widget.js
 //!   POST   /api/widget/:workflow_id/trigger
+//!   POST   /api/widget/:workflow_id/mint-token
 //!   GET    /api/workflows
 //!   POST   /api/workflows           (optional `If-Match: "<row_version>"` for
 //!                                    optimistic-concurrency protection — 409
@@ -531,6 +535,69 @@ pub async fn run(cfg: ServerConfig) {
         }
     });
 
+    // Widget-specific rate limiting, stricter than the blanket 300/60s above.
+    // Both public widget routes are gated only by the workflow's own Webhook
+    // secret (routes::widget module doc) rather than a server Bearer token,
+    // so unlike every other route here, a leaked/guessed credential lets an
+    // arbitrary internet caller reach them at will. Two axes:
+    //   - per-IP:       bounds a single leaked credential used from one place.
+    //   - per-workflow: bounds total cost/abuse regardless of how many
+    //                   different IPs a leaked credential gets used from
+    //                   (VPN rotation, botnet) — the blast radius that
+    //                   matters to the workflow owner is "how many times did
+    //                   MY workflow run", not "from how many IPs".
+    // mint-token has no per-workflow axis: it never runs the workflow, only
+    // checks a secret, so the per-IP guess-throttle is the relevant bound.
+    let widget_trigger_ip_rl = Arc::new(crate::middleware::RateLimiter::new(20, 60));
+    Arc::clone(&widget_trigger_ip_rl).spawn_eviction_task();
+    let widget_trigger_wf_rl = Arc::new(crate::middleware::KeyedRateLimiter::new(60, 60));
+    Arc::clone(&widget_trigger_wf_rl).spawn_eviction_task();
+    let tpc_wt = trusted_proxy_count;
+    let widget_trigger_rate_limit = middleware::from_fn(
+        move |axum::extract::Path(workflow_id): axum::extract::Path<String>, req: Request, next: Next| {
+            let ip_rl = Arc::clone(&widget_trigger_ip_rl);
+            let wf_rl = Arc::clone(&widget_trigger_wf_rl);
+            async move {
+                let ip: IpAddr = extract_client_ip(&req, tpc_wt);
+                if !ip_rl.is_allowed(ip) || !wf_rl.is_allowed(&workflow_id) {
+                    return StatusCode::TOO_MANY_REQUESTS.into_response();
+                }
+                next.run(req).await
+            }
+        },
+    );
+
+    let widget_mint_ip_rl = Arc::new(crate::middleware::RateLimiter::new(10, 60));
+    Arc::clone(&widget_mint_ip_rl).spawn_eviction_task();
+    let tpc_wm = trusted_proxy_count;
+    let widget_mint_rate_limit = middleware::from_fn(move |req: Request, next: Next| {
+        let ip_rl = Arc::clone(&widget_mint_ip_rl);
+        async move {
+            let ip: IpAddr = extract_client_ip(&req, tpc_wm);
+            if !ip_rl.is_allowed(ip) {
+                return StatusCode::TOO_MANY_REQUESTS.into_response();
+            }
+            next.run(req).await
+        }
+    });
+
+    // Two separately-layered routers, merged — not one router with two
+    // `.route().layer()` pairs chained in sequence. `Router::layer` wraps
+    // every route already present at the time it's called, not just the one
+    // added immediately before it (confirmed against axum 0.8's own
+    // `Router::layer` doc example, which uses this same merge pattern for
+    // exactly this reason). Chaining them directly would apply
+    // `widget_mint_rate_limit` on top of `trigger` as well, silently
+    // dropping its effective limit to mint-token's stricter 10/min/IP
+    // instead of the documented 20/min/IP + 60/min/workflow.
+    let trigger_router = Router::new()
+        .route("/api/widget/{workflow_id}/trigger", post(routes::widget::trigger_widget))
+        .layer(widget_trigger_rate_limit);
+    let mint_router = Router::new()
+        .route("/api/widget/{workflow_id}/mint-token", post(routes::widget::mint_widget_token))
+        .layer(widget_mint_rate_limit);
+    let widget_routes = trigger_router.merge(mint_router);
+
     let app = Router::new()
         .route("/api/health", get(routes::workflows::health))
         // Unauthenticated by design — see routes::widget module doc.
@@ -539,7 +606,7 @@ pub async fn run(cfg: ServerConfig) {
         // header, and a third-party page embedding the widget cannot hold
         // a server admin/write token.
         .route("/aerini-widget.js", get(routes::widget::serve_widget_js))
-        .route("/api/widget/{workflow_id}/trigger", post(routes::widget::trigger_widget))
+        .merge(widget_routes)
         .merge(protected)
         .with_state(state)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))

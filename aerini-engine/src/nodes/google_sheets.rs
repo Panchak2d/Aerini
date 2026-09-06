@@ -25,8 +25,8 @@ impl Node for GoogleSheetsNode {
                 "spreadsheet_id": { "type": "string", "description": "Google Sheets spreadsheet ID (from the URL)" },
                 "range":          { "type": "string", "description": "A1 notation range (e.g. Sheet1!A1:D1)" },
                 "values":         { "description": "Row data for append_row — array of arrays, e.g. [[\"a\",\"b\"]]" },
-                "client_id":      { "type": "string", "description": "Google OAuth client ID — enables automatic token refresh (recommended). Resolved from Connections (credential store)." },
-                "client_secret":  { "type": "string", "description": "Google OAuth client secret — enables automatic token refresh (recommended). Resolved from Connections (credential store)." },
+                "client_id":      { "type": "string", "description": "Google OAuth client ID — enables automatic token refresh (recommended). Entered directly here; not currently offered as a saved-credential picker field." },
+                "client_secret":  { "type": "string", "description": "Google OAuth client secret — enables automatic token refresh (recommended). Entered directly here; not currently offered as a saved-credential picker field." },
                 "api_key":        { "type": "string", "description": "Google OAuth 2.0 access token, pasted directly. Does not auto-refresh (expires after ~1 hour). Only used when client_id/client_secret are not set." }
             }
         })

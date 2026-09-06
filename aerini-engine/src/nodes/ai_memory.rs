@@ -27,9 +27,18 @@ impl AiMemoryNode {
     fn get_pool(&self) -> Result<&Pool<SqliteConnectionManager>, String> {
         self.pool.get_or_try_init(|| {
             let manager = SqliteConnectionManager::file(&self.db_path)
-                .with_init(|conn| conn.execute_batch("PRAGMA journal_mode=WAL;"));
+                .with_init(|conn| conn.execute_batch(
+                    "PRAGMA busy_timeout=5000;
+                     PRAGMA journal_mode=WAL;"
+                ));
+            // r2d2 defaults min_idle to max_size, so .build() would otherwise warm up
+            // all 4 connections concurrently on first use, racing each other for
+            // SQLite's WAL "0-to-1 client" recovery lock on a brand-new db file.
+            // Capping eager warm-up to one connection removes that race; later
+            // connections join an already-WAL database cleanly.
             let pool = Pool::builder()
                 .max_size(4)
+                .min_idle(Some(1))
                 .build(manager)
                 .map_err(|e| format!("AI memory: could not create pool: {}", e))?;
             // Schema init on first connection
@@ -191,10 +200,6 @@ impl Node for AiMemoryNode {
                     Some(r) => r,
                     None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for write")),
                 };
-                // was `input.input["content"].as_str.unwrap_or("")`,
-                // silently writing an empty-content row with no error — the
-                // "append" branch above already enforces this identical
-                // documented contract ("required for write/append").
                 let content = match input.input["content"].as_str() {
                     Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for write")),
@@ -465,6 +470,45 @@ mod tests {
         let data = read_out.output.unwrap();
         assert_eq!(data["count"], 1);
         assert_eq!(data["messages"], json!([{ "role": "user", "content": "original" }]));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn fresh_pool_only_warms_one_connection() {
+        let path = temp_db_path("ai_memory_warm_one");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let pool = node.get_pool().expect("pool init failed");
+        assert_eq!(pool.state().connections, 1, "only one connection should be eagerly warmed on first use");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn pool_still_grows_to_max_size_under_concurrent_load() {
+        let path = temp_db_path("ai_memory_grows_under_load");
+        cleanup(&path);
+        let node = std::sync::Arc::new(AiMemoryNode::new(path.clone()));
+        node.get_pool().expect("pool init failed");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4).map(|_| {
+            let node = std::sync::Arc::clone(&node);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let pool = node.get_pool().expect("pool init failed");
+                let conn = pool.get().expect("pool.get failed under concurrent load");
+                barrier.wait();
+                let _: i64 = conn.query_row("SELECT 1", [], |r| r.get(0)).expect("query failed");
+            })
+        }).collect();
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        assert_eq!(node.get_pool().unwrap().state().connections, 4, "pool must still reach max_size once demand requires it");
 
         cleanup(&path);
     }

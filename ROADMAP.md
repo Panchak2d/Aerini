@@ -17,10 +17,17 @@ This is a living document. Items move as priorities and capacity change.
 ## v0.3 — Extensibility
 
 - [x] Plugin / custom node API
-- [ ] Workflow versioning and history
-- [ ] Improved run history UI
+- [x] Workflow versioning and history
+- [x] Improved run history UI
 - [ ] More trigger types (file watch, database poll)
-- [ ] Export / import workflow bundles
+- [x] Bulk workflow export
+- [ ] Workflow bundle import
+
+---
+
+## v0.4 — Sub-workflows
+
+- [ ] Sub-workflows (in progress)
 
 ---
 

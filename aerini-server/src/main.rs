@@ -76,7 +76,7 @@ enum Command {
 
         /// Interface to bind the status page server to.
         /// Default is 127.0.0.1 (localhost only). Use 0.0.0.0 to expose publicly.
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, env = "AERINI_BIND", default_value = "127.0.0.1")]
         bind: String,
 
         /// Number of reverse-proxy hops to trust when reading X-Forwarded-For.
@@ -200,7 +200,7 @@ enum Command {
 
         /// Interface to bind to.
         /// Default is 127.0.0.1 (localhost only). Use 0.0.0.0 to expose publicly.
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, env = "AERINI_BIND", default_value = "127.0.0.1")]
         bind: String,
 
         /// Restrict File nodes to this directory tree (recommended in production).

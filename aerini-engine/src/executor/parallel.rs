@@ -592,7 +592,7 @@ pub(super) async fn run_inner_parallel(
 // but with in-process mock nodes so no real I/O occurs.
 #[cfg(test)]
 mod tests {
-    use super::super::{CredentialResolver, WorkflowExecutor};
+    use super::super::{CredentialResolveError, CredentialResolver, WorkflowExecutor};
     use crate::error::EngineError;
     use crate::migration::CURRENT_VERSION;
     use crate::model::{NodeInput, NodeOutput, NodeType, Workflow, WorkflowEdge, WorkflowNode};
@@ -604,7 +604,9 @@ mod tests {
     struct NoopCreds;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCreds {
-        async fn resolve(&self, _: &str) -> Option<String> { None }
+        async fn resolve(&self, _: &str) -> Result<String, CredentialResolveError> {
+            Err(CredentialResolveError::NotFound)
+        }
     }
 
     struct InstantNode;

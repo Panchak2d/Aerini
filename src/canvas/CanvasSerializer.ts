@@ -67,6 +67,8 @@ export interface WorkflowDocument {
   max_concurrent_nodes?: number;
   /** When true, a desktop manual run skips the 24h server ceiling. Default: false. */
   unlimited_duration?: boolean;
+  /** Wall-clock limit for the whole run, in seconds. Absent = no limit. */
+  max_duration_secs?: number;
   /** Workflow-scoped feature settings — currently only the Chat panel toggles. */
   settings?: { chat?: Partial<ChatSettings> };
 }
@@ -82,6 +84,7 @@ export function serialize(
   tags?: string[],
   unlimitedDuration?: boolean,
   collectionId?: string | null,
+  maxDurationSecs?: number,
 ): string {
   const doc: WorkflowDocument = {
     schema_version: "1.0",
@@ -123,6 +126,9 @@ export function serialize(
   if (unlimitedDuration) {
     doc.unlimited_duration = true;
   }
+  if (maxDurationSecs !== undefined) {
+    doc.max_duration_secs = maxDurationSecs;
+  }
   if (chatSettings && !chatSettingsEqualDefault(chatSettings)) {
     doc.settings = { chat: chatSettings };
   }
@@ -145,6 +151,7 @@ export function deserialize(json: string): {
   chatSettings: ChatSettings;
   tags: string[];
   collectionId: string | null;
+  maxDurationSecs: number | undefined;
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
@@ -152,6 +159,7 @@ export function deserialize(json: string): {
     parallel_execution?: boolean;
     max_concurrent_nodes?: number;
     unlimited_duration?: boolean;
+    max_duration_secs?: number | null;
     settings?: { chat?: Partial<ChatSettings> };
     metadata?: { tags?: string[]; collection_id?: string | null };
   };
@@ -216,5 +224,6 @@ export function deserialize(json: string): {
     chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
     tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
     collectionId: typeof doc.metadata?.collection_id === "string" ? doc.metadata.collection_id : null,
+    maxDurationSecs: typeof doc.max_duration_secs === "number" ? doc.max_duration_secs : undefined,
   };
 }

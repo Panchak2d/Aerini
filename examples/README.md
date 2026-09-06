@@ -27,13 +27,13 @@ The workflow:
 ## Chatbot___AI_Memory___Widget.md
 
 A chatbot workflow template demonstrating:
-- **Manual Trigger** — receives POST requests from the embedded chat widget
+- **Webhook** — receives POST requests relayed from the embedded chat widget
 - **AI Memory (read)** — retrieves stored conversation history for the session
-- **AI Prompt** — generates a response with full conversation context
-- **AI Memory (write)** — persists the new exchange to history
-- **Output** — returns the response to the widget
+- **AI Prompt** — generates a response with the retrieved history folded into the prompt
+- **AI Memory (append user)** / **AI Memory (append assistant)** — persists both sides of the new exchange, one `append` call per turn
+- **Output** — returns the reply text to the widget
 
-Includes widget embed instructions and security notes on token exposure and prompt injection.
+Includes widget embed instructions (the real `data-server`/`data-workflow-id`/`data-secret`/`data-token` attributes) and security notes distinguishing the send-credential from the reply-read token.
 
 ## Webhook_Receiver___GitHub___Slack_Notify.md
 
@@ -50,18 +50,18 @@ Webhook node's shared-secret field does not by itself verify GitHub's HMAC signa
 
 A daily AI content pipeline demonstrating:
 - **Schedule** — triggers once a day
-- **HTTP Request** (x2) — fetches the current top Hacker News story
+- **HTTP Request** (x2, distinctly named) — fetches the current top Hacker News story
 - **AI Prompt** — summarizes it in 3 bullet points
-- **Notion** — creates a page with the summary
+- **Notion** — writes the summary into an existing database property (title + a rich-text column)
 
-Includes the exact cron expression, chained-request wiring, and required credentials.
+Includes the exact cron expression, chained-request wiring with disambiguated node names, and required credentials.
 
 ## Scheduled_Report___HTTP___Transform___Email.md
 
 A recurring report workflow demonstrating:
 - **Schedule** — triggers weekday mornings
 - **HTTP Request** — fetches data from an API
-- **Transform Data** — extracts the relevant field
+- **Transform Data** — extracts one field via a Source Node + JSON-Pointer mapping
 - **Send Email** — emails the result
 
-Includes the cron expression, transform expression, and SMTP credential setup.
+Includes the cron expression, the Transform Data mapping, and SMTP credential setup.
