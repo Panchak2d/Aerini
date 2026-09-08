@@ -133,61 +133,59 @@ impl WorkflowDb {
                 )
             });
 
-        // r2d2 defaults min_idle to max_size, so .build() would otherwise warm up
-        // every pooled connection concurrently via r2d2's own worker threads. On a
-        // brand-new database file, each connection's with_init races the others to
-        // switch journal_mode to WAL — SQLite's WAL "0-to-1 client" recovery needs a
-        // brief exclusive lock, and more than one connection contending for it at
-        // once can surface "database is locked" even with busy_timeout set. Capping
-        // eager warm-up to one connection removes that race; later connections join
-        // an already-WAL database cleanly, however many and however concurrent, so
-        // this does not limit the pool's real capacity under load.
+        // r2d2 re-enforces min_idle as a floor on every checkout, not just at
+        // pool construction: establish_idle_connections runs inside
+        // try_get_inner right after popping an idle connection, before that
+        // connection is returned to the caller. With min_idle(Some(1)),
+        // checking out the sole warmed connection below immediately schedules
+        // a background replacement connection; if that finishes before this
+        // connection is dropped — e.g. while the migrations below run — the
+        // pool ends up with two connections instead of one. min_idle(Some(0))
+        // keeps that floor at zero, so the replenishment call is always a
+        // no-op: a connection is only ever created in direct response to real
+        // demand. Later connections still join an already-WAL database
+        // cleanly, however many and however concurrent, so this does not
+        // limit the pool's real capacity under load.
         let pool = Pool::builder()
             .max_size(pool_size.max(1) as u32)
-            .min_idle(Some(1))
+            .min_idle(Some(0))
             .build(manager)
             .map_err(|e| e.to_string())?;
 
-        {
+        let (history_limit, version_retention_limit) = {
             let conn = pool.get().map_err(|e| e.to_string())?;
             Self::run_migrations(&conn)?;
             conn.execute(
                 "UPDATE run_history SET status = 'interrupted' WHERE status = 'running'",
                 [],
             ).map_err(|e| e.to_string())?;
-        }
 
-        let history_limit = {
-            let conn = pool.get().map_err(|e| e.to_string())?;
-            let result = conn.query_row(
+            let history_limit = match conn.query_row(
                 "SELECT value FROM settings WHERE key = 'run_history_limit'",
                 [],
                 |row| row.get::<_, String>(0),
-            );
-            match result {
+            ) {
                 Ok(v) => v.parse::<i64>().unwrap_or(500).max(1),
                 Err(rusqlite::Error::QueryReturnedNoRows) => 500,
                 Err(e) => return Err(e.to_string()),
-            }
-        };
+            };
 
-        // Separate from history_limit (unlike performance_reports, which
-        // deliberately reuses it): versions default to 50, distinct from
-        // history_limit's default of 500 — reusing history_limit's default
-        // here would silently change established retention behavior for
-        // existing users.
-        let version_retention_limit = {
-            let conn = pool.get().map_err(|e| e.to_string())?;
-            let result = conn.query_row(
+            // Separate from history_limit (unlike performance_reports, which
+            // deliberately reuses it): versions default to 50, distinct from
+            // history_limit's default of 500 — reusing history_limit's default
+            // here would silently change established retention behavior for
+            // existing users.
+            let version_retention_limit = match conn.query_row(
                 "SELECT value FROM settings WHERE key = 'version_retention_limit'",
                 [],
                 |row| row.get::<_, String>(0),
-            );
-            match result {
+            ) {
                 Ok(v) => v.parse::<i64>().unwrap_or(50).max(1),
                 Err(rusqlite::Error::QueryReturnedNoRows) => 50,
                 Err(e) => return Err(e.to_string()),
-            }
+            };
+
+            (history_limit, version_retention_limit)
         };
 
         Ok(Self { pool, history_limit, version_retention_limit })

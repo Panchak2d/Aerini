@@ -153,7 +153,7 @@ A commercial license removes the AGPL copyleft obligation entirely. No source di
 
 You likely need a commercial license if you are building a product or SaaS on top of Aerini, distributing modified Aerini to clients, deploying a modified `aerini-server` as a service for others, or if your legal team requires a warranty or compliance document.
 
-[View pricing and license terms](https://panchak2d.github.io/aerini/pricing)
+[View pricing and license terms](https://aerini.org/pricing)
 
 For enterprise or volume licensing: see [CONTACT.md](CONTACT.md)
 

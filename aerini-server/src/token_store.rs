@@ -95,6 +95,9 @@ impl TokenStore {
 
     /// Create a new token. Returns the raw (unhashed) token string — shown once.
     /// `expires_in_secs`: optional TTL in seconds. None = non-expiring.
+    /// Test-only convenience wrapper; the `/api/tokens` route calls
+    /// `create_token_with_workflows` directly to also pass along ACL grants.
+    #[cfg(test)]
     pub fn create_token(&self, label: &str, scopes: &[&str], expires_in_secs: Option<u64>) -> rusqlite::Result<String> {
         self.create_token_with_id(label, scopes, expires_in_secs).map(|(_, raw)| raw)
     }
@@ -102,6 +105,8 @@ impl TokenStore {
     /// Same as [`create_token`](Self::create_token), also returning the new
     /// token's id — needed by callers that must act on the token immediately
     /// after creation (e.g. granting a workflow ACL) without a second lookup.
+    /// Test-only; see `create_token`.
+    #[cfg(test)]
     pub fn create_token_with_id(&self, label: &str, scopes: &[&str], expires_in_secs: Option<u64>) -> rusqlite::Result<(String, String)> {
         self.create_token_with_workflows(label, scopes, expires_in_secs, &[])
     }

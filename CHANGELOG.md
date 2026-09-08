@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ### Security
 - Widget relay (`POST /api/widget/:id/trigger`): now refuses with `403` to trigger any workflow containing a Shell Command, Code, or Database node, unconditionally. `--allow-shell`/`--allow-code`/`--allow-database` are server-wide, not per-workflow, so enabling one for an unrelated internal workflow previously also left that node type reachable through this route on any other, publicly-embedded workflow the same server runs
+- Dependencies: `wasmtime`/`wasmtime-wasi`/`wasmtime-wasi-http` 46.0.2 → 46.0.3 (RUSTSEC-2026-0268, RUSTSEC-2026-0269 — WASI filesystem sandbox escape and guest-controlled host heap allocation); `h2` bumped off 0.4.15 (RUSTSEC-2026-0258); `chacha20` bumped off yanked 0.10.1; `aws-sdk-s3` 1.140.0 → 1.145.0 to pull in `lru` >=0.18.2 (RUSTSEC-2026-0253)
 
 ### Planned (v0.5)
 - Sub-workflows

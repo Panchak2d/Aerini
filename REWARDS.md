@@ -1,7 +1,9 @@
 # Contributor Rewards
 
-Community donations (via GitHub Sponsors) partially support contributors.
-Commercial revenue is separate and is not part of this pool.
+Community donations (via Patreon) partially support contributors. Patreon
+membership fees count as donations for this pool. Commercial license revenue
+(see [FUNDING.md](FUNDING.md)) is a separate thing and is not part of this
+pool.
 
 ---
 
@@ -50,6 +52,14 @@ Contributor rewards are discretionary community grants. They do not create:
 - Equity or ownership rights
 - Entitlement to commercial licensing revenue
 - Guaranteed payment obligations
+
+---
+
+## Taxes and cross-border payouts
+
+Recipients are responsible for reporting reward income under their own local tax law — the reward pool does not withhold or file anything on a recipient's behalf.
+
+Separately, before this pool activates, the Maintainer will confirm what compliance steps (if any) apply to sending money from India to contributors abroad, and will not begin payouts until that's settled.
 
 ---
 

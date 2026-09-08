@@ -4,30 +4,36 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.2 — Parallel execution and hardening (shipped — v0.2.0 / v0.3.0)
+## v0.2 — Parallel execution and hardening (shipped — v0.2.0)
 
 - [x] Parallel execution (per-workflow opt-in)
 - [x] Global concurrent run limit (`--max-concurrent-runs`)
 - [x] Per-workflow SSE ACL
 - [x] Code node sandbox (filesystem restriction + subprocess restriction)
+
+---
+
+## v0.3 — Extensibility (shipped — v0.3.0)
+
+- [x] Plugin / custom node API
 - [x] Pre-built binary releases for macOS, Windows, Linux
 
 ---
 
-## v0.3 — Extensibility
+## v0.4 — Versioning and backups (shipped — v0.4.0)
 
-- [x] Plugin / custom node API
 - [x] Workflow versioning and history
 - [x] Improved run history UI
-- [ ] More trigger types (file watch, database poll)
 - [x] Bulk workflow export
-- [ ] Workflow bundle import
+- [x] Multi-node plugin packages (`.aerinipkg`)
 
 ---
 
-## v0.4 — Sub-workflows
+## v0.5 — Sub-workflows
 
 - [ ] Sub-workflows (in progress)
+- [ ] More trigger types (file watch, database poll)
+- [ ] Workflow bundle import
 
 ---
 

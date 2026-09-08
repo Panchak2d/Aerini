@@ -167,6 +167,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # tauri.conf.json's externalBin expects src-tauri/binaries/node-bundled-<target-triple>
+      # to already exist; without this, tauri build fails to find the sidecar.
+      - name: Fetch and stage Node binaries
+        shell: bash
+        run: bash scripts/fetch-node-binaries.sh
+
       # Full `tauri build` (not vite:build) — this is the check the desktop binary
       # itself, not just the frontend bundle, actually compiles and packages on
       # every platform it ships for. Unsigned, same as release.yml; nothing here

@@ -165,9 +165,9 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # next bump into a deliberate, reviewed upgrade instead of a silent one.
 # Bump only all three together, and re-verify the p3 surfaces this crate
 # depends on (plugin_loader.rs's trigger-engine linking) before doing so.
-wasmtime           = { version = "=46.0.2", features = ["component-model"] }
-wasmtime-wasi      = { version = "=46.0.2", features = ["p3"] }
-wasmtime-wasi-http = { version = "=46.0.2", features = ["p2", "p3"] }
+wasmtime           = { version = "=46.0.3", features = ["component-model"] }
+wasmtime-wasi      = { version = "=46.0.3", features = ["p3"] }
+wasmtime-wasi-http = { version = "=46.0.3", features = ["p2", "p3"] }
 
 # Pulled in transitively by wasmtime-wasi-http already, but the p3 hook
 # signature (`TriggerHttpHooks::send_request` in plugin_loader.rs) names
@@ -185,6 +185,12 @@ libc = "0.2"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3"
+# hooks: Connection::authorizer, used only by
+# nodes::ai_memory::tests::append_fails_cleanly_when_seq_lookup_errors to
+# force get_next_seq's SELECT to fail without a trigger (triggers don't fire
+# on SELECT). Test-only: unified into the dev-profile build alongside the
+# main rusqlite dependency above, does not affect the non-test feature set.
+rusqlite = { version = "0.38", features = ["hooks"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -27,7 +27,7 @@ The founder retains final authority over:
 
 - Licensing decisions
 - Commercial licensing
-- Trademarks
+- Trademarks (see [TRADEMARK_POLICY.md](TRADEMARK_POLICY.md))
 - Project continuity and legal stewardship
 
 This is not a veto on contributions — it is a stewardship responsibility.
@@ -44,6 +44,19 @@ This is not a veto on contributions — it is a stewardship responsibility.
 
 ## Succession
 
-If the founder becomes unavailable for an extended period, Core Maintainers
-may collectively assume stewardship. Governance transitions will be announced
-publicly and documented here.
+The founder may designate a successor at his sole discretion, at any time, by
+written notice satisfying the conditions in [CLA.md](CLA.md) Section 13 —
+including that successor's written commitment to keep offering the Project
+under AGPL-3.0. Until such a designation is made, the Project's intellectual
+property and the rights held under the CLA remain the founder's personal
+property.
+
+If the founder becomes unavailable for an extended period and no successor
+has been designated, Core Maintainers may continue day-to-day technical and
+community stewardship of the codebase. Because the codebase is already
+public under AGPL-3.0, this doesn't require any transfer of rights — anyone
+can already fork and continue it. It does not, however, extend to accepting
+new contributions under the CLA on the founder's behalf, granting commercial
+licenses, or otherwise acting as "Maintainer" for purposes of the CLA.
+
+Governance transitions will be announced publicly and documented here.

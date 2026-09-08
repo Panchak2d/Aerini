@@ -55,4 +55,4 @@ a claim of enforcement beyond its legal reach.
 ## Reporting violations
 
 To report a suspected violation of this policy, contact the project at the
-address listed in [SECURITY.md](SECURITY.md).
+address listed in [CONTACT.md](CONTACT.md).

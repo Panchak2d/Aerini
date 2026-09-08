@@ -31,17 +31,23 @@ impl AiMemoryNode {
                     "PRAGMA busy_timeout=5000;
                      PRAGMA journal_mode=WAL;"
                 ));
-            // r2d2 defaults min_idle to max_size, so .build() would otherwise warm up
-            // all 4 connections concurrently on first use, racing each other for
-            // SQLite's WAL "0-to-1 client" recovery lock on a brand-new db file.
-            // Capping eager warm-up to one connection removes that race; later
-            // connections join an already-WAL database cleanly.
+            // r2d2 re-enforces min_idle as a floor on every checkout, not just
+            // at pool construction: establish_idle_connections runs inside
+            // try_get_inner right after popping an idle connection, before
+            // that connection is returned to the caller. With
+            // min_idle(Some(1)), checking out the sole warmed connection
+            // below immediately schedules a background replacement
+            // connection; if that finishes before this connection is dropped
+            // — e.g. while the schema-init statements below run — the pool
+            // ends up with two connections instead of one. min_idle(Some(0))
+            // keeps that floor at zero, so the replenishment call is always a
+            // no-op: a connection is only ever created in direct response to
+            // real demand.
             let pool = Pool::builder()
                 .max_size(4)
-                .min_idle(Some(1))
+                .min_idle(Some(0))
                 .build(manager)
                 .map_err(|e| format!("AI memory: could not create pool: {}", e))?;
-            // Schema init on first connection
             {
                 let conn = pool.get().map_err(|e| e.to_string())?;
                 conn.execute_batch(
@@ -166,7 +172,12 @@ impl Node for AiMemoryNode {
                     Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for append")),
                 };
-                let seq = get_next_seq(&conn, session_id).unwrap_or(0);
+                let seq = match get_next_seq(&conn, session_id) {
+                    Ok(s) => s,
+                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
+                        "WRITE_ERROR", format!("failed to determine next sequence number: {}", e),
+                    )),
+                };
                 let now = chrono::Utc::now().to_rfc3339();
                 match conn.execute(
                     "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -303,11 +314,11 @@ mod tests {
         }
     }
 
-    /// Recovery Plan Session 3 spec: seed two sessions' worth of rows, clear
-    /// one via the same `"clear"` operation `clear_chat_session`
-    /// (`src-tauri/src/commands/workflow.rs`) delegates to via the node
-    /// registry, and confirm only the targeted session's rows are gone —
-    /// the other session's history must survive untouched.
+    /// Seeds two sessions' worth of rows, clears one via the same `"clear"`
+    /// operation `clear_chat_session` (`src-tauri/src/commands/workflow.rs`)
+    /// delegates to via the node registry, and confirms only the targeted
+    /// session's rows are gone — the other session's history must survive
+    /// untouched.
     #[tokio::test]
     async fn clear_removes_only_the_targeted_session() {
         let path = temp_db_path("clear_scoped");
@@ -470,6 +481,75 @@ mod tests {
         let data = read_out.output.unwrap();
         assert_eq!(data["count"], 1);
         assert_eq!(data["messages"], json!([{ "role": "user", "content": "original" }]));
+
+        cleanup(&path);
+    }
+
+    /// Appending while `get_next_seq`'s seq lookup fails must return
+    /// WRITE_ERROR and write nothing, never silently insert at a
+    /// wrongly-defaulted seq.
+    ///
+    /// SQLite triggers don't fire on SELECT, so the trigger technique used by
+    /// `write_reports_failure_and_preserves_data_when_delete_fails` above
+    /// can't force get_next_seq's `SELECT MAX(seq)` to fail on its own while
+    /// leaving the following INSERT able to succeed. Instead, this installs
+    /// a `rusqlite` authorizer (`Connection::authorizer`, "hooks" feature,
+    /// dev-only — see Cargo.toml) on the pool's one warmed connection that
+    /// denies read access to `ai_memory.seq` specifically: that fails the
+    /// `SELECT ... MAX(seq) ...` lookup (which reads that column), while the
+    /// later `INSERT` — which writes `seq` but never reads it — is untouched
+    /// by the denial and would still succeed if reached.
+    ///
+    /// That specificity is what makes this test discriminate a
+    /// silently-defaulting seq lookup from one that fails cleanly under the
+    /// exact same authorizer: code that swallows the SELECT failure would
+    /// still execute the INSERT, succeeding with a wrongly-defaulted seq of
+    /// 0; code that propagates the error never reaches the INSERT.
+    #[tokio::test]
+    async fn append_fails_cleanly_when_seq_lookup_errors() {
+        let path = temp_db_path("append_seq_lookup_fails");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        // Force pool init (and the schema-creation statements it runs)
+        // before installing the authorizer, so CREATE TABLE/INDEX aren't
+        // denied — then install the authorizer on that same connection.
+        {
+            let pool = node.get_pool().expect("pool init failed");
+            let conn = pool.get().expect("get conn failed");
+            conn.authorizer(Some(|ctx: rusqlite::hooks::AuthContext<'_>| {
+                use rusqlite::hooks::{AuthAction, Authorization};
+                match ctx.action {
+                    AuthAction::Read { table_name, column_name }
+                        if table_name == "ai_memory" && column_name == "seq" =>
+                    {
+                        Authorization::Deny
+                    }
+                    _ => Authorization::Allow,
+                }
+            })).expect("authorizer install failed");
+        }
+
+        let out = node.execute(make_input(
+            "append", "session-seqfail", Some("user"), Some("hello"),
+        )).await;
+        assert!(!out.success, "append must fail when get_next_seq's SELECT is denied, got: {:?}", out.output);
+        assert_eq!(out.error.unwrap().code, "WRITE_ERROR");
+
+        // Clear the authorizer before the verification read, so the read
+        // (which only touches role/content, not seq) isn't itself denied.
+        {
+            let pool = node.get_pool().expect("pool init failed");
+            let conn = pool.get().expect("get conn failed");
+            conn.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)
+                .expect("authorizer clear failed");
+        }
+        let read_out = node.execute(make_input("read", "session-seqfail", None, None)).await;
+        assert!(read_out.success, "read failed: {:?}", read_out.error);
+        assert_eq!(
+            read_out.output.unwrap()["count"], 0,
+            "no row must have been written when the seq lookup failed"
+        );
 
         cleanup(&path);
     }

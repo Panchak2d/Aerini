@@ -18,7 +18,7 @@
 
 | Source | Amount |
 |--------|--------|
-| GitHub Sponsors | $[amount] |
+| Patreon | $[amount] |
 | Other | $[amount or "—"] |
 | **Total received** | **$[total]** |
 

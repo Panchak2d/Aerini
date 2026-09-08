@@ -1,6 +1,6 @@
 # Contributor License Agreement
 
-**Aerini — Version 1.2 (Effective: 2026-07-01)**
+**Aerini — Version 1.3 (Effective: 2026-09-08)**
 
 Aerini is developed and maintained by Panchaketu Debbarma ("Maintainer"). This Contributor License Agreement ("Agreement") governs all contributions made to the Aerini project. By signing this Agreement, each contributor accepts and agrees to the following terms for their present and future contributions to the project.
 
@@ -38,7 +38,7 @@ Subject to the terms of this Agreement, You grant to the Maintainer and the Main
 
 **Scope of AI/ML Training Exclusion.** This exclusion binds the Maintainer, the Maintainer's Successors and Assigns, and parties who receive this software directly from the Maintainer with explicit notice of this restriction. Parties who receive the AGPL-licensed code through downstream distribution are governed by AGPL-3.0 terms only; the AGPL does not include an AI training restriction. This exclusion represents a binding commitment for direct recipients and a statement of the project's values — it is not a claim of universal enforcement across all possible downstream uses of AGPL-licensed copies.
 
-**Sublicense Flow-Down.** The Maintainer shall include a contractually binding restatement of the AI/ML Training Exclusion in every sublicense agreement it executes that grants rights to reproduce, distribute, or otherwise exploit Contributions. Any sublicense that does not include such a restatement is void to the extent it purports to authorise the excluded use. If a sublicensee breaches the AI/ML Training Exclusion as a direct result of the Maintainer's failure to include the required restatement, the Maintainer shall be liable to You for direct damages arising directly from that failure.
+**Sublicense Flow-Down.** The Maintainer shall include a contractually binding restatement of the AI/ML Training Exclusion in every sublicense agreement it executes that grants rights to reproduce, distribute, or otherwise exploit Contributions. Any sublicense that does not include such a restatement is void to the extent it purports to authorise the excluded use. If a sublicensee breaches the AI/ML Training Exclusion as a direct result of the Maintainer's failure to include the required restatement, the Maintainer shall be liable to You for direct damages arising directly from that failure, subject to the limitations in Section 5.
 
 This grant does not transfer ownership of Your copyright. You retain all ownership of Your Contributions and may continue to use, publish, and license them independently.
 
@@ -72,11 +72,13 @@ By submitting a Contribution, You represent and warrant that:
 
 ---
 
-## 5. No Warranty; Limitation of Liability
+## 5. No Warranty; Mutual Limitation of Liability
 
 YOUR CONTRIBUTIONS ARE PROVIDED "AS IS." TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, YOU MAKE NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, OR NON-INFRINGEMENT, WITH RESPECT TO YOUR CONTRIBUTIONS.
 
 IN NO EVENT SHALL YOU BE LIABLE TO THE MAINTAINER OR ANY THIRD PARTY FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES ARISING OUT OF OR RELATED TO YOUR CONTRIBUTIONS, EVEN IF YOU HAVE BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+IN NO EVENT SHALL THE MAINTAINER BE LIABLE TO YOU FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES ARISING OUT OF OR RELATED TO THIS AGREEMENT OR THE PROJECT, EVEN IF THE MAINTAINER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. EXCEPT FOR LIABILITY ARISING FROM THE MAINTAINER'S FRAUD OR WILFUL MISCONDUCT, THE MAINTAINER'S AGGREGATE LIABILITY TO YOU ARISING OUT OF OR RELATED TO THIS AGREEMENT — INCLUDING ANY LIABILITY UNDER THE SUBLICENSE FLOW-DOWN OBLIGATION IN SECTION 2 — SHALL NOT EXCEED THE TOTAL AMOUNT, IF ANY, PAID BY YOU TO THE MAINTAINER UNDER THIS AGREEMENT (WHICH THE PARTIES ACKNOWLEDGE IS ZERO, THIS BEING A NO-CHARGE AGREEMENT).
 
 ---
 
@@ -191,7 +193,7 @@ By signing this Agreement when prompted on a pull request, You confirm that You 
 
 # Part II — Corporate Contributor License Agreement
 
-**Aerini — Version 1.2 (Effective: 2026-07-01)**
+**Aerini — Version 1.3 (Effective: 2026-09-08)**
 
 This Corporate CLA governs contributions to the Aerini project made by employees or contractors of a legal entity ("Corporation"). It must be executed by an individual with actual authority to bind the Corporation — meaning a director, officer, or duly authorised representative empowered under the Corporation's own governance documents or applicable law to enter into intellectual property agreements — before any covered contribution is merged.
 
@@ -302,5 +304,5 @@ Sections 12 (Amendments; Survival), 14 (Severability), 15 (No Waiver), and 16 (C
 
 ---
 
-*Aerini Contributor License Agreement — Version 1.2 — 2026*
+*Aerini Contributor License Agreement — Version 1.3 — 2026*
 *Panchaketu Debbarma — https://github.com/Panchak2d/aerini*
