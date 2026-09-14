@@ -624,6 +624,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
@@ -866,6 +867,7 @@ mod tests {
 
     fn exec_input(folder_path: &str, prefix: &str, filename: &str, b64: &str) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),

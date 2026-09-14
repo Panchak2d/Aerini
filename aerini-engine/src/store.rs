@@ -4,11 +4,11 @@
 //! binary can use it without any Tauri dependency.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use rand_core::RngCore;
+use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -95,8 +95,12 @@ impl Drop for RawKey {
 impl CredentialStore {
     pub fn open(db_path: &Path, key_source: KeySource) -> Result<Self, EngineError> {
         let key_bytes = Self::load_key(key_source)?;
-        let key    = Key::<Aes256Gcm>::from_slice(&key_bytes);
-        let cipher = Aes256Gcm::new(key);
+        let key = Key::<Aes256Gcm>::try_from(key_bytes.as_slice())
+            .map_err(|_| EngineError::Encryption(format!(
+                "credential store key is corrupt: expected 32 bytes, got {}",
+                key_bytes.len()
+            )))?;
+        let cipher = Aes256Gcm::new(&key);
         let raw_key = RawKey(key_bytes);
 
         let conn = Connection::open(db_path)
@@ -157,10 +161,10 @@ impl CredentialStore {
     pub fn store(&self, req: &CreateCredentialRequest) -> Result<(), EngineError> {
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let encrypted = self.cipher
-            .encrypt(nonce, req.value.as_bytes())
+            .encrypt(&nonce, req.value.as_bytes())
             .map_err(|e| EngineError::Encryption(e.to_string()))?;
 
         let meta = CredentialMetadata {
@@ -208,9 +212,13 @@ impl CredentialStore {
                         nonce_bytes.len()
                     )));
                 }
-                let nonce = Nonce::from_slice(&nonce_bytes);
+                let nonce = Nonce::try_from(nonce_bytes.as_slice())
+                    .map_err(|_| EngineError::Encryption(format!(
+                        "credential '{id}' has a corrupt nonce: expected 12 bytes, got {}",
+                        nonce_bytes.len()
+                    )))?;
                 let decrypted = self.cipher
-                    .decrypt(nonce, enc.as_ref())
+                    .decrypt(&nonce, enc.as_ref())
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
                 Ok(Some(String::from_utf8(decrypted)
                     .map_err(|e| EngineError::Encryption(e.to_string()))?))

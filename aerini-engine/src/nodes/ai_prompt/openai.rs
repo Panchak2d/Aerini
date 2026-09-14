@@ -25,6 +25,7 @@ pub(super) async fn call_openai_compatible(
     max_tokens: u64,
     image_attachments: &[ImageAttachment],
     doc_attachments: &[DocAttachment],
+    provider_id: &str,
 ) -> NodeOutput {
     let user_content: Value = if image_attachments.is_empty() && doc_attachments.is_empty() {
         json!(prompt)
@@ -56,8 +57,8 @@ pub(super) async fn call_openai_compatible(
     });
 
     let record = crate::provider::ProviderRegistry::global()
-        .get("openai")
-        .expect("openai always registered");
+        .get(provider_id)
+        .expect("call_openai_compatible is only dispatched for \"openai\" or \"local\", both always registered");
     let req = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(format!("{}/chat/completions", base_url))
@@ -95,6 +96,42 @@ pub(super) async fn call_openai_compatible(
     )
 }
 
+/// `GET {base}/models` — same OpenAI-compatible shape as the chat endpoint,
+/// so this one function serves both "openai" and "local" (Ollama etc.).
+/// `provider_id` selects the matching `ProviderRecord` for `apply_auth`,
+/// since "local" is a distinct, keyless record.
+pub(super) async fn list_models(
+    client: reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    provider_id: &str,
+) -> Result<Vec<String>, NodeError> {
+    let record = crate::provider::ProviderRegistry::global()
+        .get(provider_id)
+        .expect("list_models is only dispatched for \"openai\" or \"local\", both always registered");
+    let req = crate::provider::ProviderRegistry::apply_auth(
+        record,
+        client.get(format!("{}/models", base_url)),
+        api_key,
+    );
+
+    let (status, resp_json) = send_and_parse(req).await.map_err(|out| {
+        out.error.unwrap_or_else(|| NodeError::unrecoverable("NETWORK_ERROR", "request failed"))
+    })?;
+
+    if let Some(msg) = extract_provider_error(&resp_json, "Unknown API error") {
+        return Err(if status == 401 || status == 403 {
+            NodeError::unrecoverable("BAD_KEY", msg)
+        } else {
+            NodeError::unrecoverable("API_ERROR", msg)
+        });
+    }
+
+    Ok(resp_json["data"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
+        .unwrap_or_default())
+}
 
 #[cfg(test)]
 mod backward_compat_tests {
@@ -160,7 +197,7 @@ mod backward_compat_tests {
         let out = call_openai_compatible(
             client, &base_url, "", "test-model",
             "You are a helpful assistant.", "hello world",
-            0.7, 2048, &[], &[],
+            0.7, 2048, &[], &[], "openai",
         ).await;
         assert!(out.success, "call_openai_compatible failed: {:?}", out.error);
 
@@ -184,5 +221,27 @@ mod backward_compat_tests {
             body, expected,
             "request body with no attachments must be byte-identical to the pre-attachment-era shape"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_openai_compatible_resolves_local_provider_record() {
+        let canned = r#"{"choices":[{"message":{"content":"ok"}}],"model":"llama3","usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let (base_url, _rx) = spawn_capturing_mock_server(canned).await;
+        let out = call_openai_compatible(
+            reqwest::Client::new(), &base_url, "", "llama3",
+            "You are a helpful assistant.", "hello world",
+            0.7, 2048, &[], &[], "local",
+        ).await;
+        assert!(out.success, "provider_id=\"local\" must resolve its own record, not panic or fail: {:?}", out.error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_models_parses_data_array_into_ids() {
+        let canned = r#"{"data":[{"id":"gpt-5.6"},{"id":"gpt-5.6-mini"}]}"#;
+        let (base_url, _rx) = spawn_capturing_mock_server(canned).await;
+        let ids = list_models(reqwest::Client::new(), &base_url, "", "openai")
+            .await
+            .expect("list_models should succeed against a canned data array");
+        assert_eq!(ids, vec!["gpt-5.6".to_string(), "gpt-5.6-mini".to_string()]);
     }
 }

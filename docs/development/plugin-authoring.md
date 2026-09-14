@@ -15,7 +15,7 @@ interface node {
 
 `describe()` runs once, at load time, and its return value (`type_id`, `display_name`, `category`, `description`, and the two JSON Schema strings) is cached for the process's whole lifetime. Nothing you return from it can change without a reload. `category` is one of `"action"`, `"ai"`, `"logic"`, or `"utility"`, the same four `NodeType` variants built-in nodes use; anything else falls back to `"action"` with a warning logged, not a load failure.
 
-`execute()` runs once per workflow run that reaches the node. `node-input.params` carries your node's resolved configuration as a flat list of key/value pairs, already past credential resolution: if a workflow author connects a saved credential to one of your fields, you receive the plaintext value directly, the same as a built-in node would, never an id you have to look up. A nested object or array in the config comes through as its JSON text under that key, which is awkward to reconstruct field by field, so the host also always includes one extra entry, key `__aerini_input_json`, whose value is the entire merged config as one JSON object string. Parse that once instead of walking the flat list if your schema has anything beyond flat scalars. On the rare chance your own schema already defines a field literally named `__aerini_input_json`, the host skips synthesizing its own entry rather than overwriting yours, so you always get your own value back and never host-synthesized data standing in for it silently. The `credentials` field on `node-input` exists in the WIT type but the host never populates it; every credential value you need already arrives through `params`.
+`execute()` runs once per workflow run that reaches the node. `node-input.params` carries your node's resolved configuration as a flat list of key/value pairs, already past credential resolution: if a workflow author connects a saved credential to one of your fields, you receive the plaintext value directly, the same as a built-in node would, never an id you have to look up. A nested object or array in the config comes through as its JSON text under that key, which is awkward to reconstruct field by field, so the host also always includes one extra entry, key `__aerini_input_json`, whose value is the entire merged config as one JSON object string. Parse that once instead of walking the flat list if your schema has anything beyond flat scalars. On the rare chance your own schema already defines a field literally named `__aerini_input_json`, the host skips synthesizing its own entry rather than overwriting yours, so you always get your own value back and never host-synthesized data standing in for it silently. The `credentials` field on `node-input` also carries every resolved credential value, keyed by the same config field name — the same values `params` carries, kept there too for backward compatibility with plugins that only read `params`. Read `credentials` directly if you want the resolved secrets without the rest of the merged config alongside them.
 
 Return `node-output` with `success` and `data` set for a normal result, or `success: false` with `error-code`/`error-message` for an expected failure, the same distinction `NodeOutput::failure` and `NodeOutput::success` make for a built-in node. Set `recoverable` when the executor's retry policy should get another attempt at the same input; don't set it for a failure that will produce the identical result every time. Never rely on a Rust panic, or your host language's equivalent, to signal failure: a trap is treated as unrecoverable no matter what actually went wrong, and the workflow just sees `wasm_trap` with no detail from inside your code.
 
@@ -125,6 +125,49 @@ interface storage {
 ```
 
 This is an import, not an export: the host links it into every plugin's linker unconditionally, so a plugin built before this interface existed is unaffected, and one that wants it just declares the import in its own hand-written world (or targets `aerini-node-with-storage`, the convenience world that pairs it with `node`). It's meant for small durable notes, not a general-purpose database: hosts enforce a per-plugin quota on total bytes and key count, and `set`/`list-keys` return a `storage-error` on `key-too-long`, `value-too-large`, `quota-exceeded`, or a backend `unavailable`. `get` and `delete` never fail; a backend problem there just looks like "key absent" rather than an error, since neither can lose data you've already confirmed was written. Every call is a no-op during `describe()`, before your plugin's own `type_id` is even known to scope storage by; it's only backed by a real store once `execute()` runs.
+
+## Filesystem watching
+
+A plugin can also import a filesystem-watching capability, distinct from `trigger`'s async event stream and unaffected by that stream's current limitations:
+
+```wit
+interface fs-watch {
+    record watch-target {
+        path: string,
+        recursive: bool,
+        events: list<string>,
+    }
+    record fs-event {
+        event-type: string,
+        path: string,
+        previous-path: string,
+        name: string,
+        extension: string,
+        size: u64,
+        is-directory: bool,
+        observed-at: string,
+    }
+    enum watch-error {
+        path-not-found,
+        permission-denied,
+        invalid-config,
+        quota-exceeded,
+        unavailable,
+    }
+    record poll-result {
+        events: list<fs-event>,
+        overflowed: bool,
+    }
+    poll: func(target: watch-target) -> result<poll-result, watch-error>;
+    unwatch: func(target: watch-target);
+}
+```
+
+Like `storage`, this is an import the host links into every plugin's linker unconditionally, so a plugin built before this interface existed is unaffected, and one that wants it just declares the import in its own hand-written world (or targets `aerini-node-with-fs-watch`, the convenience world that pairs it with `node`). Unlike `trigger`, `poll` is fully synchronous and callable from a normal `execute()` — call it once per run, typically driven by a Schedule node on whatever interval you want, rather than depending on `trigger.events()`'s host-side pump, which doesn't run any plugin's stream end to end yet (see "Trigger plugins" above).
+
+`path` must be absolute — the host has no concept of a plugin's working directory to resolve a relative one against — and `events` must be a non-empty list drawn from `"created"`, `"modified"`, `"deleted"`, `"renamed"`; either mistake fails with `invalid-config` before any watch starts. Two `poll` calls are "the same target," sharing one continuously-running watch and one event buffer, when `path` (after canonicalizing), `recursive`, and `events` all match exactly; changing any of them starts a distinct watch. Watches are scoped per plugin `type_id`, the same way `storage` is: every execution of your plugin, across every workflow and placement, that polls an equivalent target shares one buffer. `unwatch` stops a watch early and is not an error if none is running; a target nobody polls for long enough is reaped automatically either way.
+
+The host applies its own limits before any of this reaches your plugin: a cap on distinct active targets per plugin (`quota-exceeded` once hit, not a value your plugin can raise), a cap on buffered events per target (oldest dropped first, `overflowed` set on the next `poll` when that happens), and a short coalescing window that folds rapid duplicate notifications for the same path and event kind into one buffered event rather than many. `docs/plugins/file-watcher/reference.md` documents the exact current numbers and a complete reference implementation built on this interface.
 
 ## The plugin sandbox
 

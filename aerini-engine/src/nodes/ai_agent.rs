@@ -54,12 +54,13 @@ impl Node for AiAgentNode {
                 },
                 "provider": {
                     "type": "string",
-                    "enum": ["openai", "anthropic", "gemini", "auto"],
+                    "enum": ["openai", "anthropic", "gemini", "local", "auto"],
                     "description": "AI provider. OpenAI/Gemini: full tool-calling ReAct loop. Anthropic: single reasoning pass, no tool loop."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash."
+                    "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash.",
+                    "x-aerini-model-picker": true
                 },
                 "base_url": {
                     "type": "string",
@@ -130,6 +131,18 @@ impl Node for AiAgentNode {
         };
         let is_anthropic = provider_id == "anthropic";
         let is_gemini    = provider_id == "gemini";
+
+        // No default model exists for "local" — a blank model would otherwise
+        // silently inherit the OpenAI-flagship default below and get sent to
+        // whatever server base_url points to, which is very unlikely to have it.
+        if provider_id == "local"
+            && input.input["model"].as_str().map(|s| s.trim().is_empty()).unwrap_or(true)
+        {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "MISSING_MODEL",
+                "model is required when provider is \"local\"",
+            ));
+        }
 
         let default_model = if is_anthropic {
             "claude-sonnet-5"
@@ -261,7 +274,7 @@ impl Node for AiAgentNode {
             } else {
                 call_openai_agent(
                     &client, &base_url, &api_key, &model, &system,
-                    &messages, &tools, temperature, max_tokens,
+                    &messages, &tools, temperature, max_tokens, provider_id,
                 ).await
             };
 
@@ -653,6 +666,7 @@ async fn call_openai_agent(
     tools: &[Value],
     temperature: f64,
     max_tokens: u64,
+    provider_id: &str,
 ) -> Result<Value, AgentApiError> {
     let mut all_messages = vec![json!({ "role": "system", "content": system })];
     all_messages.extend_from_slice(messages);
@@ -669,10 +683,16 @@ async fn call_openai_agent(
         body["tool_choice"] = json!("auto");
     }
 
-    let record = crate::provider::ProviderRegistry::global()
-        .get("openai")
+    // provider_id reaches here from an unvalidated request field (schema
+    // enum enforcement is non-strict by default), unlike ai_prompt/mod.rs's
+    // equivalent call site — so an unregistered id falls back to the
+    // "openai" record rather than panicking, matching resolve_base_url's
+    // own fallback for the same situation.
+    let registry = crate::provider::ProviderRegistry::global();
+    let record = registry
+        .get(provider_id)
+        .or_else(|| registry.get("openai"))
         .expect("openai always registered");
-    // registry-managed: auth header
     let req = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(format!("{}/chat/completions", base_url))
@@ -916,6 +936,7 @@ mod tests {
 
     fn make_input(val: serde_json::Value) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "n1".into(),
             workflow_id:  "w1".into(),
@@ -923,6 +944,50 @@ mod tests {
             input:        val,
             context:      ExecutionContext::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn missing_model_with_local_provider_returns_missing_model_error_without_request() {
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "local"
+        }))).await;
+        assert!(!out.success);
+        let err = out.error.expect("must carry NodeError");
+        assert_eq!(err.code, "MISSING_MODEL");
+        assert!(!err.recoverable);
+    }
+
+    /// Confirms the existing `if provider_str == "auto" {...} else { provider_str }`
+    /// passthrough already lets an explicit "local" through untouched — a
+    /// public-looking base_url would resolve to "openai" via detect_from_url
+    /// if provider_id were wrongly re-derived, and "openai" has its own
+    /// default model that would never raise this error.
+    #[tokio::test]
+    async fn explicit_local_provider_survives_public_looking_base_url() {
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "local", "base_url": "https://api.example.com"
+        }))).await;
+        assert!(!out.success);
+        let err = out.error.expect("must carry NodeError");
+        assert_eq!(err.code, "MISSING_MODEL");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_provider_resolves_its_own_auth_record() {
+        let base_url = spawn_minimal_openai_agent_mock().await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "local", "model": "llama3", "base_url": base_url
+        }))).await;
+        assert!(out.success, "provider=\"local\" must resolve its own record, not panic or fail: {:?}", out.error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unregistered_provider_id_falls_back_to_openai_auth_without_panicking() {
+        let base_url = spawn_minimal_openai_agent_mock().await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "custom-proxy", "base_url": base_url
+        }))).await;
+        assert!(out.success, "an unrecognized provider_id must fall back to openai auth, not panic: {:?}", out.error);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

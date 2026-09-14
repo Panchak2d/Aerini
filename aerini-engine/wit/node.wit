@@ -226,3 +226,139 @@ world aerini-node-with-storage {
     export node;
     import storage;
 }
+
+/// Optional, host-provided filesystem watching. Like `storage`, this is an
+/// *import*: real OS-level watching (via the host's `notify` crate) runs
+/// continuously in the host process, independent of any single `execute()`
+/// call's ephemeral, sandboxed Store -- the same reason `storage`'s backing
+/// database outlives the Store that calls into it (see `plugin_loader.rs`'s
+/// module doc comment, "Plugins cannot access the real filesystem"). This is
+/// what makes a working file-watcher plugin possible at all: the sandbox
+/// denies a plugin the real filesystem outright, so a plugin cannot watch
+/// anything itself -- it can only ask the host to watch on its behalf and
+/// report back what changed.
+///
+/// Deliberately synchronous, not `trigger`'s `async func` shape: `poll` is
+/// called from inside a normal `execute()` call, the same way any other
+/// action node works today -- typically driven by a Schedule node polling on
+/// an interval -- rather than depending on `trigger.events()`'s host-side
+/// event pump, which has open bugs and does not yet deliver events end to
+/// end (see `docs/development/plugin-authoring.md`). A plugin built against
+/// this interface works today; nothing here depends on that bug being fixed.
+interface fs-watch {
+    /// One request to watch (or continue watching) a path.
+    record watch-target {
+        /// Absolute path to a file or directory. A relative path is
+        /// rejected with `invalid-config` -- the host has no concept of
+        /// "the plugin's working directory" to resolve one against.
+        path: string,
+        /// Watch `path` and everything below it, not just its immediate
+        /// contents. Ignored (treated as false) when `path` is a file.
+        recursive: bool,
+        /// Which event kinds this call wants back: any of "created",
+        /// "modified", "deleted", "renamed". Rejected with `invalid-config`
+        /// if empty or if any entry isn't one of those four -- there is no
+        /// implicit "all events" default.
+        events: list<string>,
+    }
+
+    /// One filesystem change, already resolved to plain, stable fields -- a
+    /// plugin never sees a raw platform-native notification kind.
+    record fs-event {
+        /// One of "created", "modified", "deleted", "renamed" -- always a
+        /// member of the `events` list the caller's `watch-target` asked
+        /// for; the host never returns a kind the caller didn't request.
+        event-type: string,
+        /// Absolute path the event is about. For "renamed", this is the
+        /// file's new path.
+        path: string,
+        /// Previous absolute path -- only set (non-empty) for "renamed".
+        previous-path: string,
+        /// File or directory name (final path component).
+        name: string,
+        /// Lowercase extension without the leading dot, or empty string if
+        /// the name has none.
+        extension: string,
+        /// Size in bytes at the moment the host observed the event. 0 for
+        /// "deleted" (the file no longer exists to stat) and for a
+        /// directory.
+        size: u64,
+        /// True if the path is a directory.
+        is-directory: bool,
+        /// RFC 3339 timestamp the host observed and coalesced this event at
+        /// -- not the filesystem's own ctime/mtime, which some platforms
+        /// don't expose per-event at all.
+        observed-at: string,
+    }
+
+    /// Why a `poll` call returned no events, or failed outright.
+    enum watch-error {
+        /// `path` does not exist (nothing to watch).
+        path-not-found,
+        /// The host process does not have permission to read `path`.
+        permission-denied,
+        /// `path` was relative, or `events` was empty or contained an
+        /// unrecognised value.
+        invalid-config,
+        /// This plugin type-id already has as many distinct active targets
+        /// as the host allows, and `target` would be a new one.
+        quota-exceeded,
+        /// The host could not start or continue a real OS-level watch for
+        /// this target (e.g. a platform watch-descriptor limit was hit) --
+        /// unrelated to `target`'s own content.
+        unavailable,
+    }
+
+    /// Result of one `poll` call.
+    record poll-result {
+        /// Every event observed for this exact target since the last
+        /// successful `poll` call for it (or since the watch started, on
+        /// the first call), oldest first. Bounded: the host buffers only so
+        /// many events per target between polls.
+        events: list<fs-event>,
+        /// True if the buffer above was full and the host had to drop the
+        /// oldest events to make room for newer ones before this poll
+        /// drained it -- some events between the last poll and this one
+        /// were lost. `events` is never silently incomplete without this
+        /// being set.
+        overflowed: bool,
+    }
+
+    /// Ensure a host-side watch is running for `target` -- starting one if
+    /// this is the first `poll` for it, otherwise reusing the already-
+    /// running watch -- and return every event buffered for it since the
+    /// last call, draining the buffer. Two calls are the "same target" when
+    /// `path` (after canonicalizing), `recursive`, and the exact contents of
+    /// `events` all match; changing any of them starts a distinct watch
+    /// rather than reconfiguring the existing one -- the old one keeps
+    /// running until `unwatch` is called for it or it is reaped for
+    /// inactivity (see `unwatch`'s doc comment).
+    ///
+    /// Watches are scoped per plugin type-id, like `storage` -- every
+    /// execution of a given plugin, across every workflow and every
+    /// placement, that calls `poll` with an equivalent `target` shares the
+    /// same underlying watch and buffer.
+    poll: func(target: watch-target) -> result<poll-result, watch-error>;
+
+    /// Stop the host-side watch for `target` (exact match on
+    /// `path`/`recursive`/`events`, same equivalence `poll` uses) and
+    /// discard its buffered events. Not an error if no such watch is
+    /// running. A watch nobody has polled for long enough is stopped
+    /// automatically the same way; calling this explicitly (e.g. when a
+    /// workflow author disables a watcher node) just frees the underlying
+    /// OS resource sooner.
+    unwatch: func(target: watch-target);
+}
+
+/// Pairs `fs-watch` with the required `node` export -- the convenience world
+/// plugin authors compiling against this package's tooling target when they
+/// want filesystem watching, exactly as `aerini-node-with-storage` does for
+/// `storage`. Additive alongside every other world in this package; old
+/// plugins targeting any of them keep loading unchanged. A plugin author who
+/// wants `fs-watch` alongside `storage`, `metadata`, or `trigger` hand-
+/// declares their own world importing/exporting whichever combination they
+/// need -- same guidance `storage`'s own doc comment gives.
+world aerini-node-with-fs-watch {
+    export node;
+    import fs-watch;
+}

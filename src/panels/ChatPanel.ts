@@ -94,6 +94,11 @@ export class ChatPanel {
   private bannerEl:     HTMLElement;
   private bannerTextEl: HTMLElement | null;
   private startBtn:     HTMLButtonElement;
+  /** Set only while the active session has zero messages (see renderMessages/
+   *  buildEmptyState) — null the rest of the time, once messagesEl has been
+   *  rebuilt with real chat bubbles. */
+  private emptyStateTextEl:   HTMLElement | null = null;
+  private emptyStateStartBtn: HTMLButtonElement | null = null;
   private sessionLabel: HTMLElement;
   private sessionMenu:  HTMLElement;
   private chatBtn:      HTMLButtonElement | null;
@@ -443,14 +448,31 @@ export class ChatPanel {
     if (this.el.classList.contains("chat-open")) this.refreshRunningState();
   }
 
+  /** Text shared by the top banner (history exists) and the centered
+   *  empty-state (no history yet) for the "not running" case — kept in one
+   *  place so the two surfaces can't drift out of sync with each other. */
+  private notRunningStatusText(): string {
+    return this.mainRunActive
+      ? "Running as a one-time test (Run button) \u2014 replies aren't available this way. Stop it, then use Start below for an interactive chat session."
+      : "Start this workflow to begin chatting";
+  }
+
   private refreshRunningState(): void {
-    const running = this.schedulerRunning;
-    this.bannerEl.classList.toggle("hidden", running);
-    if (this.bannerTextEl) {
-      this.bannerTextEl.textContent = !running && this.mainRunActive
-        ? "Running as a one-time test (Run button) \u2014 replies aren't available this way. Stop it, then use Start below for an interactive chat session."
-        : "Start this workflow to begin chatting";
+    const running     = this.schedulerRunning;
+    const hasMessages = this.activeSession().messages.length > 0;
+
+    // Top banner only makes sense once there's message history to anchor it
+    // to; a fresh/empty session uses the centered empty-state instead.
+    this.bannerEl.classList.toggle("hidden", running || !hasMessages);
+    if (this.bannerTextEl) this.bannerTextEl.textContent = this.notRunningStatusText();
+
+    if (this.emptyStateTextEl) {
+      this.emptyStateTextEl.textContent = running
+        ? "Send a message to start chatting with this workflow."
+        : this.notRunningStatusText();
     }
+    this.emptyStateStartBtn?.classList.toggle("hidden", running);
+
     this.inputEl.disabled = !running || this.awaitingReply;
     this.sendBtn.disabled = this.inputEl.disabled || this.inputEl.value.trim().length === 0;
   }
@@ -473,6 +495,7 @@ export class ChatPanel {
 
   private async handleStart(): Promise<void> {
     this.startBtn.disabled = true;
+    if (this.emptyStateStartBtn) this.emptyStateStartBtn.disabled = true;
     try {
       const snapshot = await this.wfManager.prepareForBgRun();
       if (!snapshot) return;
@@ -502,6 +525,7 @@ export class ChatPanel {
       }
     } finally {
       this.startBtn.disabled = false;
+      if (this.emptyStateStartBtn) this.emptyStateStartBtn.disabled = false;
     }
   }
 
@@ -784,20 +808,50 @@ export class ChatPanel {
 
   private renderMessages(): void {
     this.messagesEl.innerHTML = "";
+    this.emptyStateTextEl = null;
+    this.emptyStateStartBtn = null;
     const session = this.activeSession();
     if (session.messages.length === 0) {
-      const hint = document.createElement("div");
-      hint.className = "chat-empty-hint";
-      hint.textContent = "Send a message to start chatting with this workflow.";
-      this.messagesEl.appendChild(hint);
+      this.messagesEl.appendChild(this.buildEmptyState());
+      this.refreshRunningState(); // freshly built — sync text/button to current state now
       return;
     }
     for (const m of session.messages) this.renderOneMessage(m);
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
+  /** Centered "no messages yet" state: explanatory text above a single Start
+   *  action, replacing the old top banner for this case (see refreshRunningState). */
+  private buildEmptyState(): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "chat-empty-state";
+
+    const text = document.createElement("p");
+    text.className = "chat-empty-state-text";
+    this.emptyStateTextEl = text;
+
+    const btn = document.createElement("button");
+    btn.className = "btn-primary chat-empty-state-start";
+    btn.textContent = "Start";
+    btn.addEventListener("click", () => this.handleStart());
+    this.emptyStateStartBtn = btn;
+
+    wrap.appendChild(text);
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  /** Clears the centered empty-state block (if present) and its field refs —
+   *  called wherever real content is about to appear in .chat-messages, so a
+   *  stale Start button/text never lingers alongside an actual message. */
+  private removeEmptyState(): void {
+    this.messagesEl.querySelector(".chat-empty-state")?.remove();
+    this.emptyStateTextEl = null;
+    this.emptyStateStartBtn = null;
+  }
+
   private renderOneMessage(msg: ChatMessage): void {
-    this.messagesEl.querySelector(".chat-empty-hint")?.remove();
+    this.removeEmptyState();
     const row = document.createElement("div");
     row.className = `chat-bubble-row chat-bubble-row--${msg.role === "user" ? "user" : "ai"}`;
     row.appendChild(
@@ -924,7 +978,7 @@ export class ChatPanel {
   }
 
   private appendTypingBubble(): void {
-    this.messagesEl.querySelector(".chat-empty-hint")?.remove();
+    this.removeEmptyState();
     const row = document.createElement("div");
     row.className = "chat-bubble-row chat-bubble-row--ai";
     row.id = "chat-typing-row";

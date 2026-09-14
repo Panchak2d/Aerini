@@ -97,8 +97,44 @@ impl ProviderRegistry {
 
     /// Detect provider id from `base_url` for `provider = "auto"` in AI nodes.
     ///
-    /// Returns one of `"anthropic"`, `"gemini"`, or `"openai"` (default).
+    /// Returns one of `"anthropic"`, `"gemini"`, `"local"`, or `"openai"` (default).
+    ///
+    /// `"local"` is returned for the literal hostname `"localhost"`
+    /// (case-insensitive) or any IP literal `check_ssrf_ip` rejects under
+    /// `SsrfPolicy::Strict` — loopback and RFC 1918 primarily, but also
+    /// link-local and the other always-blocked ranges it checks — the same
+    /// definition of "local" the SSRF layer already uses everywhere else.
+    /// This is a cosmetic label only; it does not gate network access on
+    /// its own.
+    ///
+    /// No DNS resolution is performed — this function must stay synchronous,
+    /// since it runs before the async SSRF check in both AI node files. A
+    /// hostname that needs DNS to resolve to a local address (e.g.
+    /// `myollama.local`) is not detected here and falls through to `"openai"`.
     pub fn detect_from_url(base_url: &str) -> &'static str {
+        if let Ok(parsed) = url::Url::parse(base_url) {
+            match parsed.host() {
+                Some(url::Host::Domain(d)) if d.eq_ignore_ascii_case("localhost") => return "local",
+                Some(url::Host::Ipv4(ip))
+                    if crate::nodes::util::check_ssrf_ip(
+                        std::net::IpAddr::V4(ip),
+                        crate::nodes::util::SsrfPolicy::Strict,
+                    ).is_err() =>
+                {
+                    return "local";
+                }
+                Some(url::Host::Ipv6(ip))
+                    if crate::nodes::util::check_ssrf_ip(
+                        std::net::IpAddr::V6(ip),
+                        crate::nodes::util::SsrfPolicy::Strict,
+                    ).is_err() =>
+                {
+                    return "local";
+                }
+                _ => {}
+            }
+        }
+
         let url = base_url.to_lowercase();
         if url.contains("anthropic.com") {
             "anthropic"
@@ -181,7 +217,7 @@ mod tests {
     #[test]
     fn known_providers_are_present() {
         let r = ProviderRegistry::global();
-        for id in &["openai", "anthropic", "gemini", "gpt_image_1", "gpt_image_2",
+        for id in &["openai", "anthropic", "gemini", "local", "gpt_image_1", "gpt_image_2",
                     "dalle3", "nano_banana", "imagen4", "flux_pro", "flux_2_pro",
                     "a1111", "comfyui"] {
             assert!(r.get(id).is_some(), "missing provider: {}", id);
@@ -217,8 +253,37 @@ mod tests {
     #[test]
     fn detect_from_url_openai_default() {
         assert_eq!(ProviderRegistry::detect_from_url("https://api.openai.com/v1"), "openai");
-        assert_eq!(ProviderRegistry::detect_from_url("http://localhost:11434"), "openai");
         assert_eq!(ProviderRegistry::detect_from_url("https://api.groq.com"), "openai");
+    }
+
+    #[test]
+    fn detect_from_url_domain_needing_dns_stays_openai() {
+        // Documented limitation: detect_from_url does no DNS resolution, so a
+        // hostname that would only resolve to a local address at connect time
+        // is not detected here.
+        assert_eq!(ProviderRegistry::detect_from_url("http://myollama.local:11434"), "openai");
+    }
+
+    #[test]
+    fn detect_from_url_local_for_localhost_hostname_any_case() {
+        assert_eq!(ProviderRegistry::detect_from_url("http://localhost:11434"), "local");
+        assert_eq!(ProviderRegistry::detect_from_url("http://LOCALHOST:11434"), "local");
+        assert_eq!(ProviderRegistry::detect_from_url("http://LocalHost:11434"), "local");
+    }
+
+    #[test]
+    fn detect_from_url_local_for_loopback_ip_literal() {
+        assert_eq!(ProviderRegistry::detect_from_url("http://127.0.0.1:11434"), "local");
+    }
+
+    #[test]
+    fn detect_from_url_local_for_private_range_ip_literal() {
+        assert_eq!(ProviderRegistry::detect_from_url("http://192.168.1.50:11434"), "local");
+    }
+
+    #[test]
+    fn detect_from_url_public_ip_literal_stays_openai() {
+        assert_eq!(ProviderRegistry::detect_from_url("http://8.8.8.8:443"), "openai");
     }
 
     #[test]
@@ -330,6 +395,15 @@ mod tests {
         let nano       = r.get("nano_banana").unwrap();
         assert!(matches!(imagen4.auth_style, AuthStyle::HeaderKey("x-goog-api-key")));
         assert!(matches!(nano.auth_style,    AuthStyle::HeaderKey("x-goog-api-key")));
+    }
+
+    #[test]
+    fn local_provider_has_no_cloud_default_and_keyless_bearer_auth() {
+        let local = ProviderRegistry::global().get("local").unwrap();
+        assert_eq!(local.default_base_url, "");
+        assert!(matches!(local.auth_style, AuthStyle::BearerToken));
+        assert!(!local.requires_key);
+        assert!(local.capabilities.contains(&Capability::TextGen));
     }
 
     #[test]

@@ -800,6 +800,7 @@ pub fn run() {
             commands::performance::delete_performance_report,
             commands::performance::clear_performance_reports,
             commands::update::check_for_update,
+            commands::providers::list_provider_models,
             pick_folder_dialog,
             pick_plugin_file_dialog,
             write_temp_file,

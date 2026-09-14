@@ -135,6 +135,7 @@ mod tests {
 
     fn make_input(condition: &str) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -199,6 +200,7 @@ mod tests {
     #[tokio::test]
     async fn no_condition_defaults_false() {
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),

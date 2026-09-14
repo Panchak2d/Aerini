@@ -8,7 +8,7 @@ wasip3::wit_bindgen::generate!({
 
 use exports::aerini::spike_trigger::trigger::{Event, Guest};
 use wasip3::clocks::monotonic_clock;
-use wasip3::wit_bindgen::rt::async_support::stream_support::StreamReader;
+use wasip3::wit_bindgen::StreamReader;
 
 const EVENT_COUNT: u32 = 3;
 const EVENT_SPACING_NS: u64 = 50_000_000;

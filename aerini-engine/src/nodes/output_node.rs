@@ -147,6 +147,7 @@ mod tests {
 
     fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -194,6 +195,7 @@ mod tests {
         outputs.insert("z_early".to_string(), json!({ "val": "wrong" }));
         outputs.insert("a_late".to_string(), json!({ "val": "right" }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "test".to_string(),
             workflow_id: "wf".to_string(),

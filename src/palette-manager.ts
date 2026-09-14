@@ -293,6 +293,14 @@ let _canvas:   Canvas | null = null;
 let _onStatus: ((msg: string) => void) | null = null;
 let _activeCategory = "all";
 
+/** Updates the node descriptors the command palette searches, without
+ *  re-binding any listener `initCommandPalette` already attached. Call
+ *  after a plugin install/remove/reload so ⌘K sees new node types
+ *  immediately. */
+export function setCommandPaletteNodes(allNodes: NodeDescriptor[]): void {
+  _allNodes = allNodes;
+}
+
 export function initCommandPalette(
   allNodes: NodeDescriptor[],
   canvas: Canvas,

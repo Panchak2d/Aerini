@@ -9,9 +9,9 @@ import { initStatusBarFields } from "./statusbar-fields";
 import { initPerformancePanel } from "./panels/PerformancePanel";
 import {
   buildSidebarPalette, bindSidebarSearch, filterByCategory,
-  initCommandPalette, openPalette,
+  initCommandPalette, openPalette, setCommandPaletteNodes,
 } from "./palette-manager";
-import { initModals } from "./modal-manager";
+import { initModals, setModalNodes } from "./modal-manager";
 import { bindDropImport, bindFileInput } from "./drag-drop";
 import { bindPluginSettings } from "./plugin-settings";
 import { showPopover, closePopover, setDescriptorRegistry } from "./popover";
@@ -302,7 +302,33 @@ async function init() {
   });
   bindDropImport(toast);
   bindFileInput(toast);
-  bindPluginSettings(toast);
+
+  // A plugin install/remove/reload swaps the backend node registry
+  // atomically, but every frontend cache of the node-descriptor list
+  // (sidebar palette, command palette, canvas/popover registries, the
+  // wire-drop pickers' `allNodes` closure) was only ever populated from
+  // the single getNodeTypes() call above. Without this, none of them see
+  // a new/removed node type until the whole app restarts.
+  async function refreshNodeDescriptors(): Promise<void> {
+    let fresh: NodeDescriptor[];
+    try {
+      fresh = await getNodeTypes();
+    } catch {
+      // Registry swap already succeeded server-side; a transient failure to
+      // re-fetch it shouldn't blank every panel back to zero nodes. Leave
+      // the previous (still-valid, just not-quite-current) list in place.
+      return;
+    }
+    allNodes.length = 0;
+    allNodes.push(...fresh);
+    registerNodeDescriptors(fresh);
+    setDescriptorRegistry(fresh);
+    setCommandPaletteNodes(fresh);
+    setModalNodes(fresh);
+    buildSidebarPalette(fresh, canvas, setStatus);
+  }
+
+  bindPluginSettings(toast, refreshNodeDescriptors);
 
   const { refreshRunBtn } = bindToolbar(
     canvas, wfManager, runManager, chatPanel,

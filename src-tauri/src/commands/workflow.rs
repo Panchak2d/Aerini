@@ -363,6 +363,7 @@ pub async fn clear_chat_session(
         workflow_id:  String::new(),
         execution_id: uuid::Uuid::new_v4().to_string(),
         input:        serde_json::json!({ "operation": "clear", "session_id": session_id }),
+        resolved_credentials: std::collections::HashMap::new(),
         context:      ExecutionContext::default(),
         cancel_token: None,
     };

@@ -84,17 +84,32 @@
 //! SSRF-filtered `wasi:http` (p3) linked the same way action plugins get p2 — see
 //! "Outbound HTTP" above — but no raw-socket grant, the same effective position
 //! action plugins are in absent an explicit grant. See [`PluginLoader::start_trigger`].
+//!
+//! # Filesystem watching
+//!
+//! The optional WIT `fs-watch` import (`wit/node.wit`'s `interface fs-watch`) is a
+//! plugin's only way to observe the real filesystem, since the sandbox above denies
+//! it outright. [`FsWatchRegistry`] runs real `notify`-backed watchers continuously
+//! in the host process, keyed per plugin type-id like `storage`, and buffers events
+//! for whichever plugin calls `poll()` next — no relation to `trigger`/the async
+//! event pump above; `poll` is a normal synchronous import call, satisfiable from an
+//! ordinary `execute()`, so it doesn't inherit that pump's open bugs. Linked into
+//! every plugin's linker unconditionally, exactly like `storage`.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Request;
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -196,6 +211,24 @@ mod wit_storage {
     });
 
     pub use aerini::plugin::storage::{add_to_linker, Host as StorageHost, StorageError};
+}
+
+/// Bindings for the `aerini-node-with-fs-watch` world (`node` export +
+/// `fs-watch` import) -- same shape and same rationale as [`wit_storage`]
+/// immediately above, including the "an import needs no per-world
+/// detection" point: `fs-watch` is linked into every plugin's linker
+/// unconditionally in [`PluginLoader::compile_and_link`] and at both
+/// trigger-engine linker call sites, regardless of which world a given
+/// plugin's own build actually targeted.
+mod wit_fs_watch {
+    wasmtime::component::bindgen!({
+        world: "aerini-node-with-fs-watch",
+        path: "wit",
+    });
+
+    pub use aerini::plugin::fs_watch::{
+        add_to_linker, FsEvent, Host as FsWatchHost, PollResult, WatchError, WatchTarget,
+    };
 }
 
 /// A plugin's pre-instantiated bindings, in whichever of the two `aerini:plugin`
@@ -454,6 +487,7 @@ struct PluginState {
     limits: wasmtime::StoreLimits,
     http_hooks: PluginHttpHooks,
     storage: Option<PluginStorageHandle>,
+    fs_watch: Option<PluginFsWatchHandle>,
 }
 
 impl WasiView for PluginState {
@@ -504,6 +538,28 @@ impl wit_storage::StorageHost for PluginState {
     }
 }
 
+/// An [`FsWatchRegistry`] handle plus the plugin type-id this particular
+/// `Store` polls/unwatches under -- same shape and same scoping rationale
+/// as [`PluginStorageHandle`] immediately above.
+#[derive(Clone)]
+struct PluginFsWatchHandle {
+    registry: Arc<FsWatchRegistry>,
+    plugin_type_id: String,
+}
+
+impl wit_fs_watch::FsWatchHost for PluginState {
+    fn poll(&mut self, target: wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
+        let handle = self.fs_watch.as_ref().ok_or(wit_fs_watch::WatchError::Unavailable)?;
+        handle.registry.poll(&handle.plugin_type_id, &target)
+    }
+
+    fn unwatch(&mut self, target: wit_fs_watch::WatchTarget) {
+        if let Some(handle) = self.fs_watch.as_ref() {
+            handle.registry.unwatch(&handle.plugin_type_id, &target);
+        }
+    }
+}
+
 // ── Trigger plugin store state ─────────────────────────────────────────────────
 
 /// Per-instance store state for a trigger-plugin component, run on
@@ -532,6 +588,11 @@ struct TriggerPluginState {
     /// same "scoped by the resolved `type_id`, `None` if the directory's
     /// storage database couldn't be opened" contract as [`PluginState::storage`].
     storage: Option<PluginStorageHandle>,
+    /// This instance's `fs-watch` import backing -- same shape and scoping
+    /// as [`PluginState::fs_watch`]. Always `Some` in practice (unlike
+    /// `storage`, opening [`FsWatchRegistry`] cannot fail), kept `Option`
+    /// only for symmetry with `storage`'s degrade-gracefully contract.
+    fs_watch: Option<PluginFsWatchHandle>,
 }
 
 impl WasiView for TriggerPluginState {
@@ -573,7 +634,23 @@ impl wit_storage::StorageHost for TriggerPluginState {
     }
 }
 
-fn make_trigger_plugin_state(storage: Option<PluginStorageHandle>) -> TriggerPluginState {
+impl wit_fs_watch::FsWatchHost for TriggerPluginState {
+    fn poll(&mut self, target: wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
+        let handle = self.fs_watch.as_ref().ok_or(wit_fs_watch::WatchError::Unavailable)?;
+        handle.registry.poll(&handle.plugin_type_id, &target)
+    }
+
+    fn unwatch(&mut self, target: wit_fs_watch::WatchTarget) {
+        if let Some(handle) = self.fs_watch.as_ref() {
+            handle.registry.unwatch(&handle.plugin_type_id, &target);
+        }
+    }
+}
+
+fn make_trigger_plugin_state(
+    storage: Option<PluginStorageHandle>,
+    fs_watch: Option<PluginFsWatchHandle>,
+) -> TriggerPluginState {
     TriggerPluginState {
         wasi_ctx: WasiCtx::builder().build(),
         http_ctx: WasiHttpCtx::new(),
@@ -581,6 +658,7 @@ fn make_trigger_plugin_state(storage: Option<PluginStorageHandle>) -> TriggerPlu
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
         http_hooks: TriggerHttpHooks,
         storage,
+        fs_watch,
     }
 }
 
@@ -938,17 +1016,22 @@ const PLUGIN_TRIGGER_CALL_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// blob into logs while still giving an operator enough to diagnose.
 const INVALID_OUTPUT_LOG_PREVIEW_CHARS: usize = 200;
 
-fn make_plugin_state(storage: Option<PluginStorageHandle>) -> PluginState {
+fn make_plugin_state(
+    storage: Option<PluginStorageHandle>,
+    fs_watch: Option<PluginFsWatchHandle>,
+) -> PluginState {
     PluginState {
         // No preopened directories, no inherited stdio — sandboxed context.
         // Filesystem syscalls succeed at the API level but return "not found" /
-        // "permission denied" since no paths are mounted.
+        // "permission denied" since no paths are mounted. `fs-watch` (above) is
+        // how a plugin observes the real filesystem instead.
         wasi_ctx: WasiCtx::builder().build(),
         http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
         http_hooks: PluginHttpHooks,
         storage,
+        fs_watch,
     }
 }
 
@@ -1303,7 +1386,604 @@ fn make_store(engine: &Engine, state: PluginState) -> wasmtime::Store<PluginStat
     store
 }
 
-// ── PluginLoader ──────────────────────────────────────────────────────────────
+// ── Filesystem watching (WIT `fs-watch` import backing) ────────────────────────
+
+/// Max distinct watch targets one plugin type-id may have active at once.
+/// Bounds OS watch-descriptor usage the same way `STORAGE_MAX_KEYS_PER_SCOPE`
+/// bounds storage row growth — generous for what this interface is for (a
+/// handful of configured watchers per plugin), not a namespace for
+/// arbitrarily many.
+const FS_WATCH_MAX_TARGETS_PER_PLUGIN: usize = 25;
+
+/// Max buffered events per target between `poll` calls. Once full, the
+/// oldest event is dropped to make room for the newest and `overflowed` is
+/// reported on the next `poll` — see `interface fs-watch`'s own doc comment
+/// on `poll-result.overflowed` for why this is surfaced rather than silent.
+const FS_WATCH_BUFFER_CAP: usize = 500;
+
+/// A target not polled for this long has its underlying `notify` watcher
+/// stopped and its buffer discarded, freeing the OS watch descriptor — swept
+/// lazily at the start of every `poll` call (see [`FsWatchRegistry::poll`]),
+/// not by a dedicated background thread.
+const FS_WATCH_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// How long an unmatched `RenameMode::From` notification is held, waiting
+/// for a matching `To`, before being reported as a plain `deleted` (and a
+/// later, unmatched `To` as a plain `created`) instead of a `renamed` pair.
+/// A real rename is a single atomic OS operation — the two notification
+/// halves arrive within microseconds of each other in practice — so this
+/// window is generous, not a tight race. Exact rename-event pairing
+/// behavior (`Both` vs. split `From`/`To`) varies by platform and backend;
+/// confirmed only from `notify`'s own issue tracker and example code, not
+/// from running a watcher on a live filesystem on all three target
+/// platforms.
+const FS_WATCH_RENAME_CORRELATION_WINDOW: Duration = Duration::from_millis(500);
+
+/// How close together two notifications for the same `(path, event-type)`
+/// must be to be treated as one logical change and coalesced into a single
+/// buffered event, refreshed in place, rather than appended as a second one
+/// — the File Watcher Plugin spec's own reliability philosophy: "one
+/// meaningful filesystem change should result in one meaningful automation
+/// event." Many editors and copy tools fire several raw writes for what a
+/// user experiences as one save.
+const FS_WATCH_COALESCE_WINDOW: Duration = Duration::from_millis(300);
+
+/// Host-side backing for the WIT `fs-watch` import. One real `notify`
+/// watcher runs per distinct [`WatchKey`], for the process's lifetime,
+/// independent of any single `execute()` call's ephemeral, sandboxed
+/// `Store` — the same "outlives the Store that calls into it" shape
+/// [`PluginStorage`] already has for `storage`, except purely in-memory:
+/// losing buffered-but-unpolled events across a process restart is expected
+/// and acceptable (a poll afterward picks up watching from that point
+/// forward), the same as any at-least-once, best-effort filesystem
+/// notification system.
+struct FsWatchRegistry {
+    targets: Mutex<HashMap<WatchKey, WatchState>>,
+}
+
+/// Identifies one active watch. Two `poll` calls (from any execution of the
+/// same plugin type-id) with an equivalent `watch-target` share one
+/// `WatchState` and its buffer — see `interface fs-watch`'s own doc comment
+/// on `poll`.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct WatchKey {
+    plugin_type_id: String,
+    path: PathBuf,
+    recursive: bool,
+    /// Sorted and deduplicated so `["created","modified"]` and
+    /// `["modified","created"]` hash and compare equal — "the same target"
+    /// as a human reading two configs would expect.
+    events: Vec<String>,
+}
+
+/// Live state for one [`WatchKey`]: the real `notify` watcher, kept alive
+/// only for its `Drop` impl (stops the OS-level watch when this entry is
+/// removed) — its callback closure holds the actual event-processing logic
+/// and its own clone of `buffer` — plus the buffer that closure feeds and
+/// `poll` drains.
+struct WatchState {
+    _watcher: RecommendedWatcher,
+    buffer: Arc<Mutex<TargetBuffer>>,
+    last_polled: Instant,
+}
+
+/// The mutable, shared-with-the-watcher-callback part of one target's
+/// state — split out from [`WatchState`] so the `notify` callback closure
+/// (running on `notify`'s own OS thread) only ever locks this one target's
+/// small buffer, never [`FsWatchRegistry::targets`]'s registry-wide map
+/// lock, and never needs to re-derive its own `WatchKey` from a raw event.
+struct TargetBuffer {
+    events: VecDeque<wit_fs_watch::FsEvent>,
+    overflowed: bool,
+    pending_rename_from: Option<(PathBuf, Instant)>,
+    /// `(path, event-type, when)` last pushed — coalescing input, see
+    /// `FS_WATCH_COALESCE_WINDOW`.
+    last_pushed: Option<(String, String, Instant)>,
+    /// This target's own `watch-target.events` filter, copied in at watch
+    /// start so the callback can drop unwanted kinds without touching
+    /// `WatchKey` (which lives in the outer map, not reachable from here).
+    events_wanted: std::collections::HashSet<String>,
+}
+
+impl FsWatchRegistry {
+    fn new() -> Self {
+        Self { targets: Mutex::new(HashMap::new()) }
+    }
+
+    /// See `interface fs-watch`'s own doc comment on `poll` for the
+    /// contract. Validates `target`, canonicalizes its path, starts a real
+    /// `notify` watcher on first use for this exact target (subject to
+    /// `FS_WATCH_MAX_TARGETS_PER_PLUGIN`), and returns/drains whatever this
+    /// target's buffer has accumulated since the last call.
+    fn poll(
+        &self,
+        plugin_type_id: &str,
+        target: &wit_fs_watch::WatchTarget,
+    ) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
+        let mut events = target.events.clone();
+        events.sort();
+        events.dedup();
+        if events.is_empty()
+            || events.iter().any(|e| !matches!(e.as_str(), "created" | "modified" | "deleted" | "renamed"))
+        {
+            return Err(wit_fs_watch::WatchError::InvalidConfig);
+        }
+
+        let raw_path = Path::new(&target.path);
+        if !raw_path.is_absolute() {
+            return Err(wit_fs_watch::WatchError::InvalidConfig);
+        }
+        let canonical = std::fs::canonicalize(raw_path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => wit_fs_watch::WatchError::PathNotFound,
+            std::io::ErrorKind::PermissionDenied => wit_fs_watch::WatchError::PermissionDenied,
+            _ => wit_fs_watch::WatchError::Unavailable,
+        })?;
+
+        let key = WatchKey {
+            plugin_type_id: plugin_type_id.to_string(),
+            path: canonical.clone(),
+            recursive: target.recursive,
+            events: events.clone(),
+        };
+
+        // Sweep idle targets (any plugin, not just this call's) before
+        // deciding whether this poll needs to start a new watch — keeps a
+        // long-idle target from counting against this plugin's own quota.
+        self.reap_idle();
+
+        let mut targets = self.targets.lock().expect("fs-watch registry mutex poisoned");
+
+        if !targets.contains_key(&key) {
+            let active_for_plugin =
+                targets.keys().filter(|k| k.plugin_type_id == plugin_type_id).count();
+            if active_for_plugin >= FS_WATCH_MAX_TARGETS_PER_PLUGIN {
+                return Err(wit_fs_watch::WatchError::QuotaExceeded);
+            }
+
+            let buffer = Arc::new(Mutex::new(TargetBuffer {
+                events: VecDeque::new(),
+                overflowed: false,
+                pending_rename_from: None,
+                last_pushed: None,
+                events_wanted: events.iter().cloned().collect(),
+            }));
+            let callback_buffer = buffer.clone();
+
+            let mut watcher = notify::recommended_watcher(move |res: notify::Result<NotifyEvent>| {
+                if let Ok(event) = res {
+                    handle_raw_event(&callback_buffer, event);
+                }
+                // A raw `Err` here is a watcher-level failure (backend I/O
+                // error, not an OS event-queue overflow -- `notify` reports
+                // overflow as `Ok(Event)` with `need_rescan()` true, handled
+                // in `handle_raw_event` instead) rather than an event to
+                // report through `fs-event`'s own vocabulary — nothing in
+                // `interface fs-watch` represents it, and the watcher keeps
+                // running afterward regardless, so it is silently dropped
+                // rather than surfaced as a phantom event.
+            })
+            .map_err(|_| wit_fs_watch::WatchError::Unavailable)?;
+
+            let mode = if target.recursive { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+            watcher.watch(&canonical, mode).map_err(|_| wit_fs_watch::WatchError::Unavailable)?;
+
+            targets.insert(key.clone(), WatchState { _watcher: watcher, buffer, last_polled: Instant::now() });
+        }
+
+        let state = targets.get_mut(&key).expect("just inserted above, or already present");
+        state.last_polled = Instant::now();
+        let buffer = state.buffer.clone();
+        // Dropped before locking `buffer` below: nothing else needs
+        // `targets` held while draining one target's own, separately
+        // locked buffer.
+        drop(targets);
+
+        let mut buf = buffer.lock().expect("fs-watch target buffer mutex poisoned");
+        let drained: Vec<wit_fs_watch::FsEvent> = buf.events.drain(..).collect();
+        let overflowed = buf.overflowed;
+        buf.overflowed = false;
+        Ok(wit_fs_watch::PollResult { events: drained, overflowed })
+    }
+
+    /// See `interface fs-watch`'s own doc comment on `unwatch`. A path that
+    /// no longer exists can't be canonicalized to reconstruct its original
+    /// `WatchKey`, so this is a best-effort match, not a guarantee — a
+    /// target whose path was deleted out from under it is cleaned up by
+    /// `FS_WATCH_IDLE_TIMEOUT` instead, once nothing polls it anymore.
+    fn unwatch(&self, plugin_type_id: &str, target: &wit_fs_watch::WatchTarget) {
+        let mut events = target.events.clone();
+        events.sort();
+        events.dedup();
+        let Ok(canonical) = std::fs::canonicalize(&target.path) else { return };
+        let key = WatchKey {
+            plugin_type_id: plugin_type_id.to_string(),
+            path: canonical,
+            recursive: target.recursive,
+            events,
+        };
+        self.targets.lock().expect("fs-watch registry mutex poisoned").remove(&key);
+    }
+
+    fn reap_idle(&self) {
+        self.targets
+            .lock()
+            .expect("fs-watch registry mutex poisoned")
+            .retain(|_, state| state.last_polled.elapsed() < FS_WATCH_IDLE_TIMEOUT);
+    }
+}
+
+/// Converts one raw `notify` event into zero or more buffered
+/// [`wit_fs_watch::FsEvent`]s, applying rename correlation before anything
+/// is pushed (`push_event` applies coalescing). Runs on `notify`'s own
+/// callback thread, one call per raw OS notification — kept fast and
+/// scoped to this one target's [`TargetBuffer`], never the whole registry.
+fn handle_raw_event(buffer: &Arc<Mutex<TargetBuffer>>, event: NotifyEvent) {
+    let mut buf = buffer.lock().expect("fs-watch target buffer mutex poisoned");
+
+    // `need_rescan` is `notify`'s own cross-backend signal that events may
+    // have been missed (e.g. Linux inotify's queue overflow arrives as this
+    // flag on an `Other`-kind event, not as an `Err`) -- feeds the same
+    // honest `overflowed` flag `push_event`'s buffer-cap path sets, since
+    // both mean the same thing to a plugin: some events since the last poll
+    // are not fully represented.
+    if event.need_rescan() {
+        buf.overflowed = true;
+    }
+
+    // A stale pending `From` (its matching `To` never arrived within the
+    // correlation window) resolves to a plain `deleted` the next time this
+    // callback runs at all, not on a timer — a real rename's `To` follows
+    // within microseconds, so anything reaching this check is already well
+    // past that.
+    if let Some((from, at)) = &buf.pending_rename_from {
+        if at.elapsed() > FS_WATCH_RENAME_CORRELATION_WINDOW {
+            let from = from.clone();
+            buf.pending_rename_from = None;
+            push_event(&mut buf, "deleted", &from, None);
+        }
+    }
+
+    match event.kind {
+        EventKind::Create(_) => {
+            if let Some(path) = event.paths.first() {
+                push_event(&mut buf, "created", path, None);
+            }
+        }
+        EventKind::Remove(_) => {
+            if let Some(path) = event.paths.first() {
+                push_event(&mut buf, "deleted", path, None);
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            if let (Some(from), Some(to)) = (event.paths.first(), event.paths.get(1)) {
+                push_event(&mut buf, "renamed", to, Some(from.clone()));
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            if let Some(path) = event.paths.first() {
+                buf.pending_rename_from = Some((path.clone(), Instant::now()));
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            if let Some(to) = event.paths.first() {
+                if let Some((from, _)) = buf.pending_rename_from.take() {
+                    push_event(&mut buf, "renamed", to, Some(from));
+                } else {
+                    push_event(&mut buf, "created", to, None);
+                }
+            }
+        }
+        // `Any`/`Other` carry one path with no indication of which side of
+        // a rename it is (the catch-all a backend uses when it can't -- or,
+        // on some `notify` versions' macOS fsevent path, doesn't -- stitch
+        // From/To itself). Existence on disk is the only signal available:
+        // gone means this was the origin (same as `From`), present means
+        // it's the destination (same as `To`), so the existing correlation
+        // logic above applies unchanged either way.
+        EventKind::Modify(ModifyKind::Name(RenameMode::Any | RenameMode::Other)) => {
+            if let Some(path) = event.paths.first() {
+                if path.exists() {
+                    if let Some((from, _)) = buf.pending_rename_from.take() {
+                        push_event(&mut buf, "renamed", path, Some(from));
+                    } else {
+                        push_event(&mut buf, "created", path, None);
+                    }
+                } else {
+                    buf.pending_rename_from = Some((path.clone(), Instant::now()));
+                }
+            }
+        }
+        // Some backends (notably Windows') report plain content writes as
+        // `ModifyKind::Any` rather than `Data` — high-confidence from
+        // `notify`'s own documented event taxonomy, not independently
+        // verified against a live Windows watcher (no toolchain able to run
+        // one here; confirm with a real create/modify/delete/rename smoke
+        // test on Linux, macOS, and Windows before shipping).
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any | ModifyKind::Other) => {
+            if let Some(path) = event.paths.first() {
+                push_event(&mut buf, "modified", path, None);
+            }
+        }
+        EventKind::Modify(ModifyKind::Metadata(_))
+        | EventKind::Access(_)
+        | EventKind::Other
+        | EventKind::Any => {
+            // Not a value `fs-event.event-type`'s vocabulary covers.
+        }
+    }
+}
+
+/// Pushes one logical event into `buf` if `event_type` is one this target's
+/// `events_wanted` asked for, coalescing it into the existing back-of-buffer
+/// entry when the same `(path, event_type)` was just pushed within
+/// `FS_WATCH_COALESCE_WINDOW`, and enforcing `FS_WATCH_BUFFER_CAP` (oldest
+/// dropped, `overflowed` set) otherwise.
+fn push_event(buf: &mut TargetBuffer, event_type: &str, path: &Path, previous_path: Option<PathBuf>) {
+    if !buf.events_wanted.contains(event_type) {
+        return;
+    }
+
+    let path_str = path.to_string_lossy().to_string();
+    let now = Instant::now();
+
+    if let Some((last_path, last_type, at)) = &buf.last_pushed {
+        if last_type == event_type && last_path == &path_str && now.duration_since(*at) < FS_WATCH_COALESCE_WINDOW {
+            if let Some(back) = buf.events.back_mut() {
+                if back.event_type == event_type && back.path == path_str {
+                    let (size, is_directory) = stat_path(path, event_type);
+                    back.size = size;
+                    back.is_directory = is_directory;
+                    back.observed_at = Utc::now().to_rfc3339();
+                    buf.last_pushed = Some((path_str, event_type.to_string(), now));
+                    return;
+                }
+            }
+        }
+    }
+
+    let (size, is_directory) = stat_path(path, event_type);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+
+    let fs_event = wit_fs_watch::FsEvent {
+        event_type: event_type.to_string(),
+        path: path_str.clone(),
+        previous_path: previous_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        name,
+        extension,
+        size,
+        is_directory,
+        observed_at: Utc::now().to_rfc3339(),
+    };
+
+    if buf.events.len() >= FS_WATCH_BUFFER_CAP {
+        buf.events.pop_front();
+        buf.overflowed = true;
+    }
+    buf.events.push_back(fs_event);
+    buf.last_pushed = Some((path_str, event_type.to_string(), now));
+}
+
+/// Best-effort `(size, is_directory)` for `path` at the moment of an event —
+/// `(0, false)` for "deleted" (nothing left to stat) and for any path that
+/// no longer exists by the time this runs, which is expected under fast
+/// concurrent modification, not a bug: this is advisory metadata, not a
+/// guarantee the path still looks like this by the time the plugin reads
+/// the event.
+fn stat_path(path: &Path, event_type: &str) -> (u64, bool) {
+    if event_type == "deleted" {
+        return (0, false);
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) => (if meta.is_dir() { 0 } else { meta.len() }, meta.is_dir()),
+        Err(_) => (0, false),
+    }
+}
+
+#[cfg(test)]
+mod fs_watch_registry_tests {
+    use super::*;
+
+    fn target(path: &std::path::Path, events: &[&str]) -> wit_fs_watch::WatchTarget {
+        wit_fs_watch::WatchTarget {
+            path: path.to_string_lossy().to_string(),
+            recursive: false,
+            events: events.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Normal case: creating a file inside a watched directory produces one
+    /// "created" `fs-event` with the expected path/name/extension on the
+    /// next `poll`.
+    #[test]
+    fn poll_reports_a_created_file() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let registry = FsWatchRegistry::new();
+        let t = target(dir.path(), &["created"]);
+
+        registry.poll("test.plugin", &t).expect("first poll (watch start) failed");
+        std::fs::write(dir.path().join("note.txt"), b"hi").expect("write failed");
+        // notify's OS callback is asynchronous; give it a moment to fire
+        // before polling again. Generous relative to FS_WATCH_COALESCE_WINDOW
+        // so this isn't racing the coalescing logic under test elsewhere.
+        std::thread::sleep(Duration::from_millis(800));
+
+        let result = registry.poll("test.plugin", &t).expect("second poll failed");
+        assert!(!result.overflowed);
+        assert_eq!(result.events.len(), 1, "expected exactly one coalesced created event");
+        assert_eq!(result.events[0].event_type, "created");
+        assert_eq!(result.events[0].name, "note.txt");
+        assert_eq!(result.events[0].extension, "txt");
+    }
+
+    /// Edge case: a `watch-target` whose `events` list is empty is rejected
+    /// with `invalid-config` rather than defaulting to "watch everything".
+    #[test]
+    fn poll_rejects_empty_events_list() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let registry = FsWatchRegistry::new();
+        let t = target(dir.path(), &[]);
+
+        assert!(matches!(registry.poll("test.plugin", &t), Err(wit_fs_watch::WatchError::InvalidConfig)));
+    }
+
+    /// Edge case: a relative path is rejected outright — the host has no
+    /// "plugin's working directory" to resolve one against.
+    #[test]
+    fn poll_rejects_relative_path() {
+        let registry = FsWatchRegistry::new();
+        let t = wit_fs_watch::WatchTarget {
+            path: "relative/path".to_string(),
+            recursive: false,
+            events: vec!["created".to_string()],
+        };
+
+        assert!(matches!(registry.poll("test.plugin", &t), Err(wit_fs_watch::WatchError::InvalidConfig)));
+    }
+
+    /// Edge case: a path that doesn't exist yields `path-not-found`, not a
+    /// generic failure.
+    #[test]
+    fn poll_reports_path_not_found() {
+        let registry = FsWatchRegistry::new();
+        let missing = std::env::temp_dir().join("aerini-fs-watch-test-does-not-exist");
+        let t = target(&missing, &["created"]);
+
+        assert!(matches!(registry.poll("test.plugin", &t), Err(wit_fs_watch::WatchError::PathNotFound)));
+    }
+
+    /// Edge case: a plugin already at its target quota gets
+    /// `quota-exceeded` on a distinct new target, but polling one it
+    /// already holds keeps working.
+    #[test]
+    fn poll_enforces_per_plugin_quota() {
+        let registry = FsWatchRegistry::new();
+        let mut dirs = Vec::new();
+        for _ in 0..FS_WATCH_MAX_TARGETS_PER_PLUGIN {
+            let dir = tempfile::tempdir().expect("tempdir create failed");
+            let t = target(dir.path(), &["created"]);
+            registry.poll("quota.plugin", &t).expect("poll under quota failed");
+            dirs.push(dir);
+        }
+
+        let overflow_dir = tempfile::tempdir().expect("tempdir create failed");
+        let overflow_target = target(overflow_dir.path(), &["created"]);
+        assert!(matches!(
+            registry.poll("quota.plugin", &overflow_target),
+            Err(wit_fs_watch::WatchError::QuotaExceeded)
+        ));
+
+        // Re-polling an existing target is not a "new" one — must still
+        // succeed at exactly the quota.
+        let existing = target(dirs[0].path(), &["created"]);
+        assert!(registry.poll("quota.plugin", &existing).is_ok());
+    }
+
+    /// `unwatch` on a target nobody is watching is a documented no-op, not
+    /// an error.
+    #[test]
+    fn unwatch_nonexistent_target_is_a_no_op() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let registry = FsWatchRegistry::new();
+        let t = target(dir.path(), &["created"]);
+        registry.unwatch("test.plugin", &t); // must not panic
+    }
+
+    fn empty_buffer(wanted: &[&str]) -> Arc<Mutex<TargetBuffer>> {
+        Arc::new(Mutex::new(TargetBuffer {
+            events: VecDeque::new(),
+            overflowed: false,
+            pending_rename_from: None,
+            last_pushed: None,
+            events_wanted: wanted.iter().map(|s| s.to_string()).collect(),
+        }))
+    }
+
+    /// Normal case: a `RenameMode::Any` event (the catch-all `EventKind`
+    /// requires a match arm for) is treated as the destination side of a
+    /// rename when nothing is pending and the path exists.
+    #[test]
+    fn handle_raw_event_treats_existing_any_rename_as_created() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let file = dir.path().join("new-name.txt");
+        std::fs::write(&file, b"hi").expect("write failed");
+        let buffer = empty_buffer(&["created", "renamed"]);
+
+        let event = NotifyEvent::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any))).add_path(file);
+        handle_raw_event(&buffer, event);
+
+        let buf = buffer.lock().expect("mutex poisoned");
+        assert_eq!(buf.events.len(), 1);
+        assert_eq!(buf.events[0].event_type, "created");
+        assert!(buf.pending_rename_from.is_none());
+    }
+
+    /// Edge case: `RenameMode::Other` for a path that no longer exists sets
+    /// up the same pending-rename state as `From`; a later `Any` for the
+    /// surviving path correlates into one `renamed` event, not a spurious
+    /// delete-then-create pair.
+    #[test]
+    fn handle_raw_event_correlates_other_and_any_into_one_rename() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let old_path = dir.path().join("does-not-exist.txt");
+        let new_path = dir.path().join("renamed.txt");
+        std::fs::write(&new_path, b"hi").expect("write failed");
+        let buffer = empty_buffer(&["created", "renamed", "deleted"]);
+
+        handle_raw_event(
+            &buffer,
+            NotifyEvent::new(EventKind::Modify(ModifyKind::Name(RenameMode::Other))).add_path(old_path.clone()),
+        );
+        handle_raw_event(
+            &buffer,
+            NotifyEvent::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any))).add_path(new_path),
+        );
+
+        let buf = buffer.lock().expect("mutex poisoned");
+        assert_eq!(buf.events.len(), 1, "expected the pair to correlate into a single event");
+        assert_eq!(buf.events[0].event_type, "renamed");
+        assert_eq!(buf.events[0].previous_path, old_path.to_string_lossy());
+        assert!(buf.pending_rename_from.is_none());
+    }
+
+    /// Normal case: `notify`'s cross-backend rescan/overflow signal sets
+    /// the honest `overflowed` flag even on an event with no actionable
+    /// fs-event of its own.
+    #[test]
+    fn handle_raw_event_sets_overflowed_on_rescan_flag() {
+        let buffer = empty_buffer(&["created"]);
+
+        let event = NotifyEvent::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        handle_raw_event(&buffer, event);
+
+        let buf = buffer.lock().expect("mutex poisoned");
+        assert!(buf.overflowed);
+        assert!(buf.events.is_empty(), "a bare rescan signal is not itself a created/modified/deleted/renamed event");
+    }
+
+    /// Edge case: a rescan flag riding on an otherwise-actionable event
+    /// still produces that event -- the overflow signal augments, it never
+    /// suppresses, normal processing of the same event.
+    #[test]
+    fn handle_raw_event_rescan_flag_does_not_suppress_the_event() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, b"hi").expect("write failed");
+        let buffer = empty_buffer(&["created"]);
+
+        let event = NotifyEvent::new(EventKind::Create(notify::event::CreateKind::Any))
+            .add_path(file)
+            .set_flag(notify::event::Flag::Rescan);
+        handle_raw_event(&buffer, event);
+
+        let buf = buffer.lock().expect("mutex poisoned");
+        assert!(buf.overflowed);
+        assert_eq!(buf.events.len(), 1);
+        assert_eq!(buf.events[0].event_type, "created");
+    }
+}
+
+
 
 /// Loads WASM plugin components and registers them as [`Node`] implementations.
 ///
@@ -1368,6 +2048,11 @@ pub struct PluginLoader {
     /// gated-at-the-field-level rationale as `compile_count`.
     #[allow(dead_code)]
     signature_check_count: std::sync::atomic::AtomicUsize,
+    /// Backing for the WIT `fs-watch` import — one per process, unlike
+    /// `storage_pools` above, since it holds no on-disk file to key by
+    /// `plugin_dir`: every real `notify` watcher it starts lives only in
+    /// memory, for this process's lifetime. See [`FsWatchRegistry`].
+    fs_watch_registry: Arc<FsWatchRegistry>,
 }
 
 /// One cached, already-compiled [`wasmtime::component::Component`] plus the
@@ -1490,6 +2175,7 @@ impl PluginLoader {
             storage_pools: Mutex::new(HashMap::new()),
             signature_cache: Mutex::new(HashMap::new()),
             signature_check_count: std::sync::atomic::AtomicUsize::new(0),
+            fs_watch_registry: Arc::new(FsWatchRegistry::new()),
         })
     }
 
@@ -1676,7 +2362,7 @@ impl PluginLoader {
 
         // Step 3: linker + pre-instantiation.
         //
-        // Three calls are required:
+        // Four calls are required:
         // (a) `wasmtime_wasi::p2::add_to_linker_sync` — satisfies all `wasi:cli/command`
         //     imports (filesystem, random, clocks, stdio) that `wasm32-wasip2` binaries
         //     unconditionally import via Rust's standard library.
@@ -1684,6 +2370,7 @@ impl PluginLoader {
         //     `wasi:http/outgoing-handler` interface without duplicating the WASI
         //     interfaces already registered in (a).
         // (c) this package's own `storage` import (below) — see its own comment.
+        // (d) this package's own `fs-watch` import (below) — see its own comment.
         //
         // Using just `wasmtime_wasi_http::p2::add_to_linker_sync` (the proxy world bundle)
         // instead of (a)+(b) would omit `wasi:filesystem`, `wasi:random`, etc., causing
@@ -1703,6 +2390,14 @@ impl PluginLoader {
         // `storage` existed has no such import to satisfy, so this is a
         // no-op for it, not a compatibility risk (Constraint 1).
         wit_storage::add_to_linker::<PluginState, wasmtime::component::HasSelf<PluginState>>(
+            &mut linker,
+            |state| state,
+        ).map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+
+        // (d) the `fs-watch` import -- same unconditional-link rationale as
+        // (c) above; a plugin compiled before `fs-watch` existed has no
+        // such import to satisfy, so this changes nothing for it.
+        wit_fs_watch::add_to_linker::<PluginState, wasmtime::component::HasSelf<PluginState>>(
             &mut linker,
             |state| state,
         ).map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
@@ -1794,7 +2489,7 @@ impl PluginLoader {
         let exec_pre = wit::AeriniNodePre::new(instance_pre)
             .expect("node export already confirmed by detect_node_pre");
 
-        let mut store = make_store(&self.engine, make_plugin_state(None));
+        let mut store = make_store(&self.engine, make_plugin_state(None, None));
         let raw = describe_via_pre(&node_pre, &mut store)?;
 
         // Leak type_id/display_name/description/icon/author/version once per plugin load —
@@ -1843,6 +2538,7 @@ impl PluginLoader {
             author,
             version,
             storage,
+            fs_watch_registry: self.fs_watch_registry.clone(),
             trigger_capable,
         }))
     }
@@ -1864,7 +2560,7 @@ impl PluginLoader {
         let instance_pre = self.compile_and_link(path)?;
         let node_pre = self.detect_node_pre(instance_pre)?;
 
-        let mut store = make_store(&self.engine, make_plugin_state(None));
+        let mut store = make_store(&self.engine, make_plugin_state(None, None));
         let raw = describe_via_pre(&node_pre, &mut store)?;
 
         let node_type = category_to_node_type(&raw.category, &raw.type_id);
@@ -2067,6 +2763,12 @@ impl PluginLoader {
         ).is_err() {
             return false;
         }
+        if wit_fs_watch::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+            &mut linker,
+            |state| state,
+        ).is_err() {
+            return false;
+        }
 
         let Ok(instance_pre) = linker.instantiate_pre(&component) else { return false };
         wit_trigger::AeriniNodeWithTriggerPre::new(instance_pre).is_ok()
@@ -2100,6 +2802,13 @@ impl PluginLoader {
             db,
             scope: type_id.to_string(),
         });
+        // Same "looked up once per resolve" reasoning as `storage_handle`
+        // above -- `FsWatchRegistry` construction cannot fail, so this is
+        // always `Some`, unlike `storage_handle`.
+        let fs_watch_handle = Some(PluginFsWatchHandle {
+            registry: self.fs_watch_registry.clone(),
+            plugin_type_id: type_id.to_string(),
+        });
 
         for entry in entries {
             let Ok(entry) = entry else { continue };
@@ -2123,8 +2832,17 @@ impl PluginLoader {
             ).is_err() {
                 continue;
             }
+            if wit_fs_watch::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+                &mut linker,
+                |state| state,
+            ).is_err() {
+                continue;
+            }
 
-            let mut store = make_trigger_store(&self.trigger_engine, make_trigger_plugin_state(storage_handle.clone()));
+            let mut store = make_trigger_store(
+                &self.trigger_engine,
+                make_trigger_plugin_state(storage_handle.clone(), fs_watch_handle.clone()),
+            );
 
             let Ok(bindings) = wit_trigger::AeriniNodeWithTrigger::instantiate_async(&mut store, &component, &linker).await else {
                 continue;
@@ -2230,8 +2948,9 @@ impl PluginLoader {
 ///
 /// The executor provides `input.input` as a merged JSON object (config + resolved
 /// credentials). This is serialized to `Vec<wit::Param>` key-value pairs and passed
-/// to the plugin as `NodeInput.params`. `credentials` is left empty because the
-/// executor has already resolved and merged credential values into `input.input`.
+/// to the plugin as `NodeInput.params` -- kept for backward compatibility with
+/// existing plugins. The same resolved secrets are also passed separately, keyed
+/// by config field name, as `NodeInput.credentials`, via `input.resolved_credentials`.
 ///
 /// # Output deserialization
 ///
@@ -2269,6 +2988,11 @@ pub struct WasmPluginNode {
     author: &'static str,
     version: &'static str,
     storage: Option<Arc<PluginStorage>>,
+    /// Backing for the WIT `fs-watch` import -- see [`PluginFsWatchHandle`]
+    /// and `wit/node.wit`'s `interface fs-watch` doc comment. Unlike
+    /// `storage`, always present: constructing [`FsWatchRegistry`] cannot
+    /// fail the way opening `storage`'s SQLite file can.
+    fs_watch_registry: Arc<FsWatchRegistry>,
     trigger_capable: bool,
 }
 
@@ -2334,9 +3058,15 @@ impl Node for WasmPluginNode {
             db,
             scope: self.type_id.to_string(),
         });
+        // Same type_id scoping as `storage_handle` above — see `wit/node.wit`'s
+        // `interface fs-watch` doc comment.
+        let fs_watch_handle = Some(PluginFsWatchHandle {
+            registry: self.fs_watch_registry.clone(),
+            plugin_type_id: self.type_id.to_string(),
+        });
 
         let result = tokio::task::spawn_blocking(move || {
-            let mut store = make_store(&engine, make_plugin_state(storage_handle));
+            let mut store = make_store(&engine, make_plugin_state(storage_handle, fs_watch_handle));
 
             let bindings = pre.instantiate(&mut store).map_err(|e| e.to_string())?;
 
@@ -2369,7 +3099,8 @@ impl Node for WasmPluginNode {
 /// match that doc comment exactly.
 const FULL_INPUT_JSON_PARAM_KEY: &str = "__aerini_input_json";
 
-/// Flatten the merged JSON input into a `Vec<Param>` for the WIT interface.
+/// Flatten the merged JSON input into a `Vec<Param>` for the WIT interface, and
+/// the resolved credential map into its own `Vec<Param>`.
 ///
 /// The executor merges config and resolved credentials into `input.input` as a
 /// JSON object. Each top-level key becomes a `Param`. Non-string values are
@@ -2377,7 +3108,9 @@ const FULL_INPUT_JSON_PARAM_KEY: &str = "__aerini_input_json";
 /// kept for plugins written before structured access existed. One additional
 /// `FULL_INPUT_JSON_PARAM_KEY` entry carries the whole object as a single JSON
 /// string, so a plugin can parse nested config once instead of re-parsing each
-/// individually flattened field.
+/// individually flattened field. `input.resolved_credentials` carries the same
+/// secret values again, keyed by config field name; it is flattened separately
+/// into `credentials` for plugins that read structured credentials directly.
 fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
     let params = match &input.input {
         Value::Object(map) => {
@@ -2411,10 +3144,13 @@ fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
         _ => vec![],
     };
 
-    wit::NodeInput {
-        params,
-        credentials: vec![], // already merged into input.input by the executor
-    }
+    let credentials: Vec<wit::Param> = input
+        .resolved_credentials
+        .iter()
+        .map(|(k, v)| wit::Param { key: k.clone(), value: v.clone() })
+        .collect();
+
+    wit::NodeInput { params, credentials }
 }
 
 #[cfg(test)]
@@ -2422,6 +3158,7 @@ mod engine_input_to_wit_tests {
     use super::{engine_input_to_wit, FULL_INPUT_JSON_PARAM_KEY};
     use crate::model::{ExecutionContext, NodeInput};
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn make_input(input: serde_json::Value) -> NodeInput {
         NodeInput {
@@ -2430,6 +3167,7 @@ mod engine_input_to_wit_tests {
             workflow_id: "wf".to_string(),
             execution_id: "exec".to_string(),
             input,
+            resolved_credentials: HashMap::new(),
             context: ExecutionContext::default(),
         }
     }
@@ -2471,6 +3209,25 @@ mod engine_input_to_wit_tests {
             wit_input.params.iter().filter(|p| p.key == FULL_INPUT_JSON_PARAM_KEY).collect();
         assert_eq!(matches.len(), 1, "must not add a second entry under the same key");
         assert_eq!(matches[0].value, "author-value", "author's own value must win, not the synthesized JSON blob");
+    }
+
+    /// `resolved_credentials` must flatten into `wit::NodeInput.credentials`,
+    /// independently of whatever the same secret also did in `params`.
+    #[test]
+    fn resolved_credentials_becomes_wit_credentials() {
+        let mut input = make_input(json!({ "api_key": "sk_live_abc123" }));
+        input.resolved_credentials.insert("api_key".to_string(), "sk_live_abc123".to_string());
+
+        let wit_input = engine_input_to_wit(&input);
+
+        assert_eq!(wit_input.credentials.len(), 1, "exactly one resolved credential was provided");
+        let cred = &wit_input.credentials[0];
+        assert_eq!(cred.key, "api_key");
+        assert_eq!(cred.value, "sk_live_abc123");
+
+        // Backward-compat merge into params is untouched by this change.
+        let param = wit_input.params.iter().find(|p| p.key == "api_key").expect("api_key param missing");
+        assert_eq!(param.value, "sk_live_abc123");
     }
 }
 
@@ -2880,10 +3637,10 @@ mod tests {
         use wit_storage::StorageHost as _;
         let dir = tempfile::tempdir().expect("tempdir create failed");
         let db = Arc::new(PluginStorage::open(&dir.keep()).expect("PluginStorage::open failed"));
-        let mut state = make_trigger_plugin_state(Some(PluginStorageHandle {
-            db,
-            scope: "trigger-plugin-a".to_string(),
-        }));
+        let mut state = make_trigger_plugin_state(
+            Some(PluginStorageHandle { db, scope: "trigger-plugin-a".to_string() }),
+            None,
+        );
 
         assert_eq!(state.get("k1".to_string()), None);
         state.set("k1".to_string(), "v1".to_string()).expect("set failed");
@@ -2897,7 +3654,7 @@ mod tests {
     #[test]
     fn trigger_plugin_state_storage_degrades_when_handle_is_none() {
         use wit_storage::StorageHost as _;
-        let mut state = make_trigger_plugin_state(None);
+        let mut state = make_trigger_plugin_state(None, None);
 
         assert_eq!(state.get("k1".to_string()), None);
         assert!(matches!(

@@ -547,12 +547,15 @@ impl WorkflowExecutor {
         let (mut resolved_input, mut expr_warnings) =
             crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.config.env_allowlist.as_deref());
 
+        let mut resolved_credentials: HashMap<String, String> = HashMap::new();
+
         if !node_def.credentials.is_empty() {
             if let Some(obj) = resolved_input.as_object_mut() {
                 for (key, credential_id) in &node_def.credentials {
                     match self.credential_resolver.resolve(credential_id).await {
                         Ok(secret) => {
-                            obj.insert(key.clone(), Value::String(secret));
+                            obj.insert(key.clone(), Value::String(secret.clone()));
+                            resolved_credentials.insert(key.clone(), secret);
                         }
                         Err(reason) => {
                             expr_warnings.push(format!(
@@ -577,6 +580,7 @@ impl WorkflowExecutor {
             workflow_id:  workflow.id.clone(),
             execution_id: exec_id,
             input:        resolved_input,
+            resolved_credentials,
             cancel_token: self.config.cancel_token.clone(),
             context:      {
                 let mut ctx = ctx;
@@ -988,6 +992,30 @@ mod tests {
         let warning = warning.unwrap();
         assert!(matches!(warning.level, LogLevel::Warn));
         assert_eq!(warning.node_id.as_deref(), Some("n1"));
+    }
+
+    #[tokio::test]
+    async fn credential_resolution_populates_both_params_merge_and_resolved_credentials() {
+        let registry = NodeRegistry::new();
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("sk-secret")));
+        let workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+        let state = crate::context::new_shared_state(workflow.id.clone(), HashMap::new());
+
+        let node_input = executor
+            .build_input(&workflow, &workflow.nodes[0], &state, None)
+            .await
+            .expect("build_input must succeed for a resolvable credential");
+
+        assert_eq!(
+            node_input.input,
+            serde_json::json!({ "api_key": "sk-secret" }),
+            "resolved credential must still be merged into `input` for backward compat"
+        );
+        assert_eq!(
+            node_input.resolved_credentials.get("api_key"),
+            Some(&"sk-secret".to_string()),
+            "the same resolved secret must also be available structured, keyed by field name"
+        );
     }
 
     // ── Serde tests ───────────────────────────────────────────────────────────

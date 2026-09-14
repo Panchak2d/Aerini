@@ -5,6 +5,7 @@ pub mod memory;
 pub mod oauth;
 pub mod performance;
 pub mod plugins;
+pub mod providers;
 pub mod scheduler;
 pub mod update;
 pub mod workflow;

@@ -17,10 +17,15 @@ export interface PropSchema {
    *  or an object naming the cred_type ("api_key" | "bearer" | "basic" |
    *  "oauth" | "other") to filter the saved-credential picker to that type. */
   "x-aerini-credential"?: true | { cred_type?: string };
+  /** Opts a field into the model-discovery picker: a "Fetch Models" button
+   *  that calls `ExtensionContext.fetchModels` and offers the result as a
+   *  dropdown alongside the normal free-text input. Same shape as
+   *  `x-aerini-credential` above — a schema flag, not a bespoke field type. */
+  "x-aerini-model-picker"?: true;
 }
 
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
-const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
+export const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
 
 interface CredentialFieldInfo { key: string; credType?: string; }
 
@@ -67,6 +72,15 @@ function formatLabel(key: string): string {
     .replace(/\bSmtp\b/g, "SMTP").replace(/\bApi\b/g, "API");
 }
 
+/** Capitalizes a free-text Advanced Provider value for display (e.g.
+ *  "anthropic" -> "Anthropic"). Provider metadata is a plain text field
+ *  (CredentialPanel), not a fixed enum, so this can't map through a lookup
+ *  table — don't replace it with one, it needs to work for any string a
+ *  user typed. */
+function formatProviderLabel(provider: string): string {
+  return provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
 // ── Per-field sub-renderers ───────────────────────────────────────────────────
 // These are the named functions for each field type. Each is also the target
 // of the FIELD_RENDERERS dispatch table below (where applicable).
@@ -105,6 +119,76 @@ function renderTextField(
     return wrap;
   }
   return inp;
+}
+
+/** Model field with discovery. Always renders the normal free-text input
+ *  (identical to `renderTextField`, `{{ }}` expression button included) —
+ *  that control is what actually gets saved and is never disabled or
+ *  hidden. "Fetch Models" is a convenience layer on top: on success it
+ *  offers a dropdown of discovered ids that writes into the same field; on
+ *  any failure it leaves the text field exactly as it was, with only the
+ *  button's own label giving transient feedback. Requires `ctx.fetchModels`
+ *  (see `ExtensionContext`) — if a node schema sets `x-aerini-model-picker`
+ *  without wiring that hook, this silently degrades to a plain text field,
+ *  same fallback logic as a fetch failure. */
+function renderModelPickerField(
+  key: string, prop: PropSchema, cur: string,
+  node: CanvasNode, canvasEl: HTMLCanvasElement,
+  onChange: () => void, syncRequired: () => void,
+  fetchModels: (() => Promise<string[]>) | undefined,
+): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "field-multiline-wrap"; // vertical stack, same gap as other composite fields
+
+  wrap.appendChild(renderTextField(key, prop, cur, node, canvasEl, onChange, syncRequired));
+
+  if (!fetchModels) return wrap;
+
+  const FETCH_LABEL = "Fetch Models";
+  const fetchBtn = document.createElement("button");
+  fetchBtn.type = "button";
+  fetchBtn.className = "code-load-btn";
+  fetchBtn.textContent = FETCH_LABEL;
+  wrap.appendChild(fetchBtn);
+
+  const listSlot = document.createElement("div");
+  wrap.appendChild(listSlot);
+
+  fetchBtn.addEventListener("click", async () => {
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = "Fetching…";
+    try {
+      const models = await fetchModels();
+      if (!models.length) throw new Error("no models returned");
+
+      listSlot.innerHTML = "";
+      const hint = document.createElement("div");
+      hint.className = "config-hint";
+      hint.textContent = `${models.length} model${models.length === 1 ? "" : "s"} found — select one, or keep typing above.`;
+      listSlot.appendChild(hint);
+
+      // Read live, not the `cur` this closure was built with — the user
+      // may have edited the text field since this control was rendered.
+      const liveValue = String((node.data.config as Record<string, unknown>)[key] ?? "");
+      listSlot.appendChild(mkCustomSelect(models, liveValue, (v) => {
+        (node.data.config as Record<string, unknown>)[key] = v;
+        const input = wrap.querySelector<HTMLInputElement>("input");
+        if (input) input.value = v;
+        onChange(); syncRequired();
+      }));
+
+      fetchBtn.textContent = FETCH_LABEL;
+    } catch {
+      // Silent fallback (per plan): the free-text field above is untouched
+      // and fully usable. Only the button itself reports the miss, briefly.
+      fetchBtn.textContent = "Couldn't fetch — try again";
+      setTimeout(() => { fetchBtn.textContent = FETCH_LABEL; }, 2500);
+    } finally {
+      fetchBtn.disabled = false;
+    }
+  });
+
+  return wrap;
 }
 
 function renderEnumField(
@@ -297,14 +381,17 @@ const FIELD_RENDERERS: Partial<Record<string, FieldTypeRenderer>> = {
   boolean: renderBoolField,
 };
 
-/** Render one config field. Checks: cron key → enum → multiline key → type
- *  dispatch table → text fallback. Order is load-bearing — do not reorder. */
+/** Render one config field. Checks: cron key → model-picker flag → enum →
+ *  multiline key → type dispatch table → text fallback. Order is
+ *  load-bearing — do not reorder. */
 function renderField(
   key: string, prop: PropSchema, cur: string,
   node: CanvasNode, canvasEl: HTMLCanvasElement,
   onChange: () => void, syncRequired: () => void,
+  fetchModels: (() => Promise<string[]>) | undefined,
 ): HTMLElement {
   if (key === "cron_expr") return renderCronField(key, cur, node, onChange, syncRequired);
+  if (prop["x-aerini-model-picker"]) return renderModelPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired, fetchModels);
   if (prop.enum)            return renderEnumField(key, prop, cur, node, onChange, syncRequired);
   if (MULTILINE_KEYS.includes(key)) return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   const typeRenderer = FIELD_RENDERERS[prop.type ?? ""];
@@ -319,7 +406,7 @@ export function renderConfigFieldsLoop(
   cfgKeys: Array<[string, PropSchema]>,
   requiredKeys: string[],
 ): void {
-  const { node, body, canvasEl, onChange } = ctx;
+  const { node, body, canvasEl, onChange, fetchModels, rerender } = ctx;
 
   for (const [key, prop] of cfgKeys) {
     const cur = String(node.data.config[key] ?? "");
@@ -335,9 +422,17 @@ export function renderConfigFieldsLoop(
       ? `${prop.description ? prop.description + " · " : ""}Max ${prop.maxLength} characters`
       : prop.description;
 
+    // The Connection section's saved-credential pool for AI nodes is
+    // filtered by this node's current Provider (renderCredentialSection) —
+    // changing it has to rebuild the popover so that filter re-runs, same
+    // as any other field-visibility-affecting change.
+    const fieldOnChange = (key === "provider" && AI_NODE_IDS.has(node.data.node_type_id))
+      ? () => { onChange(); rerender(); }
+      : onChange;
+
     fieldEl = mkField(
       formatLabel(key),
-      () => renderField(key, prop, cur, node, canvasEl, onChange, syncRequired),
+      () => renderField(key, prop, cur, node, canvasEl, fieldOnChange, syncRequired, fetchModels),
       hint,
       isRequired,
     );
@@ -355,6 +450,7 @@ export function renderCredentialSection(
   props: Record<string, PropSchema>,
   ext: NodeConfigExtension | undefined,
   autoFillFromCredentialMetadata: (credentialId: string) => void,
+  credentialProviderMap: Map<string, string | undefined> = new Map(),
 ): void {
   const { node, body, creds, onChange } = ctx;
 
@@ -389,11 +485,32 @@ export function renderCredentialSection(
   body.appendChild(hint);
 
   for (const { key: credKey, credType } of credFields) {
-    const pool = credType ? creds.filter(c => c.cred_type === credType) : creds;
+    let pool = credType ? creds.filter(c => c.cred_type === credType) : creds;
+
+    // AI nodes: hard-filter the api_key picker to credentials whose Advanced
+    // Provider matches this node's currently selected Provider, plus any
+    // credential with no Provider set at all — those stay visible
+    // regardless, since Advanced metadata is optional and hiding them would
+    // silently break existing workflows.
+    const isAiProviderField = credKey === "api_key" && AI_NODE_IDS.has(node.data.node_type_id);
+    const curProvider = isAiProviderField
+      ? String((node.data.config as Record<string, unknown>)["provider"] ?? "")
+      : "";
+    if (isAiProviderField) {
+      pool = pool.filter(c => {
+        const p = credentialProviderMap.get(c.id);
+        return !p || p === curProvider;
+      });
+    }
+
     const label = credFields.length > 1 ? `Use Saved Credential — ${formatLabel(credKey)}` : "Use Saved Credential";
 
     body.appendChild(mkField(label, () => {
-      const options = [{ value: "", label: "— none —" }, ...pool.map(c => ({ value: c.id, label: c.name }))];
+      const options = [{ value: "", label: "— none —" }, ...pool.map(c => {
+        const p = credentialProviderMap.get(c.id);
+        const optLabel = isAiProviderField && p ? `${c.name} — ${formatProviderLabel(p)}` : c.name;
+        return { value: c.id, label: optLabel };
+      })];
       const cur = node.data.credentials[credKey] ?? "";
       return mkCustomSelect(options.map(o => o.label), options.find(o => o.value === cur)?.label ?? "— none —", (selLabel) => {
         const opt = options.find(o => o.label === selLabel);
@@ -410,9 +527,11 @@ export function renderCredentialSection(
     if (!pool.length) {
       const warn = document.createElement("div");
       warn.className = "config-hint config-hint-warn";
-      warn.textContent = creds.length
-        ? `No saved credentials of type "${credType}". Add one in Credentials in the toolbar.`
-        : "No credentials saved. Click Credentials in the toolbar.";
+      warn.textContent = !creds.length
+        ? "No credentials saved. Click Credentials in the toolbar."
+        : isAiProviderField
+          ? `No saved credentials for provider ${curProvider ? formatProviderLabel(curProvider) : "(unspecified)"}. Add one in Credentials in the toolbar.`
+          : `No saved credentials of type "${credType}". Add one in Credentials in the toolbar.`;
       body.appendChild(warn);
     }
 

@@ -615,6 +615,7 @@ mod tests {
 
     fn make_input(node_id: &str, port: u64, path: &str, variables: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      node_id.to_string(),
             workflow_id:  "wf".to_string(),

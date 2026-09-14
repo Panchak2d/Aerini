@@ -7,6 +7,8 @@ import {
   deleteCredential,
   exportEncryptionKey,
 } from "../ipc/credentials";
+import { listProviderModels } from "../ipc/providers";
+import { mkCustomSelect } from "../node-configs/popover-utils";
 import { showConfirm } from "../confirm";
 import { escapeHtml as escHtml } from "../utils";
 
@@ -265,7 +267,11 @@ export class CredentialPanel {
         </div>
         <div class="field-group">
           <label class="field-label">Model</label>
-          <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
+          <div class="field-multiline-wrap">
+            <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
+            <button type="button" class="code-load-btn" id="cred-fetch-models">Fetch Models</button>
+            <div id="cred-model-list-slot"></div>
+          </div>
         </div>
         <div class="field-group">
           <label class="field-label">Base URL</label>
@@ -289,6 +295,8 @@ export class CredentialPanel {
     const providerInp = this.el.querySelector("#cred-meta-provider") as HTMLInputElement;
     const modelInp    = this.el.querySelector("#cred-meta-model")    as HTMLInputElement;
     const baseUrlInp  = this.el.querySelector("#cred-meta-base-url") as HTMLInputElement;
+    const fetchModelsBtn = this.el.querySelector("#cred-fetch-models")   as HTMLButtonElement;
+    const modelListSlot  = this.el.querySelector("#cred-model-list-slot") as HTMLElement;
 
     // Build custom select — avoids WebKitGTK Linux native <select> rendering bug
     let selectedCredType = this.editing?.cred_type ?? CRED_TYPES[0].value;
@@ -323,6 +331,41 @@ export class CredentialPanel {
           `<line x1="1" y1="1" x2="23" y2="23"/>`;
     });
 
+    // Mirrors the node popover's model picker: free-text Model is never
+    // blocked, success offers a dropdown on top of it, any failure silently
+    // leaves the text field alone. Reads Provider/Base URL/Secret Value off
+    // this form directly — no saved credential to look up while adding one.
+    const FETCH_MODELS_LABEL = "Fetch Models";
+    fetchModelsBtn.addEventListener("click", async () => {
+      fetchModelsBtn.disabled = true;
+      fetchModelsBtn.textContent = "Fetching…";
+      try {
+        const provider = providerInp.value.trim() || "auto";
+        const baseUrl  = baseUrlInp.value.trim();
+        const models   = await listProviderModels(provider, baseUrl, valInp.value);
+        if (!models.length) throw new Error("no models returned");
+
+        modelListSlot.innerHTML = "";
+        const hint = document.createElement("div");
+        hint.className = "config-hint";
+        hint.textContent = `${models.length} model${models.length === 1 ? "" : "s"} found — select one, or keep typing above.`;
+        modelListSlot.appendChild(hint);
+
+        // Live read, not a value captured when this handler was bound —
+        // the user may have kept typing into Model since the panel opened.
+        modelListSlot.appendChild(mkCustomSelect(models, modelInp.value, (v) => {
+          modelInp.value = v;
+        }));
+
+        fetchModelsBtn.textContent = FETCH_MODELS_LABEL;
+      } catch {
+        fetchModelsBtn.textContent = "Couldn't fetch — try again";
+        setTimeout(() => { fetchModelsBtn.textContent = FETCH_MODELS_LABEL; }, 2500);
+      } finally {
+        fetchModelsBtn.disabled = false;
+      }
+    });
+
     cancelBtn?.addEventListener("click", () => this.cancelEdit());
 
     saveBtn.addEventListener("click", async () => {
@@ -333,7 +376,7 @@ export class CredentialPanel {
       errDiv.classList.add("hidden");
       if (!name)  { this.showFormError("Name is required"); return; }
       if (!id)    { this.showFormError("ID is required"); return; }
-      if (!value) { this.showFormError("Secret value is required"); return; }
+      if (!value && providerInp.value.trim() !== "local") { this.showFormError("Secret value is required"); return; }
       if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
         this.showFormError("ID can only contain letters, numbers, underscores, and hyphens");
         return;

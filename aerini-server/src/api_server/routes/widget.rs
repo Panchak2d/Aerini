@@ -105,74 +105,84 @@ pub struct WidgetTriggerBody {
 
 /// Shared by `trigger_widget` and `mint_widget_token`: loads the workflow's
 /// live scheduler row and extracts the Webhook trigger's effective
-/// `(port, path, secret)`, or an `Err(response)` the caller should return
-/// immediately as-is.
+/// `(port, path, secret)`, or a boxed `Err(response)` the caller should
+/// dereference (`*resp`) and return immediately as-is.
 async fn load_webhook_trigger(
     s: &ApiState,
     workflow_id: &str,
-) -> Result<(u16, String, String), axum::response::Response> {
+) -> Result<(u16, String, String), Box<axum::response::Response>> {
     let row = {
         let db = Arc::clone(&s.db);
         let wf_id = workflow_id.to_string();
         match tokio::task::spawn_blocking(move || db.scheduler_get(&wf_id)).await {
             Ok(Ok(Some(r))) => r,
             Ok(Ok(None)) => {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "workflow is not scheduled — start it first"})),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "workflow is not scheduled — start it first"})),
+                    )
+                        .into_response(),
+                ));
             }
             Ok(Err(e)) => {
-                return Err(
+                return Err(Box::new(
                     (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-                );
+                ));
             }
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                        .into_response(),
+                ));
             }
         }
     };
 
     if row.status != "active" {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("workflow is not running (status: {})", row.status)
-            })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("workflow is not running (status: {})", row.status)
+                })),
+            )
+                .into_response(),
+        ));
     }
 
     let trigger: TriggerKind = match serde_json::from_str(&row.trigger_kind) {
         Ok(t) => t,
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("corrupt trigger_kind in scheduler row: {}", e)
-                })),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("corrupt trigger_kind in scheduler row: {}", e)
+                    })),
+                )
+                    .into_response(),
+            ));
         }
     };
 
     match trigger {
         TriggerKind::Webhook { port, path, secret, .. } => Ok((port, path, secret)),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!(
-                    "workflow's trigger is '{}', not Webhook — the embeddable widget only works with a Webhook-triggered workflow",
-                    other.label()
-                )
-            })),
-        )
-            .into_response()),
+        other => Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "workflow's trigger is '{}', not Webhook — the embeddable widget only works with a Webhook-triggered workflow",
+                        other.label()
+                    )
+                })),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -221,7 +231,7 @@ pub async fn trigger_widget(
 ) -> impl IntoResponse {
     let (port, path, _secret) = match load_webhook_trigger(&s, &workflow_id).await {
         Ok(t) => t,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Loaded once, ahead of the relay, so the dangerous-node gate can run
@@ -370,7 +380,7 @@ pub async fn mint_widget_token(
 ) -> impl IntoResponse {
     let (_port, path, configured_secret) = match load_webhook_trigger(&s, &workflow_id).await {
         Ok(t) => t,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if configured_secret.is_empty() {

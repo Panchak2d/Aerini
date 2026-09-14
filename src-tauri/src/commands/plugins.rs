@@ -802,18 +802,32 @@ pub async fn install_plugin_from_path(
         None => {}
     }
 
-    std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
+    // `src` and `dest` can resolve to the same file: native file dialogs
+    // remember their last-browsed folder, so re-selecting a plugin that
+    // already lives in `plugin_dir` points `src_path` straight at `dest`.
+    // std::fs::copy(p, p) truncates the destination before reading from the
+    // (identical) source and "succeeds" with 0 bytes copied — it does not
+    // detect or reject a same-path copy. Content is already in place in
+    // that case, so skip both copies entirely rather than self-destruct.
+    let same_file = std::fs::canonicalize(src)
+        .ok()
+        .zip(std::fs::canonicalize(&dest).ok())
+        .is_some_and(|(a, b)| a == b);
 
-    let sig_src = sig_sidecar_path(src);
-    let sig_dest = sig_sidecar_path(&dest);
-    if sig_src.is_file() {
-        std::fs::copy(&sig_src, &sig_dest).map_err(|e| format!("Failed to copy plugin signature file: {e}"))?;
-    } else if sig_dest.is_file() {
-        // No sidecar for the incoming file, but a stale one from a previous
-        // install sits at dest — drop it so it doesn't get misattributed to
-        // this file (the checks above already refused this path if it would
-        // have been a signed-to-unsigned downgrade for a trusted type_id).
-        let _ = std::fs::remove_file(&sig_dest);
+    if !same_file {
+        std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
+
+        let sig_src = sig_sidecar_path(src);
+        let sig_dest = sig_sidecar_path(&dest);
+        if sig_src.is_file() {
+            std::fs::copy(&sig_src, &sig_dest).map_err(|e| format!("Failed to copy plugin signature file: {e}"))?;
+        } else if sig_dest.is_file() {
+            // No sidecar for the incoming file, but a stale one from a previous
+            // install sits at dest — drop it so it doesn't get misattributed to
+            // this file (the checks above already refused this path if it would
+            // have been a signed-to-unsigned downgrade for a trusted type_id).
+            let _ = std::fs::remove_file(&sig_dest);
+        }
     }
 
     Ok(filename)

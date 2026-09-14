@@ -80,6 +80,74 @@ describe("field-renderer — maxLength", () => {
   });
 });
 
+describe("field-renderer — model picker", () => {
+  it("normal case: x-aerini-model-picker renders the free-text field plus a Fetch Models button, and a successful fetch offers a dropdown that writes into the field", async () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.fetchModels = vi.fn().mockResolvedValue(["gpt-5.6", "gpt-5.6-mini"]);
+    const props: Array<[string, PropSchema]> = [
+      ["model", { type: "string", description: "Model name", "x-aerini-model-picker": true }],
+    ];
+
+    renderConfigFieldsLoop(ctx, props, []);
+
+    const input = ctx.body.querySelector("input") as HTMLInputElement;
+    expect(input).toBeTruthy(); // manual entry is present from the start, not gated on a fetch
+
+    const fetchBtn = Array.from(ctx.body.querySelectorAll("button"))
+      .find(b => b.textContent === "Fetch Models") as HTMLButtonElement;
+    expect(fetchBtn).toBeTruthy();
+
+    fetchBtn.click();
+    await vi.waitFor(() => expect(ctx.fetchModels).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(ctx.body.querySelectorAll(".csel-option").length).toBe(2));
+
+    const secondOption = Array.from(ctx.body.querySelectorAll<HTMLElement>(".csel-option"))
+      .find(el => el.textContent === "gpt-5.6-mini")!;
+    secondOption.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(ctx.node.data.config["model"]).toBe("gpt-5.6-mini");
+    expect(input.value).toBe("gpt-5.6-mini"); // text field mirrors the dropdown pick
+  });
+
+  it("edge case: a failed fetch leaves the free-text field exactly as it was — no dropdown, no error banner in the form, value untouched", async () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.fetchModels = vi.fn().mockRejectedValue(new Error("network error"));
+    const node = ctx.node;
+    node.data.config["model"] = "llama3"; // pre-existing manual entry
+    const props: Array<[string, PropSchema]> = [
+      ["model", { type: "string", "x-aerini-model-picker": true }],
+    ];
+
+    renderConfigFieldsLoop(ctx, props, []);
+
+    const input = ctx.body.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("llama3");
+
+    const fetchBtn = Array.from(ctx.body.querySelectorAll("button"))
+      .find(b => b.textContent === "Fetch Models") as HTMLButtonElement;
+    fetchBtn.click();
+    await vi.waitFor(() => expect(fetchBtn.disabled).toBe(false));
+
+    expect(ctx.body.querySelectorAll(".csel-option").length).toBe(0);
+    expect(input.value).toBe("llama3"); // never touched by the failed fetch
+    expect(ctx.node.data.config["model"]).toBe("llama3");
+  });
+
+  it("edge case: with no fetchModels wired (a node type that didn't opt in), the field silently degrades to plain text — no Fetch Models button at all", () => {
+    const ctx = makeCtx(makeNode("n1")); // makeCtx doesn't set fetchModels
+    const props: Array<[string, PropSchema]> = [
+      ["model", { type: "string", "x-aerini-model-picker": true }],
+    ];
+
+    renderConfigFieldsLoop(ctx, props, []);
+
+    expect(ctx.body.querySelector("input")).toBeTruthy();
+    const fetchBtn = Array.from(ctx.body.querySelectorAll("button"))
+      .find(b => b.textContent === "Fetch Models");
+    expect(fetchBtn).toBeUndefined();
+  });
+});
+
 describe("field-renderer — credential fields", () => {
   it("normal case: x-aerini-credential with a cred_type renders one picker per field and hard-filters each by type", () => {
     const ctx = makeCtx(makeNode("n1"));
@@ -126,5 +194,107 @@ describe("field-renderer — credential fields", () => {
     const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
     expect(options).toEqual(["— none —", "Any old key"]);
     expect(getCredentialFieldKeys(props)).toEqual(new Set(["api_key"]));
+  });
+});
+
+function makeAiNode(id: string, provider: string): CanvasNode {
+  return new CanvasNode({
+    id,
+    node_type_id: "ai_prompt",
+    node_type: "ai",
+    name: `Node ${id}`,
+    config: { provider },
+    credentials: {},
+    position: { x: 0, y: 0 },
+    ports: {
+      inputs:  [{ id: "input",  label: "Input",  position: "left"  }],
+      outputs: [{ id: "output", label: "Output", position: "right" }],
+    },
+    input_schema: {},
+    output_schema: {},
+    retry: { max_attempts: 1, backoff_ms: 500 },
+    fallback_node: null,
+    dynamic_ports: false,
+  });
+}
+
+const AI_API_KEY_PROPS: Record<string, PropSchema> = { api_key: { type: "string" } };
+
+describe("field-renderer — AI-node credential provider filtering", () => {
+  it("normal case: the api_key picker on an AI node hard-filters to credentials matching the node's Provider, plus wildcard (no-metadata) credentials, and labels matched entries with their provider", () => {
+    const ctx = makeCtx(makeAiNode("n1", "anthropic"));
+    ctx.creds.push(
+      { id: "c1", name: "Claude key",    cred_type: "api_key" },
+      { id: "c2", name: "OpenAI key",    cred_type: "api_key" },
+      { id: "c3", name: "Unlabeled key", cred_type: "api_key" },
+    );
+    const providerMap = new Map<string, string | undefined>([
+      ["c1", "anthropic"], ["c2", "openai"], ["c3", undefined],
+    ]);
+
+    renderCredentialSection(ctx, AI_API_KEY_PROPS, undefined, () => {}, providerMap);
+
+    const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+    expect(options).toEqual(["— none —", "Claude key — Anthropic", "Unlabeled key"]);
+  });
+
+  it("edge case: no credential matches the node's Provider — pool is empty and the warning names the provider, not the generic cred-type message", () => {
+    const ctx = makeCtx(makeAiNode("n1", "gemini"));
+    ctx.creds.push({ id: "c1", name: "OpenAI key", cred_type: "api_key" });
+    const providerMap = new Map<string, string | undefined>([["c1", "openai"]]);
+
+    renderCredentialSection(ctx, AI_API_KEY_PROPS, undefined, () => {}, providerMap);
+
+    const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+    expect(options).toEqual(["— none —"]);
+    const warn = ctx.body.querySelector(".config-hint-warn") as HTMLElement;
+    expect(warn.textContent).toBe("No saved credentials for provider Gemini. Add one in Credentials in the toolbar.");
+  });
+
+  it("edge case: a non-AI node's api_key field is unaffected by provider filtering, even with a provider map supplied", () => {
+    const ctx = makeCtx(makeNode("n1")); // node_type_id "save_to_folder", not an AI node
+    ctx.creds.push({ id: "c1", name: "Some key", cred_type: "api_key" });
+    const providerMap = new Map<string, string | undefined>([["c1", "openai"]]);
+
+    renderCredentialSection(ctx, AI_API_KEY_PROPS, undefined, () => {}, providerMap);
+
+    const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+    expect(options).toEqual(["— none —", "Some key"]); // no provider suffix, not filtered
+  });
+});
+
+describe("field-renderer — Provider field rebuilds the popover on AI nodes", () => {
+  it("normal case: changing Provider on an AI node calls ctx.rerender (so the Connection section's filter re-runs against the new value)", () => {
+    const ctx = makeCtx(makeAiNode("n1", "openai"));
+    const rerenderSpy = vi.fn();
+    ctx.rerender = rerenderSpy;
+    const props: Array<[string, PropSchema]> = [
+      ["provider", { type: "string", enum: ["auto", "openai", "anthropic", "gemini", "local"] }],
+    ];
+
+    renderConfigFieldsLoop(ctx, props, []);
+    const option = Array.from(ctx.body.querySelectorAll<HTMLElement>(".csel-option"))
+      .find(el => el.textContent === "anthropic")!;
+    option.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(ctx.node.data.config["provider"]).toBe("anthropic");
+    expect(rerenderSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("edge case: changing an unrelated enum field on a non-AI node does not call ctx.rerender", () => {
+    const ctx = makeCtx(makeNode("n1")); // "save_to_folder", not an AI node
+    const rerenderSpy = vi.fn();
+    ctx.rerender = rerenderSpy;
+    const props: Array<[string, PropSchema]> = [
+      ["mode", { type: "string", enum: ["flat", "nested"] }],
+    ];
+
+    renderConfigFieldsLoop(ctx, props, []);
+    const option = Array.from(ctx.body.querySelectorAll<HTMLElement>(".csel-option"))
+      .find(el => el.textContent === "nested")!;
+    option.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(ctx.node.data.config["mode"]).toBe("nested");
+    expect(rerenderSpy).not.toHaveBeenCalled();
   });
 });

@@ -269,6 +269,7 @@ mod tests {
 
     fn make_input(sources_json: Value) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
@@ -295,6 +296,7 @@ mod tests {
     #[tokio::test]
     async fn no_sources_returns_empty_files() {
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),

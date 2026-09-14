@@ -193,6 +193,37 @@ describe("plugin-settings installPluginOrPackWithUpdatePrompt, extension dispatc
   });
 });
 
+describe("plugin-settings bindPluginSettings, node-descriptor refresh callback", () => {
+  beforeEach(() => {
+    mocks.installPluginFromPath.mockReset();
+    mocks.reloadPlugins.mockReset();
+  });
+
+  it("runs onNodesReloaded after an install whose reload actually swapped the registry", async () => {
+    mocks.installPluginFromPath.mockResolvedValue("plugin.wasm");
+    mocks.reloadPlugins.mockResolvedValue({ loaded: [], builtin_rejected: [], plugin_collisions: [] });
+    const { bindPluginSettings, installWithUpdatePrompt } = await import("../plugin-settings");
+    const onNodesReloaded = vi.fn();
+    bindPluginSettings(vi.fn(), onNodesReloaded);
+
+    await installWithUpdatePrompt("/src/plugin.wasm", "/plugins", vi.fn());
+
+    expect(onNodesReloaded).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run onNodesReloaded when the post-install reload call itself fails", async () => {
+    mocks.installPluginFromPath.mockResolvedValue("plugin.wasm");
+    mocks.reloadPlugins.mockRejectedValue(new Error("engine busy"));
+    const { bindPluginSettings, installWithUpdatePrompt } = await import("../plugin-settings");
+    const onNodesReloaded = vi.fn();
+    bindPluginSettings(vi.fn(), onNodesReloaded);
+
+    await installWithUpdatePrompt("/src/plugin.wasm", "/plugins", vi.fn());
+
+    expect(onNodesReloaded).not.toHaveBeenCalled();
+  });
+});
+
 describe("plugin-settings signatureStatusClass", () => {
   it("classifies the trusted-publisher status as positive", async () => {
     const { signatureStatusClass } = await import("../plugin-settings");

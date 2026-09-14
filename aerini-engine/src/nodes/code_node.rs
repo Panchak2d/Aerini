@@ -18,12 +18,17 @@ static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 /// Intercepts `import` resolution and blocks dangerous built-in modules.
 /// Written to a temp file because Node.js loaders cannot be passed inline.
 ///
-/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os, module
+/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os, module,
+/// v8, inspector
 /// These cover: subprocess spawning, filesystem access, raw network access, and — via
 /// `module`'s `createRequire()` — a CommonJS `require()` that would otherwise reach every
-/// other entry on this list. `process.getBuiltinModule()` reaches the same builtins without
-/// an `import` and so never hits this hook; `execute()`'s sandbox prelude overrides it with
-/// the same blocklist.
+/// other entry on this list. `v8` is blocked because `v8.writeHeapSnapshot(path)` writes a
+/// heap dump — containing arbitrary script-controlled string data — to any filesystem path,
+/// an arbitrary-file-write primitive independent of `fs`. `inspector` is blocked because
+/// `inspector.open()` starts a debugger session whose `Runtime.evaluate` executes code
+/// without going through `eval`/`new Function`, bypassing `--disallow-code-generation-from-strings`.
+/// `process.getBuiltinModule()` reaches the same builtins without an `import` and so never
+/// hits this hook; `execute()`'s sandbox prelude overrides it with the same blocklist.
 /// Allowed: crypto, util, path, stream, events, url, buffer, string_decoder, querystring
 ///
 /// Compatibility: --experimental-loader works on all Node.js 18+ versions.
@@ -50,14 +55,18 @@ const BLOCKED = new Set([
   'node:repl',          'repl',
   'node:domain',        'domain',
   'node:module',        'module',
+  'node:v8',            'v8',
+  'node:inspector',     'inspector',
+  'node:inspector/promises', 'inspector/promises',
 ]);
 
 export async function resolve(specifier, context, nextResolve) {
   if (BLOCKED.has(specifier)) {
     throw new Error(
       `[Aerini sandbox] Import of '${specifier}' is blocked. ` +
-      `Filesystem, module-imported network access, subprocess access, and CommonJS require() ` +
-      `(via the 'module' builtin) are blocked in sandboxed Code nodes. ` +
+      `Filesystem, module-imported network access, subprocess access, CommonJS require() ` +
+      `(via the 'module' builtin), heap-snapshot file writes (via 'v8'), and debugger-based ` +
+      `code execution (via 'inspector') are all blocked in sandboxed Code nodes. ` +
       `Global fetch() and WebSocket are also disabled. ` +
       `Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments.`
     );
@@ -75,9 +84,21 @@ export async function resolve(specifier, context, nextResolve) {
 /// loader's own list) is what matters most: `module.createRequire()` hands
 /// back a full CommonJS `require()`, which reaches every other blocked
 /// builtin regardless of what the loader hook does.
+///
+/// `process.binding()`, `process._linkedBinding()`, and `process.dlopen()` are deleted
+/// outright rather than blocklisted by name: they hand back raw internal Node bindings
+/// (`process.binding('fs')`, `process.binding('spawn_sync')`) or load native addons
+/// directly, bypassing the ESM loader hook entirely regardless of which module names it
+/// blocks. Verified: with only the module-import blocklist in place, sandboxed code could
+/// call `process.binding('spawn_sync').spawn(...)` to execute arbitrary OS commands with
+/// the host process's own privileges. No sandboxed workflow snippet has a legitimate use
+/// for any of the three, so they are removed unconditionally rather than name-filtered.
 const SANDBOX_GLOBALS_HARDENING: &str = r#"delete globalThis.fetch;
 delete globalThis.WebSocket;
 delete globalThis.XMLHttpRequest;
+delete process.binding;
+delete process._linkedBinding;
+delete process.dlopen;
 {
   const __sandboxBlockedBuiltins = new Set([
     'node:child_process', 'child_process',
@@ -97,6 +118,9 @@ delete globalThis.XMLHttpRequest;
     'node:repl',          'repl',
     'node:domain',        'domain',
     'node:module',        'module',
+    'node:v8',            'v8',
+    'node:inspector',     'inspector',
+    'node:inspector/promises', 'inspector/promises',
   ]);
   const __sandboxOriginalGetBuiltinModule = process.getBuiltinModule.bind(process);
   process.getBuiltinModule = (id) => {
@@ -646,6 +670,7 @@ mod tests {
             metadata.insert("__code_disabled".to_string(), serde_json::Value::Bool(true));
         }
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -668,10 +693,39 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn sandbox_loader_blocks_v8_and_inspector() {
+        // v8.writeHeapSnapshot(path) writes an attacker-influenced file to an
+        // arbitrary path; inspector.open() starts a debugger whose Runtime.evaluate
+        // bypasses --disallow-code-generation-from-strings. Both bypass the loader
+        // hook's module-name blocklist without touching fs/child_process at all,
+        // so both must be blocked by name like every other dangerous builtin.
+        assert!(SANDBOX_LOADER_CONTENT.contains("'node:v8'"));
+        assert!(SANDBOX_LOADER_CONTENT.contains("'v8'"));
+        assert!(SANDBOX_LOADER_CONTENT.contains("'node:inspector'"));
+        assert!(SANDBOX_LOADER_CONTENT.contains("'inspector'"));
+    }
+
+    #[test]
     fn sandbox_globals_hardening_overrides_get_builtin_module() {
         assert!(SANDBOX_GLOBALS_HARDENING.contains("process.getBuiltinModule = "));
         assert!(SANDBOX_GLOBALS_HARDENING.contains("'module'"));
         assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:child_process'"));
+    }
+
+    #[test]
+    fn sandbox_globals_hardening_deletes_raw_binding_access() {
+        // process.binding('spawn_sync').spawn(...) and process.binding('fs') hand back
+        // raw internal Node bindings that bypass the ESM loader hook entirely -- verified
+        // empirically to execute arbitrary OS commands when only the module-import
+        // blocklist was in place. process.dlopen/_linkedBinding load native addons
+        // directly, same bypass class. All three must be removed unconditionally,
+        // since neither reaches the module-name blocklist above.
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.binding;"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process._linkedBinding;"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.dlopen;"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:v8'"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:inspector'"));
     }
 
     #[tokio::test]
@@ -727,6 +781,7 @@ mod tests {
     #[tokio::test]
     async fn missing_code_returns_error() {
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),

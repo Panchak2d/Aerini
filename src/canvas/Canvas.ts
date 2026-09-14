@@ -11,6 +11,19 @@ import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
 import { getCanvasColors } from "./theme-colors";
 
+/** #output-drawer is a `position: fixed` overlay (workspace.css) — it sits on
+ * top of #canvas without shrinking #canvas's own box, so a canvas element's
+ * getBoundingClientRect() alone still reports full height even while the
+ * drawer visually covers the bottom of it. Returns how much of `r`, measured
+ * from its own top edge, is actually unobstructed by the drawer. */
+function unobstructedHeight(r: DOMRect): number {
+  const drawer = document.getElementById("output-drawer");
+  if (!drawer || drawer.classList.contains("hidden")) return r.height;
+  const dr = drawer.getBoundingClientRect();
+  if (dr.right <= r.left || dr.left >= r.right) return r.height;
+  return Math.max(0, Math.min(r.bottom, dr.top) - r.top);
+}
+
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
   el:  HTMLCanvasElement;
@@ -351,14 +364,12 @@ export class Canvas {
     window.addEventListener("keyup",   ih._keyUpH);
   }
 
-  // destroy was removed here — it had zero callers
-  // anywhere in the app (Canvas is instantiated exactly once, at startup,
-  // and never torn down) and was incomplete even if it had been called:
-  // it only removed 5 of bind()'s 15 registered listeners and never
-  // disconnected the ResizeObserver. No concrete near-term feature needs
-  // teardown; reintroduce a correct version (stored, removable handler
-  // references for every listener bind() adds, plus ro.disconnect()) in
-  // the same patch that actually needs it.
+  // No destroy()/teardown method: Canvas is instantiated exactly once, at
+  // startup, and never torn down, so nothing calls one. Don't add a partial
+  // version — detaching only some of bind()'s listeners without also calling
+  // ro.disconnect() on the ResizeObserver is worse than no teardown at all.
+  // A correct version needs stored, removable handler references for every
+  // listener bind() adds, plus ro.disconnect().
 
   // ── Port snap ─────────────────────────────────────────────────────────────
 
@@ -698,8 +709,8 @@ export class Canvas {
 
   centerOn(wx: number, wy: number) {
     const r = this.el.getBoundingClientRect();
-    this.panX = r.width  / 2 - wx * this.zoom;
-    this.panY = r.height / 2 - wy * this.zoom;
+    this.panX = r.width / 2 - wx * this.zoom;
+    this.panY = unobstructedHeight(r) / 2 - wy * this.zoom;
   }
 
   setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) { n.status = s; if (s === "success") n.missingRequired = false; } }
@@ -715,9 +726,14 @@ export class Canvas {
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
     for (const n of this.nodes.values()) { mnX = Math.min(mnX, n.data.position.x); mnY = Math.min(mnY, n.data.position.y); mxX = Math.max(mxX, n.data.position.x + NODE_WIDTH); mxY = Math.max(mxY, n.data.position.y + n.height); }
     const r   = this.el.getBoundingClientRect(), pad = 80;
-    this.zoom = Math.min((r.width - pad * 2) / ((mxX - mnX) || 1), (r.height - pad * 2) / ((mxY - mnY) || 1), 1.2);
+    // Floor guards against the drawer covering nearly the whole canvas on a
+    // short viewport (e.g. maximized drawer at 70vh) driving the height term
+    // to zero/negative, which would invert the zoom instead of just fitting
+    // tighter than usual.
+    const h   = Math.max(unobstructedHeight(r), pad * 2 + 40);
+    this.zoom = Math.min((r.width - pad * 2) / ((mxX - mnX) || 1), (h - pad * 2) / ((mxY - mnY) || 1), 1.2);
     this.panX = r.width / 2 - ((mnX + mxX) / 2) * this.zoom;
-    this.panY = r.height / 2 - ((mnY + mxY) / 2) * this.zoom;
+    this.panY = h / 2 - ((mnY + mxY) / 2) * this.zoom;
     // Notify zoom-hint and viewport-persistence listeners, same as onWheel
     // does after every zoom change -- fitToScreen is just another way the
     // zoom/pan can change.
@@ -732,7 +748,7 @@ export class Canvas {
    * anchor on). No new zoom math — mirrors the existing formula exactly. */
   private zoomAtCenter(factor: number) {
     const r = this.el.getBoundingClientRect();
-    const cx = r.width / 2, cy = r.height / 2;
+    const cx = r.width / 2, cy = unobstructedHeight(r) / 2;
     const { x: wx, y: wy } = this.s2w(cx, cy);
     const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * factor));
     this.panX = cx - wx * nz;

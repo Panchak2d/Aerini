@@ -2,7 +2,7 @@
 
 A minimal trigger plugin: starts a workflow run every `interval_secs` seconds. Demonstrates the `trigger` interface alongside the `node` interface every plugin already implements — see [docs/plugin-authoring.md](../../../docs/plugin-authoring.md#trigger-plugins) for the concepts.
 
-> **Status: builds and traces correctly, not yet runnable end-to-end.** Aerini's host-side trigger event pump has open implementation bugs. This example is a correct reference for the guest-side pattern — don't expect it to fire inside a running Aerini instance yet.
+> **Status: not build-verified.** A missing `wasip3` feature flag (`wit-bindgen-macros`) that would have blocked this crate from compiling at all was fixed in a later batch, but no real `cargo build` has run against it since — this environment has no `wasm32-wasip2`-capable toolchain. Treat this as an unverified guest-side pattern reference, not a confirmed build, until compiled on real hardware. Separately, Aerini's host-side trigger event pump has open implementation bugs — don't expect this to fire inside a running Aerini instance even once it compiles.
 
 This is a separate, self-contained crate from the base `../` echo template — it targets the `aerini-node-with-trigger` world instead of plain `aerini-node`, and needs the `wasip3` crate for async guest bindings. It does not affect or depend on the base template.
 

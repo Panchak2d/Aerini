@@ -15,7 +15,7 @@ wasip3::wit_bindgen::generate!({ world: "aerini-node-with-trigger" });
 use exports::aerini::plugin::node::{Guest as NodeGuest, NodeDescriptor, NodeInput, NodeOutput};
 use exports::aerini::plugin::trigger::{Guest as TriggerGuest, TriggerEvent};
 use wasip3::clocks::monotonic_clock;
-use wasip3::wit_bindgen::rt::async_support::stream_support::StreamReader;
+use wasip3::wit_bindgen::StreamReader;
 
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 const NS_PER_SEC: u64 = 1_000_000_000;

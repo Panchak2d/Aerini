@@ -22,12 +22,20 @@ Ollama listens on `http://localhost:11434` by default and doesn't check for an A
 
 Add an AI Prompt node and set:
 
-- **Provider**: leave it at `auto`, or set it to `openai` directly. Aerini has no separate "Ollama" provider entry; an OpenAI-compatible base URL is all `auto` needs, since detection only special-cases Anthropic's and Google's own domains and falls back to `openai` for everything else, `localhost` included.
+- **Provider**: leave it at `auto`, or set it to `local` directly. Aerini has a `local` provider entry — a wire-identical twin of `openai`'s, meant for Ollama, LM Studio, vLLM, llama.cpp, or anything else speaking the OpenAI chat-completions format. `auto` recognizes the literal hostname `localhost` and any loopback or private-network IP (e.g. `127.0.0.1`, `192.168.1.50`) and resolves to `local` automatically, no extra click needed. The one gap: this check runs on the URL text itself, not DNS, so a hostname that needs a lookup to resolve to a local address (e.g. `myollama.local`) isn't recognized and `auto` falls back to `openai` instead — set Provider to `local` explicitly in that case. Setting Provider to `openai` by hand still works too (same wire behavior), but skips the blank-Model safeguard covered below, so prefer `local` or `auto`.
 - **Base URL**: `http://localhost:11434/v1`. Both the scheme and the `/v1` matter. Ollama's OpenAI-compatible endpoint lives under `/v1/chat/completions`, and Aerini sends the request to exactly whatever you type here plus `/chat/completions`, nothing smarter.
-- **Model**: the exact tag you pulled, e.g. `llama3.2`. Leave this blank and the node quietly falls back to `gpt-5.6`, a model your local Ollama has never heard of.
+- **Model**: the exact tag you pulled, e.g. `llama3.2`. Type it directly, or use **Fetch Models** next to the field to pull a live list from your server (see [Finding available models](#finding-available-models) below). Leaving this blank fails immediately with a `MISSING_MODEL` error whenever Provider is `local` or `auto` resolves to it, instead of silently sending a model your server has never heard of. The one case that isn't caught: `auto` pointed at a hostname it can't recognize as local (see the Provider note above) still falls back to `openai`'s default, `gpt-5.6`, on a blank Model.
 - **API Key**: leave it empty. Aerini only adds an `Authorization` header when this field is non-empty, and Ollama doesn't check for one by default.
 
 Run the node. A working setup returns a reply in `content`, the same shape you'd get back from OpenAI or Claude.
+
+## Finding available models
+
+Instead of typing a tag by hand, click **Fetch Models** next to the Model field. It queries your server's `/models` endpoint using whatever Provider, Base URL, and API Key are currently set on the node — `local` and `auto` (once it's resolved to `local`) both work, using the same detection the node itself uses at run time. A successful fetch offers a dropdown of everything your server reports having pulled; pick one, or keep typing directly, since the plain text field is always still there underneath and typing never stops working.
+
+If the fetch fails — nothing listening at that Base URL, or the server doesn't expose `/models` — the field is left exactly as it was. Only the button's own label gives brief feedback; no dropdown appears and no form-level error interrupts you.
+
+If a saved credential is selected on the node, its Secret Value is used as the API Key for the fetch; otherwise a one-off key typed directly into the node is used, the same precedence the node applies at run time. Ollama and other local servers ignore this value either way.
 
 ## Reusing this setup with a saved credential
 
@@ -37,14 +45,14 @@ Open the Credentials panel and add one:
 
 - **Type**: API Key. It barely matters here, since nothing about the value gets checked; it just decides how the credential is labeled in the list.
 - **Name**: something you'll recognize, like "Ollama Local".
-- **Secret Value**: the form won't save a credential without one, even though Ollama itself never reads it. Type anything, like `not-needed`. It gets sent as a Bearer token the same way a real key would be, and Ollama ignores it the same way it ignores any other value here.
-- **Advanced**: set **Provider** to `openai` (not `ollama`, since no such provider id is registered), **Model** to your pulled tag, and **Base URL** to `http://localhost:11434/v1`.
+- **Secret Value**: optional, as long as Advanced Provider (below) is set to `local` — leave it blank and Aerini simply won't send an `Authorization` header, which is exactly what a default Ollama install expects. With any other Advanced Provider value, including `openai`, the form still requires something here even though Ollama itself never reads it; type anything, like `not-needed`, and it's sent as a Bearer token that gets ignored the same way any other value would.
+- **Advanced**: set **Provider** to `local` (not `ollama`, since no such provider id is registered, and not `openai`, which would require a Secret Value above and skip the blank-Model safeguard on the node itself), **Model** to your pulled tag, and **Base URL** to `http://localhost:11434/v1`.
 
 Save it. Now, on any AI Prompt or AI Agent node, pick this credential from **Use Saved Credential** and Aerini fills provider, model, and base URL in for you, but only into whichever of those three fields are still blank on that node. Anything you've already typed into one of them stays untouched.
 
 ## AI Agent
 
-AI Agent's `base_url`, `api_key`, and provider detection work identically to AI Prompt's: same `AllowLocal` policy, same base-URL fallback, same silent `gpt-5.6` default if Model is left blank. Everything above applies without changes.
+AI Agent's `base_url`, `api_key`, and provider detection work identically to AI Prompt's: same `AllowLocal` policy, same base-URL fallback, same `MISSING_MODEL` hard error if Model is left blank while Provider is `local` or `auto` resolves to it. Everything above, including [Finding available models](#finding-available-models), applies without changes.
 
 One difference worth knowing: AI Agent's **Provider** field is required rather than optional, so you have to actually pick a value from the dropdown instead of leaving it unset. Picking `auto` still resolves exactly the same way it does on AI Prompt, it just has to be picked rather than assumed.
 
@@ -60,7 +68,8 @@ Getting there also depends on the server itself. Ollama listens only on `127.0.0
 
 - **The node fails immediately with a network error**: nothing is listening at that address and port. Confirm the server is actually running and that the port in Base URL matches what it's bound to.
 - **"URL scheme 'localhost' is not permitted"**, or similar: the `http://` is missing from the front of Base URL. Something like `localhost:11434` on its own parses as a URL whose scheme is `localhost`, not as a host and port, so Aerini rejects it before it ever tries to connect. Add `http://` to the front.
-- **The reply comes back empty, or complains about a model it can't find**: Model doesn't match a tag you've actually pulled. Leaving Model blank is the most common cause, since it silently sends `gpt-5.6` instead. Check the exact tag against what your server reports it has installed.
+- **'model is required when provider is "local"'**: Model was left blank with Provider set to (or `auto`-detected as) `local`. This is a deliberate hard error, not a bug — fill in the tag you pulled, or use **Fetch Models**.
+- **The reply comes back empty, or complains about a model it can't find**: Model doesn't match a tag you've actually pulled — check the exact tag against what your server reports it has installed, or use **Fetch Models** to see the live list. A blank Model now fails immediately with the error above rather than silently misfiring, except when `auto` is pointed at a hostname it can't recognize as local (see [Pointing AI Prompt at it](#pointing-ai-prompt-at-it)); that case still falls back to `gpt-5.6` without warning.
 - **The request seems to reach real OpenAI, or asks for billing**: Base URL was left blank somewhere along the way. An empty Base URL resolves to OpenAI's own API, not to whatever's running locally, regardless of what Provider is set to.
 
 ## See also

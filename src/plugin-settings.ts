@@ -120,6 +120,13 @@ function renderPluginList(): void {
 
 let _toast: ToastFn = () => {};
 
+/** Set by `bindPluginSettings`. Re-fetches node descriptors and pushes them
+ *  into every panel/registry that caches a snapshot, so a successful
+ *  install/remove/reload shows up without an app restart. Not called when
+ *  `reloadPlugins` itself fails — the backend registry didn't change, so
+ *  there's nothing new to show. */
+let _onNodesReloaded: (() => void | Promise<void>) | null = null;
+
 async function refreshPlugins(): Promise<void> {
   if (!_pluginDir) {
     _plugins = [];
@@ -191,6 +198,7 @@ export async function installWithUpdatePrompt(
     await installPluginFromPath(srcPath, pluginDir, overwrite);
     try {
       await reloadPlugins(pluginDir);
+      await _onNodesReloaded?.();
       toast(overwrite ? "Plugin updated and reloaded." : "Plugin installed and activated.", "success");
     } catch (reloadErr) {
       toast(
@@ -225,6 +233,7 @@ export async function installPackWithUpdatePrompt(
     await installPluginPackFromPath(srcPath, pluginDir, overwrite);
     try {
       await reloadPlugins(pluginDir);
+      await _onNodesReloaded?.();
       toast(overwrite ? "Plugin pack updated and reloaded." : "Plugin pack installed and activated.", "success");
     } catch (reloadErr) {
       toast(
@@ -259,6 +268,7 @@ async function onRemovePlugin(filename: string, displayName: string, toast: Toas
     await removePlugin(filename, _pluginDir);
     try {
       await reloadPlugins(_pluginDir);
+      await _onNodesReloaded?.();
       toast("Plugin removed.", "success");
     } catch (reloadErr) {
       toast(`Plugin removed, but reload failed (${reloadErr}). Restart to apply.`, "info");
@@ -282,6 +292,7 @@ async function onRemovePluginPack(packId: string, displayName: string, toast: To
     await removePluginPack(packId, _pluginDir);
     try {
       await reloadPlugins(_pluginDir);
+      await _onNodesReloaded?.();
       toast("Plugin pack removed.", "success");
     } catch (reloadErr) {
       toast(`Plugin pack removed, but reload failed (${reloadErr}). Restart to apply.`, "info");
@@ -297,6 +308,7 @@ async function onManualReload(toast: ToastFn): Promise<void> {
   if (!_pluginDir) return;
   try {
     await reloadPlugins(_pluginDir);
+    await _onNodesReloaded?.();
     toast("Plugins reloaded.", "success");
     await refreshPlugins();
   } catch (e) {
@@ -309,12 +321,19 @@ async function onManualReload(toast: ToastFn): Promise<void> {
  * list the first time the Plugins rail zone is opened (and after any
  * install/remove); subsequent opens reuse the cached list.
  *
+ * `onNodesReloaded` runs after every install/remove/reload that succeeds
+ * in swapping the backend registry, so callers can refresh whatever else
+ * caches a node-descriptor snapshot (sidebar palette, command palette,
+ * canvas/popover registries). It does not run when `reloadPlugins` itself
+ * throws — the registry didn't change in that case.
+ *
  * relocated from the Settings modal (#btn-settings) to its own
  * rail zone (#tab-plugins) — trigger element changed, everything else
  * (the _loaded guard, IPC calls, DOM target ids) is unchanged.
  */
-export function bindPluginSettings(toast: ToastFn): void {
+export function bindPluginSettings(toast: ToastFn, onNodesReloaded?: () => void | Promise<void>): void {
   _toast = toast;
+  _onNodesReloaded = onNodesReloaded ?? null;
 
   const browseBtn = document.getElementById("btn-plugin-dir-browse");
   const installBtn = document.getElementById("btn-install-plugin");

@@ -231,6 +231,8 @@
   flex-direction: column;
   gap: 14px;
 }
+.zone-body-scroll .settings-row { justify-content: flex-start; }
+.zone-body-scroll .settings-row-actions { margin-left: 0; }
 
 .zone-search {
   padding: 6px 8px;
@@ -341,7 +343,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -417,11 +419,13 @@
   height: 13px;
   accent-color: var(--blue);
   cursor: pointer;
-  visibility: hidden;
+  display: none;
 }
 #workflow-list.select-mode .workflow-item-check,
 .workflow-item.selected .workflow-item-check,
-.workflow-item:hover .workflow-item-check { visibility: visible; }
+.workflow-item:hover .workflow-item-check { display: inline-block; }
+
+.workflow-item-run-state:empty { display: none; }
 
 .workflow-item-drag-handle {
   flex-shrink: 0;
@@ -429,12 +433,11 @@
   font-size: 11px;
   line-height: 1;
   color: var(--t3);
-  opacity: 0;
   cursor: grab;
   text-align: center;
-  transition: opacity 120ms ease;
+  display: none;
 }
-.workflow-item:hover .workflow-item-drag-handle { opacity: 1; }
+.workflow-item:hover .workflow-item-drag-handle { display: inline-block; }
 
 .workflow-item.selected {
   background: color-mix(in srgb, var(--blue) 10%, transparent);

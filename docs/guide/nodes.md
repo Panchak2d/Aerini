@@ -385,8 +385,8 @@ Send a prompt to an AI model, Claude, GPT, Gemini, or a local Ollama model, and 
 |---|---|---|
 | `prompt` | Prompt | Required. |
 | `system` | System | System/persona instructions. |
-| `model` | Model | Model name, e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash`, `llama3`. |
-| `provider` | Provider | `auto`, `openai`, `anthropic`, or `gemini`. `auto` detects from Base URL. |
+| `model` | Model | Model name, e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash`, `llama3`. A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. |
+| `provider` | Provider | `auto`, `openai`, `anthropic`, `gemini`, or `local`. `auto` detects from Base URL, including local servers such as Ollama. |
 | `base_url` | Base URL | API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here specifically, for local models like Ollama. See [Local Models](local-models.md) for how to point this at one. |
 | `api_key` | API Key | Resolved from Connections. |
 | `temperature` | Temperature | 0.0 (precise) to 2.0 (creative). Default 0.7. |
@@ -407,8 +407,8 @@ Give an AI model a set of tools it can call to work toward a goal across multipl
 | `system` | System | System instructions for the agent's persona and behavior. |
 | `tools` | Tools | JSON array of tool definitions, each `{name, description, parameters}`. Used with OpenAI-compatible and Gemini providers. |
 | `context` | Context | Extra context to hand the agent, e.g. from earlier nodes or variables. |
-| `provider` | Provider | Required. `openai`, `anthropic`, `gemini`, or `auto`. OpenAI and Gemini run a full tool-calling loop; Anthropic runs a single reasoning pass with no tool loop. |
-| `model` | Model | E.g. `gpt-5.6` (OpenAI), `claude-sonnet-5` (Anthropic), `gemini-3.6-flash` (Gemini). |
+| `provider` | Provider | Required. `openai`, `anthropic`, `gemini`, `local`, or `auto`. OpenAI, Gemini, and `local` run a full tool-calling loop; Anthropic runs a single reasoning pass with no tool loop. |
+| `model` | Model | E.g. `gpt-5.6` (OpenAI), `claude-sonnet-5` (Anthropic), `gemini-3.6-flash` (Gemini). A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. |
 | `base_url` | Base URL | API base URL, leave blank for the provider's default. Loopback and private-network addresses are allowed here too, for local models like Ollama; see [Local Models](local-models.md). |
 | `api_key` | API Key | Resolved from Connections. |
 | `max_iterations` | Max Iterations | Max think-act-observe cycles. Default 5, max 20. Ignored for Anthropic, which always runs 1. |
@@ -502,7 +502,7 @@ Route the workflow to one of several branches based on a value match, like a swi
 |---|---|---|
 | `field` | Field | Required. Dot-path to switch on, e.g. `status` or `response.code`. |
 | `source_node` | Source Node | Required. Which upstream node's output to read Field from. |
-| `cases` | Cases | Required. A JSON array of cases, e.g. `[{"match": "ok", "port": "case_ok"}]`. |
+| `cases` | Cases | Required. A JSON array of cases, e.g. `[{"match": "ok", "port": "case_1"}]`. |
 | `default_port` | Default Port | Port to route to when nothing matches. Default `default`. |
 
 **Ports:** In → Case 1 through Case 8 (eight fixed case ports), plus Default. Case labels on the canvas are generic; the app reads your actual case config to show the label you gave each one alongside the port ID.

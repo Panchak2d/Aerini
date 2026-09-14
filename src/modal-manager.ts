@@ -8,6 +8,14 @@ let _allNodes: NodeDescriptor[] = [];
 let _pendingImport: Record<string, unknown> | null = null;
 let _onConfirmImport: ImportCallback | null = null;
 
+/** Updates the node descriptors modals render against, without re-binding
+ *  any listener `initModals` already attached. Call after a plugin
+ *  install/remove/reload so modal-driven previews see new node types
+ *  immediately. */
+export function setModalNodes(allNodes: NodeDescriptor[]): void {
+  _allNodes = allNodes;
+}
+
 export function initModals(
   allNodes: NodeDescriptor[],
   onConfirmImport: ImportCallback

@@ -255,6 +255,7 @@ mod tests {
 
     fn make_set_input(key: &str, value: Value, persist: bool) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "set1".to_string(),
             workflow_id: "wf".to_string(),
@@ -266,6 +267,7 @@ mod tests {
 
     fn make_get_input(key: &str, variables: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "get1".to_string(),
             workflow_id: "wf".to_string(),
@@ -298,6 +300,7 @@ mod tests {
     async fn set_missing_key_returns_failure() {
         let node = SetVariableNode { db: None };
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n".to_string(),
             workflow_id: "wf".to_string(),
@@ -386,6 +389,7 @@ mod tests {
     async fn get_empty_key_returns_failure() {
         let node = GetVariableNode { db: None };
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n".to_string(),
             workflow_id: "wf".to_string(),

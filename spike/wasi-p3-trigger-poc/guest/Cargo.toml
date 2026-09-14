@@ -18,4 +18,4 @@ crate-type = ["cdylib"]
 # top comment for why: a second copy would not satisfy wasip3's own `^0.57.1`
 # requirement under Cargo's 0.x semver rules, producing two incompatible copies
 # of the async runtime-support types wasip3's stream/clock bindings use).
-wasip3 = "0.7.1"
+wasip3 = { version = "0.7.1", features = ["wit-bindgen-macros", "async-spawn"] }

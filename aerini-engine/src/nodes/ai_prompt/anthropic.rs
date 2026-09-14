@@ -109,3 +109,84 @@ pub(super) async fn call_anthropic(
         vec![format!("Anthropic responded ({} chars, {}in/{}out tokens)", content.len(), input_tok, output_tok)],
     )
 }
+
+/// `GET {base}/v1/models` — same `/v1` `call_anthropic` appends above, since
+/// `resolve_base_url` strips it from `base_url` for this provider. Same
+/// `{"data":[{"id":...}]}` shape as OpenAI's models list.
+pub(super) async fn list_models(
+    client: reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, NodeError> {
+    if api_key.is_empty() {
+        return Err(NodeError::unrecoverable(
+            "MISSING_API_KEY",
+            "Anthropic requires an API key. Add one in Connections.",
+        ));
+    }
+
+    let endpoint = format!("{}/v1/models", base_url);
+    let record = crate::provider::ProviderRegistry::global()
+        .get("anthropic")
+        .expect("anthropic always registered");
+    let req = crate::provider::ProviderRegistry::apply_auth(record, client.get(&endpoint), api_key);
+
+    let (status, resp_json) = send_and_parse(req).await.map_err(|out| {
+        out.error.unwrap_or_else(|| NodeError::unrecoverable("NETWORK_ERROR", "request failed"))
+    })?;
+
+    if let Some(msg) = extract_provider_error(&resp_json, "Unknown Anthropic error") {
+        return Err(if status == 401 || status == 403 {
+            NodeError::unrecoverable("BAD_KEY", msg)
+        } else {
+            NodeError::unrecoverable("API_ERROR", msg)
+        });
+    }
+
+    Ok(resp_json["data"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
+        .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod list_models_tests {
+    use super::*;
+
+    async fn spawn_mock(response_body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind failed");
+        let port = listener.local_addr().expect("local_addr failed").port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (r, mut w) = stream.split();
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+                if line.trim().is_empty() { break; }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(), response_body
+            );
+            let _ = w.write_all(resp.as_bytes()).await;
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_models_parses_data_array_into_ids() {
+        let base_url = spawn_mock(r#"{"data":[{"id":"claude-sonnet-5"},{"id":"claude-opus-5"}]}"#).await;
+        let ids = list_models(reqwest::Client::new(), &base_url, "test-key")
+            .await
+            .expect("list_models should succeed against a canned data array");
+        assert_eq!(ids, vec!["claude-sonnet-5".to_string(), "claude-opus-5".to_string()]);
+    }
+}

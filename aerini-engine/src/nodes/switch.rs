@@ -32,7 +32,7 @@ impl Node for SwitchNode {
                 },
                 "cases": {
                     "type": "string",
-                    "description": "JSON array of cases: [{\"match\": \"ok\", \"port\": \"case_ok\"}, ...]"
+                    "description": "JSON array of cases: [{\"match\": \"ok\", \"port\": \"case_1\"}, ...]"
                 },
                 "default_port": {
                     "type": "string",
@@ -276,6 +276,7 @@ mod tests {
     /// placeholder ("src") since it's never read.
     fn make_input(field: &str, cases_json: &str, source_node: &str, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -295,6 +296,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -340,6 +342,7 @@ mod tests {
     #[tokio::test]
     async fn missing_field_returns_error() {
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -459,6 +462,7 @@ mod tests {
         // silently routing the no-match fallback to a port no edge can ever
         // be wired to on the canvas.
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -487,6 +491,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("src".to_string(), json!({}));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -549,6 +554,7 @@ mod tests {
         // Mirrors the case["port"] check for default_port — a bare number
         // must not silently fall through to the literal "default" fallback.
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -614,6 +620,7 @@ mod tests {
         // rejected with a distinct code from the is_null() reject path
         // (SOURCE_NODE_REQUIRED, see below).
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -642,6 +649,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -673,6 +681,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -704,6 +713,7 @@ mod tests {
         outputs.insert("prev".to_string(), json!({ "status": "ok" }));
         outputs.insert("other".to_string(), json!({ "status": "should_not_be_used" }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -734,6 +744,7 @@ mod tests {
         // (SOURCE_NOT_FOUND), matching transform.rs's behavior for the same
         // case.
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),

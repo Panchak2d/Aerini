@@ -305,6 +305,7 @@ mod tests {
         if let Some(r) = role    { body["role"]    = json!(r); }
         if let Some(c) = content { body["content"] = json!(c); }
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test_node".to_string(),
             workflow_id:  String::new(),

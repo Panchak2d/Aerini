@@ -285,11 +285,18 @@ export class WorkflowManager {
       if (!this.hasUnsaved) return;
       const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
       if (isTauri()) {
-        try { await saveWorkflow(json); } catch (e) { console.error("Aerini: autosave failed", e); }
+        try {
+          await saveWorkflow(json);
+        } catch (e) {
+          console.error("Aerini: autosave failed", e);
+          if (isWorkflowRunning(this.currentId)) {
+            this.onToast(`Autosave failed: ${e}`, "error");
+          }
+        }
       } else {
         lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json, this.currentTags, this.currentCollectionId);
       }
-    }, 30_000);
+    }, isWorkflowRunning(this.currentId) ? 500 : 30_000);
   }
 
   setSortMode(mode: string): void {

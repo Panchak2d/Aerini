@@ -112,6 +112,7 @@ mod tests {
             None    => json!({}),
         };
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),
@@ -134,6 +135,7 @@ mod tests {
             None    => json!({}),
         };
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),

@@ -28,7 +28,7 @@ crate-type = ["cdylib"]
 # would produce two incompatible copies of those runtime-support types.
 # VERIFIED (spike/wasi-p3-trigger-poc's own research, this audit trail):
 # 0.7.1+wasi-0.3.0 is current, final WASI 0.3.0 (not an -rc build).
-wasip3 = "0.7.1"
+wasip3 = { version = "0.7.1", features = ["wit-bindgen-macros", "async-spawn"] }
 # Parses the trigger's own JSON config string (wit/node.wit's `trigger.events`
 # doc comment). Pure-Rust, no OS-specific syscalls -- compiles cleanly to
 # wasm32-wasip2. VERIFIED: 1.0.151 current on crates.io/docs.rs.

@@ -324,6 +324,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
@@ -349,6 +350,7 @@ mod tests {
 
     fn no_sandbox_input(op_json: Value) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
@@ -449,6 +451,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
@@ -492,6 +495,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
@@ -528,6 +532,7 @@ mod tests {
         );
 
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),

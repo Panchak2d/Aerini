@@ -154,6 +154,7 @@ mod tests {
 
     fn make_input(input: Value, node_outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "n1".to_string(),
             workflow_id: "wf".to_string(),

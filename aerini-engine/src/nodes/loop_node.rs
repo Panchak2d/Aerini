@@ -260,6 +260,7 @@ mod tests {
 
     fn make_input(input: Value, outputs: HashMap<String, Value>) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),
@@ -344,6 +345,7 @@ mod tests {
         outputs.insert("z_second".to_string(), json!({ "items": [9, 9] }));
         outputs.insert("a_first".to_string(), json!({ "items": [1, 2, 3] }));
         let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id: "test".to_string(),
             workflow_id: "wf".to_string(),
@@ -486,6 +488,7 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert("__loop_test_index".to_string(), json!(2));
         let input_at_cap = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "test".to_string(),
             workflow_id:  "wf".to_string(),

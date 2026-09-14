@@ -26,9 +26,9 @@ Click **Add a credential** (or, if this is your first one, **Add your first cred
   - **Other / Custom**: anything else
 - **Name**: a label for your own reference, like "OpenAI Production Key."
 - **ID**: a short identifier used internally to attach this credential to a node. It's auto-filled from the name (lowercased, spaces turned into underscores) but you can edit it before saving. Letters, numbers, underscores, and hyphens only. You can't change it later, so if you need a different ID, delete the credential and add it again.
-- **Secret Value**: the actual key or token. Click the eye icon to reveal it while typing.
+- **Secret Value**: the actual key or token. Click the eye icon to reveal it while typing. Required for every Advanced Provider value except one: if Advanced Provider (below) is set to `local`, this field is optional — see [Local Models](local-models.md#reusing-this-setup-with-a-saved-credential).
 
-An **Advanced** section lets you optionally record a provider, model, and base URL alongside the secret. These aren't secret themselves, they exist so that when you later pick this credential on an AI node, Aerini can fill in matching fields for you automatically. More on that below.
+An **Advanced** section lets you optionally record a provider, model, and base URL alongside the secret. These aren't secret themselves, they exist so that when you later pick this credential on an AI node, Aerini can fill in matching fields for you automatically. Next to Model, a **Fetch Models** button queries that provider's `/models` endpoint using whatever Provider, Base URL, and Secret Value are currently in this form, and offers a dropdown of what it finds — typing a name directly always still works if the fetch fails. More on that below.
 
 Click **Save Credential**. That's it: the credential now shows up in the panel and is available to every workflow.
 
@@ -40,7 +40,7 @@ Click **Delete** to remove one. If any workflow still references it, Aerini refu
 
 ## Using a credential in a node
 
-Open a node's settings and look for a **Connection** section. If the node has one, it shows a **Use Saved Credential** dropdown listing every credential you've saved, filtered by type only if that specific field requires one (most don't, so you'll usually see your full list). Pick one and the node uses it at run time. The secret itself is never written into the workflow file; only the credential's ID is, and that ID is resolved back to the real value the moment the workflow runs.
+Open a node's settings and look for a **Connection** section. If the node has one, it shows a **Use Saved Credential** dropdown listing every credential you've saved, filtered by type only if that specific field requires one (most don't, so you'll usually see your full list) — except on AI Prompt, AI Agent, and Image Generation, which filter differently; see [AI nodes: auto-fill and one-off keys](#ai-nodes-auto-fill-and-one-off-keys) below. Pick one and the node uses it at run time. The secret itself is never written into the workflow file; only the credential's ID is, and that ID is resolved back to the real value the moment the workflow runs.
 
 Here's the part that trips people up: **not every field described as "resolved from Connections" actually gets a dropdown.** Only a field literally named `api_key` or `password` gets the automatic picker. Everything else on a node, however it's labeled, is a plain text box you type into directly, and whatever you type is saved in the workflow file unencrypted. This is a real gap between how a few node descriptions read and how the picker currently works, not something you're doing wrong.
 
@@ -78,6 +78,8 @@ Pick whichever one matches the API you're calling. If you're not sure, check tha
 ### AI nodes: auto-fill and one-off keys
 
 AI Prompt, AI Agent, and Image Generation all read a `provider`, `model`, and `base_url` alongside `api_key`. When you pick a saved credential that has Advanced metadata filled in (see [Adding a credential](#adding-a-credential) above), Aerini copies that provider, model, and base URL into the node automatically, but only into fields that are still blank. It never overwrites something you already typed.
+
+On these three node types, the **Use Saved Credential** dropdown is also filtered to match: it only lists credentials whose Advanced Provider is the same as the Provider currently selected on the node, plus any credential with no Provider set at all (those are always shown, since Advanced metadata is optional). Each matched credential shows its provider next to its name, e.g. "My Key — Anthropic", so you can tell them apart at a glance. If nothing matches, the dropdown is empty and the warning below it names the provider it's short a credential for — use **Or enter a key directly** below, or add a matching credential from the Credentials panel. Changing the node's Provider re-filters the list immediately.
 
 These three node types also offer **Or enter a key directly**, an inline field for a one-off API key. It's stored in the workflow file unencrypted and is ignored the moment you pick a saved credential instead. Use it for quick testing, not for anything you'd mind someone else seeing if they opened the workflow file.
 

@@ -18,6 +18,14 @@ export interface ExtensionContext {
    *  existing tests construct `ExtensionContext` object literals directly
    *  without it; a missing value reads as falsy, same as `false`. */
   hasConfigSection?: boolean;
+  /** Fetches available model ids for this node's current provider/base_url/
+   *  credential config — powers `x-aerini-model-picker` fields. Rejects on
+   *  any failure (bad key, network error, unrecognized provider); the field
+   *  renderer must treat that as "discovery unavailable" and leave manual
+   *  entry untouched, never as a blocking error. Optional for the same
+   *  reason as `hasConfigSection` above — most node types have no
+   *  model-picker field and existing `ExtensionContext` literals omit it. */
+  fetchModels?: () => Promise<string[]>;
 }
 
 export interface NodeConfigExtension {

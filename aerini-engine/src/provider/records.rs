@@ -40,6 +40,16 @@ pub(super) fn built_in() -> HashMap<&'static str, ProviderRecord> {
         extra_headers: &[],
     });
 
+    m.insert("local", ProviderRecord {
+        id: "local",
+        display_name: "Local Model (local)",
+        capabilities: &[Capability::TextGen],
+        default_base_url: "", // user-supplied only; no cloud default
+        auth_style: AuthStyle::BearerToken,
+        requires_key: false, // same OpenAI-compatible wire behavior as `openai`
+        extra_headers: &[],
+    });
+
     // ── ImageGen ──────────────────────────────────────────────────────────────
 
     m.insert("gpt_image_1", ProviderRecord {

@@ -16,6 +16,9 @@ vi.mock("../ipc/credentials", () => credMock);
 const confirmMock = vi.hoisted(() => ({ showConfirm: vi.fn() }));
 vi.mock("../confirm", () => ({ showConfirm: confirmMock.showConfirm }));
 
+const providersMock = vi.hoisted(() => ({ listProviderModels: vi.fn() }));
+vi.mock("../ipc/providers", () => providersMock);
+
 import { CredentialPanel } from "../panels/CredentialPanel";
 
 function entry(id: string, name: string, cred_type = "api_key"): CredentialEntry {
@@ -37,6 +40,7 @@ beforeEach(() => {
   credMock.saveCredential.mockReset().mockResolvedValue(undefined);
   credMock.deleteCredential.mockReset().mockResolvedValue(undefined);
   confirmMock.showConfirm.mockReset().mockResolvedValue(true);
+  providersMock.listProviderModels.mockReset().mockResolvedValue([]);
 });
 
 describe("CredentialPanel — scroll region structure", () => {
@@ -106,6 +110,53 @@ describe("CredentialPanel — usage visibility", () => {
     const usageEl = document.querySelector(".cred-item-usage")!;
     expect(usageEl.textContent).toBe("Not used by any workflow");
     expect(usageEl.classList.contains("unused")).toBe(true);
+  });
+});
+
+describe("CredentialPanel — Secret Value requirement", () => {
+  it("blocks save with an empty Secret Value when Advanced Provider is blank", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-name") as HTMLInputElement).value = "New Key";
+    (document.getElementById("cred-id") as HTMLInputElement).value = "new_key";
+    (document.getElementById("cred-save") as HTMLButtonElement).click();
+    await flush();
+
+    expect(credMock.saveCredential).not.toHaveBeenCalled();
+    expect(document.getElementById("cred-save-error")?.textContent).toBe("Secret value is required");
+  });
+
+  it("still blocks an empty Secret Value for every other Advanced Provider value", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-name") as HTMLInputElement).value = "New Key";
+    (document.getElementById("cred-id") as HTMLInputElement).value = "new_key";
+    (document.getElementById("cred-meta-provider") as HTMLInputElement).value = "openai";
+    (document.getElementById("cred-save") as HTMLButtonElement).click();
+    await flush();
+
+    expect(credMock.saveCredential).not.toHaveBeenCalled();
+    expect(document.getElementById("cred-save-error")?.textContent).toBe("Secret value is required");
+  });
+
+  it("allows an empty Secret Value when Advanced Provider is 'local'", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-name") as HTMLInputElement).value = "Local Model";
+    (document.getElementById("cred-id") as HTMLInputElement).value = "local_model";
+    (document.getElementById("cred-meta-provider") as HTMLInputElement).value = "local";
+    (document.getElementById("cred-save") as HTMLButtonElement).click();
+    await flush();
+
+    expect(credMock.saveCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "local_model", value: "", provider: "local" })
+    );
   });
 });
 
@@ -207,5 +258,74 @@ describe("CredentialPanel — view / re-edit a saved credential", () => {
 
     expect(confirmMock.showConfirm).toHaveBeenCalled();
     expect(document.getElementById("cred-cancel")).toBeNull();
+  });
+});
+
+describe("CredentialPanel — Advanced 'Fetch Models'", () => {
+  it("populates a dropdown on a successful fetch, reading Provider/Base URL/Secret Value from this form", async () => {
+    providersMock.listProviderModels.mockResolvedValue(["gpt-4o", "gpt-4o-mini"]);
+
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-meta-provider") as HTMLInputElement).value = "openai";
+    (document.getElementById("cred-meta-base-url") as HTMLInputElement).value = "https://api.openai.com/v1";
+    (document.getElementById("cred-value") as HTMLInputElement).value = "sk-test";
+    (document.getElementById("cred-fetch-models") as HTMLButtonElement).click();
+    await flush();
+
+    expect(providersMock.listProviderModels).toHaveBeenCalledWith("openai", "https://api.openai.com/v1", "sk-test");
+    const options = document.querySelectorAll("#cred-model-list-slot .csel-option");
+    expect(options.length).toBe(2);
+    expect(Array.from(options).map(o => o.textContent)).toEqual(["gpt-4o", "gpt-4o-mini"]);
+    expect((document.getElementById("cred-fetch-models") as HTMLButtonElement).disabled).toBe(false);
+
+    options[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect((document.getElementById("cred-meta-model") as HTMLInputElement).value).toBe("gpt-4o");
+  });
+
+  it("degrades silently to the plain text field on a fetch error, without throwing", async () => {
+    providersMock.listProviderModels.mockRejectedValue(new Error("network error"));
+
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    const modelInp = document.getElementById("cred-meta-model") as HTMLInputElement;
+    modelInp.value = "typed-manually";
+    const fetchBtn = document.getElementById("cred-fetch-models") as HTMLButtonElement;
+    fetchBtn.click();
+    await flush();
+
+    expect(fetchBtn.textContent).toBe("Couldn't fetch — try again");
+    expect(fetchBtn.disabled).toBe(false);
+    expect(modelInp.value).toBe("typed-manually");
+    expect(document.querySelector("#cred-model-list-slot .csel-option")).toBeNull();
+  });
+
+  it("degrades silently on an empty model list, same as any other fetch failure", async () => {
+    providersMock.listProviderModels.mockResolvedValue([]);
+
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-fetch-models") as HTMLButtonElement).click();
+    await flush();
+
+    expect(document.getElementById("cred-fetch-models")?.textContent).toBe("Couldn't fetch — try again");
+    expect(document.querySelector("#cred-model-list-slot .csel-option")).toBeNull();
+  });
+
+  it("resolves a blank Provider to 'auto', matching the node popover's own default", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    (document.getElementById("cred-fetch-models") as HTMLButtonElement).click();
+    await flush();
+
+    expect(providersMock.listProviderModels).toHaveBeenCalledWith("auto", "", "");
   });
 });

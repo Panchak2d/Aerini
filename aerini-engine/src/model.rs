@@ -350,6 +350,11 @@ pub struct NodeInput {
     pub execution_id: String,
     /// Merged config + resolved credential values.
     pub input: Value,
+    /// Resolved credential values, keyed by the same config field name they're
+    /// merged into `input` under. A clean, structured path to the same secrets
+    /// `input` already carries — plugins may read either; this does not replace
+    /// the merge.
+    pub resolved_credentials: HashMap<String, String>,
     pub context: ExecutionContext,
     /// `Some` when the run carries a cancellation token; resolves when the run is
     /// cancelled. `CancellationToken` has no `Serialize`/`Deserialize` impl, hence

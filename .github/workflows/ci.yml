@@ -69,6 +69,26 @@ jobs:
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
+  template-wit-sync:
+    name: Example plugin template WIT files match canonical
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # examples/plugin-template/wit/node.wit and its trigger-example subcrate's own
+      # copy are duplicated, not symlinked, so the template still works as a
+      # self-contained starting point when copied out of this repo on its own (see
+      # examples/plugin-template/README.md). Same pattern as the "dist/ is not
+      # stale" check below: compare against the source of truth and fail loud if a
+      # copy has drifted, instead of letting it go silently stale like it did before.
+      - name: Diff template wit copies against canonical
+        run: |
+          diff aerini-engine/wit/node.wit examples/plugin-template/wit/node.wit || \
+            (echo "ERROR: examples/plugin-template/wit/node.wit is stale — copy aerini-engine/wit/node.wit over it and commit" && exit 1)
+          diff aerini-engine/wit/node.wit examples/plugin-template/trigger-example/wit/node.wit || \
+            (echo "ERROR: examples/plugin-template/trigger-example/wit/node.wit is stale — copy aerini-engine/wit/node.wit over it and commit" && exit 1)
+
   node-checks:
     name: Node.js dependency audit and dist staleness
     runs-on: ubuntu-latest
@@ -79,7 +99,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
@@ -147,7 +167,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'

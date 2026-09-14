@@ -2,7 +2,8 @@ import { NODE_IDS } from "../node-ids";
 import { REQUIRED_FIELDS } from "../validation";
 import type { CanvasNode } from "../canvas/Node";
 import type { Canvas } from "../canvas/Canvas";
-import { listCredentials, getCredentialMetadata } from "../ipc/credentials";
+import { listCredentials, getCredentialMetadata, getCredentialSecret } from "../ipc/credentials";
+import { listProviderModels } from "../ipc/providers";
 import { runWorkflow } from "../ipc/workflow";
 import type { NodeDescriptor, WorkflowLogEntry } from "../ipc/workflow";
 import { escapeHtml } from "../utils";
@@ -21,7 +22,7 @@ import { renderWebhookBanners }                       from "./extensions/webhook
 import { renderSocialUploadFields }                   from "./extensions/social-upload";
 import {
   getCredentialFieldKeys, renderConfigFieldsLoop, renderCredentialSection,
-  type PropSchema,
+  AI_NODE_IDS, type PropSchema,
 } from "./field-renderer";
 
 // Registry of node descriptors — populated by app.ts via setDescriptorRegistry()
@@ -128,6 +129,21 @@ export async function showPopover(
   // If another popover opened while we were awaiting credentials, abort.
   if (myId !== _activePopoverId) return;
 
+  // AI nodes' Connection section is filtered by Provider (field-renderer.ts's
+  // renderCredentialSection) — prefetch each pool credential's Advanced
+  // Provider up front so that filter has something to check. Gated to
+  // AI_NODE_IDS so non-AI nodes never pay this extra round trip.
+  let credentialProviderMap: Map<string, string | undefined> = new Map();
+  if (AI_NODE_IDS.has(node.data.node_type_id)) {
+    const entries = await Promise.all(creds.map(async (c) =>
+      [c.id, (await getCredentialMetadata(c.id).catch(() => null))?.provider] as const
+    ));
+    credentialProviderMap = new Map(entries);
+  }
+
+  // Another popover may have opened while we were awaiting metadata.
+  if (myId !== _activePopoverId) return;
+
   // Parse schema — fall back to the ALL_NODES descriptor registry if the saved
   // node has an empty input_schema (happens when loaded from a .aerini file that
   // was saved before the serializer included the full schema).
@@ -172,6 +188,23 @@ export async function showPopover(
 
     if (myId !== _activePopoverId) return; // popover closed/reopened while awaiting
     if (changed) { onChange(); showPopover(node, canvasEl, onChangeFn, canvas); }
+  }
+
+  // Powers `x-aerini-model-picker` fields' "Fetch Models" button. Reads live
+  // config at call time (not captured up front), so it always reflects
+  // whatever the user has typed into provider/base_url/the credential picker
+  // so far. api_key precedence mirrors the executor's own build_input(): a
+  // saved credential (node.data.credentials["api_key"]) wins over the
+  // inline one-off key in config, never the other way round.
+  async function fetchModelsForNode(): Promise<string[]> {
+    const config = node.data.config as Record<string, unknown>;
+    const provider = String(config["provider"] ?? "auto");
+    const baseUrl  = String(config["base_url"] ?? "");
+    const credId   = node.data.credentials["api_key"];
+    const apiKey   = credId
+      ? (await getCredentialSecret(credId).catch(() => null)) ?? ""
+      : String(config["api_key"] ?? "");
+    return listProviderModels(provider, baseUrl, apiKey);
   }
   // Keys managed by custom UI blocks — excluded from generic field rendering.
   const CUSTOM_UI_KEYS = new Set(["subfolders", "sources", "files", "folder_path", "overwrite", "attachments"]);
@@ -256,6 +289,7 @@ export async function showPopover(
   const ctx: ExtensionContext = {
     node, body, canvasEl, onChange, creds,
     rerender: () => showPopover(node, canvasEl, onChangeFn, canvas),
+    fetchModels: fetchModelsForNode,
   };
 
   // Config fields
@@ -272,7 +306,7 @@ export async function showPopover(
   ext?.afterFields?.(ctx);
 
   // Credentials
-  renderCredentialSection(ctx, props, ext, autoFillFromCredentialMetadata);
+  renderCredentialSection(ctx, props, ext, autoFillFromCredentialMetadata, credentialProviderMap);
 
   // Reliability
   body.appendChild(mkSection("Reliability"));

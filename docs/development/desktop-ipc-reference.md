@@ -2,7 +2,7 @@
 
 The desktop app's frontend never touches the filesystem, a database, or the Rust engine directly. Every one of those operations crosses through Tauri's IPC bridge as a named command, registered once in `src-tauri/src/lib.rs`'s `invoke_handler!` list. This page is the exhaustive list: every registered command, its parameters, what it returns, and where in the frontend it's actually called from. It assumes you've read [Architecture](architecture.md), specifically the [Tauri shell](architecture.md#the-tauri-shell-src-tauri) section this page is the detail behind.
 
-69 commands are registered today, spread across ten modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `memory`, `performance`, `update`) plus 13 commands declared directly in `lib.rs` that don't belong to any one domain.
+70 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 13 commands declared directly in `lib.rs` that don't belong to any one domain.
 
 ## Conventions
 
@@ -200,9 +200,19 @@ Two more commands the Plugins settings panel depends on, `pick_folder_dialog` an
 
 User-triggered only; nothing polls or schedules this automatically. Calls the GitHub Releases API directly, validates that the release URL it gets back actually points at `github.com` over `https` before returning it, and compares semantic versions to compute `is_newer`.
 
+## Providers
+
+`providers.rs` (102 lines), one command.
+
+| Command | Parameters | Returns | Frontend caller |
+|---|---|---|---|
+| `list_provider_models` | `provider: String`, `base_url: String`, `api_key: String` | `Result<Vec<String>, String>` | `listProviderModels` (`src/ipc/providers.ts`), called from the "Fetch Models" button on `model` fields flagged `x-aerini-model-picker` (`field-renderer.ts`/`lifecycle.ts`), and from the Credential panel's own Advanced "Fetch Models" button (`CredentialPanel.ts`), which reads provider/base URL/secret value off its own form fields instead of a node's config |
+
+Discovers a provider's available models by calling its `/models`-style endpoint. Thin wrapper: `aerini_engine::nodes::ai_prompt::list_models` does the actual work — resolving `base_url` the same way (and under the same `SsrfPolicy::AllowLocal` SSRF check) the AI Prompt node's own `execute()` does, then dispatching to a per-provider parser. `openai` and `local` share one parser (`{"data":[{"id":...}]}`); `anthropic` uses the same shape at `/v1/models`; `gemini` has a different envelope (`{"models":[{"name":"models/xxx"}]}`) and strips the `"models/"` prefix so all three return bare model ids. `provider` also accepts `"auto"` (and anything else not already one of the four ids): the command resolves it via `ProviderRegistry::detect_from_url(base_url)` first, the same classifier `execute()` uses, so the AI nodes' own default `provider` setting can discover models too.
+
 ## Top-level commands
 
-13 commands declared directly in `lib.rs` rather than under `commands/`, because none belongs to one of the ten domains above. Callers are scattered across several frontend files; there is no single wrapper file for this group.
+13 commands declared directly in `lib.rs` rather than under `commands/`, because none belongs to one of the eleven domains above. Callers are scattered across several frontend files; there is no single wrapper file for this group.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|

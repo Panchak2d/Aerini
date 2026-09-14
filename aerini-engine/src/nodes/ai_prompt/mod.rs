@@ -39,8 +39,8 @@ impl Node for AiPromptNode {
             "properties": {
                 "prompt":         { "type": "string",  "description": "User prompt" },
                 "system":         { "type": "string",  "description": "System / persona instructions" },
-                "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3" },
-                "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini"], "description": "API provider. 'auto' detects from base_url." },
+                "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3", "x-aerini-model-picker": true },
+                "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini", "local"], "description": "API provider. 'auto' detects from base_url." },
                 "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here, for local models such as Ollama." },
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },
                 "temperature":    { "type": "number",  "description": "Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7" },
@@ -100,10 +100,22 @@ impl Node for AiPromptNode {
         let user_url_raw = input.input["base_url"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("");
         let raw_provider = input.input["provider"].as_str().unwrap_or("auto");
         let provider_id: &str = match raw_provider {
-            "anthropic" | "gemini" | "openai" => raw_provider,
+            "anthropic" | "gemini" | "openai" | "local" => raw_provider,
             _ => crate::provider::ProviderRegistry::detect_from_url(user_url_raw),
         };
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
+
+        // No default model exists for "local" — a blank model would otherwise
+        // silently inherit the OpenAI-flagship default below and get sent to
+        // whatever server base_url points to, which is very unlikely to have it.
+        if provider_id == "local"
+            && input.input["model"].as_str().map(|s| s.trim().is_empty()).unwrap_or(true)
+        {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "MISSING_MODEL",
+                "model is required when provider is \"local\"",
+            ));
+        }
 
         // Must branch by provider_id: an Anthropic or Gemini call with no `model`
         // set would otherwise silently send an OpenAI model string to that
@@ -150,12 +162,44 @@ impl Node for AiPromptNode {
         let mut output = match provider_id {
             "anthropic" => anthropic::call_anthropic(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
             "gemini"    => gemini::call_gemini(client, &base_url, &api_key, &model, &system, system_provided, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
-            _           => openai::call_openai_compatible(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
+            _           => openai::call_openai_compatible(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs, provider_id).await,
         };
         if !pa.logs.is_empty() {
             output.logs.extend(pa.logs);
         }
         output
+    }
+}
+
+/// Discovers a provider's available models, for the credential panel and
+/// node-config "Fetch Models" affordance. Mirrors `execute()`'s own
+/// resolve → SSRF-check → dispatch sequence above: same `resolve_base_url`,
+/// same `SsrfPolicy::AllowLocal` (this hits the same user-supplied
+/// `base_url` outside node execution, so it needs the identical guard), same
+/// three-way provider dispatch.
+pub async fn list_models(
+    provider_id: &str,
+    user_base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, NodeError> {
+    if !matches!(provider_id, "anthropic" | "gemini" | "openai" | "local") {
+        return Err(NodeError::unrecoverable(
+            "UNKNOWN_PROVIDER",
+            format!("Unknown provider \"{}\"", provider_id),
+        ));
+    }
+
+    let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_base_url);
+
+    if let Err(e) = crate::nodes::util::check_host_ssrf_from_url(&base_url, crate::nodes::util::SsrfPolicy::AllowLocal).await {
+        return Err(NodeError::unrecoverable("SSRF_BLOCKED", e));
+    }
+
+    let client = crate::provider::shared_ai_client();
+    match provider_id {
+        "anthropic" => anthropic::list_models(client, &base_url, api_key).await,
+        "gemini"    => gemini::list_models(client, &base_url, api_key).await,
+        _           => openai::list_models(client, &base_url, api_key, provider_id).await,
     }
 }
 
@@ -168,6 +212,7 @@ mod tests {
 
     fn make_input(val: serde_json::Value) -> NodeInput {
         NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
             node_id:      "n1".into(),
             workflow_id:  "w1".into(),
@@ -196,6 +241,34 @@ mod tests {
         let err = out.error.expect("must carry NodeError");
         assert_eq!(err.code, "MISSING_PROMPT");
         assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn missing_model_with_local_provider_returns_missing_model_error_without_request() {
+        let out = AiPromptNode.execute(make_input(json!({
+            "prompt": "hi", "provider": "local"
+        }))).await;
+        assert!(!out.success);
+        let err = out.error.expect("must carry NodeError");
+        assert_eq!(err.code, "MISSING_MODEL");
+        assert!(!err.recoverable);
+    }
+
+    /// An explicit `provider: "local"` must not be overwritten by
+    /// `detect_from_url` just because `base_url` looks like an ordinary
+    /// public domain. If the passthrough were missing, provider_id would
+    /// fall through to `detect_from_url("https://api.example.com")` ==
+    /// "openai", which has its own default model and would never raise
+    /// this error — so seeing MISSING_MODEL here proves provider stayed
+    /// "local".
+    #[tokio::test]
+    async fn explicit_local_provider_survives_public_looking_base_url() {
+        let out = AiPromptNode.execute(make_input(json!({
+            "prompt": "hi", "provider": "local", "base_url": "https://api.example.com"
+        }))).await;
+        assert!(!out.success);
+        let err = out.error.expect("must carry NodeError");
+        assert_eq!(err.code, "MISSING_MODEL");
     }
 
     /// `base_url` is SSRF-checked under `SsrfPolicy::AllowLocal`, which
@@ -255,6 +328,28 @@ mod tests {
             assert_ne!(err.code, "SSRF_BLOCKED", "loopback base_url must be allowed under SsrfPolicy::AllowLocal");
         }
         assert!(out.success, "request should reach the local mock server and succeed: {:?}", out.error);
+    }
+
+    /// `list_models` (the model-discovery dispatch function) must run the
+    /// same `SsrfPolicy::AllowLocal` gate `execute()` runs above — this is a
+    /// separate call path outside node execution, so nothing else guarantees
+    /// it inherits that guard.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_models_allows_loopback_base_url_for_local_provider() {
+        let base_url = spawn_minimal_openai_mock().await;
+        let result = super::list_models("local", &base_url, "").await;
+        if let Err(e) = &result {
+            assert_ne!(e.code, "SSRF_BLOCKED", "loopback base_url must be allowed under SsrfPolicy::AllowLocal");
+        }
+        assert!(result.is_ok(), "list_models should reach the local mock server: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn list_models_unknown_provider_returns_error_not_panic() {
+        let err = super::list_models("bogus", "http://example.com", "")
+            .await
+            .expect_err("an unrecognized provider_id must error, not panic downstream");
+        assert_eq!(err.code, "UNKNOWN_PROVIDER");
     }
 
     /// like `spawn_minimal_openai_mock`, but also captures the request
