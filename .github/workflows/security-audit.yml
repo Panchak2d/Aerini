@@ -8,11 +8,7 @@ on:
       - '.cargo/audit.toml'
       - '.github/workflows/security-audit.yml'
   pull_request:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '.cargo/audit.toml'
-      - '.github/workflows/security-audit.yml'
+
   schedule:
     # Daily at 06:00 UTC — picks up new advisories even without dependency changes
     - cron: '0 6 * * *'

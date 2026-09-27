@@ -82,7 +82,7 @@ Click **Export → Export for Server** on a workflow to generate a deployment pa
 ![Export for Server dialog with the Linux Server tab selected, listing required credentials and the status page port](.github/readme/export-server.png)  
 
 
-`aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. No prebuilt server binary is published yet, only the desktop installers, so building one yourself (Docker or from source) is currently the only way to get one. Full details: [Server Deployment](docs/operations/server-deploy.md).
+`aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. Get it with `docker pull ghcr.io/panchak2d/aerini-server`, or build it yourself (Docker or from source) if you want to customize it. Full details: [Server Deployment](docs/operations/server-deploy.md).
 
 ## Using the engine in your own program
 

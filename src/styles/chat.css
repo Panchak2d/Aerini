@@ -110,8 +110,8 @@
 
 .chat-branding-footer { flex-shrink: 0; text-align: center; font-size: 10px; color: var(--t2); padding: 0 0 6px; letter-spacing: .02em; }
 .chat-attach-btn { flex-shrink: 0; background: none; border: 1px solid var(--bd); border-radius: var(--radius-sm); color: var(--t2); padding: 6px; cursor: pointer; transition: color var(--trans), border-color var(--trans); }
-.chat-attach-btn:hover:not(:disabled) { color: var(--t1); border-color: var(--t3); }
-.chat-attach-btn:disabled { opacity: .4; cursor: not-allowed; }
+.chat-attach-btn:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--t1); border-color: var(--t3); }
+.chat-attach-btn:disabled, .chat-attach-btn[aria-disabled="true"] { opacity: .4; cursor: not-allowed; }
 .chat-input { flex: 1; resize: none; background: var(--bg3); border: 1px solid var(--bd); border-radius: var(--radius-sm); color: var(--t1); font-size: 13px; font-family: inherit; padding: 7px 9px; max-height: 120px; line-height: 1.4; }
 .chat-input:disabled { opacity: .5; cursor: not-allowed; }
 .chat-input:focus { outline: none; border-color: var(--color-focus); }

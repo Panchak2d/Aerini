@@ -1,15 +1,21 @@
 // @vitest-environment jsdom
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { serialize, deserialize } from "../canvas/CanvasSerializer";
 import {
   groupWorkflowsByCollection,
   visibleCollectionGroups,
   computeSelectionRange,
   collectionColorVar,
+  WorkflowManager,
   type CollectionDef,
 } from "../workflow-manager";
 import type { WorkflowSummary } from "../ipc/workflow";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  convertFileSrc: vi.fn((p: string) => p),
+}));
 
 function wf(id: string, collection_id: string | null = null): WorkflowSummary {
   return { id, name: id, updated_at: "2024-01-01T00:00:00Z", tags: [], collection_id };
@@ -118,6 +124,66 @@ describe("collectionColorVar", () => {
 // CanvasSerializer — collection_id round-trip (mirrors the existing tags
 // round-trip test in workflow-manager.test.ts)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// buildCollectionGroup — inline collection-rename, commit on outside click
+// ---------------------------------------------------------------------------
+
+function callBuildCollectionGroup(
+  fakeThis: unknown,
+  collection: CollectionDef | null,
+  items: WorkflowSummary[],
+): HTMLElement {
+  return (WorkflowManager.prototype as unknown as {
+    buildCollectionGroup: (c: CollectionDef | null, i: WorkflowSummary[]) => HTMLElement;
+  }).buildCollectionGroup.call(fakeThis, collection, items);
+}
+
+beforeEach(() => {
+  document.body.innerHTML = "";
+});
+
+describe("buildCollectionGroup — collection rename commit on outside click", () => {
+  it("normal case: a mousedown outside the input commits via commitCollectionRename", async () => {
+    const collection = col("c1", 0);
+    const fakeThis = {
+      editingCollectionId: "c1",
+      commitCollectionRename: vi.fn(),
+      cancelCollectionRename: vi.fn(),
+    };
+
+    const el = callBuildCollectionGroup(fakeThis, collection, []);
+    document.body.appendChild(el);
+    const inp = el.querySelector("input.workflow-collection-rename-input") as HTMLInputElement;
+    inp.value = "Renamed Collection";
+
+    await new Promise(r => setTimeout(r, 0));
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(fakeThis.commitCollectionRename).toHaveBeenCalledWith("c1", "Renamed Collection");
+    expect(fakeThis.cancelCollectionRename).not.toHaveBeenCalled();
+  });
+
+  it("edge case: Escape cancels and a later outside click does not also commit", async () => {
+    const collection = col("c1", 0);
+    const fakeThis = {
+      editingCollectionId: "c1",
+      commitCollectionRename: vi.fn(),
+      cancelCollectionRename: vi.fn(),
+    };
+
+    const el = callBuildCollectionGroup(fakeThis, collection, []);
+    document.body.appendChild(el);
+    const inp = el.querySelector("input.workflow-collection-rename-input") as HTMLInputElement;
+    inp.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    await new Promise(r => setTimeout(r, 0));
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(fakeThis.cancelCollectionRename).toHaveBeenCalledWith("c1");
+    expect(fakeThis.commitCollectionRename).not.toHaveBeenCalled();
+  });
+});
 
 describe("serialize/deserialize — collection_id", () => {
   it("round-trips a set collection_id", () => {

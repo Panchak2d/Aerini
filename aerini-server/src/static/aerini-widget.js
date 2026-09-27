@@ -78,11 +78,28 @@
     return;
   }
 
+  function toHex2(n) {
+    var s = n.toString(16);
+    return s.length === 1 ? "0" + s : s;
+  }
+
   function makeUuid() {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
       return window.crypto.randomUUID();
     }
-    // RFC4122-ish fallback for older browsers lacking crypto.randomUUID.
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      var hex = "";
+      for (var i = 0; i < 16; i++) {
+        hex += toHex2(bytes[i]);
+        if (i === 3 || i === 5 || i === 7 || i === 9) hex += "-";
+      }
+      return hex;
+    }
+    // RFC4122-ish fallback for environments with no Web Crypto API at all.
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
       var r = (Math.random() * 16) | 0;
       var v = c === "x" ? r : (r & 0x3) | 0x8;

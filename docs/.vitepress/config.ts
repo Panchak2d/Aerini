@@ -4,6 +4,7 @@ export default defineConfig({
   title: 'Aerini Docs',
   description: 'Documentation for Aerini, a local-first visual workflow automation engine.',
   lang: 'en-US',
+  cleanUrls: true,
 
   markdown: {
     // Aerini's own {{...}} expression syntax appears throughout docs/ as
