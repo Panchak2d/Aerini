@@ -29,7 +29,7 @@ function renderEntry(title: string, status: DiffStatus, changes: FieldChange[]):
   header.className = "diff-entry-header";
   header.innerHTML = `
     <span class="diff-status-badge">${STATUS_LABEL[status]}</span>
-    <span class="diff-entry-title">${escHtml(title)}</span>`;
+    <span class="diff-entry-title" title="${escHtml(title)}">${escHtml(title)}</span>`;
   entry.appendChild(header);
   if (changes.length) {
     const rows = document.createElement("div");
@@ -66,10 +66,10 @@ export function showDiffPanel(labelA: string, jsonA: string, labelB: string, jso
 
   const hdr = document.createElement("div");
   hdr.className = "diff-panel-header";
-  hdr.innerHTML = `<span class="diff-panel-title">${escHtml(labelA)} → ${escHtml(labelB)}</span>`;
+  hdr.innerHTML = `<span class="diff-panel-title" title="${escHtml(labelA)} → ${escHtml(labelB)}">${escHtml(labelA)} → ${escHtml(labelB)}</span>`;
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => overlay.remove());
   hdr.appendChild(closeBtn);
   panel.appendChild(hdr);

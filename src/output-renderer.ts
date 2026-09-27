@@ -59,7 +59,7 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
           <span class="sum-node-mark sum-node-mark--${markClass}">${mark}</span>
           <span class="sum-node-name">${escapeHtml(name)}</span>
           <span class="sum-node-type">${typeLabel(typeId)}</span>
-          <span class="sum-node-preview">${escapeHtml(preview)}</span>
+          <span class="sum-node-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>
         </div>`;
     }
     html += `</div>`;
@@ -182,9 +182,15 @@ export function renderLogsView(result: WorkflowResult): string {
     const mark      = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "INF";
     const markClass = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "info";
     const t         = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    return `<div class="log-line">
+    // node_id carries the full id for lookup (data-node-id); the badge shows
+    // the same 12-char prefix renderDebugView uses. Both escaped — node ids
+    // are attacker-controllable via workflow import (see CanvasSerializer).
+    const nodeAttrs = l.node_id ? ` data-node-id="${escapeHtml(l.node_id)}" tabindex="0" role="button"` : "";
+    const nodeBadge = l.node_id ? `<span class="log-node">[${escapeHtml(l.node_id.slice(0, 12))}]</span>` : "";
+    return `<div class="log-line"${nodeAttrs}>
       <span class="log-mark log-mark--${markClass}">${mark}</span>
       <span class="log-time">${t}</span>
+      ${nodeBadge}
       <span class="log-msg">${escapeHtml(l.message)}</span>
     </div>`;
   }).join("")}</div>`;
@@ -195,7 +201,7 @@ export function renderDebugView(result: WorkflowResult): string {
     const mark      = l.level === "error" ? "ERR" : l.level === "warn" ? "WRN" : "   ";
     const markClass = l.level === "error" ? "error" : l.level === "warn" ? "warn" : "info";
     const t         = new Date(l.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const node      = l.node_id ? ` [${l.node_id.slice(0, 12)}]` : "";
+    const node      = l.node_id ? ` [${escapeHtml(l.node_id.slice(0, 12))}]` : "";
     return `<span class="dbg-mark dbg-mark--${markClass}">${mark}</span> <span class="dbg-time">${t}${node}</span> ${escapeHtml(l.message)}`;
   }).join("\n");
 }
@@ -254,6 +260,7 @@ async function renderMediaBatch(
       const caption = document.createElement("div");
       caption.className = "res-media-caption";
       caption.textContent = file.filename;
+      caption.title = file.filename;
 
       const dl = document.createElement("a");
       dl.className = "res-media-dl";
@@ -281,6 +288,7 @@ async function renderMediaBatch(
         const caption = document.createElement("div");
         caption.className = "res-media-caption";
         caption.textContent = file.filename;
+        caption.title = file.filename;
 
         const dl = document.createElement("a");
         dl.className = "res-media-dl";
@@ -456,7 +464,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
        <div class="soc-upload-list">
          ${uploaded.map(u => `
            <div class="soc-upload-item">
-             <span class="soc-upload-filename">${escapeHtml(String(u.filename ?? ""))}</span>
+             <span class="soc-upload-filename" title="${escapeHtml(String(u.filename ?? ""))}">${escapeHtml(String(u.filename ?? ""))}</span>
              ${u.url && isHttpUrl(String(u.url)) ? `<a class="soc-upload-link" href="${escapeHtml(String(u.url))}" target="_blank" rel="noopener noreferrer">View ↗</a>` : ""}
            </div>`).join("")}
        </div>`
@@ -467,7 +475,7 @@ function renderSocialUploadOutput(out: unknown, name: string): string {
        ${errors.map(e => `
          <div class="soc-error-card">
            <div class="soc-error-code">${ICON_CIRCLE_ALERT}${escapeHtml(String(e.code ?? "ERROR"))}</div>
-           <div class="soc-error-filename">${escapeHtml(String(e.filename ?? ""))}</div>
+           <div class="soc-error-filename" title="${escapeHtml(String(e.filename ?? ""))}">${escapeHtml(String(e.filename ?? ""))}</div>
            <div class="soc-error-explanation">${escapeHtml(String(e.explanation ?? e.message ?? ""))}</div>
            ${e.action ? `<div class="soc-error-action">${escapeHtml(String(e.action))}</div>` : ""}
          </div>`).join("")}`

@@ -1,6 +1,6 @@
 # Contributor License Agreement
 
-**Aerini — Version 1.3 (Effective: 2026-09-08)**
+**Aerini — Version 1.4 (Effective: 2026-09-20)**
 
 Aerini is developed and maintained by Panchaketu Debbarma ("Maintainer"). This Contributor License Agreement ("Agreement") governs all contributions made to the Aerini project. By signing this Agreement, each contributor accepts and agrees to the following terms for their present and future contributions to the project.
 
@@ -106,7 +106,7 @@ The Corporate CLA is set out in Part II of this document. Individuals making Con
 
 Where a Contribution is submitted outside the GitHub pull request flow — including by email, patch file, or any other channel — the Contribution must be accompanied by a signed statement of acceptance before it may be merged into the Project. Unsigned contributions submitted outside the GitHub pull request flow will not be accepted.
 
-The signed statement must be delivered to **aerini@proton.me** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
+The signed statement must be delivered to **panchak2d@aerini.org** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
 
 > *I, [full legal name], agree to the terms of the Aerini Contributor License Agreement, Version [version number in force at the date of signing], as published at [canonical URL of the Agreement]. I confirm that I have the legal authority to make this Contribution and to grant the licenses described in that Agreement. My GitHub username is [GitHub username]. Date of signing: [DD Month YYYY].*
 
@@ -126,9 +126,9 @@ The Maintainer shall maintain a permanent record of all signatories — includin
 
 **Governing Law.** This Agreement is governed by the laws of India, without regard to its conflict of law principles.
 
-**Dispute Resolution.** Any dispute arising out of or in connection with this Agreement — including any question regarding its existence, validity, or termination — shall be referred to and finally resolved by binding arbitration under the rules of the Indian Council of Arbitration. The seat of arbitration shall be New Delhi, India. The arbitration shall be conducted in English. The arbitral award shall be final and binding on the parties, and may be enforced in any court of competent jurisdiction.
+**Dispute Resolution.** Any dispute arising out of or in connection with this Agreement — including any question regarding its existence, validity, or termination — shall be subject to the exclusive jurisdiction of the courts of India.
 
-Nothing in this Section prevents either party from seeking urgent interim or injunctive relief from a court of competent jurisdiction where necessary to prevent irreparable harm pending the outcome of arbitration.
+Nothing in this Section prevents either party from seeking urgent interim or injunctive relief from a court of competent jurisdiction where necessary to prevent irreparable harm.
 
 ---
 
@@ -148,7 +148,7 @@ The Maintainer may assign or transfer rights in the Project and this Agreement �
 
 (a) The Successor or Assign agrees in writing to be bound by the terms of this Agreement, including the AI/ML Training Exclusion in Section 2 and this Section 13.
 
-(b) The Successor or Assign commits in writing to maintaining the Project (or a substantive portion thereof) under AGPL-3.0 as a publicly available open-source release. This commitment shall be structured as a condition of the assignment — not merely as a contractual covenant between the Maintainer and the Successor or Assign — such that a material breach of this commitment by the Successor or Assign entitles affected contributors to seek injunctive relief directly against the Successor or Assign in addition to any other remedy available under Section 11. This commitment does not prevent the Successor or Assign from also offering the Project under a commercial license consistent with the dual-license model described in Section 2. Contributors are intended third-party beneficiaries of this Section and may enforce its terms directly against any Successor or Assign without joining the Maintainer as a party.
+(b) The Successor or Assign commits in writing to maintaining the Project (or a substantive portion thereof) under AGPL-3.0 as a publicly available open-source release. This commitment shall be structured as a condition of the assignment — not merely as a contractual covenant between the Maintainer and the Successor or Assign — such that a material breach of this commitment by the Successor or Assign entitles affected contributors to seek injunctive relief directly against the Successor or Assign in addition to any other remedy available in the courts identified in Section 11. This commitment does not prevent the Successor or Assign from also offering the Project under a commercial license consistent with the dual-license model described in Section 2. Contributors are intended third-party beneficiaries of this Section and may enforce its terms directly against any Successor or Assign without joining the Maintainer as a party.
 
 (c) The Maintainer notifies contributors of the assignment by posting a notice to the Project's primary repository no less than 30 days before the assignment takes effect, where practicable.
 
@@ -170,7 +170,7 @@ Failure by the Maintainer to enforce any provision of this Agreement on any occa
 
 ## 16. Cure Period
 
-Before either party pursues a claim for indemnification under Section 6 or commences arbitration under Section 11 in respect of a breach of this Agreement, the non-breaching party shall provide the breaching party with written notice specifying the nature of the breach in reasonable detail. The breaching party shall have thirty (30) days from receipt of that notice to cure the breach. If the breach is cured within that period, no indemnification liability arising from that breach shall accrue.
+Before either party pursues a claim for indemnification under Section 6 or commences proceedings under Section 11 in respect of a breach of this Agreement, the non-breaching party shall provide the breaching party with written notice specifying the nature of the breach in reasonable detail. The breaching party shall have thirty (30) days from receipt of that notice to cure the breach. If the breach is cured within that period, no indemnification liability arising from that breach shall accrue.
 
 If the breach is not capable of being fully cured within thirty (30) days but the breaching party commences cure within that period and diligently pursues completion, the cure period shall be extended by such additional time as is reasonably necessary, not to exceed ninety (90) days in total from the date of the original notice.
 
@@ -193,7 +193,7 @@ By signing this Agreement when prompted on a pull request, You confirm that You 
 
 # Part II — Corporate Contributor License Agreement
 
-**Aerini — Version 1.3 (Effective: 2026-09-08)**
+**Aerini — Version 1.4 (Effective: 2026-09-20)**
 
 This Corporate CLA governs contributions to the Aerini project made by employees or contractors of a legal entity ("Corporation"). It must be executed by an individual with actual authority to bind the Corporation — meaning a director, officer, or duly authorised representative empowered under the Corporation's own governance documents or applicable law to enter into intellectual property agreements — before any covered contribution is merged.
 
@@ -261,7 +261,7 @@ Contributions from individuals not on the authorised list at the time of submiss
 
 This Corporate CLA takes effect only upon written confirmation from the Maintainer following receipt of a properly executed copy.
 
-To execute this Agreement, the Corporation must send to the Maintainer at **aerini@proton.me** using the subject line **Corporate CLA — [Legal Company Name]**:
+To execute this Agreement, the Corporation must send to the Maintainer at **panchak2d@aerini.org** using the subject line **Corporate CLA — [Legal Company Name]**:
 
 - the legal name and registered address of the Corporation;
 - the full name, title, and evidence of authority of the signatory (such as a board resolution, power of attorney, or a written statement signed by a director confirming the signatory's role and authority to bind the Corporation in intellectual property matters);
@@ -304,5 +304,5 @@ Sections 12 (Amendments; Survival), 14 (Severability), 15 (No Waiver), and 16 (C
 
 ---
 
-*Aerini Contributor License Agreement — Version 1.3 — 2026*
+*Aerini Contributor License Agreement — Version 1.4 — 2026*
 *Panchaketu Debbarma — https://github.com/Panchak2d/aerini*

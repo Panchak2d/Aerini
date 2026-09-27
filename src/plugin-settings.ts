@@ -48,7 +48,7 @@ function renderPluginItem(p: PluginInfo): string {
   return `
     <div class="plugin-list-item" data-filename="${escapeHtml(p.filename)}">
       <div class="plugin-list-item-info">
-        <div class="plugin-list-item-name">${escapeHtml(p.display_name)}</div>
+        <div class="plugin-list-item-name" title="${escapeHtml(p.display_name)}">${escapeHtml(p.display_name)}</div>
         ${p.load_error
           ? `<div class="plugin-list-item-error">${escapeHtml(p.load_error)}</div>`
           : `<div class="plugin-list-item-meta">${escapeHtml(p.type_id)} · ${escapeHtml(p.filename)}</div>`}
@@ -57,7 +57,11 @@ function renderPluginItem(p: PluginInfo): string {
           ? `<div class="plugin-list-item-signature plugin-list-item-signature--${signatureStatusClass(p.signature_status)}">${escapeHtml(p.signature_status)}</div>`
           : ""}
       </div>
-      <button class="btn-sm btn-plugin-remove" data-filename="${escapeHtml(p.filename)}">Remove</button>
+      <button type="button" class="plugin-item-remove" data-filename="${escapeHtml(p.filename)}"
+        data-tooltip="Remove plugin &quot;${escapeHtml(p.display_name)}&quot;"
+        aria-label="Remove plugin ${escapeHtml(p.display_name)}">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
   `;
 }
@@ -103,7 +107,7 @@ function renderPluginList(): void {
     `;
   }).join("");
 
-  el.querySelectorAll<HTMLButtonElement>(".btn-plugin-remove").forEach(btn => {
+  el.querySelectorAll<HTMLButtonElement>(".plugin-item-remove").forEach(btn => {
     btn.addEventListener("click", () => {
       const p = _plugins.find(pl => pl.filename === btn.dataset.filename);
       onRemovePlugin(btn.dataset.filename!, p?.display_name ?? btn.dataset.filename!, _toast);
@@ -144,17 +148,49 @@ async function refreshPlugins(): Promise<void> {
 async function onBrowse(): Promise<void> {
   const path = await pickFolderDialog().catch(() => null);
   if (!path) return;
-  await setSetting("plugin_dir", path);
-  _pluginDir = path;
-  renderDirPath();
-  await refreshPlugins();
+  const btn = document.getElementById("btn-plugin-dir-browse") as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  try {
+    await setSetting("plugin_dir", path);
+    _pluginDir = path;
+    renderDirPath();
+    try {
+      const report = await reloadPlugins(path);
+      await _onNodesReloaded?.();
+      const count = report.loaded.length;
+      _toast(
+        count > 0
+          ? `Plugin folder set. ${count} plugin${count === 1 ? "" : "s"} loaded.`
+          : "Plugin folder set. No plugins found in it yet.",
+        "success",
+      );
+    } catch (reloadErr) {
+      _toast(`Plugin folder set, but reload failed (${reloadErr}). Restart to apply.`, "info");
+      showRestartBanner();
+    }
+    await refreshPlugins();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
+// Both buttons show a disabled + relabeled state for the duration of the
+// async call (install/reload can take a moment and give zero feedback
+// otherwise) using .btn-sm's existing :disabled treatment -- no new CSS.
+// The label is captured/restored rather than hardcoded so it stays correct
+// if the button's own text ever changes.
 async function onInstall(toast: ToastFn): Promise<void> {
   if (!_pluginDir) return;
   const srcPath = await pickPluginFileDialog().catch(() => null);
   if (!srcPath) return;
-  await installPluginOrPackWithUpdatePrompt(srcPath, _pluginDir, toast);
+  const btn = document.getElementById("btn-install-plugin") as HTMLButtonElement | null;
+  const originalLabel = btn?.textContent ?? "";
+  if (btn) { btn.disabled = true; btn.textContent = "Installing…"; }
+  try {
+    await installPluginOrPackWithUpdatePrompt(srcPath, _pluginDir, toast);
+  } finally {
+    if (btn) { btn.disabled = !_pluginDir; btn.textContent = originalLabel; }
+  }
 }
 
 /**
@@ -306,6 +342,9 @@ async function onRemovePluginPack(packId: string, displayName: string, toast: To
 
 async function onManualReload(toast: ToastFn): Promise<void> {
   if (!_pluginDir) return;
+  const btn = document.getElementById("btn-reload-plugins") as HTMLButtonElement | null;
+  const originalLabel = btn?.textContent ?? "";
+  if (btn) { btn.disabled = true; btn.textContent = "Reloading…"; }
   try {
     await reloadPlugins(_pluginDir);
     await _onNodesReloaded?.();
@@ -313,6 +352,8 @@ async function onManualReload(toast: ToastFn): Promise<void> {
     await refreshPlugins();
   } catch (e) {
     toast(`Plugin reload failed: ${e}`, "error");
+  } finally {
+    if (btn) { btn.disabled = !_pluginDir; btn.textContent = originalLabel; }
   }
 }
 
@@ -326,10 +367,6 @@ async function onManualReload(toast: ToastFn): Promise<void> {
  * caches a node-descriptor snapshot (sidebar palette, command palette,
  * canvas/popover registries). It does not run when `reloadPlugins` itself
  * throws — the registry didn't change in that case.
- *
- * relocated from the Settings modal (#btn-settings) to its own
- * rail zone (#tab-plugins) — trigger element changed, everything else
- * (the _loaded guard, IPC calls, DOM target ids) is unchanged.
  */
 export function bindPluginSettings(toast: ToastFn, onNodesReloaded?: () => void | Promise<void>): void {
   _toast = toast;

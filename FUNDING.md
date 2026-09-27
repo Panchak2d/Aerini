@@ -2,7 +2,7 @@
 
 ## Commercial licensing
 
-If you need to get out from under AGPL-3.0's copyleft obligation, a commercial license is the way to do that: proprietary modifications permitted, no source disclosure required.
+If you need to get out from under AGPL-3.0's copyleft obligation, a commercial license is the way to do that: proprietary modifications permitted, no source disclosure required, for one named product or service per license.
 
 [View pricing and license terms](https://aerini.org/pricing)
 

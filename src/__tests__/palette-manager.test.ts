@@ -8,6 +8,7 @@ import {
   filterByCategory,
   buildSidebarPalette,
 } from "../palette-manager";
+import { registerNodeDescriptors } from "../canvas/CanvasSerializer";
 
 // palette-manager → icon-cache → @tauri-apps/api/core
 vi.mock("@tauri-apps/api/core", () => ({
@@ -114,7 +115,8 @@ describe("command palette — name filter", () => {
       </div>
       <div id="canvas"></div>
     `;
-    initCommandPalette(ALL_NODES, mockCanvas as never, vi.fn());
+    registerNodeDescriptors(ALL_NODES);
+    initCommandPalette(mockCanvas as never, vi.fn());
     openPalette();
   });
 
@@ -182,7 +184,8 @@ describe("command palette — wire-drop mismatch feedback", () => {
 
   it("dims a node with no input ports via a class, not an inline style, while dropping from an output wire", () => {
     const canvas = { ...mockCanvas, _pendingWireDrop: { fromNode: "n1" } };
-    initCommandPalette([NO_INPUT_NODE], canvas as never, vi.fn());
+    registerNodeDescriptors([NO_INPUT_NODE]);
+    initCommandPalette(canvas as never, vi.fn());
     openPalette();
 
     const row = document.querySelector<HTMLElement>(".palette-result")!;
@@ -193,7 +196,8 @@ describe("command palette — wire-drop mismatch feedback", () => {
   it("flashes .palette-result--flash-error on a mismatched click, then clears it after 600ms, without touching inline style", () => {
     vi.useFakeTimers();
     const canvas = { ...mockCanvas, _pendingWireDrop: { fromNode: "n1" } };
-    initCommandPalette([NO_INPUT_NODE], canvas as never, vi.fn());
+    registerNodeDescriptors([NO_INPUT_NODE]);
+    initCommandPalette(canvas as never, vi.fn());
     openPalette();
 
     const row = document.querySelector<HTMLElement>(".palette-result")!;
@@ -317,7 +321,7 @@ describe("buildSidebarPalette — collapsible categories", () => {
 
   it("clicking a header collapses only its own subheader's items, leaving sibling Action subheaders and other categories untouched", () => {
     // http_request -> "Core Actions", slack -> "Integrations" — both
-    // data-cat="action", but different subheaders (the split this batch adds).
+    // data-cat="action", but different action subheaders.
     const coreActionsHeader  = headerForItem("http request");
     const integrationsHeader = headerForItem("slack");
     expect(coreActionsHeader).not.toBe(integrationsHeader);
@@ -359,16 +363,23 @@ describe("buildSidebarPalette — collapsible categories", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Plugin icon badge — sidebar list and command palette result row
+// Plugin icon — sidebar list and command palette result row
+//
+// A plugin's own icon (wit/node.wit's metadata.icon) renders as the *main*
+// icon here, not a separate small badge next to the name -- plugin type_ids
+// are never in icon-cache.ts's static NODE_SVG_INNER map (a plugin can't add
+// itself to a host-shipped file), so without this, every plugin node fell
+// back to the flat ".palette-dot"/".palette-result-icon" "·" placeholder
+// regardless of whether it supplied a real icon.
 // ---------------------------------------------------------------------------
 
-describe("plugin icon badge", () => {
+describe("plugin icon", () => {
   afterEach(() => {
     if (document.getElementById("command-palette-overlay")) closePalette();
     document.body.innerHTML = "";
   });
 
-  it("sidebar list renders the plugin's sanitized icon in the badge, not a literal \"P\"", () => {
+  it("sidebar list renders the plugin's sanitized icon as its main icon, not the flat dot fallback", () => {
     document.body.innerHTML = `
       <div id="node-palette"></div>
       <div id="canvas"></div>
@@ -376,13 +387,19 @@ describe("plugin icon badge", () => {
     buildSidebarPalette([...ALL_NODES, PLUGIN_NODE], mockCanvas as never, vi.fn());
 
     const item = document.querySelector<HTMLElement>('.palette-item[data-search*="custom_plugin_node"]')!;
-    const badge = item.querySelector(".palette-plugin-badge")!;
-    expect(badge.querySelector("svg.icon-svg")).not.toBeNull();
-    expect(badge.querySelector("circle")).not.toBeNull();
-    expect(badge.textContent).not.toBe("P");
+    expect(item.querySelector(".palette-dot")).toBeNull();
+    const icon = item.querySelector(".palette-icon")!;
+    expect(icon.querySelector("svg.icon-svg")).not.toBeNull();
+    expect(icon.querySelector("circle")).not.toBeNull();
+    expect(icon.getAttribute("title")).toBe("Plugin node");
+    // No separate icon badge -- the icon above is the only place this
+    // plugin's icon renders in this row. It does get a persistent visible
+    // text tag though, since the icon/tooltip alone isn't discoverable.
+    expect(item.querySelector(".palette-plugin-badge")).toBeNull();
+    expect(item.querySelector(".palette-plugin-tag")?.textContent).toBe("Plugin");
   });
 
-  it("command palette result row renders the plugin's sanitized icon in the badge, not a literal \"P\"", () => {
+  it("command palette result row renders the plugin's sanitized icon as its main icon, not the flat dot fallback", () => {
     document.body.innerHTML = `
       <div id="command-palette-overlay" class="hidden">
         <input id="palette-search" type="text" />
@@ -390,18 +407,22 @@ describe("plugin icon badge", () => {
       </div>
       <div id="canvas"></div>
     `;
-    initCommandPalette([...ALL_NODES, PLUGIN_NODE], mockCanvas as never, vi.fn());
+    registerNodeDescriptors([...ALL_NODES, PLUGIN_NODE]);
+    initCommandPalette(mockCanvas as never, vi.fn());
     openPalette();
 
     const row = Array.from(document.querySelectorAll<HTMLElement>(".palette-result"))
       .find(r => r.textContent?.includes("Custom Plugin"))!;
-    const badge = row.querySelector(".palette-plugin-badge")!;
-    expect(badge.querySelector("svg.icon-svg")).not.toBeNull();
-    expect(badge.querySelector("circle")).not.toBeNull();
-    expect(badge.textContent).not.toBe("P");
+    const icon = row.querySelector(".palette-result-icon")!;
+    expect(icon.textContent).not.toBe("·");
+    expect(icon.querySelector("svg.icon-svg")).not.toBeNull();
+    expect(icon.querySelector("circle")).not.toBeNull();
+    expect(icon.getAttribute("title")).toBe("Plugin node");
+    expect(row.querySelector(".palette-plugin-badge")).toBeNull();
+    expect(row.querySelector(".palette-plugin-tag")?.textContent).toBe("Plugin");
   });
 
-  it("non-plugin nodes render no plugin badge in either the sidebar or the command palette", () => {
+  it("non-plugin nodes keep using the built-in category icon, with no \"Plugin node\" tooltip", () => {
     document.body.innerHTML = `
       <div id="node-palette"></div>
       <div id="command-palette-overlay" class="hidden">
@@ -411,9 +432,141 @@ describe("plugin icon badge", () => {
       <div id="canvas"></div>
     `;
     buildSidebarPalette(ALL_NODES, mockCanvas as never, vi.fn());
-    initCommandPalette(ALL_NODES, mockCanvas as never, vi.fn());
+    registerNodeDescriptors(ALL_NODES);
+    initCommandPalette(mockCanvas as never, vi.fn());
     openPalette();
 
     expect(document.querySelectorAll(".palette-plugin-badge").length).toBe(0);
+    expect(document.querySelectorAll('[data-tooltip="Plugin node"]').length).toBe(0);
+    expect(document.querySelectorAll(".palette-plugin-tag").length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Node info tooltip — plugin tag. Same badge the sidebar list and command
+// palette row already show (above); this is the third hover surface that
+// was missing it.
+// ---------------------------------------------------------------------------
+
+describe("node info tooltip — plugin tag", () => {
+  // Local fixtures carry a description so showNodeInfoTooltip doesn't
+  // early-return (HTTP_NODE/PLUGIN_NODE have none, and neither type_id is in
+  // NODE_DESCRIPTION_FALLBACK) — kept local rather than mutating the shared
+  // fixtures other describe blocks rely on.
+  const HTTP_NODE_DESC   = { ...HTTP_NODE,   description: "Make an HTTP request." };
+  const PLUGIN_NODE_DESC = { ...PLUGIN_NODE, description: "A custom plugin node." };
+
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="canvas"></div>
+      <div id="node-info-tooltip" class="node-info-tooltip hidden">
+        <div class="nit-header">
+          <span class="nit-dot"></span>
+          <span class="nit-name"></span>
+          <span class="nit-plugin-tag palette-plugin-tag hidden">Plugin</span>
+        </div>
+        <p class="nit-desc"></p>
+        <div class="nit-ports"></div>
+      </div>
+    `;
+    buildSidebarPalette([HTTP_NODE_DESC, PLUGIN_NODE_DESC], mockCanvas as never, vi.fn());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("shows the plugin tag on hover for a plugin node", () => {
+    vi.useFakeTimers();
+    const item = document.querySelector<HTMLElement>('.palette-item[data-search*="custom_plugin_node"]')!;
+    item.dispatchEvent(new MouseEvent("mouseenter"));
+    vi.advanceTimersByTime(600);
+
+    expect(document.getElementById("node-info-tooltip")!.classList.contains("hidden")).toBe(false);
+    expect(document.querySelector(".nit-plugin-tag")!.classList.contains("hidden")).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("keeps the plugin tag hidden on hover for a non-plugin node", () => {
+    vi.useFakeTimers();
+    const item = document.querySelector<HTMLElement>('.palette-item[data-search*="http_request"]')!;
+    item.dispatchEvent(new MouseEvent("mouseenter"));
+    vi.advanceTimersByTime(600);
+
+    expect(document.getElementById("node-info-tooltip")!.classList.contains("hidden")).toBe(false);
+    expect(document.querySelector(".nit-plugin-tag")!.classList.contains("hidden")).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("hovering a plugin node then a non-plugin node re-hides the tag, not leaking the previous state", () => {
+    vi.useFakeTimers();
+    const pluginItem = document.querySelector<HTMLElement>('.palette-item[data-search*="custom_plugin_node"]')!;
+    pluginItem.dispatchEvent(new MouseEvent("mouseenter"));
+    vi.advanceTimersByTime(600);
+    expect(document.querySelector(".nit-plugin-tag")!.classList.contains("hidden")).toBe(false);
+
+    const httpItem = document.querySelector<HTMLElement>('.palette-item[data-search*="http_request"]')!;
+    httpItem.dispatchEvent(new MouseEvent("mouseenter"));
+    vi.advanceTimersByTime(600);
+    expect(document.querySelector(".nit-plugin-tag")!.classList.contains("hidden")).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Preset preview tooltip — show-delay. Mirrors showNodeInfoTooltip's
+// 500ms hover delay so a quick mouse pass over the preset list doesn't
+// flash a tooltip for every row.
+// ---------------------------------------------------------------------------
+
+describe("preset preview tooltip — show delay", () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="canvas"></div>
+      <div id="template-preview-tooltip" class="hidden">
+        <span class="tpt-dot"></span>
+        <span class="tpt-name"></span>
+        <div class="tpt-config"></div>
+      </div>
+    `;
+    buildSidebarPalette([AI_NODE], mockCanvas as never, vi.fn());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("does not show immediately on mouseenter", () => {
+    vi.useFakeTimers();
+    const item = document.querySelector<HTMLElement>('.palette-preset[data-search*="claude"]')!;
+    item.dispatchEvent(new MouseEvent("mouseenter"));
+
+    expect(document.getElementById("template-preview-tooltip")!.classList.contains("hidden")).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("shows after the 500ms delay elapses", () => {
+    vi.useFakeTimers();
+    const item = document.querySelector<HTMLElement>('.palette-preset[data-search*="claude"]')!;
+    item.dispatchEvent(new MouseEvent("mouseenter"));
+    vi.advanceTimersByTime(500);
+
+    const tip = document.getElementById("template-preview-tooltip")!;
+    expect(tip.classList.contains("hidden")).toBe(false);
+    expect(tip.querySelector(".tpt-name")!.textContent).toBe("Claude (Anthropic)");
+    vi.useRealTimers();
+  });
+
+  it("cancels the pending show if the mouse leaves before the delay elapses", () => {
+    vi.useFakeTimers();
+    const item = document.querySelector<HTMLElement>('.palette-preset[data-search*="claude"]')!;
+    item.dispatchEvent(new MouseEvent("mouseenter"));
+    item.dispatchEvent(new MouseEvent("mouseleave"));
+    vi.advanceTimersByTime(500);
+
+    expect(document.getElementById("template-preview-tooltip")!.classList.contains("hidden")).toBe(true);
+    vi.useRealTimers();
   });
 });

@@ -1,5 +1,6 @@
 import type { NodeDescriptor } from "./ipc/workflow";
 import type { Canvas } from "./canvas/Canvas";
+import { getAllNodeDescriptors } from "./canvas/node-registry";
 import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 import { escapeHtml } from "./utils";
 import { getIconSvg } from "./icon-cache";
@@ -224,14 +225,20 @@ export function buildSidebarPalette(
       const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
       const catKey = isTrigger ? "trigger" : desc.node_type;
       item.dataset.cat = catKey;
-      const pluginBadge = desc.is_plugin
-        ? `<span class="palette-plugin-badge" title="Plugin node">${getPluginIconSvg(desc.icon)}</span>`
-        : "";
-      const iconSvg = getIconSvg(desc.type_id);
+      // Plugins are never in NODE_SVG_INNER (icon-cache.ts is a static,
+      // host-shipped map — a plugin can't add itself to it), so getIconSvg
+      // always misses for them. Plugin nodes render their own declared icon
+      // (wit/node.wit's `metadata.icon`) as the main icon here; plugin
+      // identity itself is carried by the trailing .palette-plugin-tag badge,
+      // not by the icon slot.
+      const iconSvg = desc.is_plugin ? getPluginIconSvg(desc.icon) : getIconSvg(desc.type_id);
       const iconHtml = iconSvg
-        ? `<span class="palette-icon palette-icon--${catKey}">${iconSvg}</span>`
+        ? `<span class="palette-icon palette-icon--${catKey}"${desc.is_plugin ? ' title="Plugin node" data-tooltip="Plugin node"' : ""}>${iconSvg}</span>`
         : `<span class="palette-dot dot-${catKey}"></span>`;
-      item.innerHTML = `${iconHtml}<span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginBadge}`;
+      // Persistent visible marker, not just the icon's hover tooltip above --
+      // a plugin node otherwise looks identical to a built-in one at a glance.
+      const pluginTagHtml = desc.is_plugin ? `<span class="palette-plugin-tag">Plugin</span>` : "";
+      item.innerHTML = `${iconHtml}<span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginTagHtml}`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -288,25 +295,14 @@ export function blurSearch(): void {
 
 let paletteActive   = 0;
 let paletteFiltered: NodeDescriptor[] = [];
-let _allNodes: NodeDescriptor[] = [];
 let _canvas:   Canvas | null = null;
 let _onStatus: ((msg: string) => void) | null = null;
 let _activeCategory = "all";
 
-/** Updates the node descriptors the command palette searches, without
- *  re-binding any listener `initCommandPalette` already attached. Call
- *  after a plugin install/remove/reload so ⌘K sees new node types
- *  immediately. */
-export function setCommandPaletteNodes(allNodes: NodeDescriptor[]): void {
-  _allNodes = allNodes;
-}
-
 export function initCommandPalette(
-  allNodes: NodeDescriptor[],
   canvas: Canvas,
   onStatus: (msg: string) => void
 ): void {
-  _allNodes = allNodes;
   _canvas   = canvas;
   _onStatus = onStatus;
 
@@ -343,9 +339,10 @@ function renderPaletteResults(q: string): void {
   const resultsEl = document.getElementById("palette-results")!;
   resultsEl.innerHTML = "";
   const lower = q.toLowerCase().trim();
+  const allNodes = getAllNodeDescriptors();
   paletteFiltered = lower
-    ? _allNodes.filter(t => t.display_name.toLowerCase().includes(lower) || t.type_id.includes(lower))
-    : _allNodes;
+    ? allNodes.filter(t => t.display_name.toLowerCase().includes(lower) || t.type_id.includes(lower))
+    : allNodes;
 
   if (!paletteFiltered.length) {
     resultsEl.innerHTML = `<div class="palette-empty">No nodes match "${escapeHtml(q)}"</div>`;
@@ -368,15 +365,19 @@ function renderPaletteResults(q: string): void {
       row.className = "palette-result";
       if (i === paletteActive) row.classList.add("active");
       row.dataset.idx = String(i);
-      const iconSvg  = getIconSvg(desc.type_id);
+      // See the equivalent branch in the main palette-item loop above for
+      // why plugins use getPluginIconSvg here instead of getIconSvg.
+      const iconSvg  = desc.is_plugin ? getPluginIconSvg(desc.icon) : getIconSvg(desc.type_id);
       const catClass = ["action", "ai", "logic", "utility"].includes(desc.node_type)
         ? desc.node_type : "utility";
+      const pluginTagHtml = desc.is_plugin ? `<span class="palette-plugin-tag">Plugin</span>` : "";
       row.innerHTML = `
-        <div class="palette-result-icon palette-result-icon--${catClass}">${iconSvg || "·"}</div>
+        <div class="palette-result-icon palette-result-icon--${catClass}"${desc.is_plugin ? ' title="Plugin node" data-tooltip="Plugin node"' : ""}>${iconSvg || "·"}</div>
         <div>
-          <div class="palette-result-name">${escapeHtml(desc.display_name)}${desc.is_plugin ? `<span class="palette-plugin-badge" title="Plugin node">${getPluginIconSvg(desc.icon)}</span>` : ""}</div>
+          <div class="palette-result-name">${escapeHtml(desc.display_name)}</div>
           <div class="palette-result-cat">${escapeHtml(CAT_NAMES[desc.node_type] ?? desc.node_type)}</div>
         </div>
+        ${pluginTagHtml}
         <kbd class="palette-result-kbd">Enter</kbd>`;
 
       // In wire-drop mode, dim nodes that cannot receive/give a connection
@@ -393,6 +394,7 @@ function renderPaletteResults(q: string): void {
         row.title = inInputWireDrop
           ? "This node has no output ports — cannot connect"
           : "This node has no input ports — cannot connect";
+        row.setAttribute("data-tooltip", row.title);
       }
       row.addEventListener("click", () => insertFromPalette(desc));
       row.addEventListener("mouseover", () => { paletteActive = i; highlightPalette(); });
@@ -461,29 +463,35 @@ function buildConfigLines(config: Record<string, unknown>): string {
   for (const [k, v] of Object.entries(config)) {
     if (v === undefined || v === null || v === "" || Array.isArray(v) || typeof v === "object") continue;
     const label = CONFIG_LABELS[k] ?? k;
-    lines.push(`<div class="tpt-row"><span class="tpt-label">${label}</span><span class="tpt-val">${String(v)}</span></div>`);
+    lines.push(`<div class="tpt-row"><span class="tpt-label">${label}</span><span class="tpt-val" title="${escapeHtml(String(v))}">${escapeHtml(String(v))}</span></div>`);
     if (lines.length >= 4) break;
   }
   return lines.join("");
 }
 
+let _ptTimer: ReturnType<typeof setTimeout> | null = null;
+
 function showPresetTooltip(
   e: MouseEvent,
   data: { label: string; nodeType: string; config: Record<string, unknown> }
 ): void {
-  const tip = document.getElementById("template-preview-tooltip");
-  if (!tip) return;
-  const dot = tip.querySelector<HTMLElement>(".tpt-dot");
-  const name = tip.querySelector<HTMLElement>(".tpt-name");
-  const cfg  = tip.querySelector<HTMLElement>(".tpt-config");
-  if (dot)  dot.className = `tpt-dot dot-${data.nodeType}`;
-  if (name) name.textContent = data.label;
-  if (cfg)  cfg.innerHTML = buildConfigLines(data.config);
-  tip.classList.remove("hidden");
-  repositionTooltip(e);
+  if (_ptTimer) clearTimeout(_ptTimer);
+  _ptTimer = setTimeout(() => {
+    const tip = document.getElementById("template-preview-tooltip");
+    if (!tip) return;
+    const dot = tip.querySelector<HTMLElement>(".tpt-dot");
+    const name = tip.querySelector<HTMLElement>(".tpt-name");
+    const cfg  = tip.querySelector<HTMLElement>(".tpt-config");
+    if (dot)  dot.className = `tpt-dot dot-${data.nodeType}`;
+    if (name) name.textContent = data.label;
+    if (cfg)  cfg.innerHTML = buildConfigLines(data.config);
+    tip.classList.remove("hidden");
+    repositionTooltip(e);
+  }, 500);
 }
 
 function hidePresetTooltip(): void {
+  if (_ptTimer) { clearTimeout(_ptTimer); _ptTimer = null; }
   const tip = document.getElementById("template-preview-tooltip");
   if (tip) tip.classList.add("hidden");
 }
@@ -570,10 +578,12 @@ function showNodeInfoTooltip(e: MouseEvent, desc: NodeDescriptor): void {
     if (!tip) return;
     const dot   = tip.querySelector<HTMLElement>(".nit-dot");
     const name  = tip.querySelector<HTMLElement>(".nit-name");
+    const tag   = tip.querySelector<HTMLElement>(".nit-plugin-tag");
     const d     = tip.querySelector<HTMLElement>(".nit-desc");
     const ports = tip.querySelector<HTMLElement>(".nit-ports");
     if (dot)   dot.className   = `nit-dot dot-${desc.node_type}`;
     if (name)  name.textContent = desc.display_name;
+    if (tag)   tag.classList.toggle("hidden", !desc.is_plugin);
     if (d)     d.textContent    = description;
     if (ports) {
       const labels = desc.ports.outputs

@@ -57,6 +57,7 @@ A related symptom: the dropdown is there and had something selected, but the nod
 [Background Runs](guide/background-runs.md#unattended-execution-and-dangerous-nodes) already covers the core rule: a manual Run shows this confirmation once per session, a scheduled or webhook-triggered background fire skips it and only logs a warning instead. Two things worth adding:
 
 - It isn't only Shell Command, Code, and Database that trigger it. Any node loaded from a `.wasm` plugin counts as well, since Aerini has no way to know what a plugin actually does on your machine.
+- The **Test** button in a node's config panel shows the same confirmation for these nodes. Its approval is remembered separately from a full Run's, for the current app session only, so you may see the dialog once from each.
 - Approving it doesn't stick around forever. The approval is remembered only for the current app session, and only for that exact set of dangerous nodes on that exact workflow. Restart Aerini, or add or remove a dangerous node, and you'll see the dialog again the next time you run it.
 
 ## A webhook never receives a request
@@ -69,6 +70,10 @@ If you're testing with a plain Run press rather than Schedule Run, a few more sp
 - If another Webhook node is already listening on that port in this same running copy of Aerini, you'll get a clear message saying so rather than a confusing connection error.
 - A wrong path on an otherwise-correct request comes back as **401 Unauthorized**, not 404. That's deliberate, so a guessed path can't be used to confirm a port is even listening, but it also means a 401 you get while testing might mean "wrong path," not "wrong secret." Check the path before assuming your secret header is the problem.
 - If nothing valid arrives before the node's configured Timeout runs out (60 seconds by default), the run ends with a plain "no request received" failure.
+
+## A node shows a "?" chip, or its panel says "Node type not available"
+
+The workflow contains a node whose type this copy of Aerini doesn't know. Usually that's a node from a `.wasm` plugin that isn't installed on this machine, for example a workflow you imported from someone else. It can also be an id from an older version of Aerini that has since been retired. The node keeps its saved settings and you can still edit them, but it can't run: a Run or a Test fails with `Node type '...' is not registered`. Install the plugin (the **Plugins** tab) or replace the node, then try again. If the panel says this for a node that is built into Aerini, restart the app; the notice only appears once Aerini has loaded its node list, so a persistent one on a built-in node is worth reporting.
 
 ## See also
 

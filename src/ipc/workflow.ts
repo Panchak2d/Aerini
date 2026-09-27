@@ -155,8 +155,6 @@ export const getScheduledJob = (workflowId: string) =>
 export const setAlwaysOn = (workflowId: string, alwaysOn: boolean) =>
   invoke<void>("set_always_on", { workflowId, alwaysOn });
 
-export const forceQuit = () => invoke<void>("force_quit");
-
 export const getSetting = (key: string) =>
   invoke<string | null>("get_setting", { key });
 

@@ -111,6 +111,7 @@ export function renderScheduleFields(ctx: ExtensionContext): void {
         btn.className = "cron-preset-btn";
         btn.textContent = p.label;
         btn.title = p.value;
+        btn.setAttribute("data-tooltip", p.value);
         btn.setAttribute("aria-label", `${p.label} (${p.value})`);
         const isActive = p.value === currentCron;
         if (isActive) btn.classList.add("active");

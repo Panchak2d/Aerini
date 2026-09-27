@@ -17,7 +17,10 @@ const confirmMock = vi.hoisted(() => ({ showConfirm: vi.fn() }));
 vi.mock("../confirm", () => ({ showConfirm: confirmMock.showConfirm }));
 
 const providersMock = vi.hoisted(() => ({ listProviderModels: vi.fn() }));
-vi.mock("../ipc/providers", () => providersMock);
+vi.mock("../ipc/providers", async () => {
+  const actual = await vi.importActual<typeof import("../ipc/providers")>("../ipc/providers");
+  return { ...actual, listProviderModels: providersMock.listProviderModels };
+});
 
 import { CredentialPanel } from "../panels/CredentialPanel";
 
@@ -261,6 +264,50 @@ describe("CredentialPanel — view / re-edit a saved credential", () => {
   });
 });
 
+describe("CredentialPanel — Advanced Provider picker", () => {
+  it("normal case: offers the four known providers, and clicking one fills the free-text Provider field", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    const providerInp = document.getElementById("cred-meta-provider") as HTMLInputElement;
+    expect(providerInp.value).toBe("");
+
+    const optionTexts = Array.from(document.querySelectorAll("#cred-provider-picker-slot .csel-option"))
+      .map(o => o.textContent);
+    expect(optionTexts).toEqual(["openai", "anthropic", "gemini", "local"]);
+
+    const geminiOpt = Array.from(document.querySelectorAll("#cred-provider-picker-slot .csel-option"))
+      .find(o => o.textContent === "gemini")!;
+    geminiOpt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    expect(providerInp.value).toBe("gemini");
+  });
+
+  it("edge case: picking 'local' reveals the Ollama Base URL quick-fill; any other provider does not", async () => {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+
+    const baseUrlInp = document.getElementById("cred-meta-base-url") as HTMLInputElement;
+    expect(document.querySelector("#cred-base-url-help-slot button")).toBeNull();
+
+    const localOpt = Array.from(document.querySelectorAll("#cred-provider-picker-slot .csel-option"))
+      .find(o => o.textContent === "local")!;
+    localOpt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+    const fillBtn = document.querySelector("#cred-base-url-help-slot button") as HTMLButtonElement;
+    expect(fillBtn?.textContent).toBe("Use Ollama defaults");
+    fillBtn.click();
+    expect(baseUrlInp.value).toBe("http://localhost:11434/v1");
+
+    const openaiOpt = Array.from(document.querySelectorAll("#cred-provider-picker-slot .csel-option"))
+      .find(o => o.textContent === "openai")!;
+    openaiOpt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(document.querySelector("#cred-base-url-help-slot button")).toBeNull();
+  });
+});
+
 describe("CredentialPanel — Advanced 'Fetch Models'", () => {
   it("populates a dropdown on a successful fetch, reading Provider/Base URL/Secret Value from this form", async () => {
     providersMock.listProviderModels.mockResolvedValue(["gpt-4o", "gpt-4o-mini"]);
@@ -285,8 +332,8 @@ describe("CredentialPanel — Advanced 'Fetch Models'", () => {
     expect((document.getElementById("cred-meta-model") as HTMLInputElement).value).toBe("gpt-4o");
   });
 
-  it("degrades silently to the plain text field on a fetch error, without throwing", async () => {
-    providersMock.listProviderModels.mockRejectedValue(new Error("network error"));
+  it("degrades to the plain text field on a fetch error, without throwing, and shows the backend's specific reason", async () => {
+    providersMock.listProviderModels.mockRejectedValue(new Error("MISSING_API_KEY: Anthropic requires an API key"));
 
     const panel = new CredentialPanel();
     await panel.show();
@@ -302,6 +349,11 @@ describe("CredentialPanel — Advanced 'Fetch Models'", () => {
     expect(fetchBtn.disabled).toBe(false);
     expect(modelInp.value).toBe("typed-manually");
     expect(document.querySelector("#cred-model-list-slot .csel-option")).toBeNull();
+
+    // The whole point of this fix: the CODE: prefix is stripped so the
+    // reader sees the reason, not the raw backend error string.
+    const errHint = document.querySelector("#cred-model-list-slot .config-hint-warn") as HTMLElement;
+    expect(errHint?.textContent).toBe("Anthropic requires an API key");
   });
 
   it("degrades silently on an empty model list, same as any other fetch failure", async () => {

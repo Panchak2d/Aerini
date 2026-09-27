@@ -3,6 +3,7 @@ import type { RunManager } from "../run-manager";
 import { getBgJobs, removeBgJob } from "../run-manager";
 import { stopScheduledWorkflow, startScheduledWorkflow, parseSchedulerError } from "../ipc/workflow";
 import { updateActivityBadge, updateBgRunningState } from "../sidebar-sections";
+import { formatDuration } from "../monitor-helpers";
 
 type Toast = (msg: string, type: "success" | "error" | "info") => void;
 
@@ -71,6 +72,7 @@ export function renderBgJobs(
     nameEl.className = "bg-job-name";
     nameEl.textContent = job.name;
     nameEl.title = job.name;
+    nameEl.setAttribute("data-tooltip", job.name);
 
     const statusEl = document.createElement("span");
     statusEl.className = `bg-job-status bg-job-status--${job.status}`;
@@ -107,9 +109,7 @@ export function renderBgJobs(
         statusEl.textContent = "running";
       }
     } else if (job.status === "done") {
-      const secs = job.finishedAt
-        ? Math.round((job.finishedAt - job.startedAt) / 1000) : 0;
-      statusEl.textContent = secs < 60 ? `${secs}s` : `${Math.round(secs / 60)}m`;
+      statusEl.textContent = formatDuration(job.finishedAt ? job.finishedAt - job.startedAt : 0);
     } else if (job.status === "stopped") {
       statusEl.textContent = "stopped";
     } else {
@@ -123,17 +123,23 @@ export function renderBgJobs(
       const stopBtn = document.createElement("button");
       stopBtn.className = "bg-job-action-btn bg-job-action-stop";
       stopBtn.title = "Stop workflow";
+      stopBtn.setAttribute("data-tooltip", "Stop workflow");
       stopBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`;
       stopBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         stopBtn.disabled = true;
-        try { await stopScheduledWorkflow(job.id); } catch { /* event updates */ }
+        try {
+          await stopScheduledWorkflow(job.id);
+        } catch {
+          stopBtn.disabled = false; // event updates handle the success case; on failure, nothing else will
+        }
       });
       actions.appendChild(stopBtn);
     } else {
       const restartBtn = document.createElement("button");
       restartBtn.className = "bg-job-action-btn bg-job-action-restart";
       restartBtn.title = "Restart workflow";
+      restartBtn.setAttribute("data-tooltip", "Restart workflow");
       restartBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
       restartBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
@@ -155,6 +161,7 @@ export function renderBgJobs(
       const dismissBtn = document.createElement("button");
       dismissBtn.className = "bg-job-action-btn bg-job-action-dismiss";
       dismissBtn.title = "Remove from list";
+      dismissBtn.setAttribute("data-tooltip", "Remove from list");
       dismissBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       dismissBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -182,7 +189,7 @@ export function renderBgJobs(
         item.style.opacity = "";
         item.style.pointerEvents = "";
       }
-      runManager.openHistoryDrawer(job.name);
+      runManager.openHistoryDrawer();
     });
 
     list.appendChild(item);
@@ -199,4 +206,5 @@ export function updateBgRunButton(currentWorkflowId: string): void {
   btn.title = isRunning
     ? "This workflow is already running in the background. Stop it from the Background Runs panel to restart."
     : "Run silently in the background — result stored in history";
+  btn.setAttribute("data-tooltip", isRunning ? "Already running in background" : "Run silently in the background");
 }

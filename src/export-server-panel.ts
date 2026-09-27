@@ -144,8 +144,8 @@ function renderReady(
           ${result.credentials.map(c => {
             const filled   = filledIds.has(c.credential_id);
             const statusEl = filled
-              ? `<span class="esp-cred-ok"  title="Credential is filled">✓</span>`
-              : `<span class="esp-cred-warn" title="Credential is empty">⚠</span>`;
+              ? `<span class="esp-cred-ok"  title="Credential is filled" data-tooltip="Credential is filled">✓</span>`
+              : `<span class="esp-cred-warn" title="Credential is empty" data-tooltip="Credential is empty">⚠</span>`;
             return `<tr class="${filled ? "" : "esp-cred-row--empty"}">
               <td class="esp-cred-status">${statusEl}</td>
               <td>${escapeHtml(c.credential_id)}</td>

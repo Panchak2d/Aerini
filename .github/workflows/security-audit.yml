@@ -5,34 +5,43 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
-      - '.github/workflows/security-audit.yml'
-      - 'audit.toml'
       - '.cargo/audit.toml'
+      - '.github/workflows/security-audit.yml'
   pull_request:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/security-audit.yml'
   schedule:
     # Daily at 06:00 UTC — picks up new advisories even without dependency changes
     - cron: '0 6 * * *'
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
+      # Documented ignores for unfixable transitive advisories live in
+      # .cargo/audit.toml, which cargo-audit picks up from the repo root.
+      # Only vulnerability advisories fail the job; unmaintained, unsound and
+      # yanked warnings are reported without failing it. Issues are created
+      # automatically on main/master.
       - name: Audit Rust Dependencies
-        uses: actions-rust-lang/audit@v1
-        # audit.toml at repo root is auto-detected by cargo-audit; it contains
-        # documented ignores for unfixable transitive advisories.
-        # Issues are created automatically for critical vulnerabilities on
-        # main/master. Informational advisories are reported but do not fail.
+        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24 # v1.2.7

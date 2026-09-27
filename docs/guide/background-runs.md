@@ -63,6 +63,8 @@ Run on launch is meant for Interval, Cron, and Webhook triggers, which repeat in
 
 Click **Background Runs** in the sidebar to see every workflow currently or recently running in the background: name, a status dot, and either a countdown to its next run or how long its last run took.
 
+![The Background Runs panel with a live countdown to the next scheduled fire](../public/images/background-runs-panel.png)
+
 From here you can stop a job that's currently running. Anything that isn't running (stopped, done, or failed) instead shows two actions: restart it, or dismiss it from the list. Clicking a job opens that workflow and jumps straight to its **History** tab.
 
 ## Run history

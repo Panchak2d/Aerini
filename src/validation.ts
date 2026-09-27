@@ -1,7 +1,7 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
-import { NODE_IDS, TRIGGER_NODE_IDS, DANGEROUS_NODE_IDS } from "./node-ids";
-import { isPluginNodeType } from "./canvas/CanvasSerializer";
+import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
+import { isDangerousNodeType } from "./canvas/node-registry";
 
 // `database` is deliberately absent here — its required fields depend on
 // `db_type` (sqlite needs db_path+query; postgres/mysql need
@@ -80,10 +80,7 @@ export async function checkDangerousNodes(
   confirm: (msg: string, isDanger: boolean) => Promise<boolean>,
 ): Promise<boolean> {
   const dangerousNodes = [...nodes]
-    .filter(n =>
-      DANGEROUS_NODE_IDS.has(n.data.node_type_id as string) ||
-      isPluginNodeType(n.data.node_type_id as string)
-    );
+    .filter(n => isDangerousNodeType(n.data.node_type_id as string));
   if (!dangerousNodes.length) return true;
 
   const dangerousIds  = dangerousNodes.map(n => n.data.id).sort().join(",");

@@ -5,7 +5,7 @@ import { Canvas } from "../canvas/Canvas";
 import { Connector, PendingConnector } from "../canvas/Connector";
 import { CanvasNode } from "../canvas/Node";
 import type { UndoAction } from "../canvas/UndoManager";
-import { serialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
+import { serialize, deserialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
 import { checkDangerousNodes } from "../validation";
 import type { NodeDescriptor } from "../ipc/workflow";
 
@@ -169,6 +169,56 @@ describe("serialize — dangling edge filter", () => {
 
     const doc = JSON.parse(serialize("wf_test", "Test", nodes, edges));
     expect(doc.edges).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deserialize must not trust an imported node/edge id verbatim: a bad-format
+// or duplicate id is replaced with the same generated scheme already used
+// for an absent id, and a dangling edge is still dropped — both now
+// reported via importWarnings instead of failing silently.
+// ---------------------------------------------------------------------------
+
+describe("deserialize — imported id validation", () => {
+  it("normal case: well-formed, unique ids pass through unchanged with no warnings", () => {
+    const doc = { id: "wf1", name: "Test", nodes: [{ id: "n1" }, { id: "n2" }], edges: [{ id: "e1", from_node: "n1", to_node: "n2" }] };
+    const rt = deserialize(JSON.stringify(doc));
+    expect([...rt.nodes.keys()]).toEqual(["n1", "n2"]);
+    expect([...rt.connectors.keys()]).toEqual(["e1"]);
+    expect(rt.importWarnings).toEqual([]);
+  });
+
+  it("edge case: a node id containing HTML metacharacters is replaced and reported", () => {
+    const doc = { id: "wf1", name: "Test", nodes: [{ id: '"><img src=x>' }], edges: [] };
+    const rt = deserialize(JSON.stringify(doc));
+    const ids = [...rt.nodes.keys()];
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).not.toBe('"><img src=x>');
+    expect(ids[0]).toMatch(/^node_/);
+    expect(rt.importWarnings.some(w => w.includes("invalid or duplicate"))).toBe(true);
+  });
+
+  it("edge case: two nodes sharing the same id both survive — the second is re-keyed instead of overwriting the first", () => {
+    const doc = { id: "wf1", name: "Test", nodes: [{ id: "dup", name: "First" }, { id: "dup", name: "Second" }], edges: [] };
+    const rt = deserialize(JSON.stringify(doc));
+    expect(rt.nodes.size).toBe(2);
+    expect(rt.nodes.get("dup")?.data.name).toBe("First");
+    expect([...rt.nodes.values()].map(n => n.data.name)).toEqual(["First", "Second"]);
+    expect(rt.importWarnings.some(w => w.includes("invalid or duplicate"))).toBe(true);
+  });
+
+  it("a genuinely absent id is still generated silently, same as before — not counted as a warning", () => {
+    const doc = { id: "wf1", name: "Test", nodes: [{ name: "No id" }], edges: [] };
+    const rt = deserialize(JSON.stringify(doc));
+    expect(rt.nodes.size).toBe(1);
+    expect(rt.importWarnings).toEqual([]);
+  });
+
+  it("an edge referencing a missing node is still dropped — now reported instead of silent", () => {
+    const doc = { id: "wf1", name: "Test", nodes: [{ id: "n1" }], edges: [{ id: "e1", from_node: "n1", to_node: "ghost" }] };
+    const rt = deserialize(JSON.stringify(doc));
+    expect(rt.connectors.size).toBe(0);
+    expect(rt.importWarnings.some(w => w.includes("dropped"))).toBe(true);
   });
 });
 

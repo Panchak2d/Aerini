@@ -1,12 +1,14 @@
 import { NODE_IDS } from "../node-ids";
-import { REQUIRED_FIELDS } from "../validation";
+import { REQUIRED_FIELDS, checkDangerousNodes } from "../validation";
+import { showConfirm } from "../confirm";
 import type { CanvasNode } from "../canvas/Node";
 import type { Canvas } from "../canvas/Canvas";
 import { listCredentials, getCredentialMetadata, getCredentialSecret } from "../ipc/credentials";
 import { listProviderModels } from "../ipc/providers";
 import { runWorkflow } from "../ipc/workflow";
-import type { NodeDescriptor, WorkflowLogEntry } from "../ipc/workflow";
+import type { WorkflowLogEntry } from "../ipc/workflow";
 import { escapeHtml } from "../utils";
+import { getNodeDescriptor, isUnregisteredNodeType } from "../canvas/node-registry";
 import { closeExpressionPicker } from "../expression-picker";
 import {
   mk, mkSection, mkField,
@@ -20,17 +22,12 @@ import { renderAiCostWarning, renderAiAttachments }   from "./extensions/ai-prom
 import { renderHttpAuthMode, renderHttpSsrfWarning }  from "./extensions/http";
 import { renderWebhookBanners }                       from "./extensions/webhook";
 import { renderSocialUploadFields }                   from "./extensions/social-upload";
+import { renderPluginRawConfigEditor }                 from "./extensions/plugin-config";
+import { renderUnregisteredNodeNotice }                from "./extensions/unregistered-node";
 import {
   getCredentialFieldKeys, renderConfigFieldsLoop, renderCredentialSection,
-  AI_NODE_IDS, type PropSchema,
+  isGenericallyEditable, storedValueFitsField, AI_NODE_IDS, type PropSchema,
 } from "./field-renderer";
-
-// Registry of node descriptors — populated by app.ts via setDescriptorRegistry()
-// Used to recover field schemas when a saved node has empty input_schema.properties
-let _descriptorRegistry: Map<string, NodeDescriptor> = new Map();
-export function setDescriptorRegistry(nodes: NodeDescriptor[]): void {
-  _descriptorRegistry = new Map(nodes.map(d => [d.type_id, d]));
-}
 
 // ── Extension registry ────────────────────────────────────────────────────────
 
@@ -46,16 +43,40 @@ const NODE_CONFIG_EXTENSIONS: Partial<Record<string, NodeConfigExtension>> = {
   [NODE_IDS.WEBHOOK]:        { afterReliability: renderWebhookBanners },
 };
 
+// Config keys a built-in node's bespoke UI or canvas ports already own, so the
+// generic field loop must skip them. Keyed by node id on purpose: a plugin node
+// may declare a property with one of these names and still needs a normal field
+// for it. The plugin loader rejects a type_id that collides with a built-in, so
+// a plugin can't opt into (or out of) these exclusions.
+const CUSTOM_UI_KEYS: Partial<Record<string, ReadonlySet<string>>> = {
+  [NODE_IDS.SAVE_TO_FOLDER]: new Set(["subfolders", "folder_path", "overwrite"]),
+  [NODE_IDS.COLLECT_FILES]:  new Set(["sources"]),
+  [NODE_IDS.SOCIAL_UPLOAD]:  new Set(["files"]),
+  [NODE_IDS.AI_PROMPT]:      new Set(["attachments"]),
+  [NODE_IDS.AI_AGENT]:       new Set(["attachments"]),
+};
+
 // ── Popover state ─────────────────────────────────────────────────────────────
+
+// Session-scoped approvals for the Test button's dangerous-node confirmation,
+// keyed by checkDangerousNodes' own workflow-id + node-id key.
+const _testApproved = new Set<string>();
+
+// The shared confirm dialog lives outside the popover; while it is showing,
+// the popover's outside-click, Esc, and Tab handling must leave it alone.
+function isConfirmOpen(): boolean {
+  const modal = document.getElementById("confirm-modal");
+  return !!modal && !modal.classList.contains("hidden");
+}
 
 let _activePopover: HTMLElement | null = null;
 // Unique ID per popover instance — prevents old onOutside handlers from
 // closing a newly-opened popover when rapidly switching between nodes.
 let _activePopoverId = 0;
 // Node the currently-open popover belongs to — used on close to flag
-// missing required fields (UX-7). Cleared whenever the popover closes.
+// missing required fields. Cleared whenever the popover closes.
 let _activePopoverNode: CanvasNode | null = null;
-// Element focused before popover opened — restored on close (N-11)
+// Element focused before popover opened — restored on close
 let _previousFocus: HTMLElement | null = null;
 // Removes the active popover's document-level listeners (focus trap, outside
 // click, Esc). Set by showPopover(), run unconditionally by closePopover() —
@@ -150,7 +171,7 @@ export async function showPopover(
   const schema  = node.data.input_schema as Record<string, unknown>;
   let rawProps = (schema?.properties ?? {}) as Record<string, unknown>;
   if (!Object.keys(rawProps).length) {
-    const desc = _descriptorRegistry.get(node.data.node_type_id);
+    const desc = getNodeDescriptor(node.data.node_type_id);
     if (desc) {
       const ds = desc.input_schema as Record<string, unknown>;
       rawProps = (ds?.properties ?? {}) as Record<string, unknown>;
@@ -206,10 +227,22 @@ export async function showPopover(
       : String(config["api_key"] ?? "");
     return listProviderModels(provider, baseUrl, apiKey);
   }
-  // Keys managed by custom UI blocks — excluded from generic field rendering.
-  const CUSTOM_UI_KEYS = new Set(["subfolders", "sources", "files", "folder_path", "overwrite", "attachments"]);
+  const customUiKeys = CUSTOM_UI_KEYS[node.data.node_type_id];
   const credFieldKeys = getCredentialFieldKeys(props);
-  const cfgKeys = Object.entries(props).filter(([k]) => !credFieldKeys.has(k) && !CUSTOM_UI_KEYS.has(k));
+  const editableKeys = Object.entries(props).filter(([k]) => !credFieldKeys.has(k) && !customUiKeys?.has(k));
+  // A schema can declare object/array-of-object properties the generic
+  // renderer has no control for, or leave a property's type unspecified
+  // (e.g. HTTP Request's `body`), and a stored value can be an object or
+  // array its property's control would corrupt; those are edited as JSON
+  // instead of a text input that would overwrite them. Applies uniformly to
+  // every node — built-in schemas declare or hold non-string values too
+  // (HTTP Request's `headers`, Shell's `env`, Transform's `mappings`), and a
+  // plugin node whose plugin is no longer installed has no descriptor and
+  // only its saved schema to go on.
+  const rawEditKeys = editableKeys.filter(([k, p]) =>
+    !isGenericallyEditable(p) || !storedValueFitsField(p, node.data.config[k]));
+  const rawKeySet = new Set(rawEditKeys.map(([k]) => k));
+  const cfgKeys = rawKeySet.size ? editableKeys.filter(([k]) => !rawKeySet.has(k)) : editableKeys;
 
   const pop = document.createElement("div");
   pop.className = "node-popover"; pop.id = "node-popover";
@@ -224,19 +257,42 @@ export async function showPopover(
   headerText.className = "popover-header-text";
   const titleEl = document.createElement("div");
   titleEl.id = "popover-title-label";
-  titleEl.className = "popover-title"; titleEl.textContent = node.data.name;
+  titleEl.className = "popover-title"; titleEl.textContent = node.data.name; titleEl.title = node.data.name;
   const subtitleEl = document.createElement("div");
-  subtitleEl.className = "popover-subtitle"; subtitleEl.textContent = node.data.node_type_id.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  const subtitleText = node.data.node_type_id.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  subtitleEl.className = "popover-subtitle"; subtitleEl.textContent = subtitleText; subtitleEl.title = subtitleText;
   headerText.appendChild(titleEl); headerText.appendChild(subtitleEl);
+  // Plugin identity — same registry the schema fallback above already reads,
+  // keyed off is_plugin (never a hardcoded type_id list). pack_id/pack_display_name
+  // are NOT on NodeDescriptor (only on the separate Plugins-tab PluginInfo
+  // type, keyed by filename, not type_id) -- author is the richest provenance
+  // field actually available here.
+  const pluginMeta = getNodeDescriptor(node.data.node_type_id);
+  if (pluginMeta?.is_plugin) {
+    const metaRow = document.createElement("div");
+    metaRow.className = "popover-plugin-meta";
+    const tag = document.createElement("span");
+    tag.className = "palette-plugin-tag"; tag.textContent = "Plugin";
+    metaRow.appendChild(tag);
+    if (pluginMeta.author) {
+      const authorEl = document.createElement("span");
+      authorEl.className = "popover-plugin-author";
+      authorEl.textContent = `by ${pluginMeta.author}`;
+      authorEl.title = authorEl.textContent;
+      metaRow.appendChild(authorEl);
+    }
+    headerText.appendChild(metaRow);
+  }
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
   closeBtn.setAttribute("aria-label", "Close");
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => closePopover());
 
   const testBtn = document.createElement("button");
   testBtn.className = "popover-test-btn";
   testBtn.title = "Test this node in isolation";
+  testBtn.setAttribute("data-tooltip", "Test this node in isolation");
   testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
   testBtn.addEventListener("click", async () => {
     testBtn.disabled = true;
@@ -257,6 +313,10 @@ export async function showPopover(
   // Body
   const body = document.createElement("div");
   body.className = "popover-body";
+
+  if (isUnregisteredNodeType(node.data.node_type_id)) {
+    renderUnregisteredNodeNotice(body, node.data.node_type_id);
+  }
 
   // Search — only when ≥4 config fields
   if (cfgKeys.length >= 4) {
@@ -280,7 +340,7 @@ export async function showPopover(
   body.appendChild(mkField("Name", () => {
     const inp = mk<HTMLInputElement>("input");
     inp.type = "text"; inp.value = node.data.name; inp.autocomplete = "off"; inp.spellcheck = false;
-    inp.addEventListener("input", () => { node.data.name = inp.value; titleEl.textContent = inp.value; onChange(); });
+    inp.addEventListener("input", () => { node.data.name = inp.value; titleEl.textContent = inp.value; titleEl.title = inp.value; onChange(); });
     return inp;
   }));
 
@@ -289,6 +349,7 @@ export async function showPopover(
   const ctx: ExtensionContext = {
     node, body, canvasEl, onChange, creds,
     rerender: () => showPopover(node, canvasEl, onChangeFn, canvas),
+    hasConfigSection: cfgKeys.length > 0,
     fetchModels: fetchModelsForNode,
   };
 
@@ -304,6 +365,7 @@ export async function showPopover(
   }
 
   ext?.afterFields?.(ctx);
+  if (rawEditKeys.length) renderPluginRawConfigEditor(ctx, credFieldKeys);
 
   // Credentials
   renderCredentialSection(ctx, props, ext, autoFillFromCredentialMetadata, credentialProviderMap);
@@ -330,17 +392,22 @@ export async function showPopover(
 
   positionPopover(pop, node, canvasEl);
 
-  // Move focus to first focusable element inside popover (N-11)
+  // Move focus to the first focusable field inside the popover body.
+  // Scoped to `body`, not `pop` — `pop` includes the header, where testBtn
+  // (a <button>) sits before closeBtn in document order and would win
+  // querySelector's first match. Landing focus there auto-fired its
+  // tooltip (focus listener in tooltip-manager.ts) on every popover open,
+  // and left Enter wired to "run this node" instead of editing a field.
   const FOCUSABLE = 'input, select, textarea, button, [tabindex]:not([tabindex="-1"])';
   setTimeout(() => {
     if (myId !== _activePopoverId) return;
-    const first = pop.querySelector<HTMLElement>(FOCUSABLE);
+    const first = body.querySelector<HTMLElement>(FOCUSABLE);
     first?.focus({ preventScroll: true });
   }, 50);
 
-  // Focus trap — keep Tab/Shift+Tab inside popover (N-11)
+  // Focus trap — keep Tab/Shift+Tab inside popover
   const onFocusTrap = (e: KeyboardEvent) => {
-    if (e.key !== "Tab") return;
+    if (e.key !== "Tab" || isConfirmOpen()) return;
     const focusable = Array.from(pop.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(FOCUSABLE)).filter(el => !el.disabled);
     if (!focusable.length) return;
     const first = focusable[0];
@@ -355,12 +422,12 @@ export async function showPopover(
 
   // Close on outside click.
   const onOutside = (e: MouseEvent) => {
-    if (!pop.contains(e.target as Node)) closePopover();
+    if (!pop.contains(e.target as Node) && !isConfirmOpen()) closePopover();
   };
 
   // Close on Esc
   const onEsc = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closePopover();
+    if (e.key === "Escape" && !isConfirmOpen()) closePopover();
   };
   document.addEventListener("keydown", onEsc, true);
 
@@ -402,6 +469,9 @@ function positionPopover(pop: HTMLElement, node: CanvasNode, canvasEl: HTMLCanva
 // ── Single-node test ──────────────────────────────────────────────────────────
 
 async function testSingleNode(node: CanvasNode, onChange: () => void): Promise<void> {
+  // Same confirmation a canvas Run gives for nodes that execute code.
+  if (!await checkDangerousNodes(`test_${node.data.id}`, [node], _testApproved, showConfirm)) return;
+
   // Wrap the node in a minimal workflow: trigger → node
   const triggerId = "test_trigger";
   const minimalWorkflow = {

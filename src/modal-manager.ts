@@ -1,26 +1,15 @@
-import type { NodeDescriptor } from "./ipc/workflow";
+import { getNodeDescriptor } from "./canvas/node-registry";
 import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
 import { THEMES, getStoredTheme, applyTheme } from "./theme";
 
 type ImportCallback = (obj: Record<string, unknown>) => void;
 
-let _allNodes: NodeDescriptor[] = [];
 let _pendingImport: Record<string, unknown> | null = null;
 let _onConfirmImport: ImportCallback | null = null;
 
-/** Updates the node descriptors modals render against, without re-binding
- *  any listener `initModals` already attached. Call after a plugin
- *  install/remove/reload so modal-driven previews see new node types
- *  immediately. */
-export function setModalNodes(allNodes: NodeDescriptor[]): void {
-  _allNodes = allNodes;
-}
-
 export function initModals(
-  allNodes: NodeDescriptor[],
   onConfirmImport: ImportCallback
 ): void {
-  _allNodes = allNodes;
   _onConfirmImport = onConfirmImport;
 
   const hide = (id: string) => document.getElementById(id)!.classList.add("hidden");
@@ -45,6 +34,9 @@ export function initModals(
   document.getElementById("btn-close-shortcuts")!.addEventListener("click", () => hide("shortcuts-modal"));
   document.getElementById("shortcuts-modal")!.addEventListener("click", e => {
     if (e.target === document.getElementById("shortcuts-modal")) hide("shortcuts-modal");
+  });
+  document.getElementById("btn-shortcuts")!.addEventListener("click", () => {
+    document.getElementById("shortcuts-modal")!.classList.remove("hidden");
   });
 
   // Settings persistence
@@ -92,7 +84,7 @@ export function showImportPreview(obj: Record<string, unknown>): void {
     (obj.nodes as Array<{ node_type_id: string }>)?.map(n => n.node_type_id) ?? []
   )];
   for (const tid of typeIds) {
-    const known = _allNodes.find(n => n.type_id === tid);
+    const known = getNodeDescriptor(tid);
     const item = document.createElement("div");
     item.className = "import-req-item";
     const dot = document.createElement("span");
@@ -117,10 +109,6 @@ export function showImportPreview(obj: Record<string, unknown>): void {
     reqList.appendChild(item);
   }
   document.getElementById("import-preview-modal")!.classList.remove("hidden");
-}
-
-export function isGridSnapEnabled(): boolean {
-  return localStorage.getItem("aerini_grid_snap") === "true";
 }
 
 function isN8nWorkflow(obj: Record<string, unknown>): boolean {
@@ -294,7 +282,7 @@ function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" 
   return "action";
 }
 
-/** Fallback only — used when no real descriptor for typeId exists in _allNodes (e.g. "unsupported"). */
+/** Fallback only — used when no real descriptor for typeId exists in the node registry (e.g. "unsupported"). */
 function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
   const inputs = TRIGGER_NODE_IDS.has(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
   const outputs = typeId === NODE_IDS.STOP ? [] : [{ id: "output", label: "Out", position: "right" }];
@@ -302,8 +290,9 @@ function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:strin
 }
 
 /**
- * Real per-type ports, sourced from the live backend node registry (_allNodes,
- * populated from get_node_types()) when a matching descriptor exists — this is
+ * Real per-type ports, sourced from the live backend node registry
+ * (canvas/node-registry.ts, populated from get_node_types()) when a matching
+ * descriptor exists — this is
  * what every branching/multi-port node's *actual* port ids come from (e.g.
  * if_condition's on_true/on_false, switch's case_1..case_8/default). Falls back
  * to the generic single input/output guess only for a type with no registered
@@ -311,7 +300,7 @@ function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:strin
  * Aerini equivalent).
  */
 function resolvePorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
-  const known = _allNodes.find(n => n.type_id === typeId);
+  const known = getNodeDescriptor(typeId);
   if (known) return { inputs: known.ports.inputs, outputs: known.ports.outputs };
   return getDefaultPorts(typeId);
 }
@@ -332,13 +321,12 @@ function resolvePorts(typeId: string): { inputs: Array<{id:string;label:string;p
  * slot) is mapped to "default", the only remaining valid port. This is a
  * best-effort index mapping only: it does not translate n8n's actual
  * match/condition config into Aerini's `cases`/`default_port` config field
- * (a separate, larger fix — n8n's rule shape varies per node version and
- * isn't parsed here; tracked in the backlog, not fixed by this batch).
+ * (a separate, larger translation — n8n's rule shape varies per node version
+ * and isn't parsed here).
  *
- * Every other node type uses its real output port id at that array index
- * (falling back to the first known output port, or "output" if the type has
- * no registered descriptor at all) instead of the previous "output"/"out_N"
- * guess.
+ * Every other node type uses its real output port id at that array index,
+ * falling back to the first known output port, or "output" if the type has
+ * no registered descriptor at all.
  */
 function n8nOutputPortId(typeId: string, portIdx: number): string {
   if (typeId === NODE_IDS.IF_CONDITION) {

@@ -157,7 +157,7 @@ function renderGuide(el: HTMLElement): void {
           <div class="ssg-subtitle">Follow the steps for your platform to create OAuth credentials.</div>
         </div>
         <button class="ssg-close" id="ssg-close" aria-label="Close">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
         </button>
@@ -212,7 +212,7 @@ function renderGuide(el: HTMLElement): void {
       <div class="ssg-footer">
         <div class="ssg-redirect-row">
           <span class="ssg-redirect-label">Redirect URI (use this exact value in all platforms):</span>
-          <span class="ssg-redirect-uri">${liveUriHtml}</span>
+          <span class="ssg-redirect-uri" title="${liveUriHtml}">${liveUriHtml}</span>
           <button class="ssg-copy-btn" id="ssg-copy-uri">Copy</button>
         </div>
       </div>
@@ -237,6 +237,7 @@ function renderGuide(el: HTMLElement): void {
   // Copyable redirect URI values (inline code blocks in steps)
   el.querySelectorAll<HTMLElement>(".ssg-copyable").forEach(code => {
     code.title = "Click to copy";
+    code.setAttribute("data-tooltip", "Click to copy");
     code.style.cursor = "pointer";
     code.addEventListener("click", () => {
       navigator.clipboard.writeText(code.dataset.value ?? code.textContent ?? "").catch(() => {});

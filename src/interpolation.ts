@@ -107,7 +107,7 @@ function showInterpolationDropdown(
     const isAlias    = p.includes(" (");
     const insertValue = isAlias ? p.slice(0, p.indexOf(" (")) : p;
     const hint       = isAlias ? p.slice(p.indexOf(" (")) : "";
-    item.innerHTML = `<span class="interp-path">${escHtml(insertValue)}</span>${hint ? `<span class="interp-hint">${escHtml(hint)}</span>` : ""}`;
+    item.innerHTML = `<span class="interp-path" title="${escHtml(insertValue)}">${escHtml(insertValue)}</span>${hint ? `<span class="interp-hint">${escHtml(hint)}</span>` : ""}`;
     item.addEventListener("mousedown", (e) => { e.preventDefault(); onSelect(insertValue); });
     dd.appendChild(item);
   }

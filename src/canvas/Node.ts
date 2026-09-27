@@ -2,6 +2,7 @@ import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
 import { NODE_IDS, DANGEROUS_NODE_IDS, TRIGGER_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
 import { getCanvasColors, headerTint, resolveNoteColors } from "./theme-colors";
+import { isPluginNodeType, isUnregisteredNodeType } from "./node-registry";
 
 export interface CanvasNodeData {
   id: string;
@@ -362,6 +363,17 @@ export class CanvasNode {
       ctx.fillText(meta.icon, x + 14, y + NODE_HEADER / 2);
     }
 
+    // ── Plugin badge (corner of the icon, any status) ───────────────────────
+    // Looked up by type_id against the same registry the palette/config panel
+    // use (node-registry's registerNodeDescriptors) -- CanvasNodeData never
+    // carries is_plugin itself, so this needs zero changes to node placement,
+    // serialization, or the .aerini file format.
+    if (isPluginNodeType(this.data.node_type_id)) {
+      drawTypeBadge(ctx, x + 26, y + NODE_HEADER / 2 + 6, "P");
+    } else if (isUnregisteredNodeType(this.data.node_type_id)) {
+      drawTypeBadge(ctx, x + 26, y + NODE_HEADER / 2 + 6, "?");
+    }
+
     // ── Node name ──────────────────────────────────────────────────────────
     ctx.font         = "500 12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif";
     ctx.fillStyle    = colors.textPrimary;
@@ -587,6 +599,26 @@ function drawDangerBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number):
   ctx.textAlign    = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("!", cx, cy + s * 0.15);
+  ctx.restore();
+}
+
+function drawTypeBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number, glyph: string): void {
+  const r = 5;
+  const colors = getCanvasColors();
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = colors.surface2;
+  ctx.fill();
+  ctx.strokeStyle = colors.textSecondary;
+  ctx.lineWidth   = 1.25;
+  ctx.stroke();
+
+  ctx.font         = "bold 7px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.fillStyle    = colors.textSecondary;
+  ctx.textAlign    = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(glyph, cx, cy + 0.5);
   ctx.restore();
 }
 

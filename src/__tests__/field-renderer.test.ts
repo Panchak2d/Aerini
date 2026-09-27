@@ -4,9 +4,16 @@ import { CanvasNode } from "../canvas/Node";
 import { renderConfigFieldsLoop, renderCredentialSection, getCredentialFieldKeys, type PropSchema } from "../popover/field-renderer";
 import type { ExtensionContext } from "../node-configs/popover-utils";
 
-// CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
+// CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level).
+// Command-aware so the path-picker tests below can control pick_file_dialog
+// / pick_folder_dialog independently of each other; anything else keeps the
+// original blanket "[]" resolution the rest of this file's tests rely on.
+const invokeMock = vi.fn((cmd: string): Promise<unknown> => {
+  if (cmd === "pick_file_dialog" || cmd === "pick_folder_dialog") return Promise.resolve(null);
+  return Promise.resolve([]);
+});
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(() => Promise.resolve([])),
+  invoke: (...a: [string]) => invokeMock(...a),
   convertFileSrc: vi.fn((p: string) => p),
 }));
 
@@ -109,9 +116,9 @@ describe("field-renderer — model picker", () => {
     expect(input.value).toBe("gpt-5.6-mini"); // text field mirrors the dropdown pick
   });
 
-  it("edge case: a failed fetch leaves the free-text field exactly as it was — no dropdown, no error banner in the form, value untouched", async () => {
+  it("edge case: a failed fetch leaves the free-text field untouched and shows the backend's specific reason, not a generic message", async () => {
     const ctx = makeCtx(makeNode("n1"));
-    ctx.fetchModels = vi.fn().mockRejectedValue(new Error("network error"));
+    ctx.fetchModels = vi.fn().mockRejectedValue(new Error("BAD_KEY: Incorrect API key provided"));
     const node = ctx.node;
     node.data.config["model"] = "llama3"; // pre-existing manual entry
     const props: Array<[string, PropSchema]> = [
@@ -131,6 +138,11 @@ describe("field-renderer — model picker", () => {
     expect(ctx.body.querySelectorAll(".csel-option").length).toBe(0);
     expect(input.value).toBe("llama3"); // never touched by the failed fetch
     expect(ctx.node.data.config["model"]).toBe("llama3");
+
+    // The whole point of this fix: the CODE: prefix is stripped so the
+    // reader sees the reason, not the raw backend error string.
+    const errHint = ctx.body.querySelector(".config-hint-warn") as HTMLElement;
+    expect(errHint?.textContent).toBe("Incorrect API key provided");
   });
 
   it("edge case: with no fetchModels wired (a node type that didn't opt in), the field silently degrades to plain text — no Fetch Models button at all", () => {
@@ -296,5 +308,146 @@ describe("field-renderer — Provider field rebuilds the popover on AI nodes", (
 
     expect(ctx.node.data.config["mode"]).toBe("nested");
     expect(rerenderSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("field-renderer — array field: fixed enum options (checkbox group)", () => {
+  const EVENTS_PROP: PropSchema = {
+    type: "array",
+    items: { type: "string", enum: ["created", "modified", "deleted", "renamed"] },
+  };
+
+  it("normal case: checking two boxes stores them as an array in the schema's own order, not click order", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    renderConfigFieldsLoop(ctx, [["events", EVENTS_PROP]], ["events"]);
+
+    const boxes = Array.from(ctx.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    expect(boxes.map(b => b.value)).toEqual(["created", "modified", "deleted", "renamed"]);
+
+    // This test suite's jsdom setup doesn't run a checkbox's default click
+    // activation behavior (confirmed: .click() here neither flips .checked
+    // nor fires "change") -- every other test file in this suite that
+    // drives a form control does so by setting the property directly and
+    // dispatching the event by hand, so this matches that convention
+    // rather than assuming real-browser click semantics.
+    const check = (box: HTMLInputElement, value: boolean) => {
+      box.checked = value;
+      box.dispatchEvent(new Event("change"));
+    };
+
+    // "renamed" before "created" — stored order must still follow the
+    // schema, not check order.
+    check(boxes[3], true);
+    check(boxes[0], true);
+    expect(ctx.node.data.config["events"]).toEqual(["created", "renamed"]);
+
+    // Unchecking one removes just that entry.
+    check(boxes[0], false);
+    expect(ctx.node.data.config["events"]).toEqual(["renamed"]);
+  });
+
+  it("edge case: a pre-existing config array pre-checks the matching boxes, and a non-array stored value is treated as none checked", () => {
+    const ctxWithArray = makeCtx(makeNode("n1"));
+    ctxWithArray.node.data.config["events"] = ["deleted", "modified"];
+    renderConfigFieldsLoop(ctxWithArray, [["events", EVENTS_PROP]], ["events"]);
+    const checkedInArray = Array.from(ctxWithArray.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')).map(b => b.value);
+    expect(checkedInArray.sort()).toEqual(["deleted", "modified"]);
+
+    const ctxBadShape = makeCtx(makeNode("n2"));
+    ctxBadShape.node.data.config["events"] = "created"; // hand-edited/legacy shape, not an array
+    renderConfigFieldsLoop(ctxBadShape, [["events", EVENTS_PROP]], ["events"]);
+    const checkedBadShape = ctxBadShape.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked');
+    expect(checkedBadShape.length).toBe(0);
+  });
+});
+
+describe("field-renderer — array field: free-form strings (chip list)", () => {
+  const IGNORE_PROP: PropSchema = { type: "array", items: { type: "string" } };
+
+  it("normal case: typing a value and pressing Enter adds a chip and stores it; clicking a chip's remove button removes it", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    renderConfigFieldsLoop(ctx, [["ignore", IGNORE_PROP]], []);
+
+    const input = ctx.body.querySelector<HTMLInputElement>(".field-chiplist-add-row input")!;
+    input.value = "**/node_modules/**";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    expect(ctx.node.data.config["ignore"]).toEqual(["**/node_modules/**"]);
+    expect(ctx.body.querySelectorAll(".field-chip").length).toBe(1);
+    expect(input.value).toBe(""); // cleared after commit
+
+    const removeBtn = ctx.body.querySelector<HTMLButtonElement>(".field-chip-remove")!;
+    removeBtn.click();
+    expect(ctx.node.data.config["ignore"]).toEqual([]);
+    expect(ctx.body.querySelectorAll(".field-chip").length).toBe(0);
+  });
+
+  it("edge case: a duplicate value and a whitespace-only value are both no-ops, and the Add button commits the same as Enter", () => {
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.node.data.config["ignore"] = ["**/*.tmp"];
+    renderConfigFieldsLoop(ctx, [["ignore", IGNORE_PROP]], []);
+
+    const input = ctx.body.querySelector<HTMLInputElement>(".field-chiplist-add-row input")!;
+    const addBtn = ctx.body.querySelector<HTMLButtonElement>(".field-chiplist-add-btn")!;
+
+    input.value = "**/*.tmp"; // duplicate of the pre-existing entry
+    addBtn.click();
+    expect(ctx.node.data.config["ignore"]).toEqual(["**/*.tmp"]);
+
+    input.value = "   "; // whitespace only
+    addBtn.click();
+    expect(ctx.node.data.config["ignore"]).toEqual(["**/*.tmp"]);
+
+    input.value = "**/.git/**";
+    addBtn.click();
+    expect(ctx.node.data.config["ignore"]).toEqual(["**/*.tmp", "**/.git/**"]);
+  });
+});
+
+describe("field-renderer — path picker", () => {
+  it("normal case: \"file-or-directory\" renders both buttons, and choosing a folder fills the field and calls pick_folder_dialog", async () => {
+    invokeMock.mockClear();
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "pick_folder_dialog" ? Promise.resolve("/Users/me/Documents") : Promise.resolve([]));
+
+    const ctx = makeCtx(makeNode("n1"));
+    const props: Array<[string, PropSchema]> = [
+      ["path", { type: "string", "x-aerini-path-picker": "file-or-directory" }],
+    ];
+    renderConfigFieldsLoop(ctx, props, []);
+
+    const buttons = Array.from(ctx.body.querySelectorAll("button")).map(b => b.textContent);
+    expect(buttons).toContain("Choose File…");
+    expect(buttons).toContain("Choose Folder…");
+
+    const folderBtn = Array.from(ctx.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find(b => b.textContent === "Choose Folder…")!;
+    folderBtn.click();
+    await vi.waitFor(() => expect(ctx.node.data.config["path"]).toBe("/Users/me/Documents"));
+
+    expect(invokeMock).toHaveBeenCalledWith("pick_folder_dialog");
+    const input = ctx.body.querySelector<HTMLInputElement>('input[type="text"]')!;
+    expect(input.value).toBe("/Users/me/Documents"); // text field mirrors the picked path
+  });
+
+  it("edge case: \"directory\" alone renders only the folder button, and a cancelled dialog (null) leaves the field untouched", async () => {
+    invokeMock.mockClear();
+    invokeMock.mockImplementation(() => Promise.resolve(null)); // user cancelled
+
+    const ctx = makeCtx(makeNode("n1"));
+    ctx.node.data.config["path"] = "/already/set";
+    const props: Array<[string, PropSchema]> = [
+      ["path", { type: "string", "x-aerini-path-picker": "directory" }],
+    ];
+    renderConfigFieldsLoop(ctx, props, []);
+
+    const buttons = Array.from(ctx.body.querySelectorAll(".path-picker-row button")).map(b => b.textContent);
+    expect(buttons).toEqual(["Choose Folder…"]); // no file button in "directory" mode
+
+    const folderBtn = ctx.body.querySelector<HTMLButtonElement>(".path-picker-row button")!;
+    folderBtn.click();
+    await vi.waitFor(() => expect(folderBtn.disabled).toBe(false));
+
+    expect(ctx.node.data.config["path"]).toBe("/already/set"); // untouched by the cancel
   });
 });

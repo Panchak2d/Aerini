@@ -1,168 +1,211 @@
 # Aerini
 
-Aerini is a visual workflow automation desktop app for macOS, Windows, and Linux. Drag nodes onto a canvas, connect them together, and automate tasks: run them manually, on a schedule, or trigger them via HTTP request.
+Aerini is a visual workflow automation app for macOS, Windows, and Linux. Drag nodes onto a canvas, wire them together, and run the result by hand, on a schedule, or from a webhook.
 
-No account. No cloud. No subscription. Everything runs on your machine.
+No account, no cloud, no subscription. Everything runs on your machine unless you point a node at something else.
 
----
+Aerini is pre-1.0 and under active development. The workflow file format and internal APIs can still change before a 1.0 release.
+
+![Aerini running a workflow with the chat panel open](.github/readme/hero.png)
+
+Get it at **[aerini.org](https://aerini.org/)**, or from the [Releases page](https://github.com/Panchak2d/aerini/releases) if you'd rather skip the website. Docs live in [`docs/`](docs/index.md). Pricing for the commercial license is at [aerini.org/pricing](https://aerini.org/pricing).
 
 ## What you can build
 
-- **Scheduled reports:** fetch data from an API every morning, transform it, email or Slack the result
-- **Alerts:** poll an endpoint on a timer, post to a channel when something looks wrong
-- **AI pipelines:** chain an AI Prompt into a Transform into a Notion page create
-- **Webhook receivers:** accept a GitHub or Stripe webhook, run logic, send a notification
-- **File processing:** read files, transform their content, write results elsewhere
-- **Social media uploads:** generate images with AI and post them to YouTube, Instagram, or TikTok
+- A morning report that pulls numbers from an API, reshapes them, and emails or Slacks the result
 
-Aerini is a local-first tool for individuals and small setups. For workflows that need to run 24/7 on a server, `aerini-server` handles that without requiring the desktop app on the server.
+- An alert that checks something on a timer and only speaks up when it looks wrong
 
----
+- A webhook receiver for GitHub or Stripe that runs your logic and sends a notification
 
-## Guides
+- A small AI pipeline: prompt a model, transform what comes back, hand it to the next node
+
+- File and data shuffling: read something, change it, write it somewhere else
+
+- Generating images or text with AI and uploading the result straight to YouTube, Instagram, or TikTok
+
+If it can be described as "when this happens, do these steps," it's a workflow.
+
+## Building one
+
+The left sidebar lists every node, grouped by category, with search and one-click presets for the AI providers and platforms you'll reach for most (Claude, GPT-4o, Gemini, Ollama, DALL-E 3, Imagen 4, plus ready-to-go Save to Folder and Upload nodes). Drop nodes on the canvas, connect their ports, hit Run. The panel underneath shows a summary, the raw results, an execution transcript, a debug view, and run history, so when something fails you're not guessing where.
+
+![Building a branching weather-check workflow with the node palette open](.github/readme/build-visually.png)
+
+Conditions branch with True/False outputs, a Loop node runs a sub-flow once per item, and Switch handles more than two paths. Anything downstream can pull in an upstream node's output with `{{Node Name.output.field}}`; see [Expressions](docs/guide/expressions.md) for the full syntax.
+
+## 40 nodes, seven categories
+
+| Category | Nodes |
+| - | - |
+| **Triggers** | Manual Trigger, Webhook, Schedule |
+| **Core Actions** | HTTP Request, Shell Command, Code (JS), Send Email, Desktop Notification, Database |
+| **Files & Storage** | File, Save to Folder, S3 Storage, Social Upload |
+| **Integrations** | Slack, Discord, GitHub, Google Sheets, Notion, Telegram, SendGrid, Stripe |
+| **AI** | AI Prompt, AI Agent, AI Memory, Text Splitter, Image Generation |
+| **Logic** | If / Condition, Switch, Loop (For Each), Stop, Merge, Collect Files |
+| **Utility** | Delay, Wait, Transform Data, JSON, Set Variable, Get Variable, Text to File, Output |
+
+
+Full parameters and outputs for each one: [Nodes Reference](docs/guide/nodes.md).
+
+## Every change is a version you can get back
+
+Aerini snapshots your workflow automatically as you edit, and you can save a named snapshot yourself before trying something risky. Version History compares any two snapshots field by field and restores either one. No more "I changed something three days ago and can't remember what."
+
+![Version History showing a list of snapshots with compare and restore options](.github/readme/version-history.png)
+
+## Plugins
+
+Node types you write yourself. Compile a Rust crate to `wasm32-wasip2`, then either drop the `.wasm` file (or an `.aerinipkg` bundle, if it's more than one node) onto the Aerini window, or install it from the dedicated Plugins panel. It shows up in the palette tagged as a Plugin, right next to the built-ins.
+
+Each plugin call runs sandboxed in its own Wasmtime instance: no filesystem access, a 64 MiB memory cap, and a 30-second wall-clock deadline per call. Outbound HTTP is allowed but filtered the same way built-in nodes are, so a plugin can't be used to reach your internal network. Aerini shows a signature status for every installed plugin (unsigned is normal for most community plugins, not a red flag by itself) and surfaces load errors instead of silently dropping a bad build.
+
+![The Plugins panel showing an installed plugin and the empty-state canvas](.github/readme/plugins.png)
+
+Start with [Plugin Authoring](docs/development/plugin-authoring.md), or copy `examples/plugin-template/`.
+
+## Background runs and keeping an eye on things
+
+A workflow with a Schedule or Webhook trigger keeps running while you work on something else. You don't need the canvas open. The Background Runs panel lists everything currently running, idle, or stopped; the Monitor panel next to it tracks memory use and lets you start or stop everything at once.
+
+![Monitor panel showing memory use and each workflow's run status](.github/readme/monitor.png)
+
+More on triggers and run history: [Background Runs](docs/guide/background-runs.md).
+
+## Running it unattended
+
+Aerini itself is built for one person on one machine, but a workflow can run without the desktop app open. `aerini-server` is the headless binary for that.
+
+Click **Export → Export for Server** on a workflow to generate a deployment package. The Linux Server target produces a zip with a self-installing systemd service, no Rust or Node required on the box you're deploying to.  
+  
+![Export for Server dialog with the Linux Server tab selected, listing required credentials and the status page port](.github/readme/export-server.png)  
+
+
+`aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. No prebuilt server binary is published yet, only the desktop installers, so building one yourself (Docker or from source) is currently the only way to get one. Full details: [Server Deployment](docs/operations/server-deploy.md).
+
+## Using the engine in your own program
+
+`aerini-engine` is a plain Rust crate: no Tauri, no UI dependency. Pull it into your own program, register your own nodes alongside or instead of the 40 built-ins, supply your own credential resolver and event sink, and run workflows headless. It's the same engine behind the desktop app and `aerini-server`, so retries, parallel execution, expressions, and plugins all behave the same way embedded as they do anywhere else.
+
+See [Embedding aerini-engine](docs/development/embedding.md) for a working example and what's safe to depend on across versions.
+
+## Requirements (building from source)
+
+| Tool | Version | Why |
+| - | - | - |
+| Rust (stable) | 1.95+ | Builds the engine and desktop shell |
+| Node.js | 20.19+, 22.13+, or 24+ | Only to run the frontend build, not needed to use the app itself |
+| Tauri CLI | 2.x | Packages the desktop app |
+
+
+The Code (JS) node runs on a Node.js runtime bundled inside Aerini. You don't need Node.js installed to use that node, only to build Aerini from source.
+
+## Installing
+
+Download the installer for your OS from **[aerini.org](https://aerini.org/)**, or grab the same files from the [Releases page](https://github.com/Panchak2d/aerini/releases): `.dmg` for macOS, `.msi` or `.exe` for Windows, `.deb` or `.AppImage` for Linux. No terminal needed.
+
+A few things worth knowing before your first launch:
+
+- **macOS** builds are Apple Silicon only right now, no Intel build yet. The app isn't signed with an Apple Developer certificate, so right-click it and choose Open the first time instead of double-clicking, or Gatekeeper will block it.
+
+- **Windows** installers aren't code-signed either, so SmartScreen will warn you. Click "More info," then "Run anyway." Normal for a project this size, not a sign anything's wrong.
+
+- **Linux** needs `webkit2gtk` 4.1, which most desktops already have. If Aerini won't launch and complains about a missing shared library, install `webkit2gtk-4.1` first (e.g. `libwebkit2gtk-4.1-0` on Debian/Ubuntu).
+
+Once it's running, [Getting Started](docs/getting-started/getting-started.md) walks through building and scheduling your first workflow.
+
+### Building from source
+
+```
+git clone https://github.com/Panchak2d/aerini      
+cd aerini      
+npm install      
+./scripts/fetch-node-binaries.sh      
+npm run dev
+```
+
+`fetch-node-binaries.sh` downloads and checksum-verifies the Node.js runtime Aerini bundles for the Code (JS) node. It's a one-time step per clone and the build fails without it. Needs `curl`, `tar`, `unzip` (or `powershell.exe` on Windows), and `sha256sum`/`shasum` on your PATH.
+
+The first build takes a few minutes while Rust compiles. After that, changes rebuild in seconds. `npm run build` produces a standalone installer under `src-tauri/target/release/bundle/`.
+
+> `dist/` is committed on purpose, Tauri reads frontend assets from it at build time. Don't add it to `.gitignore`. Details in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
 
 | Guide | What it covers |
-|---|---|
-| [Introduction](docs/index.md) | What Aerini is, why use it, what it can and can't do |
-| [Getting Started](docs/getting-started/getting-started.md) | Install, build your first workflow, run it, schedule it |
-| [Concepts](docs/getting-started/concepts.md) | What a workflow is, what nodes are, how everything fits together |
-| [Glossary](docs/glossary.md) | Plain-language definitions of every term used across these docs |
-| [Nodes Reference](docs/guide/nodes.md) | Every built-in node: parameters, outputs, and what each one does |
+| - | - |
+| [Introduction](docs/index.md) | What Aerini is, who it's for, what it can't do |
+| [Installation](docs/getting-started/installation.md) | Downloading and installing on each OS |
+| [Getting Started](docs/getting-started/getting-started.md) | Build your first workflow, run it, schedule it |
+| [Concepts](docs/getting-started/concepts.md) | What a workflow is, what a node is, how it fits together |
+| [Glossary](docs/glossary.md) | Every term used across these docs, defined plainly |
+| [Nodes Reference](docs/guide/nodes.md) | Every built-in node: parameters, outputs, what it does |
+| [Keyboard Shortcuts](docs/guide/keyboard-shortcuts.md) | Every shortcut, grouped the same way as the in-app list |
 | [Expressions](docs/guide/expressions.md) | `{{...}}` syntax for wiring node outputs into other nodes |
-| [Credentials](docs/guide/credentials.md) | Storing API keys securely and getting them from every supported service |
+| [Credentials](docs/guide/credentials.md) | Storing API keys and setting up every supported service |
 | [Background Runs](docs/guide/background-runs.md) | Schedules, webhook triggers, run history |
-| [Examples](docs/guide/examples.md) | Index of worked example workflows in [`examples/`](examples/) |
-| [Troubleshooting](docs/troubleshooting.md) | Common problems, organized by symptom |
+| [Version History](docs/guide/version-history.md) | Automatic and named snapshots, comparing, restoring |
+| [Plugins](docs/guide/plugins.md) | Installing and managing a `.wasm` plugin node |
+| [Monitor](docs/guide/monitor.md) | Memory use and run status across every workflow at once |
+| [Examples](docs/guide/examples.md) | Worked example workflows in [`examples/`](examples/) |
+| [Troubleshooting](docs/troubleshooting.md) | Common problems, by symptom |
 | [FAQ](docs/faq.md) | Short answers to common questions |
-| [Security](docs/guide/security.md) | Encryption, dangerous nodes, SSRF protection, server hardening |
-| [Widget Embedding](docs/guide/widget-embedding.md) | Dropping the chat widget into a web page, token scoping, security tradeoffs |
-| [Local Models](docs/guide/local-models.md) | Using Ollama and other OpenAI-compatible local servers with AI Prompt |
-| [Server Deployment](docs/operations/server-deploy.md) | Running workflows 24/7 on a Linux server |
+| [Security](docs/guide/security.md) | Encryption, dangerous nodes, SSRF protection, hardening a server |
+| [Chat Panel](docs/guide/chat-panel.md) | Chatting with a workflow inside the desktop app |
+| [Widget Embedding](docs/guide/widget-embedding.md) | Dropping the chat widget into a web page |
+| [Local Models](docs/guide/local-models.md) | Using Ollama and other OpenAI-compatible local servers |
+| [Server Deployment](docs/operations/server-deploy.md) | Running workflows 24/7 on Docker or a Linux box |
 | [Server CLI Reference](docs/operations/server-cli-reference.md) | Every `aerini-server serve`/`api` flag |
-| [Server API Reference](docs/operations/server-api-reference.md) | REST endpoints, SSE events, and scoped tokens exposed by `aerini-server --api` |
-| [Updating](docs/operations/updating.md) | Manual desktop update checks, server binary updates, workflow schema migration |
+| [Server API Reference](docs/operations/server-api-reference.md) | REST endpoints, SSE events, scoped tokens |
+| [Updating](docs/operations/updating.md) | Desktop updates, server binary updates, workflow schema migration |
+
 
 Developer guides:
 
 | Guide | What it covers |
-|---|---|
+| - | - |
 | [Architecture](docs/development/architecture.md) | How the engine, Tauri shell, and server binary fit together |
-| [Embedding aerini-engine](docs/development/embedding.md) | Use the engine as a Rust library in your own program |
-| [Custom Node Authoring](docs/development/node-authoring.md) | Adding new built-in node types to Aerini |
+| [Embedding aerini-engine](docs/development/embedding.md) | Using the engine as a Rust library in your own program |
+| [Custom Node Authoring](docs/development/node-authoring.md) | Adding a new built-in node type |
 | [Plugin Authoring](docs/development/plugin-authoring.md) | Writing and distributing `.wasm` plugin nodes |
 | [Desktop IPC Reference](docs/development/desktop-ipc-reference.md) | Every command the frontend can call into the Tauri shell |
-| [Workflow File Format](docs/reference/workflow-file-format.md) | The `.aerini`/`.json` workflow file schema |
-| [Schema Migrations](docs/reference/schema-migrations.md) | How workflow format changes are handled across versions |
+| [Workflow File Format](docs/reference/workflow-file-format.md) | The `.aerini`/`.json` schema |
+| [Schema Migrations](docs/reference/schema-migrations.md) | How the workflow format changes across versions |
 | [Testing](docs/development/testing.md) | Where tests live and how to run them |
 
----
-
-## Node categories
-
-Aerini ships 40 built-in nodes:
-
-**Triggers:** Manual Trigger, Schedule, Webhook
-
-**Logic:** If / Condition, Switch, Loop (For Each), Merge, Stop, Collect Files
-
-**Flow Control:** Delay, Wait
-
-**AI:** AI Prompt, AI Agent, AI Memory, Text Splitter, Image Generation
-
-**Actions:** HTTP Request, Shell Command, Code (JS), Send Email, SendGrid, File, Desktop Notification, Save to Folder, Social Upload, Database, S3 Storage
-
-**Integrations:** Slack, Discord, GitHub, Google Sheets, Notion, Telegram, Stripe
-
-**Data & Utility:** Transform Data, JSON, Set Variable, Get Variable, Output, Text to File
-
----
-
-## Plugins
-
-Aerini supports `.wasm` plugin nodes. Write a new node type in Rust, compile it to `wasm32-wasip2`, and install it through **Settings → Plugins** — pick a plugin folder, then install via the file picker or just drag the `.wasm` file onto the window. Plugin nodes appear in the palette automatically (marked with a small "P" badge so you can tell them apart from built-ins) and execute with the same isolation guarantees as built-in nodes — each call runs in a sandboxed Wasmtime instance with a 64 MiB memory limit and outbound HTTP access but no filesystem access.
-
-The Settings panel also lists installed plugins and surfaces any that failed to load (with the reason) instead of just dropping them, so a bad build doesn't disappear silently.
-
-See [Plugin Authoring](docs/development/plugin-authoring.md) to get started, or copy `examples/plugin-template/` as a starting point.
-
----
-
-## Embedding the engine
-
-`aerini-engine` is a standalone Rust crate — the workflow model, executor, scheduler, and node registry don't depend on Tauri or any UI. You can pull it into your own Rust program, register your own nodes alongside (or instead of) the 40 built-ins, supply your own credential resolver and event sink, and run workflows headless — no desktop app, no database required unless you want run history.
-
-This is the same engine that powers the desktop app and `aerini-server`, so anything documented for those (retries, parallel execution, expressions, plugins) works the same way when embedded.
-
-See [Embedding aerini-engine](docs/development/embedding.md) for a complete working example, the stable API surface, and what's safe to depend on across versions.
-
----
-
-## Requirements
-
-| Tool | Version | Why |
-|---|---|---|
-| Rust (stable) | 1.77+ | Builds the engine and desktop shell |
-| Node.js | 18+ | Only to run `npm`/Vite while building from source — not needed to use the app |
-| Tauri CLI | 2.x | Packages the desktop app |
-
-The Code (JS) node runs on a Node.js runtime bundled with Aerini itself. You don't need Node.js installed to use that node — only to build Aerini from source (above).
-
----
-
-## Installing
-
-**Most people want this.** Download the installer for your OS from the [Releases page](https://github.com/Panchak2d/aerini/releases) — `.dmg` (macOS), `.msi`/`.exe` (Windows), or `.deb`/`.AppImage` (Linux). No terminal, no Rust, no Node.js required. Run it like any other desktop app. See [Getting Started](docs/getting-started/getting-started.md) for what to do next.
-
-### Building from source (contributors / unsupported platforms)
-
-```bash
-git clone https://github.com/Panchak2d/aerini
-cd aerini
-npm install
-./scripts/fetch-node-binaries.sh
-npm run dev
-```
-
-`fetch-node-binaries.sh` downloads and checksum-verifies the Node.js runtime that gets bundled into Aerini (used by the Code (JS) node) and stages it under `src-tauri/binaries/`. Required once per clone — the build fails without it. Needs `curl`, `tar`, `unzip` (or `powershell.exe` on Windows), and `sha256sum`/`shasum` on your PATH, plus network access to nodejs.org.
-
-The first build takes 2-5 minutes while Rust compiles. After that, changes rebuild in seconds.
-
-To produce a standalone installer: `npm run build`. The output goes to `src-tauri/target/release/bundle/`.
-
-> `dist/` is intentionally committed. Tauri reads frontend assets from it at build time. Do not add it to `.gitignore`. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
 
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
-You can use, modify, and distribute Aerini freely. If you modify Aerini and run it as a network-accessible service, you must release your modifications under AGPL-3.0.
-
----
-
-## Commercial licensing
-
-Aerini is open source under [AGPL-3.0](LICENSE). Under AGPL-3.0:
-
 - You can use, modify, and self-host Aerini freely.
-- If you run a **modified version** of `aerini-server` as a **network-accessible service** for others, you must publish your modifications under the same license.
-- Running the **unmodified** binary as an internal tool for your own team does not trigger this obligation.
 
-A commercial license removes the AGPL copyleft obligation entirely. No source disclosure required, proprietary modifications permitted.
+- If you distribute a modified version of Aerini — including running a modified `aerini-server` as a network service for others — you have to publish those modifications under AGPL-3.0 too.
 
-You likely need a commercial license if you are building a product or SaaS on top of Aerini, distributing modified Aerini to clients, deploying a modified `aerini-server` as a service for others, or if your legal team requires a warranty or compliance document.
+- Running the **unmodified** binary as an internal tool for your own team doesn't trigger that.
 
-[View pricing and license terms](https://aerini.org/pricing)
+### Need a commercial license?
 
-For enterprise or volume licensing: see [CONTACT.md](CONTACT.md)
+A commercial license removes the copyleft obligation for one named product or service of yours: no source disclosure, proprietary modifications allowed, and no limit on that product's end customers. Each additional product needs its own license. The license also requires you to pass its AI-training restriction on to your own end customers. You probably want one if you're building a product or SaaS on top of Aerini, distributing a modified copy to clients, running a modified `aerini-server` as a service for others, or your legal team wants a license certificate on file. You accept the terms electronically at checkout and the certificate is issued automatically, so there is nothing to sign. The software itself is provided as-is, with no warranty.
+
+[Pricing](https://aerini.org/pricing) · [License terms](https://aerini.org/license-terms) · [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md) · enterprise or volume licensing: [CONTACT.md](CONTACT.md)
+
+See [Why Aerini is dual-licensed](docs/dual-licensing.md) for the reasoning behind this model, including why a CLA is required from contributors.
 
 ## Privacy
 
-Aerini collects no telemetry, analytics, usage data, or crash reports. Beyond what you explicitly configure in your workflows, the only outbound connection Aerini's own UI makes is loading the Inter font from Google Fonts over HTTPS — see [Security §Desktop security model](docs/guide/security.md#desktop-security-model) for details. See the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
+No telemetry, no analytics, no crash reports. The only outbound connection Aerini's own interface makes on its own is loading the Inter font from Google Fonts over HTTPS, everything else is whatever your workflows are configured to do. See [Security §Desktop security model](docs/guide/security.md#desktop-security-model), or the [transparency report template](transparency/TEMPLATE.md) for the full audit trail.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). A CLA is required before your first PR merges. CLA Assistant posts a one-click sign link on the PR itself, GitHub OAuth, takes a few seconds.
 
-**CLA:** Required before your first PR is merged. [CLA Assistant](https://cla-assistant.io) posts a one-click sign link on your first PR. GitHub OAuth, done in seconds.
+## Community & support
+
+- Questions, workflow help, feature ideas: [GitHub Discussions](https://github.com/Panchak2d/aerini/discussions)
+
+- Bugs: [GitHub Issues](https://github.com/Panchak2d/aerini/issues)
+
+- Funding development directly: [Patreon](https://www.patreon.com/c/Panchak2d)
+

@@ -49,10 +49,10 @@
   font-size: 15px;
   caret-color: var(--blue);
 }
-#palette-search::placeholder { color: var(--t3); }
+#palette-search::placeholder { color: var(--t2); }
 #palette-hint {
   font-size: 11px;
-  color: var(--t3);
+  color: var(--t2);
   border: 1px solid var(--bd);
   border-radius: 4px;
   padding: 2px 5px;
@@ -65,7 +65,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .07em;
-  color: var(--t3);
+  color: var(--t2);
   padding: 7px 9px 2px;
 }
 .palette-result {
@@ -93,8 +93,8 @@
 }
 .icon-svg { display: block; flex-shrink: 0; }
 .palette-result-name { font-size: 13px; color: var(--t1); font-weight: 500; }
-.palette-result-cat  { font-size: 11px; color: var(--t3); }
-.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono); }
+.palette-result-cat  { font-size: 11px; color: var(--t2); }
+.palette-result-kbd  { margin-left: auto; font-size: 10px; color: var(--t2); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono); }
 /* CSS hooks replacing palette-manager.ts's two inline .style.* writes
    (wire-drop-mismatch dimming, mismatch-click flash). Same visual result, now
    themeable/adjustable from CSS instead of hardcoded in JS. No transition on
@@ -103,19 +103,34 @@
 .palette-result--flash-error { outline: 1px solid var(--red); }
 
 
+/* ── MODAL ENTRANCE MOTION (shared: shortcuts / settings / workflow settings) ── */
+
+@keyframes modal-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-box-in { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  #shortcuts-modal, #settings-modal, #wf-settings-modal,
+  .shortcuts-box, .settings-box { animation: none; }
+}
+
 /* ── SHORTCUTS MODAL ────────────────────────────────────────────────────────── */
 
-#shortcuts-modal { position: fixed; inset: 0; background: rgba(0,0,0,.68); z-index: 500; display: flex; align-items: center; justify-content: center; }
+#shortcuts-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; animation: modal-backdrop-in 120ms ease; }
 #shortcuts-modal.hidden { display: none; }
-.shortcuts-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 12px; width: 440px; overflow: hidden; box-shadow: 0 28px 56px rgba(0,0,0,.5); }
-.shortcuts-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--bd); font-size: 14px; font-weight: 600; }
-.shortcuts-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 14px; }
-.shortcuts-group { display: flex; flex-direction: column; gap: 4px; }
-.shortcuts-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t3); margin-bottom: 3px; }
-.shortcut-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--t2); padding: 2px 0; }
-.shortcut-note { font-size: 10px; color: var(--t3); margin-left: 4px; }
-.shortcut-keys { display: flex; gap: 3px; }
-.shortcut-keys kbd { font-size: 11px; color: var(--t1); background: var(--bg3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono); }
+.shortcuts-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 12px; width: 440px; max-height: 82vh; overflow-y: auto; box-shadow: 0 28px 56px rgba(0,0,0,.5); animation: modal-box-in 140ms cubic-bezier(.16,1,.3,1); }
+.shortcuts-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--bd); font-size: 14px; font-weight: 600; color: var(--t1); position: sticky; top: 0; background: var(--bg2); }
+.shortcuts-body { padding: 8px 18px 16px; display: flex; flex-direction: column; }
+.shortcuts-group { display: flex; flex-direction: column; gap: 1px; padding: 12px 0 8px; }
+.shortcuts-group + .shortcuts-group { border-top: 1px solid var(--bd); }
+.shortcuts-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t2); margin-bottom: 4px; }
+.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--t2); padding: 5px 6px; margin: 0 -6px; border-radius: 6px; transition: background var(--trans); }
+.shortcut-row:hover { background: var(--bg3); }
+.shortcut-row-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.shortcut-desc { font-size: 10px; color: var(--t2); }
+.shortcut-note { font-size: 10px; color: var(--t2); margin-left: 4px; }
+.shortcut-keys { display: flex; gap: 4px; flex-shrink: 0; }
+.shortcut-keys kbd { font-size: 11px; color: var(--t1); background: var(--bg3); border: 1px solid var(--bd); border-radius: 4px; padding: 2px 7px; font-family: var(--font-mono); box-shadow: 0 1px 0 rgba(0,0,0,.2); }
+.shortcut-row:hover .shortcut-keys kbd { background: var(--bg4); }
 
 
 /* ── IMPORT PREVIEW MODAL ───────────────────────────────────────────────────── */
@@ -129,10 +144,10 @@
 .import-workflow-desc { font-size: 12px; color: var(--t2); line-height: 1.6; margin-bottom: 14px; }
 .import-meta { display: flex; gap: 14px; padding: 11px 22px; background: var(--bg3); border-top: 1px solid var(--bd); border-bottom: 1px solid var(--bd); }
 .import-meta-item { display: flex; flex-direction: column; gap: 2px; }
-.import-meta-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--t3); }
+.import-meta-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--t2); }
 .import-meta-value { font-size: 13px; color: var(--t1); font-weight: 500; }
 .import-requirements { padding: 11px 22px; border-bottom: 1px solid var(--bd); }
-.import-req-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--t3); margin-bottom: 7px; }
+.import-req-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--t2); margin-bottom: 7px; }
 .import-req-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--t2); padding: 2px 0; }
 .import-req-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
 .import-actions { display: flex; gap: 9px; padding: 14px 22px; }
@@ -144,32 +159,46 @@
 
 /* ── SETTINGS MODALS ────────────────────────────────────────────────────────── */
 
-#settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; }
+#settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; animation: modal-backdrop-in 120ms ease; }
 #settings-modal.hidden { display: none; }
-#wf-settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; }
+#wf-settings-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 500; display: flex; align-items: center; justify-content: center; animation: modal-backdrop-in 120ms ease; }
 #wf-settings-modal.hidden { display: none; }
-.settings-toggle { width: 38px; height: 22px; appearance: none; background: var(--color-surface-3); border-radius: 11px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s; border: 1px solid var(--bd); }
+.settings-toggle { width: 38px; height: 22px; appearance: none; background: var(--color-surface-3); border-radius: 11px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s, border-color .15s; border: 1px solid var(--bd); }
+.settings-toggle:hover { border-color: var(--t3); }
 .settings-toggle:checked { background: var(--accent); border-color: var(--accent); }
 .settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .settings-toggle:checked::after { transform: translateX(16px); }
-.settings-number-input { flex: 0 0 52px; width: 52px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; }
+.settings-number-input { flex: 0 0 68px; width: 68px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; }
 /* overrides base.css's global `select { width: 100% }` (higher
    specificity, one class vs. one type selector, wins regardless of source
    order) so the theme picker sizes to its content like the row's other
    controls (.settings-toggle/.settings-number-input) instead of stretching
    across the remaining flex space. */
 .settings-select { flex: 0 0 auto; width: auto; min-width: 140px; }
-.settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); }
-.settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; }
-.settings-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 18px; }
-.settings-group { display: flex; flex-direction: column; gap: 8px; }
-.settings-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t3); }
+.settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); animation: modal-box-in 140ms cubic-bezier(.16,1,.3,1); }
+.settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; color: var(--t1); position: sticky; top: 0; background: var(--bg2); z-index: 1; }
+.settings-body { padding: 14px 20px 18px; display: flex; flex-direction: column; gap: 16px; }
+.settings-group { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; }
+.settings-group:first-child { padding-top: 0; }
+.settings-group + .settings-group { border-top: 1px solid var(--bd); }
+.settings-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t2); }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; flex-wrap: wrap; }
 .settings-row[hidden] { display: none; }
+#settings-modal .settings-row,
+#wf-settings-modal .settings-row {
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  transition: background var(--trans);
+}
+#settings-modal .settings-row:hover,
+#wf-settings-modal .settings-row:hover { background: var(--bg3); }
 #wf-settings-modal .settings-row { align-items: flex-start; }
 #wf-settings-modal .settings-row > div { flex: 1; min-width: 0; }
 .settings-label { font-size: 13px; color: var(--t1); font-weight: 400; }
-.settings-desc { font-size: 11px; color: var(--t3); margin-top: 2px; line-height: 1.45; }
+#settings-modal .settings-label,
+#wf-settings-modal .settings-label { font-weight: 500; }
+.settings-desc { font-size: 11px; color: var(--t2); margin-top: 2px; line-height: 1.45; }
 .settings-text-input { width: 100%; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 6px 9px; }
 .settings-text-input:focus { outline: 2px solid var(--color-focus); outline-offset: -1px; }
 .wf-tags-editor { display: flex; flex-direction: column; gap: 8px; }
@@ -179,9 +208,6 @@
 .wf-tag-chip-remove { background: none; border: none; color: var(--t3); cursor: pointer; font-size: 10px; padding: 2px; border-radius: 3px; line-height: 1; }
 .wf-tag-chip-remove:hover { color: var(--red); background: rgba(248,113,113,.1); }
 .wf-tag-chip-remove:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
-
-.browser-notice { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.28); border-radius: 7px; padding: 9px 11px; font-size: 12px; color: var(--amber); line-height: 1.6; }
-.browser-notice strong { display: block; font-size: 12px; margin-bottom: 2px; }
 
 .btn-sm { padding: 4px 10px; background: var(--bg4); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 12px; font-family: inherit; cursor: pointer; transition: background var(--trans), border-color var(--trans); white-space: nowrap; }
 .btn-sm:hover { background: var(--bg3); border-color: var(--t3); }
@@ -193,17 +219,33 @@
 .settings-row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 
 .plugin-list-container { display: flex; flex-direction: column; gap: 4px; }
-.plugin-list-empty { font-size: 11px; color: var(--t3); padding: 4px 0; }
-.plugin-list-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; }
+.plugin-list-empty { font-size: 11px; color: var(--t2); padding: 4px 0; }
+.plugin-list-item { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 28px 6px 8px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; }
 .plugin-list-item-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .plugin-list-item-name { font-size: 12px; color: var(--t1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.plugin-list-item-meta { font-size: 10px; color: var(--t3); font-family: monospace; }
+.plugin-list-item-meta { font-size: 10px; color: var(--t2); font-family: monospace; overflow-wrap: anywhere; }
+.plugin-item-remove {
+  position: absolute; top: 6px; right: 6px;
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex-shrink: 0;
+  background: none; border: 1px solid transparent; border-radius: 5px;
+  color: var(--t3); cursor: pointer; transition: all var(--trans);
+}
+.plugin-item-remove:hover { color: var(--red); background: rgba(248,113,113,.1); border-color: rgba(248,113,113,.3); }
+.plugin-item-remove:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 .plugin-list-item-error { font-size: 10px; color: var(--red); }
 .plugin-list-item-warning { font-size: 10px; color: var(--amber); }
 .plugin-list-item-signature { font-size: 10px; }
 .plugin-list-item-signature--positive { color: var(--green); }
-.plugin-list-item-signature--neutral { color: var(--t3); }
+.plugin-list-item-signature--neutral { color: var(--t2); }
 .plugin-list-item-signature--warning { color: var(--amber); }
+
+.plugin-pack-group { border: 1px solid var(--bd); border-radius: 8px; padding: 6px; margin-bottom: 6px; }
+.plugin-pack-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 4px 8px; }
+.plugin-pack-name { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--t2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-pack-members { display: flex; flex-direction: column; gap: 4px; padding-left: 4px; }
+.btn-plugin-pack-remove:hover { color: var(--red); background: rgba(248,113,113,.1); border-color: rgba(248,113,113,.3); }
+.btn-plugin-pack-remove:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 
 
 /* ── CONTEXT MENU ───────────────────────────────────────────────────────────── */
@@ -315,7 +357,7 @@
 
 .onboarding-version {
   font-size: 11px;
-  color: var(--t3);
+  color: var(--t2);
   background: var(--bg3);
   border: 1px solid var(--bd);
   border-radius: 20px;
@@ -375,7 +417,7 @@
 
 .onboarding-step-desc {
   font-size: 12px;
-  color: var(--t3);
+  color: var(--t2);
   line-height: 1.5;
 }
 
@@ -415,7 +457,7 @@
 .onboarding-btn-skip {
   background: none;
   border: none;
-  color: var(--t3);
+  color: var(--t2);
   font-size: 12px;
   cursor: pointer;
   padding: 8px 12px;
@@ -450,7 +492,7 @@
   padding: 4px 8px;
   font-size: 11px;
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
   pointer-events: auto;
   z-index: 9999;
   box-shadow: 0 2px 8px rgba(0,0,0,.4);
@@ -523,16 +565,23 @@
 
 
 .workflow-rename-hint {
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
   font-size: 11px;
+  background: none;
+  border: none;
+  border-radius: 4px;
   color: var(--color-text-muted);
   opacity: 0;
-  transition: opacity 200ms ease;
+  transition: opacity 200ms ease, color var(--trans), background var(--trans);
   cursor: pointer;
   user-select: none;
   margin-left: 2px;
   padding: 4px 6px;
   margin-right: -6px;
 }
+.workflow-rename-hint:focus-visible { opacity: 1; }
 #toolbar:hover .workflow-rename-hint,
 .workflow-title:hover ~ .workflow-rename-hint {
   opacity: 0.6;
@@ -647,7 +696,8 @@
   margin: 0;
 }
 
-.panel-close-btn {
+.panel-close-btn,
+.panel-close {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -661,7 +711,9 @@
   transition: color var(--trans), background var(--trans);
   flex-shrink: 0;
 }
-.panel-close-btn:hover { color: var(--t1); background: var(--bg4); }
-.panel-close-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.panel-close-btn:hover,
+.panel-close:hover { color: var(--t1); background: var(--bg4); }
+.panel-close-btn:focus-visible,
+.panel-close:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 /* export-server panel styles → export-server.css */

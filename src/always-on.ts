@@ -48,6 +48,7 @@ export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManag
   btn.title = alwaysOn
     ? "Run on launch is ON — this workflow starts automatically when Aerini opens. Click to disable."
     : "Run on launch is OFF — click to make this workflow start automatically when Aerini opens.";
+  btn.setAttribute("data-tooltip", alwaysOn ? "Run on launch is ON" : "Run on launch is OFF");
 }
 
 export function bindAlwaysOnToggle(canvas: Canvas, wfManager: WorkflowManager, toast: Toast): void {
@@ -71,11 +72,16 @@ export function bindAlwaysOnToggle(canvas: Canvas, wfManager: WorkflowManager, t
       }
     }
 
+    // Button is icon + text node, not plain text -- swap the text node
+    // directly so the SVG survives, instead of overwriting textContent.
+    const labelNode = [...btn.childNodes].find(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim());
+    const originalLabel = labelNode?.textContent ?? "";
     btn.disabled = true;
+    if (labelNode) labelNode.textContent = enabling ? "Starting…" : "Stopping…";
     try {
       if (enabling) {
         const snapshot = await wfManager.prepareForBgRun();
-        if (!snapshot) { btn.disabled = false; return; }
+        if (!snapshot) { btn.disabled = false; if (labelNode) labelNode.textContent = originalLabel; return; }
         const jobs        = await getScheduledJobs();
         const existingJob = jobs.find((j: ScheduledJobRow) => j.workflow_id === wfManager.currentId);
         const isRunning   = existingJob?.status === "active";
@@ -91,6 +97,7 @@ export function bindAlwaysOnToggle(canvas: Canvas, wfManager: WorkflowManager, t
       btn.title = enabling
         ? "Run on launch is ON — this workflow starts automatically when Aerini opens. Click to disable."
         : "Run on launch is OFF — click to make this workflow start automatically when Aerini opens.";
+      btn.setAttribute("data-tooltip", enabling ? "Run on launch is ON" : "Run on launch is OFF");
       toast(
         enabling ? "Run on launch enabled — workflow will start on every app launch" : "Run on launch disabled",
         enabling ? "success" : "info",
@@ -99,6 +106,7 @@ export function bindAlwaysOnToggle(canvas: Canvas, wfManager: WorkflowManager, t
       toast(`Could not update run on launch: ${e}`, "error");
     } finally {
       btn.disabled = false;
+      if (labelNode) labelNode.textContent = originalLabel;
     }
   });
 }

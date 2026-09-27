@@ -159,7 +159,7 @@ describe("plugin-settings — remove confirm gate", () => {
   it("normal case: OK confirms and removes the plugin, message names it by display_name", async () => {
     const { invoke, toast } = await loadWithOnePlugin();
 
-    const removeBtn = document.querySelector<HTMLButtonElement>(".btn-plugin-remove")!;
+    const removeBtn = document.querySelector<HTMLButtonElement>(".plugin-item-remove")!;
     expect(removeBtn).not.toBeNull();
     removeBtn.click();
     await flush();
@@ -178,7 +178,7 @@ describe("plugin-settings — remove confirm gate", () => {
   it("edge case: Cancel leaves the plugin installed — remove_plugin never invoked", async () => {
     const { invoke, toast } = await loadWithOnePlugin();
 
-    document.querySelector<HTMLButtonElement>(".btn-plugin-remove")!.click();
+    document.querySelector<HTMLButtonElement>(".plugin-item-remove")!.click();
     await flush();
     document.getElementById("confirm-cancel")!.click();
     await flush();

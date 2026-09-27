@@ -257,16 +257,16 @@ function buildItem(
   const badgeText = isInterrupted ? "INTERRUPTED" : record.success ? "OK" : "FAIL";
   // Replay needs a real recorded result — an interrupted/still-running row's
   // result_json is '' (see save_run_started), nothing to replay from.
-  const replayBtn = isInterrupted ? "" : `<button class="history-replay-btn" title="Run again with this run's recorded trigger input">↻</button>`;
+  const replayBtn = isInterrupted ? "" : `<button class="history-replay-btn" title="Run again with this run's recorded trigger input" data-tooltip="Run again with this input">↻</button>`;
   item.innerHTML = `
     <div class="history-item-row">
       <span class="history-badge ${record.success && !isInterrupted ? "history-badge-ok" : "history-badge-fail"}">${badgeText}</span>
-      <span class="history-name">${escapeHtml(record.workflow_name)}</span>
+      <span class="history-name" title="${escapeHtml(record.workflow_name)}">${escapeHtml(record.workflow_name)}</span>
       <span class="history-dur">${isInterrupted ? "" : dur}</span>
       ${replayBtn}
-      <button class="history-del-btn" title="Delete this run">✕</button>
+      <button class="history-del-btn" title="Delete this run" data-tooltip="Delete this run">✕</button>
     </div>
-    <div class="history-meta"><span title="${dateStr} · ${timeStr}" aria-label="${dateStr} at ${timeStr}">${relativeTime(ranAt)}</span></div>`;
+    <div class="history-meta"><span title="${dateStr} · ${timeStr}" data-tooltip="${dateStr} · ${timeStr}" aria-label="${dateStr} at ${timeStr}">${relativeTime(ranAt)}</span></div>`;
   item.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).closest(".history-del-btn, .history-replay-btn")) return;
     if (isInterrupted) return;
@@ -278,12 +278,15 @@ function buildItem(
     e.preventDefault();
     item.click();
   });
-  item.querySelector<HTMLButtonElement>(".history-del-btn")!.addEventListener("click", async (e) => {
+  const delBtn = item.querySelector<HTMLButtonElement>(".history-del-btn")!;
+  delBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
+    delBtn.disabled = true;
     try {
       await deleteRunRecord(record.id);
       item.remove();
     } catch (err) {
+      delBtn.disabled = false;
       console.error("Failed to delete run record:", err);
     }
   });

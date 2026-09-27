@@ -36,14 +36,14 @@ describe("openHistoryDrawer — History tab click wiring", () => {
     setDom();
     const rm = makeManager();
     rm.setCurrentWorkflow("wf-1", "First");
-    rm.openHistoryDrawer("First");
+    rm.openHistoryDrawer();
 
     const historyTab = document.querySelector<HTMLElement>("#drawer-tabs .drawer-tab")!;
     const perfTab     = document.getElementById("drawer-tab-performance")!;
     expect(historyTab.textContent).toBe("History");
     expect(historyTab.classList.contains("active")).toBe(true);
 
-    // Navigate away, as in the repro's step 1 ("Open the Performance tab").
+    // Navigate away to the Performance tab.
     perfTab.click();
     expect(document.getElementById("output-content")!.classList.contains("hidden")).toBe(true);
     expect(document.getElementById("output-content-performance")!.classList.contains("hidden")).toBe(false);
@@ -60,7 +60,7 @@ describe("openHistoryDrawer — History tab click wiring", () => {
     setDom();
     const rm = makeManager();
     rm.setCurrentWorkflow("wf-1", "First");
-    rm.openHistoryDrawer("First");
+    rm.openHistoryDrawer();
 
     const content = document.getElementById("output-content")!;
     expect(content.children.length).toBeGreaterThan(0); // renderHistoryPanel() appended something

@@ -85,3 +85,25 @@ describe("popover lifecycle — document listener cleanup", () => {
     expect(removeSpy.mock.calls.filter(c => c[0] === "mousedown").length).toBe(1);
   });
 });
+
+describe("popover lifecycle — auto-focus target (N-11)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    document.body.innerHTML = "";
+  });
+
+  afterEach(() => {
+    closePopover(false);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("normal case: focus lands on the first body field, not the header's Test button", async () => {
+    await openPopover(makeNode("n1"));
+
+    const testBtn = document.querySelector(".popover-test-btn");
+    expect(testBtn).not.toBeNull();
+    expect(document.activeElement).not.toBe(testBtn);
+    expect(document.activeElement?.closest(".popover-body")).not.toBeNull();
+  });
+});

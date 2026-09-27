@@ -165,6 +165,7 @@ export function mkCustomSelect(
   const labelEl = document.createElement("span");
   labelEl.className = "csel-label";
   labelEl.textContent = current || options[0] || "";
+  labelEl.title = current || options[0] || "";
 
   const arrow = document.createElement("span");
   arrow.className = "csel-arrow";
@@ -216,6 +217,7 @@ export function mkCustomSelect(
     const opt = options[idx];
     if (!opt) return;
     labelEl.textContent = opt;
+    labelEl.title = opt;
     optionEls.forEach((el, i) => {
       el.classList.toggle("selected", i === idx);
       el.setAttribute("aria-selected", i === idx ? "true" : "false");

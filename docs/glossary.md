@@ -93,7 +93,7 @@ The category a node carries for organizing the node picker (for example, Action 
 ## Plugins and sandboxing
 
 ### Plugin
-A node type added to Aerini without modifying or recompiling it: a compiled `.wasm` file you install through Settings. Plugin nodes show up in the node picker alongside built-ins, marked with a small "P" badge.
+A node type added to Aerini without modifying or recompiling it: a compiled `.wasm` file you install through Settings. Plugin nodes show up in the node picker alongside built-ins, marked with a "Plugin" tag (also in the node info tooltip and the node's config panel), and carry a small "P" chip on the canvas.
 
 ### WASM
 Short for WebAssembly, a portable, sandboxed binary format. Aerini plugins are compiled to WASM, which is what lets them run safely alongside the built-in engine without being written in a specific language or trusted with full access to your machine.

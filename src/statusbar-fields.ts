@@ -25,6 +25,7 @@ export function initMemChip(wfManager: WorkflowManager): { refresh: () => void }
     // an inert "—", not a dead button that throws on click.
     chip.disabled = true;
     chip.title = "Memory usage — desktop app only";
+    chip.setAttribute("data-tooltip", "Memory usage — desktop app only");
     return { refresh: () => {} };
   }
 
@@ -56,6 +57,7 @@ export function initMemChip(wfManager: WorkflowManager): { refresh: () => void }
       bgBadge.title = data.length
         ? `${data.length} run${data.length === 1 ? "" : "s"} running, using ${formatBytes(bgTotal)} total`
         : "";
+      bgBadge.setAttribute("data-tooltip", bgBadge.title);
     }
 
     if (currentData.length === 0) {
@@ -108,7 +110,7 @@ export function initMemChip(wfManager: WorkflowManager): { refresh: () => void }
     currentData.forEach((run, i) => {
       const runEl = runEls[i];
       const nameEl = runEl.querySelector<HTMLElement>(".mem-run-name");
-      if (nameEl) nameEl.textContent = resolveName();
+      if (nameEl) { const n = resolveName(); nameEl.textContent = n; nameEl.title = n; }
 
       const rowLabels = ["Run overhead", ...run.nodes.map(n => cap(n.node_type_id))];
       const rowBytes  = [run.live_bytes, ...run.nodes.map(n => n.live_bytes)];
@@ -116,7 +118,7 @@ export function initMemChip(wfManager: WorkflowManager): { refresh: () => void }
       rowLabels.forEach((label, j) => {
         const rowEl = rowEls[j];
         const nameSpan = rowEl.querySelector<HTMLElement>(".mem-row-name");
-        if (nameSpan) nameSpan.textContent = label;
+        if (nameSpan) { nameSpan.textContent = label; nameSpan.title = label; }
         const bar = rowEl.querySelector<HTMLElement>(".mem-row-bar i");
         if (bar) bar.style.width = `${Math.min(100, rowBytes[j] / maxRowBytes * 100)}%`;
       });
@@ -153,14 +155,14 @@ export function initStatusBarFields(
   bar.innerHTML = `
     <span class="statusbar-field">Nodes <b id="stat-nodes">0</b></span>
     <span class="statusbar-sep"></span>
-    <span class="statusbar-field">Conn <b id="stat-conn">0</b></span>
+    <span class="statusbar-field" data-tooltip="Connections between nodes">Conn <b id="stat-conn">0</b></span>
     <span class="statusbar-sep"></span>
     <span class="statusbar-field">Selected <b id="stat-selected">0</b></span>
     <span class="statusbar-sep"></span>
     <span class="statusbar-field">Zoom <b id="stat-zoom">100%</b></span>
     <span class="statusbar-sep"></span>
     <span class="mem-chip-wrap">
-      <button type="button" class="mem-chip" id="mem-chip" data-level="idle" aria-expanded="false" aria-haspopup="true" title="Memory usage for the open workflow — live while running, last run's total otherwise">
+      <button type="button" class="mem-chip" id="mem-chip" data-level="idle" aria-expanded="false" aria-haspopup="true" title="Memory usage for the open workflow — live while running, last run's total otherwise" data-tooltip="Memory usage for the open workflow">
         <span class="mem-dot" aria-hidden="true"></span>MEM <b id="mem-chip-value">—</b>
       </button>
       <div class="mem-popover" id="mem-popover" hidden></div>

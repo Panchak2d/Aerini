@@ -438,6 +438,24 @@ async fn pick_plugin_file_dialog(app: tauri::AppHandle) -> Option<String> {
     }
 }
 
+/// Open a native file picker dialog with no extension filter and return the
+/// chosen path. Returns null (None → JS null) when the user cancels. Unlike
+/// `pick_plugin_file_dialog` above, this is for node config fields (e.g. a
+/// plugin's own `x-aerini-path-picker` schema flag -- see
+/// popover/field-renderer.ts's renderPathPickerField) that can point at any
+/// file, not a fixed type this binary already knows about.
+#[tauri::command]
+async fn pick_file_dialog(app: tauri::AppHandle) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<tauri_plugin_dialog::FilePath>>();
+    app.dialog()
+        .file()
+        .pick_file(move |path| { let _ = tx.send(path); });
+    match rx.await {
+        Ok(Some(path)) => path.as_path().map(|p| p.display().to_string()),
+        _ => None,
+    }
+}
+
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
 /// Strips `/`, `\`, and `..` from the filename before constructing the path.
@@ -803,6 +821,7 @@ pub fn run() {
             commands::providers::list_provider_models,
             pick_folder_dialog,
             pick_plugin_file_dialog,
+            pick_file_dialog,
             write_temp_file,
         ])
         .run(tauri::generate_context!())

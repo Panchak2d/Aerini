@@ -1,0 +1,23 @@
+# Deny-all, allow-list. Only what Dockerfile actually COPYs is sent to the
+# daemon — if the Dockerfile starts COPYing something new, add it here too.
+*
+
+!Cargo.toml
+!Cargo.lock
+!NODE_VERSION
+!aerini-engine
+!aerini-engine/**
+!aerini-server
+!aerini-server/**
+
+# Re-exclude local build/dev artifacts even inside the allow-listed crates
+# (won't exist in a clean checkout, but will on a dev machine).
+aerini-engine/target
+aerini-engine/**/target
+aerini-server/target
+aerini-server/**/target
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key

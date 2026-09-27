@@ -25,33 +25,8 @@ body.monitor-mode #output-drawer { display: none !important; }
   border-bottom: 1px solid var(--bd);
 }
 .monitor-stat { display: flex; flex-direction: column; gap: 2px; }
-.monitor-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--t3); }
+.monitor-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--t2); }
 .monitor-stat-val   { font-family: var(--font-mono); font-size: 15px; color: var(--t1); }
-
-/* Memory chip: a plain button reset, not mem-chip's pill sizing — this
-   sits in the header next to the plain "Active runs" stat and needs to
-   read the same size, just wrapped in something clickable. */
-.monitor-mem-btn {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: none; border: 1px solid transparent; border-radius: 4px;
-  padding: 2px 4px; cursor: pointer; font: inherit; color: inherit;
-  transition: border-color 80ms ease, background 80ms ease;
-}
-.monitor-mem-btn:hover, .monitor-mem-btn[aria-expanded="true"] {
-  border-color: var(--bd); background: var(--bg3);
-}
-.monitor-mem-btn[data-level="active"] .mem-dot { background: var(--green); }
-.monitor-mem-btn[data-level="warn"]   .mem-dot { background: var(--amber); }
-.monitor-mem-btn[data-level="high"]   .mem-dot { background: var(--red); }
-
-.monitor-mem-spark { flex-shrink: 0; }
-.monitor-mem-spark polyline { fill: none; stroke-width: 1.5; }
-
-/* mem-popover default opens upward from the bottom status bar — this
-   chip lives in the top header strip, so it needs to open downward. */
-.monitor-mem-popover { top: calc(100% + 8px); bottom: auto; left: 0; right: auto; }
-.monitor-mem-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; color: var(--t2); }
-.monitor-mem-row span:last-child { color: var(--t1); font-variant-numeric: tabular-nums; }
 
 .monitor-header-actions { display: flex; gap: 8px; margin-left: auto; align-self: center; }
 .monitor-bulk-btn {
@@ -88,7 +63,7 @@ body.monitor-mode #output-drawer { display: none !important; }
   background: var(--color-surface-1);
   border-radius: var(--radius);
 }
-.monitor-canvas-card-label { font-size: 10px; color: var(--t3); margin-bottom: 6px; }
+.monitor-canvas-card-label { font-size: 10px; color: var(--t2); margin-bottom: 6px; }
 .monitor-row--canvas { padding: 0; }
 
 /* ── Row list ── */
@@ -108,7 +83,7 @@ body.monitor-mode #output-drawer { display: none !important; }
 .monitor-row-countdown {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--t3);
+  color: var(--t2);
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -130,16 +105,16 @@ body.monitor-mode #output-drawer { display: none !important; }
    the same color tokens so it reads as one visual system. */
 .monitor-status { font-size: 10px; flex-shrink: 0; white-space: nowrap; min-width: 46px; }
 .monitor-status--running { color: var(--green); }
-.monitor-status--done    { color: var(--t3); }
+.monitor-status--done    { color: var(--t2); }
 .monitor-status--failed  { color: var(--red); }
-.monitor-status--stopped { color: var(--t3); }
-.monitor-status--idle    { color: var(--t3); }
+.monitor-status--stopped { color: var(--t2); }
+.monitor-status--idle    { color: var(--t2); }
 
 .monitor-empty {
   padding: 24px 12px;
   text-align: center;
   font-size: 12px;
-  color: var(--t3);
+  color: var(--t2);
 }
 
 /* ── Sidebar: Overview + Resources ── */
@@ -147,7 +122,7 @@ body.monitor-mode #output-drawer { display: none !important; }
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: .04em;
-  color: var(--t3);
+  color: var(--t2);
   margin-bottom: 6px;
 }
 
@@ -192,7 +167,7 @@ body.monitor-mode #output-drawer { display: none !important; }
   padding: 0;
   font-family: inherit;
   font-size: 10px;
-  color: var(--t3);
+  color: var(--t2);
   cursor: pointer;
   transition: color 80ms ease;
 }

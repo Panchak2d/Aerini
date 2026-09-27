@@ -374,6 +374,7 @@ export class ChatPanel {
       const lbl = document.createElement("span");
       lbl.className = "chat-attachment-chip-label";
       lbl.innerHTML = CHAT_ATTACHMENT_FILE_ICON + " " + escapeHtml(att.filename);
+      lbl.title = att.filename;
       chip.appendChild(lbl);
 
       const removeBtn = document.createElement("button");
@@ -495,7 +496,13 @@ export class ChatPanel {
 
   private async handleStart(): Promise<void> {
     this.startBtn.disabled = true;
-    if (this.emptyStateStartBtn) this.emptyStateStartBtn.disabled = true;
+    const startLabel = this.startBtn.textContent;
+    const emptyStateStartLabel = this.emptyStateStartBtn?.textContent;
+    this.startBtn.textContent = "Starting…";
+    if (this.emptyStateStartBtn) {
+      this.emptyStateStartBtn.disabled = true;
+      this.emptyStateStartBtn.textContent = "Starting…";
+    }
     try {
       const snapshot = await this.wfManager.prepareForBgRun();
       if (!snapshot) return;
@@ -525,7 +532,11 @@ export class ChatPanel {
       }
     } finally {
       this.startBtn.disabled = false;
-      if (this.emptyStateStartBtn) this.emptyStateStartBtn.disabled = false;
+      this.startBtn.textContent = startLabel;
+      if (this.emptyStateStartBtn) {
+        this.emptyStateStartBtn.disabled = false;
+        this.emptyStateStartBtn.textContent = emptyStateStartLabel ?? "Start";
+      }
     }
   }
 
@@ -915,11 +926,13 @@ export class ChatPanel {
 
       const copyBtn = document.createElement("button");
       copyBtn.title = "Copy image";
+      copyBtn.setAttribute("data-tooltip", "Copy image");
       copyBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
       copyBtn.addEventListener("click", (e) => { e.stopPropagation(); this.copyImage(img, copyBtn); });
 
       const dlBtn = document.createElement("button");
       dlBtn.title = "Download";
+      dlBtn.setAttribute("data-tooltip", "Download");
       dlBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
       dlBtn.addEventListener("click", (e) => { e.stopPropagation(); this.downloadImage(img); });
 
@@ -1144,7 +1157,9 @@ export class ChatPanel {
   }
 
   private renderSessionLabel(): void {
-    this.sessionLabel.textContent = this.activeSession().name;
+    const name = this.activeSession().name;
+    this.sessionLabel.textContent = name;
+    this.sessionLabel.title = name;
   }
 
   private renderSessionMenu(): void {
@@ -1152,7 +1167,7 @@ export class ChatPanel {
     for (const s of this.store.sessions) {
       const item = document.createElement("button");
       item.className = "toolbar-dropdown-item chat-session-item";
-      item.innerHTML = `<span class="chat-session-item-name">${escapeHtml(s.name)}</span>`;
+      item.innerHTML = `<span class="chat-session-item-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>`;
       const del = document.createElement("span");
       del.className = "chat-session-item-del";
       del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
@@ -1225,27 +1240,34 @@ export class ChatPanel {
    * clearChatSession call for the session-menu delete path.)
    */
   private async handleClear(): Promise<void> {
-    if (this.awaitingReply) this.cancelPending();
-    const current = this.activeSession();
+    const clearBtn = document.getElementById("btn-chat-clear") as HTMLButtonElement | null;
+    const clearLabel = clearBtn?.textContent;
+    if (clearBtn) { clearBtn.disabled = true; clearBtn.textContent = "Clearing…"; }
     try {
-      await clearChatSession(current.id);
-    } catch (e) {
-      console.error("Aerini: clearChatSession failed", e);
-      this.toast("Could not clear AI memory on the backend — chat history was cleared locally.", "error");
+      if (this.awaitingReply) this.cancelPending();
+      const current = this.activeSession();
+      try {
+        await clearChatSession(current.id);
+      } catch (e) {
+        console.error("Aerini: clearChatSession failed", e);
+        this.toast("Could not clear AI memory on the backend — chat history was cleared locally.", "error");
+      }
+      const idx = this.store.sessions.findIndex(s => s.id === current.id);
+      const fresh = this.newSessionObject();
+      fresh.name = current.name;
+      this.store.sessions[idx] = fresh;
+      this.store.activeId = fresh.id;
+      try {
+        await deleteChatSession(current.id);
+      } catch (e) {
+        console.error("Aerini: deleteChatSession failed", e);
+      }
+      this.persist();
+      this.renderSessionLabel();
+      this.renderMessages();
+    } finally {
+      if (clearBtn) { clearBtn.disabled = false; clearBtn.textContent = clearLabel ?? "Clear"; }
     }
-    const idx = this.store.sessions.findIndex(s => s.id === current.id);
-    const fresh = this.newSessionObject();
-    fresh.name = current.name;
-    this.store.sessions[idx] = fresh;
-    this.store.activeId = fresh.id;
-    try {
-      await deleteChatSession(current.id);
-    } catch (e) {
-      console.error("Aerini: deleteChatSession failed", e);
-    }
-    this.persist();
-    this.renderSessionLabel();
-    this.renderMessages();
   }
 
   // ── Static DOM bindings ──────────────────────────────────────────────────

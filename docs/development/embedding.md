@@ -2,6 +2,10 @@
 
 `aerini-engine` is a plain Rust library. Nothing in it depends on Tauri or on either binary in this workspace, so you can add it to your own program, register whichever built-in nodes you want, supply your own credential resolver and event sink, and run workflows with no desktop app and no `aerini-server` process anywhere in the picture. This page assumes you've read [Architecture](architecture.md); it covers the same crate from the outside, as a dependency, rather than as part of this repository's own workspace.
 
+## License
+
+`aerini-engine` is AGPL-3.0 licensed, same as the rest of this repository. Embedding it in your own program and then distributing that program, or running it as a network-accessible service for others, brings your program under the same obligation described in [Why Aerini is dual-licensed](../dual-licensing.md): publish your modifications under AGPL-3.0, including the code you wrote around the crate, or get a commercial license if you need to keep it closed.
+
 ## Adding the dependency
 
 `aerini-engine` isn't published on crates.io. Depend on it directly from the repository, either as a git dependency or, if you've cloned the repository locally, as a path dependency:

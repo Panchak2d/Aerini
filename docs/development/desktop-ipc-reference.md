@@ -188,7 +188,7 @@ Two more commands the Plugins settings panel depends on, `pick_folder_dialog` an
 | `delete_performance_report` | `run_id: String` | `Result<(), String>` | none: registered, no frontend caller |
 | `clear_performance_reports` | `workflow_id: String` | `Result<(), String>` | none: registered, no frontend caller |
 
-`get_live_performance` and `get_recent_performance` are, despite the module's own doc comment claiming otherwise, in active use today: `src/panels/PerformancePanel.ts`, `src/panels/MonitorPanel.ts`, and `src/statusbar-fields.ts` all call `getRecentPerformance`, and `PerformancePanel.ts` also calls `getLivePerformance` and listens for the `performance-live` event `ipc/performance.ts` exposes alongside them. The doc comment is stale for these two; see this batch's flagged findings below. The remaining four commands, which read and write the persisted `performance_reports` table rather than the in-memory live/recent snapshots, genuinely have no frontend caller yet, confirmed by a repository-wide search rather than assumed from the comment.
+`get_live_performance` and `get_recent_performance` are, despite the module's own doc comment claiming otherwise, in active use today: `src/panels/PerformancePanel.ts`, `src/panels/MonitorPanel.ts`, and `src/statusbar-fields.ts` all call `getRecentPerformance`, and `PerformancePanel.ts` also calls `getLivePerformance` and listens for the `performance-live` event `ipc/performance.ts` exposes alongside them. The doc comment is stale for these two. The remaining four commands, which read and write the persisted `performance_reports` table rather than the in-memory live/recent snapshots, genuinely have no frontend caller yet, confirmed by a repository-wide search rather than assumed from the comment.
 
 ## Update
 
@@ -221,7 +221,7 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 | `save_file_dialog` | `content: String`, `filename: String` | `Result<String, String>` | `workflow-manager.ts` |
 | `save_export_zip` | `zip_path: String`, `filename: String` | `Result<String, String>` | `export-server-panel.ts`, `toolbar.ts` |
 | `close_window` | none | none (no return value) | `ipc/events.ts`, on the app's close-requested event |
-| `force_quit` | none | none (no return value) | none: registered and wrapped as `forceQuit` in `ipc/workflow.ts`, but nothing currently calls that wrapper |
+| `force_quit` | none | none (no return value) | none: registered, no frontend caller |
 | `check_bundled_node` | none | `Result<String, String>` | `checkBundledNode` (`ipc/workflow.ts`), called from `app.ts` |
 | `cancel_run` | `run_id: String` | none (no return value) | `cancelRun` (`ipc/workflow.ts`), called from `src/run-manager/` |
 | `get_autostart` | none | `bool` | `getAutostart` (`ipc/autostart.ts`), called from `toolbar.ts` |

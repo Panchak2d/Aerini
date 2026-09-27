@@ -36,7 +36,7 @@ The edges matter as much as the feature list.
 - **No hosted service.** There's no Aerini cloud to sign up for. Something, your desktop or a server you run, has to be on for a scheduled or webhook-triggered workflow to fire.
 - **Single machine by design.** A workflow runs wherever you started it. There's no built-in way to sync the same workflow across two machines or hand a run off between them.
 - **Doesn't expose your machine to the internet on its own.** A Webhook node listens on a local port. If you want the outside world to reach it, you're responsible for exposing that port yourself, with a reverse proxy or a tunneling tool like `cloudflared` or `ngrok`.
-- **Pre-1.0.** Aerini is currently version 0.4.0. The workflow file format and internal APIs are expected to keep changing until 1.0, when they'll be locked down under semantic versioning.
+- **Pre-1.0.** Aerini is currently version 0.4.1. The workflow file format and internal APIs are expected to keep changing until 1.0, when they'll be locked down under semantic versioning.
 - **Not a general data platform.** No data warehouse, no built-in analytics, no massive-scale batch processing. It's an automation tool for individuals and small setups, not enterprise ETL infrastructure.
 
 > [!NOTE]
@@ -60,9 +60,15 @@ If you're deciding whether it's safe to expose a Webhook node to the internet, y
 | Understand the mental model before diving in | [Concepts](getting-started/concepts.md) |
 | Look up a term you don't recognize | [Glossary](glossary.md) |
 | See every built-in node | [Nodes Reference](guide/nodes.md) |
+| Look up a keyboard shortcut | [Keyboard Shortcuts](guide/keyboard-shortcuts.md) |
 | Wire node outputs into other nodes | [Expressions](guide/expressions.md) |
 | Store an API key or set up OAuth | [Credentials](guide/credentials.md) |
 | Run workflows on a schedule or via webhook | [Background Runs](guide/background-runs.md) |
+| Roll back a workflow or compare it to an earlier save | [Version History](guide/version-history.md) |
+| Install or manage a `.wasm` plugin node | [Plugins](guide/plugins.md) |
+| Check on every workflow's status and memory use at once | [Monitor](guide/monitor.md) |
+| Chat with a workflow inside the desktop app | [Chat Panel](guide/chat-panel.md) |
+| Drop a chat widget onto a web page | [Widget Embedding](guide/widget-embedding.md) |
 | See a worked example end to end | [Examples](guide/examples.md) |
 | Fix a stuck or failed run | [Troubleshooting](troubleshooting.md) |
 | Run Aerini unattended on a server | [Server Deployment](operations/server-deploy.md) |
@@ -73,4 +79,4 @@ Not sure where to start? [Installation](getting-started/installation.md) is the 
 
 ## Project status
 
-Aerini is open source (AGPL-3.0), currently at version 0.4.0, pre-1.0, and actively developed. See the repository's `README.md` for license and contribution details.
+Aerini is open source (AGPL-3.0), currently at version 0.4.1, pre-1.0, and actively developed. See the repository's `README.md` for license and contribution details.

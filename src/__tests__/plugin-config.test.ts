@@ -78,4 +78,32 @@ describe("renderPluginRawConfigEditor", () => {
     const err = ctx.body.querySelector('[role="alert"]') as HTMLElement;
     expect(err.style.display).toBe("block");
   });
+
+  it("edge case: blurring without editing commits nothing", () => {
+    const node = makeNode({ old_key: "old_value" });
+    const onChange = vi.fn();
+    const rerender = vi.fn();
+    const ctx = makeCtx(node, true, onChange, rerender);
+
+    renderPluginRawConfigEditor(ctx);
+    (ctx.body.querySelector("textarea") as HTMLTextAreaElement).dispatchEvent(new Event("blur"));
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(rerender).not.toHaveBeenCalled();
+  });
+
+  it("hidden keys are not shown, survive a commit, and cannot be set from the JSON", () => {
+    const node = makeNode({ old_key: "old_value", api_key: "sk-inline" });
+    const ctx = makeCtx(node, true, vi.fn(), vi.fn());
+
+    renderPluginRawConfigEditor(ctx, new Set(["api_key"]));
+    const ta = ctx.body.querySelector("textarea") as HTMLTextAreaElement;
+    expect(JSON.parse(ta.value)).toEqual({ old_key: "old_value" });
+    expect(ta.value).not.toContain("sk-inline");
+
+    ta.value = JSON.stringify({ new_key: 1, api_key: "attacker-value" });
+    ta.dispatchEvent(new Event("blur"));
+
+    expect(node.data.config).toEqual({ api_key: "sk-inline", new_key: 1 });
+  });
 });

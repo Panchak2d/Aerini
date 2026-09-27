@@ -23,10 +23,10 @@ export async function showVersionPanel(
   hdr.className = "version-panel-header";
   hdr.innerHTML = `
     <span class="version-panel-title">Version History</span>
-    <span class="unsaved-dot${wfManager.hasUnsaved ? " visible" : ""}" title="Unsaved changes on canvas"></span>`;
+    <span class="unsaved-dot${wfManager.hasUnsaved ? " visible" : ""}" title="Unsaved changes on canvas" data-tooltip="Unsaved changes on canvas"></span>`;
   const closeBtn = document.createElement("button");
   closeBtn.className = "popover-close";
-  closeBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  closeBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
   closeBtn.addEventListener("click", () => overlay.remove());
   hdr.appendChild(closeBtn);
   panel.appendChild(hdr);
@@ -79,7 +79,7 @@ export async function showVersionPanel(
     item.dataset.search = `${displayMsg} ${label}`.toLowerCase();
     item.innerHTML = `
       <div class="version-item-meta">
-        <span class="version-item-name">${escHtml(displayMsg)}${current ? ' <span class="version-current-badge">Current</span>' : ""}</span>
+        <span class="version-item-name" title="${escHtml(displayMsg)}">${escHtml(displayMsg)}${current ? ' <span class="version-current-badge">Current</span>' : ""}</span>
         <span class="version-item-date">${label}</span>
       </div>`;
 
@@ -94,6 +94,8 @@ export async function showVersionPanel(
     // hasUnsaved, and needs no extra IPC round trip.
     compareBtn.addEventListener("click", async () => {
       compareBtn.disabled = true;
+      const compareLabel = compareBtn.textContent;
+      compareBtn.textContent = "Comparing…";
       try {
         const oldJson = await wfManager.getVersionJson(v.id);
         if (!oldJson) {
@@ -105,6 +107,7 @@ export async function showVersionPanel(
         toast(`Compare failed: ${e}`, "error");
       } finally {
         compareBtn.disabled = false;
+        compareBtn.textContent = compareLabel;
       }
     });
 
@@ -130,15 +133,18 @@ export async function showVersionPanel(
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "version-delete-btn";
     deleteBtn.title = "Delete this version";
+    deleteBtn.setAttribute("data-tooltip", "Delete this version");
     deleteBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
     deleteBtn.addEventListener("click", async () => {
       const ok = await showConfirm(`Delete version from ${label}? This cannot be undone.`, true, "Delete");
       if (!ok) return;
+      deleteBtn.disabled = true;
       try {
         await wfManager.deleteVersion(v.id);
         versions = versions.filter(x => x.id !== v.id);
         renderList();
       } catch (e) {
+        deleteBtn.disabled = false;
         toast(`Delete failed: ${e}`, "error");
       }
     });
@@ -191,6 +197,8 @@ export async function showVersionPanel(
 
   async function handleSaveSnapshot(): Promise<void> {
     snapshotBtn.disabled = true;
+    const snapshotLabel = snapshotBtn.textContent;
+    snapshotBtn.textContent = "Saving…";
     try {
       const ok = await wfManager.saveNamedVersion(snapshotInput.value);
       if (!ok) {
@@ -209,6 +217,7 @@ export async function showVersionPanel(
       toast(`Snapshot failed: ${e}`, "error");
     } finally {
       snapshotBtn.disabled = false;
+      snapshotBtn.textContent = snapshotLabel;
     }
   }
   snapshotBtn.addEventListener("click", handleSaveSnapshot);

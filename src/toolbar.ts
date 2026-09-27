@@ -52,6 +52,7 @@ function buildIconBtn(id: string, title: string, svgInner: string): HTMLButtonEl
   btn.type = "button";
   btn.className = "btn-toolbar btn-icon-only";
   btn.title = title;
+  btn.setAttribute("data-tooltip", title);
   btn.setAttribute("aria-label", title);
   btn.innerHTML = svgInner;
   return btn;
@@ -188,6 +189,7 @@ export function bindToolbar(
       : !isRunning && triggerIsWebhook
       ? "Runs once — waits up to 60s for a single webhook request, then stops. For Chat or a persistent listener, use Start in the Chat panel instead."
       : "";
+    runMainBtn.setAttribute("data-tooltip", runMainBtn.title);
   };
 
   const runWrap = document.getElementById("run-dropdown-wrap");
@@ -250,21 +252,30 @@ export function bindToolbar(
   });
   $("btn-bg-run")?.addEventListener("click", async () => {
     closeAllDropdowns();
-    const snapshot = await wfManager.prepareForBgRun();
-    if (!snapshot) return;
+    const btn = $("btn-bg-run") as HTMLButtonElement;
+    btn.disabled = true;
     try {
-      const started = await runManager.executeBgJob(snapshot);
-      if (started) {
-        activateZone("bgruns");
-        toast("Workflow scheduled — running in background", "success");
+      const snapshot = await wfManager.prepareForBgRun();
+      if (!snapshot) return;
+      try {
+        const started = await runManager.executeBgJob(snapshot);
+        if (started) {
+          activateZone("bgruns");
+          toast("Workflow scheduled — running in background", "success");
+        }
+      } catch (rawError) {
+        const err = parseSchedulerError(String(rawError));
+        if (err.error_kind === "port_conflict") {
+          toast(`Port ${err.port} is already in use by "${err.held_by_workflow_name}".`, "error");
+        } else {
+          toast(`Could not start background run: ${(err as { message?: string }).message ?? rawError}`, "error");
+        }
       }
-    } catch (rawError) {
-      const err = parseSchedulerError(String(rawError));
-      if (err.error_kind === "port_conflict") {
-        toast(`Port ${err.port} is already in use by "${err.held_by_workflow_name}".`, "error");
-      } else {
-        toast(`Could not start background run: ${(err as { message?: string }).message ?? rawError}`, "error");
-      }
+    } finally {
+      // Resyncs disabled state + label ("Schedule Run" / "Running…") from
+      // actual job status, rather than a hardcoded restore -- same button
+      // this function already owns via scheduler-status events elsewhere.
+      loadBgPanel().then(m => m.updateBgRunButton(wfManager.currentId));
     }
   });
 
@@ -396,6 +407,13 @@ export function bindToolbar(
   const titleEl = $("workflow-name-label");
   titleEl.addEventListener("dblclick", () => wfManager.startRename(titleEl));
 
+  document.getElementById("workflow-rename-hint")?.addEventListener("click", () => {
+    const label = document.getElementById("workflow-name-label");
+    if (label) wfManager.startRename(label);
+  });
+
+  const ESCAPE_CLOSABLE_MODAL_IDS = ["settings-modal", "wf-settings-modal", "shortcuts-modal"];
+
   window.addEventListener("keydown", e => {
     if (isMonitorModeActive()) return;
     const inInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
@@ -404,11 +422,12 @@ export function bindToolbar(
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runWithValidation(); return; }
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "F") { e.preventDefault(); canvas.fitToScreen(); return; }
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "C") { e.preventDefault(); chatPanel.toggle(); return; }
+    if (e.key === "Escape") {
+      const openModalId = ESCAPE_CLOSABLE_MODAL_IDS.find(id => !$(id).classList.contains("hidden"));
+      if (openModalId) { $(openModalId).classList.add("hidden"); return; }
+    }
     if (inInput) return;
     if (e.key === "?" || e.key === "/") { $("shortcuts-modal").classList.remove("hidden"); return; }
-    if (e.key === "Escape") {
-      $("shortcuts-modal").classList.add("hidden");
-    }
     if (e.key === "m" || e.key === "M") {
       const w      = document.getElementById("minimap-wrap");
       const hidden = w?.classList.toggle("minimap-hidden");

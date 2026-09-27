@@ -353,6 +353,7 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
         ev.preventDefault();
         sort.dataset.sort = opt.value;
         sort.title = opt.label;
+        sort.setAttribute("data-tooltip", opt.label);
         sort.classList.toggle("active", opt.value !== "updated_desc");
         onSort(opt.value);
         dd.remove();
@@ -409,6 +410,7 @@ export function bindBgRunsFilter(onFilter: (status: string, query: string) => vo
         ev.preventDefault();
         filter.dataset.filter = opt.value;
         filter.title = opt.label;
+        filter.setAttribute("data-tooltip", opt.label);
         filter.classList.toggle("active", opt.value !== "all");
         const s = state();
         onFilter(opt.value, s.query);

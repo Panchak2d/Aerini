@@ -8,6 +8,7 @@ import {
   type HistorySample,
 } from "../ipc/performance";
 import { formatBytes } from "../mem-summary";
+import { formatDuration } from "../monitor-helpers";
 import { isTauri } from "../utils";
 
 
@@ -72,13 +73,6 @@ export function buildGraphSvg(history: HistorySample[], markers: GraphMarkers = 
       ${peakHtml}
     </div>
   </div>`;
-}
-
-// Matches BgJobsPanel's own duration convention exactly (seconds under a
-// minute, rounded minutes above it) rather than introducing a second one.
-function formatDuration(ms: number): string {
-  const secs = Math.round(ms / 1000);
-  return secs < 60 ? `${secs}s` : `${Math.round(secs / 60)}m`;
 }
 
 // PerfStatus ("running"/"success"/"failed") has no "stopped" analog in

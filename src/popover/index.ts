@@ -1,1 +1,1 @@
-export { showPopover, closePopover, setDescriptorRegistry } from "./lifecycle";
+export { showPopover, closePopover } from "./lifecycle";

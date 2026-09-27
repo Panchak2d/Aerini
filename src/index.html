@@ -62,6 +62,9 @@
         <button id="btn-credentials" class="activity-btn" title="Manage credentials (API keys)" data-tooltip="Credentials" aria-label="Manage credentials (API keys)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
         </button>
+        <button id="btn-shortcuts" class="activity-btn" title="View keyboard shortcuts (press ?)" data-tooltip="Shortcuts" aria-label="View keyboard shortcuts (press ?)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12"/></svg>
+        </button>
         <button id="btn-settings" class="activity-btn" title="Settings" data-tooltip="Settings" aria-label="Settings">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
@@ -95,24 +98,24 @@
         <div class="zone-header">
           <span class="zone-title">Workflows</span>
           <div class="zone-header-actions">
-            <button class="zone-action-btn" id="btn-new-workflow" title="New Workflow (Ctrl+N)" aria-label="New Workflow">
+            <button class="zone-action-btn" id="btn-new-workflow" title="New Workflow (Ctrl+N)" data-tooltip="New Workflow" aria-label="New Workflow">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
             </button>
-            <button class="zone-action-btn" id="btn-wf-add-collection" title="New collection" aria-label="New collection">
+            <button class="zone-action-btn" id="btn-wf-add-collection" title="New collection" data-tooltip="New collection" aria-label="New collection">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M3 7a1 1 0 0 1 1-1h4.5l1.5 2H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/>
                 <line x1="12" y1="12.5" x2="12" y2="17.5"/><line x1="9.5" y1="15" x2="14.5" y2="15"/>
               </svg>
             </button>
             <div class="zone-action-sep" aria-hidden="true"></div>
-            <button class="zone-action-btn" id="btn-wf-select-mode" title="Select multiple" aria-label="Select multiple workflows" aria-pressed="false">
+            <button class="zone-action-btn" id="btn-wf-select-mode" title="Select multiple" data-tooltip="Select multiple" aria-label="Select multiple workflows" aria-pressed="false">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12.5 2.2 2.2L16 9.5"/>
               </svg>
             </button>
-            <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" aria-label="Sort workflows" data-sort="updated_desc">
+            <button class="zone-action-btn" id="btn-wf-sort" title="Sort: Newest" data-tooltip="Sort: Newest" aria-label="Sort workflows" data-sort="updated_desc">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/></svg>
             </button>
           </div>
@@ -151,10 +154,10 @@
             <span class="zone-mem-badge hidden" id="bg-mem-badge" title=""></span>
           </span>
           <div class="zone-header-actions">
-            <button class="zone-action-btn" id="btn-bg-search-toggle" title="Search runs" aria-label="Search background runs" aria-expanded="false">
+            <button class="zone-action-btn" id="btn-bg-search-toggle" title="Search runs" data-tooltip="Search runs" aria-label="Search background runs" aria-expanded="false">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
             </button>
-            <button class="zone-action-btn" id="btn-bg-filter" title="Filter: All" aria-label="Filter background runs" data-filter="all">
+            <button class="zone-action-btn" id="btn-bg-filter" title="Filter: All" data-tooltip="Filter: All" aria-label="Filter background runs" data-filter="all">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
             </button>
           </div>
@@ -207,18 +210,18 @@
   <!-- ── Canvas ── -->
   <main id="canvas-area">
     <div id="toolbar" role="toolbar" aria-label="Workflow toolbar">
-      <span id="workflow-name-label" class="workflow-title" title="Double-click to rename">Untitled</span>
+      <span id="workflow-name-label" class="workflow-title" title="Double-click to rename" data-tooltip="Double-click to rename">Untitled</span>
       <span class="unsaved-dot" id="unsaved-dot"></span>
-      <span class="workflow-rename-hint" id="workflow-rename-hint" title="Double-click the name to rename" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
+      <button type="button" class="workflow-rename-hint" id="workflow-rename-hint" data-tooltip="Rename workflow" aria-label="Rename workflow"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
       <div class="toolbar-spacer"></div>
       <div class="toolbar-actions">
-        <button id="btn-new-workflow-toolbar" class="btn-toolbar btn-toolbar-secondary" title="New Workflow (Ctrl+N)" aria-label="New Workflow">
+        <button id="btn-new-workflow-toolbar" class="btn-toolbar btn-toolbar-secondary" title="New Workflow (Ctrl+N)" data-tooltip="New Workflow (Ctrl+N)" aria-label="New Workflow">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
           New Workflow
         </button>
         <div class="toolbar-divider" id="toolbar-divider-new-workflow"></div>
         <div class="toolbar-dropdown-wrap" id="export-dropdown-wrap">
-          <button id="btn-export" class="btn-toolbar btn-toolbar-dropdown" title="Export workflow" aria-haspopup="menu" aria-expanded="false">
+          <button id="btn-export" class="btn-toolbar btn-toolbar-dropdown" title="Export workflow" data-tooltip="Export workflow" aria-haspopup="menu" aria-expanded="false">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export
             <svg class="dropdown-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
@@ -248,24 +251,24 @@
           </div>
         </div>
         <div class="toolbar-divider"></div>
-        <button id="btn-focus-mode" class="btn-toolbar btn-icon-only" title="Focus mode (F)" aria-label="Focus mode">
+        <button id="btn-focus-mode" class="btn-toolbar btn-icon-only" title="Focus mode (F)" data-tooltip="Focus mode (F)" aria-label="Focus mode">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
         </button>
-        <button id="btn-chat" class="btn-toolbar btn-icon-only hidden" title="Chat (Ctrl+Shift+C)" aria-label="Chat">
+        <button id="btn-chat" class="btn-toolbar btn-icon-only hidden" title="Chat (Ctrl+Shift+C)" data-tooltip="Chat (Ctrl+Shift+C)" aria-label="Chat">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
           Chat
         </button>
         <button id="btn-save" class="btn-toolbar btn-toolbar-secondary">Save</button>
         <span id="always-on-wrap" class="always-on-wrap" data-tooltip="Add a Schedule or Webhook trigger to enable Run on launch" data-tooltip-side="left">
-          <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Run this workflow automatically every time Aerini opens" aria-label="Run workflow on every app launch">
+          <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Run this workflow automatically every time Aerini opens" data-tooltip="Run on launch is OFF" aria-label="Run workflow on every app launch">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             Run on launch
           </button>
         </span>
-        <button id="btn-versions" class="btn-toolbar btn-icon-only" title="Version history" aria-label="Version history">
+        <button id="btn-versions" class="btn-toolbar btn-icon-only" title="Version history" data-tooltip="Version history" aria-label="Version history">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         </button>
-        <button id="btn-wf-settings" class="btn-toolbar btn-icon-only" title="Workflow Settings" aria-label="Workflow Settings">
+        <button id="btn-wf-settings" class="btn-toolbar btn-icon-only" title="Workflow Settings" data-tooltip="Workflow Settings" aria-label="Workflow Settings">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
         <div class="toolbar-dropdown-wrap run-dropdown-wrap" id="run-dropdown-wrap">
@@ -273,7 +276,7 @@
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Run
           </button>
-          <button id="btn-run-chevron" class="btn-toolbar btn-run btn-run-chevron" title="More run options" aria-label="More run options" aria-haspopup="menu" aria-expanded="false">
+          <button id="btn-run-chevron" class="btn-toolbar btn-run btn-run-chevron" title="More run options" data-tooltip="More run options" aria-label="More run options" aria-haspopup="menu" aria-expanded="false">
             <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="toolbar-dropdown-menu toolbar-dropdown-menu-right" id="run-dropdown-menu">
@@ -332,7 +335,7 @@
       <button id="btn-minimap-toggle" title="Toggle minimap (M)" aria-label="Toggle minimap" data-tooltip="Toggle minimap">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/></svg>
       </button>
-      <canvas id="minimap-canvas" width="160" height="100" role="img" aria-label="Workflow minimap"></canvas>
+      <canvas id="minimap-canvas" width="160" height="100" role="img" aria-label="Workflow minimap" title="Click to jump to that area" data-tooltip="Click to jump to that area">
     </div>
 
 
@@ -350,7 +353,7 @@
   <!-- ── Output drawer ── -->
   <div id="output-drawer" class="hidden">
     <div id="drawer-resize-handle"></div>
-    <div class="drawer-header" id="drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="output-content" title="Toggle output panel">
+    <div class="drawer-header" id="drawer-header" role="button" tabindex="0" aria-expanded="false" aria-controls="output-content" title="Toggle output panel" data-tooltip="Toggle output panel">
       <svg class="drawer-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       <span>Output</span>
       <span class="drawer-hint">Run the workflow to see results</span>
@@ -360,10 +363,10 @@
       <div class="drawer-header-spacer"></div>
       <div class="drawer-actions">
         <button class="drawer-btn" id="btn-copy-output" title="Copy output">Copy</button>
-        <button class="drawer-btn" id="btn-expand-output" title="Expand / collapse">
+        <button class="drawer-btn" id="btn-expand-output" title="Expand / collapse" data-tooltip="Expand / collapse">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
         </button>
-        <button id="btn-close-drawer" class="drawer-btn" title="Close">
+        <button id="btn-close-drawer" class="drawer-btn" title="Close" data-tooltip="Close">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -426,7 +429,7 @@
     <div class="chat-panel-header">
       <span class="chat-panel-title">Chat</span>
       <div class="chat-session-wrap" id="chat-session-wrap">
-        <button class="chat-session-btn" id="chat-session-btn" title="Sessions">
+        <button class="chat-session-btn" id="chat-session-btn" title="Sessions" data-tooltip="Sessions">
           <span id="chat-session-label">Session</span>
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
@@ -434,7 +437,7 @@
       </div>
       <div class="chat-header-spacer"></div>
       <button class="drawer-btn" id="btn-chat-clear" title="Clear chat">Clear</button>
-      <button class="drawer-btn" id="btn-chat-close" title="Close">
+      <button class="drawer-btn" id="btn-chat-close" title="Close" data-tooltip="Close">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -444,11 +447,11 @@
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">
-      <button class="chat-attach-btn hidden" id="chat-attach-btn" title="Attach file" disabled>
+      <button class="chat-attach-btn hidden" id="chat-attach-btn" title="Attach file" data-tooltip="Attach file" disabled>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
       </button>
       <textarea id="chat-input" class="chat-input" placeholder="Type a message…" rows="1" disabled></textarea>
-      <button class="chat-send-btn" id="chat-send-btn" disabled title="Send">
+      <button class="chat-send-btn" id="chat-send-btn" disabled title="Send" data-tooltip="Send">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
       </button>
     </div>
@@ -486,7 +489,7 @@
     <div class="shortcuts-box">
       <div class="shortcuts-header">
         Keyboard Shortcuts
-        <button id="btn-close-shortcuts" class="panel-close">
+        <button id="btn-close-shortcuts" class="panel-close" title="Close" data-tooltip="Close" aria-label="Close">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -498,7 +501,10 @@
           <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd></div></div>
           <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
           <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
-          <div class="shortcut-row"><span>Close panel</span><div class="shortcut-keys"><kbd>Dbl-click</kbd><span class="shortcut-hint">empty canvas</span></div></div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Close panel</span><span class="shortcut-desc">On an empty area of the canvas</span></div>
+            <div class="shortcut-keys"><kbd>Dbl-click</kbd></div>
+          </div>
         </div>
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Selection &amp; Editing</div>
@@ -509,7 +515,10 @@
           <div class="shortcut-row"><span>Undo</span><div class="shortcut-keys"><kbd>Ctrl+Z</kbd></div></div>
           <div class="shortcut-row"><span>Redo</span><div class="shortcut-keys"><kbd>Ctrl+Y</kbd></div></div>
           <div class="shortcut-row"><span>Cut connector</span><div class="shortcut-keys"><kbd>Alt+drag</kbd></div></div>
-          <div class="shortcut-row"><span>Disconnect wire</span><div class="shortcut-keys"><kbd>Drag</kbd><span class="shortcut-hint">port dot</span></div></div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Drag away from a port dot</span></div>
+            <div class="shortcut-keys"><kbd>Drag</kbd></div>
+          </div>
         </div>
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Workflow</div>
@@ -518,14 +527,18 @@
           <div class="shortcut-row"><span>Run workflow</span><div class="shortcut-keys"><kbd>Ctrl+Enter</kbd></div></div>
           <div class="shortcut-row"><span>Show shortcuts</span><div class="shortcut-keys"><kbd>?</kbd></div></div>
           <div class="shortcut-row"><span>Navigate workflow list</span><div class="shortcut-keys"><kbd>↑</kbd><kbd>↓</kbd></div></div>
-          <div class="shortcut-row"><span>Open / rename in list</span><div class="shortcut-keys"><kbd>Enter</kbd><span class="shortcut-hint">Dbl-click to rename</span></div></div>
+          <div class="shortcut-row"><span>Open item in list</span><div class="shortcut-keys"><kbd>Enter</kbd></div></div>
+          <div class="shortcut-row"><span>Rename in list</span><div class="shortcut-keys"><kbd>Dbl-click</kbd></div></div>
           <div class="shortcut-row"><span>Workflow row menu</span><div class="shortcut-keys"><kbd>Right-click</kbd></div></div>
         </div>
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Node Config</div>
           <div class="shortcut-row"><span>Open config</span><div class="shortcut-keys"><kbd>Double-click</kbd></div></div>
           <div class="shortcut-row"><span>Close config</span><div class="shortcut-keys"><kbd>Esc</kbd></div></div>
-          <div class="shortcut-row"><span>Insert node data</span><div class="shortcut-keys"><kbd>{{</kbd><span class="shortcut-hint">in any field</span></div></div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Insert node data</span><span class="shortcut-desc">In any field</span></div>
+            <div class="shortcut-keys"><kbd>{{</kbd></div>
+          </div>
         </div>
       </div>
     </div>
@@ -560,7 +573,7 @@
     <div class="settings-box">
       <div class="settings-header">
         Settings
-        <button id="btn-close-settings" class="panel-close">
+        <button id="btn-close-settings" class="panel-close" title="Close" data-tooltip="Close" aria-label="Close">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -638,8 +651,8 @@
     <div class="settings-box">
       <div class="settings-header">
         <span class="settings-title">Workflow Settings</span>
-        <button id="btn-close-wf-settings" class="panel-close">
-          <svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <button id="btn-close-wf-settings" class="panel-close" title="Close" data-tooltip="Close" aria-label="Close">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
       <div class="settings-body">
@@ -777,6 +790,7 @@
     <div class="nit-header">
       <span class="nit-dot"></span>
       <span class="nit-name"></span>
+      <span class="nit-plugin-tag palette-plugin-tag hidden">Plugin</span>
     </div>
     <p class="nit-desc"></p>
     <div class="nit-ports"></div>

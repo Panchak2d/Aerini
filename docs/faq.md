@@ -46,7 +46,7 @@ Open Settings and click Check for Updates. Aerini checks for a newer release and
 
 ## Is Aerini free to use?
 
-Yes. Aerini is open source under AGPL-3.0. You can use, modify, and self-host it freely, and running the unmodified `aerini-server` binary internally for your own team never triggers any extra obligation. If you modify Aerini and run it as a network-accessible service, though, AGPL-3.0 requires releasing those modifications under the same license. A separate commercial license removes that requirement, for cases like building a product or SaaS on top of Aerini, or deploying a modified `aerini-server` as a service for others. See the repository's `README.md` for the full terms.
+Yes. Aerini is open source under AGPL-3.0. You can use, modify, and self-host it freely, and running the unmodified `aerini-server` binary internally for your own team never triggers any extra obligation. If you modify Aerini and run it as a network-accessible service, though, AGPL-3.0 requires releasing those modifications under the same license. A separate commercial license removes that requirement for one named product or service (with any number of end customers), for cases like building a product or SaaS on top of Aerini, or deploying a modified `aerini-server` as a service for others. See the repository's `README.md` for the full terms.
 
 ## See also
 

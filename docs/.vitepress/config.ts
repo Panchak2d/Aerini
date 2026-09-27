@@ -41,10 +41,15 @@ export default defineConfig({
         text: 'Guide',
         items: [
           { text: 'Nodes Reference', link: '/guide/nodes' },
+          { text: 'Keyboard Shortcuts', link: '/guide/keyboard-shortcuts' },
           { text: 'Expressions', link: '/guide/expressions' },
           { text: 'Credentials', link: '/guide/credentials' },
           { text: 'Background Runs', link: '/guide/background-runs' },
+          { text: 'Version History', link: '/guide/version-history' },
+          { text: 'Plugins', link: '/guide/plugins' },
+          { text: 'Monitor', link: '/guide/monitor' },
           { text: 'Local Models', link: '/guide/local-models' },
+          { text: 'Chat Panel', link: '/guide/chat-panel' },
           { text: 'Widget Embedding', link: '/guide/widget-embedding' },
           { text: 'Security', link: '/guide/security' },
           { text: 'Examples', link: '/guide/examples' }
@@ -82,7 +87,8 @@ export default defineConfig({
         items: [
           { text: 'FAQ', link: '/faq' },
           { text: 'Glossary', link: '/glossary' },
-          { text: 'Troubleshooting', link: '/troubleshooting' }
+          { text: 'Troubleshooting', link: '/troubleshooting' },
+          { text: 'Why Aerini is dual-licensed', link: '/dual-licensing' }
         ]
       }
     ],
