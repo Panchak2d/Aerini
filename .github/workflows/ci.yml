@@ -8,20 +8,29 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: Build, test, lint
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1 — apt-get remove failures (package not present on a given runner image) are non-fatal by design
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
-          tool-cache: false
+          preinstalled-runtimes: false
           android: true
           dotnet: true
           haskell: true
@@ -29,22 +38,19 @@ jobs:
           swap-storage: false
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
+          toolchain: stable
           components: clippy
 
       - name: Add swap space
-        run: |
-          sudo fallocate -l 8G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
+        run: bash scripts/ci-add-swap.sh
 
       - name: Install Linux system dependencies
         run: sudo apt-get update -q && sudo apt-get install -y libdbus-1-dev mold
 
       - name: Cache Cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -59,8 +65,13 @@ jobs:
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
-      - name: Test
+      - name: Test engine
         run: cargo test -p aerini-engine --locked
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Test server
+        run: cargo test -p aerini-server --locked
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
@@ -72,9 +83,12 @@ jobs:
   template-wit-sync:
     name: Example plugin template WIT files match canonical
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # examples/plugin-template/wit/node.wit and its trigger-example subcrate's own
       # copy are duplicated, not symlinked, so the template still works as a
@@ -92,16 +106,19 @@ jobs:
   node-checks:
     name: Node.js dependency audit and dist staleness
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       HUSKY: '0'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -109,6 +126,9 @@ jobs:
 
       - name: npm audit (high severity)
         run: npm audit --omit=dev --audit-level=high
+
+      - name: Type check (tsc)
+        run: npm run typecheck
 
       - name: Frontend tests (vitest)
         run: npm test
@@ -122,28 +142,55 @@ jobs:
           npm run vite:build
           git diff --exit-code dist/ || (echo "ERROR: dist/ is stale — run 'npm run vite:build' and commit the result" && exit 1)
 
+  docs-build:
+    name: Docs site builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HUSKY: '0'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build docs
+        run: npm run docs:build
+
   tauri-build:
     name: Build desktop app (src-tauri)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-22.04
-          - platform: ubuntu-22.04-arm
+          - platform: ubuntu-24.04
+          - platform: ubuntu-24.04-arm
           - platform: windows-latest
           - platform: macos-latest
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
     env:
       HUSKY: '0'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         if: startsWith(matrix.platform, 'ubuntu')
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
-          tool-cache: false
+          preinstalled-runtimes: false
           android: true
           dotnet: true
           haskell: true
@@ -152,14 +199,9 @@ jobs:
 
       - name: Add swap space
         if: startsWith(matrix.platform, 'ubuntu')
-        run: |
-          sudo fallocate -l 8G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
+        run: bash scripts/ci-add-swap.sh
 
-      # GTK/WebKit bundling deps, same list release.yml uses for its ubuntu-22.04 leg.
-      # ubuntu-22.04-arm carries the same package set in the arm64 partner image.
+      # GTK/WebKit bundling deps; same list as release.yml.
       - name: Install Linux system dependencies
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
@@ -167,16 +209,18 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
 
       - name: Cache Cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry

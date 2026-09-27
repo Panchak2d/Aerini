@@ -12,13 +12,26 @@ You'll land on the main screen: a **[canvas](../glossary.md#canvas)** filling mo
 
 Every workflow starts with a **[trigger](../glossary.md#trigger)**, the node that decides when the rest of it runs. In the sidebar, under **Triggers**, find **Manual Trigger** and click it to place it on the canvas. This one starts a run only when you tell it to, which makes it the right choice while you're still building and testing.
 
+![Manual Trigger placed on the canvas, node sidebar open](../public/images/getting-started-01-trigger-placed.png)
+
 ## Step 2: Add something for it to do
 
 Under **Core Actions** in the sidebar, find **HTTP Request** and click it. Aerini places new nodes to the right of whatever you added last, so it should land right next to Manual Trigger with no dragging needed.
 
 Connect the two: drag from the small dot on the right edge of Manual Trigger to the matching dot on the left edge of HTTP Request. That **[connection](../glossary.md#connection)** is what tells Aerini which node runs next.
 
+![Dragging a connection off Manual Trigger's output dot](../public/images/getting-started-02-connect-drag.png)
+
+> [!TIP]
+> If you drag a connection out and release it over empty canvas instead of an existing node, Aerini opens a small search popover so you can pick a new node and place it, already connected, in one motion. Handy once you're adding nodes faster than you're arranging them.
+>
+> ![The node search popover that appears when a dragged connection is dropped on empty canvas](../public/images/node-search-popover.png)
+
+![Manual Trigger connected to HTTP Request, not yet configured](../public/images/getting-started-03-http-connected.png)
+
 Double-click HTTP Request to open its settings. Set **URL** to `https://httpbin.org/get` and leave **Method** as `GET`. httpbin.org is a small public service built for exactly this: it just echoes back whatever request you send it, so you get a real response without needing an account or an API key anywhere.
+
+![HTTP Request's settings panel with URL filled in](../public/images/getting-started-04-http-request-config.png)
 
 ## Step 3: Add somewhere to see the result
 
@@ -26,13 +39,23 @@ Under **Utility**, find **Output** and click it the same way. Connect it too: ri
 
 You should now have three boxes in a row, wired together: Manual Trigger, HTTP Request, Output.
 
+![All three nodes wired together, before running](../public/images/getting-started-05-workflow-wired.png)
+
 ## Step 4: Save it
 
-Press **Ctrl+S** (**Cmd+S** on macOS). Since this workflow doesn't have a name yet, the title at the top left of the toolbar turns into an editable text box with its current text already selected. Type a name, for example `My First Workflow`, and press Enter.
+Press **Ctrl+S** (**Cmd+S** on macOS). Since this workflow doesn't have a name yet, the title at the top left of the toolbar turns into an editable text box with its current text already selected.
+
+![The title field in its editable state, current text selected](../public/images/getting-started-10-rename-workflow.png)
+
+Type a name, for example `My First Workflow`, and press Enter.
+
+![The title now showing the new name](../public/images/getting-started-11-workflow-named.png)
 
 ## Step 5: Run it
 
 Click **Run** in the top right. Aerini executes the three nodes in order, and within a second or two each one shows a short preview of its own output right on the canvas. Output's preview should show the JSON body httpbin.org sent back, including the URL it received and the headers your request carried. If a node fails instead, you'll see a small alert icon on it rather than a preview.
+
+![All three nodes after a successful run, with the Output drawer's Summary tab open](../public/images/getting-started-06-run-result.png)
 
 That's one full **[run](../glossary.md#run)**, done by hand. Everything after this point is about making it happen without you.
 
@@ -42,17 +65,29 @@ A workflow that only runs when you click a button isn't really automated yet. To
 
 Click Manual Trigger to select it, then press **Delete** (or **Backspace**) to remove it, which takes its connection with it. In the sidebar, under **Triggers** again, find **Schedule** and click it. Aerini adds new nodes to the right of your existing ones, so Schedule will land past Output rather than where Manual Trigger used to be; drag it over to the left of HTTP Request if you want the row to read left to right again, though where it sits on the canvas makes no difference to how it runs. Connect its right dot to HTTP Request's left dot, the same way you connected things before.
 
+![Schedule swapped in for Manual Trigger, not yet configured](../public/images/getting-started-07-schedule-swapped.png)
+
 Double-click Schedule to configure it. Set **Mode** to `interval`, and **Interval (seconds)** to `10`, the shortest interval Aerini allows. Ten seconds is short on purpose here, so you can watch it fire a few times without waiting around; a real scheduled workflow would more likely run hourly, daily, or on a [cron expression](../glossary.md#cron-expression) instead.
+
+![Schedule's settings panel with Mode set to interval and Interval set to 10 seconds](../public/images/getting-started-08-schedule-config.png)
 
 Save again with Ctrl+S (or Cmd+S).
 
 ## Step 7: Turn on the schedule
 
-Next to the Run button is a small arrow. Click it, and choose **Schedule Run** instead of the plain Run you used before. Aerini starts running the workflow every ten seconds in the background, whether or not this window is even open. You can watch it happen from **Background Runs** in the sidebar, which lists every run as it happens along with whether it succeeded.
+Next to the Run button is a small arrow. Click it, and choose **Schedule Run** instead of the plain Run you used before.
+
+![The Run button's dropdown, showing Run Now and Schedule Run](../public/images/getting-started-09-run-dropdown.png)
+
+Aerini starts running the workflow every ten seconds in the background, whether or not this window is even open. You can watch it happen from **Background Runs** in the sidebar, which lists every run as it happens along with whether it succeeded.
 
 ## Step 8: Turn it back off
 
-Since it's now firing every ten seconds, stop it once you've seen enough. Open the same Run menu and use it again to stop the workflow, or find it under **Background Runs** in the sidebar and stop it from there. Closing the window doesn't stop it: Aerini keeps running in your system tray even with no window open, so the button or panel above is the actual off switch, not the window's close button.
+Since it's now firing every ten seconds, stop it once you've seen enough. Open the same Run menu and use it again to stop the workflow, or find it under **Background Runs** in the sidebar and stop it from there.
+
+![The Background Runs panel with a live countdown to the next scheduled fire](../public/images/background-runs-panel.png)
+
+Closing the window doesn't stop it: Aerini keeps running in your system tray even with no window open, so the button or panel above is the actual off switch, not the window's close button.
 
 ## What you just built
 
@@ -62,5 +97,6 @@ From here:
 
 - [Concepts](concepts.md) puts a name to everything you just did (workflow, node, connection, run) and explains how they fit together.
 - [Nodes Reference](../guide/nodes.md) lists everything else you can build with beyond HTTP Request and Output.
+- [Keyboard Shortcuts](../guide/keyboard-shortcuts.md) covers every shortcut, including the two you just used (`Ctrl+S`, `Delete`). The same list opens in the app itself by pressing `?` or clicking **Shortcuts** in the toolbar.
 - [Background Runs](../guide/background-runs.md) covers schedules and webhook triggers in more depth, including run history.
 - [Glossary](../glossary.md) is there for any term that comes up later and doesn't ring a bell.

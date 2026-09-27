@@ -5,10 +5,14 @@ IMAGE="${1:-aerini-server-smoke}"
 PORT=7799
 TOKEN="smoke-test-token-0123456789abcdef"
 CONTAINER=""
+SAVE_BODY_FILE=""
 
 [ -f Dockerfile ] || { echo "Run this from the repo root (Dockerfile not found in $(pwd))."; exit 1; }
 
-cleanup() { [ -n "$CONTAINER" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+cleanup() {
+  [ -n "$CONTAINER" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  [ -n "$SAVE_BODY_FILE" ] && rm -f "$SAVE_BODY_FILE" || true
+}
 trap cleanup EXIT
 
 fail_with_logs() {
@@ -46,10 +50,12 @@ done
 WORKFLOW='{"id":"smoke-test-code-node","name":"smoke test","nodes":[{"id":"n1","node_type_id":"code","node_type":"action","name":"Code","input_schema":{},"output_schema":{},"config":{"code":"output(2 + 2);"}}],"edges":[]}'
 SAVE_BODY="$(python3 -c 'import json,sys; print(json.dumps({"workflow_json": sys.argv[1]}))' "$WORKFLOW")"
 
-SAVE_STATUS="$(curl -sS -o /tmp/smoke-save-body.json -w '%{http_code}' -X POST "http://127.0.0.1:${PORT}/api/workflows" \
+SAVE_BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/aerini-smoke-save.XXXXXX")"
+
+SAVE_STATUS="$(curl -sS -o "$SAVE_BODY_FILE" -w '%{http_code}' -X POST "http://127.0.0.1:${PORT}/api/workflows" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d "$SAVE_BODY")" || fail_with_logs "save request could not be sent"
-[ "$SAVE_STATUS" = "200" ] || fail_with_logs "save returned HTTP ${SAVE_STATUS}: $(cat /tmp/smoke-save-body.json 2>/dev/null)"
+[ "$SAVE_STATUS" = "200" ] || fail_with_logs "save returned HTTP ${SAVE_STATUS}: $(cat "$SAVE_BODY_FILE" 2>/dev/null)"
 
 RUN_RESPONSE="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/api/workflows/smoke-test-code-node/run" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d '{}')" \

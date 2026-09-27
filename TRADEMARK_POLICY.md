@@ -4,6 +4,9 @@
 > describes how the name is used today, not a legal right that's been
 > formally registered anywhere. It follows common practice for unregistered
 > open source project names. Not legal advice.
+>
+> Commercial licensees: your rights and duties are set by Section 8 of your
+> license, not by this document.
 
 ## The name and logo
 

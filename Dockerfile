@@ -41,9 +41,17 @@ COPY Cargo.toml Cargo.lock ./
 COPY aerini-engine ./aerini-engine
 COPY aerini-server ./aerini-server
 
-# Exclude src-tauri from the workspace — it has Tauri/desktop dependencies that
-# cannot build in a headless container. aerini-server does not depend on it.
-RUN printf '[workspace]\nmembers = ["aerini-engine", "aerini-server"]\nresolver = "2"\n\n[workspace.package]\nversion = "0.4.0"\nedition = "2021"\n' > Cargo.toml
+# Drop src-tauri from the workspace members — it has Tauri/desktop dependencies
+# that cannot build in a headless container, and aerini-server does not depend
+# on it. Editing the real root manifest (instead of writing a replacement)
+# keeps [workspace.package] fields such as version and license inherited by
+# the member crates. Dropping the member prunes Cargo.lock, so the build below
+# must not pass --locked.
+RUN sed -i '/^[[:space:]]*"src-tauri",[[:space:]]*$/d' Cargo.toml && \
+    if grep -q 'src-tauri' Cargo.toml; then \
+      echo "ERROR: src-tauri is still referenced in Cargo.toml after the sed edit; update the pattern in the Dockerfile" >&2; \
+      exit 1; \
+    fi
 
 RUN cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
 

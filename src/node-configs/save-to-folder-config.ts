@@ -24,6 +24,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
   const folderDisplay = document.createElement("span");
   folderDisplay.className = "folder-picker-path";
   folderDisplay.textContent = (node.data.config["folder_path"] as string) || "Not set";
+  folderDisplay.title = (node.data.config["folder_path"] as string) || "Not set";
   folderDisplay.setAttribute("aria-live", "polite");
 
   const pickBtn = document.createElement("button");
@@ -38,6 +39,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
     if (path) {
       node.data.config["folder_path"] = path;
       folderDisplay.textContent = path;
+      folderDisplay.title = path;
       onChange();
     }
   });

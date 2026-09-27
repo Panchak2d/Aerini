@@ -18,6 +18,8 @@ Click **Credentials** in the toolbar. This opens a panel listing everything you'
 
 Click **Add a credential** (or, if this is your first one, **Add your first credential**) at the bottom of the panel and fill in:
 
+![The empty Add a credential form](../public/images/credentials-add-empty.png)
+
 - **Type**: pick the shape of the secret. This mostly helps you and other people reading your credential list remember what it's for:
   - **API Key**: a plain key sent as a header or query parameter
   - **Bearer Token**: sent as `Authorization: Bearer <value>`
@@ -27,6 +29,10 @@ Click **Add a credential** (or, if this is your first one, **Add your first cred
 - **Name**: a label for your own reference, like "OpenAI Production Key."
 - **ID**: a short identifier used internally to attach this credential to a node. It's auto-filled from the name (lowercased, spaces turned into underscores) but you can edit it before saving. Letters, numbers, underscores, and hyphens only. You can't change it later, so if you need a different ID, delete the credential and add it again.
 - **Secret Value**: the actual key or token. Click the eye icon to reveal it while typing. Required for every Advanced Provider value except one: if Advanced Provider (below) is set to `local`, this field is optional — see [Local Models](local-models.md#reusing-this-setup-with-a-saved-credential).
+
+![The form filled in, Secret Value masked behind the eye icon](../public/images/credentials-add-filled-masked.png)
+
+![The same form with Secret Value revealed by clicking the eye icon](../public/images/credentials-add-filled-revealed.png)
 
 An **Advanced** section lets you optionally record a provider, model, and base URL alongside the secret. These aren't secret themselves, they exist so that when you later pick this credential on an AI node, Aerini can fill in matching fields for you automatically. Next to Model, a **Fetch Models** button queries that provider's `/models` endpoint using whatever Provider, Base URL, and Secret Value are currently in this form, and offers a dropdown of what it finds — typing a name directly always still works if the fetch fails. More on that below.
 

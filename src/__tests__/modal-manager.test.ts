@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, beforeEach } from "vitest";
 import { initModals, convertN8nWorkflow, showImportPreview } from "../modal-manager";
+import { registerNodeDescriptors } from "../canvas/CanvasSerializer";
 import type { NodeDescriptor } from "../ipc/workflow";
 
 /**
@@ -35,7 +36,7 @@ function mkModalDom(): void {
     el.id = id;
     document.body.appendChild(el);
   }
-  const btnIds = ["import-cancel", "import-confirm", "btn-close-settings", "btn-close-shortcuts"];
+  const btnIds = ["import-cancel", "import-confirm", "btn-close-settings", "btn-close-shortcuts", "btn-shortcuts"];
   for (const id of btnIds) {
     const el = document.createElement("button");
     el.id = id;
@@ -96,7 +97,8 @@ beforeEach(() => {
 describe("initModals — theme select wiring", () => {
   it("populates the select from the THEMES registry and applies a change as data-theme", () => {
     document.documentElement.removeAttribute("data-theme");
-    initModals([], () => {});
+    registerNodeDescriptors([]);
+    initModals(() => {});
 
     const select = document.getElementById("setting-theme") as HTMLSelectElement;
     const optionValues = Array.from(select.options).map(o => o.value);
@@ -110,9 +112,23 @@ describe("initModals — theme select wiring", () => {
   });
 });
 
+describe("initModals — shortcuts button opens the shortcuts modal", () => {
+  it("removes 'hidden' from shortcuts-modal when btn-shortcuts is clicked", () => {
+    const modal = document.getElementById("shortcuts-modal")!;
+    modal.classList.add("hidden");
+    registerNodeDescriptors([]);
+    initModals(() => {});
+
+    document.getElementById("btn-shortcuts")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(modal.classList.contains("hidden")).toBe(false);
+  });
+});
+
 describe("convertN8nWorkflow — If node branch port mapping", () => {
   it("maps n8n output index 0 to on_true and index 1 to on_false, not a generic 'output'/'out_1' guess", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
 
     const n8n = {
       name: "wf",
@@ -141,7 +157,8 @@ describe("convertN8nWorkflow — If node branch port mapping", () => {
 
 describe("convertN8nWorkflow — Switch node case port mapping", () => {
   it("maps sequential rule outputs to case_1.. and an out-of-range/fallback index to default", () => {
-    initModals([SWITCH_DESCRIPTOR], () => {});
+    registerNodeDescriptors([SWITCH_DESCRIPTOR]);
+    initModals(() => {});
 
     const n8n = {
       name: "wf",
@@ -174,7 +191,8 @@ describe("convertN8nWorkflow — Switch node case port mapping", () => {
   });
 
   it("maps an index at or beyond the 8 supported case ports to default", () => {
-    initModals([SWITCH_DESCRIPTOR], () => {});
+    registerNodeDescriptors([SWITCH_DESCRIPTOR]);
+    initModals(() => {});
 
     const n8n = {
       name: "wf",
@@ -196,7 +214,8 @@ describe("convertN8nWorkflow — Switch node case port mapping", () => {
 
 describe("convertN8nWorkflow — non-branching node types (regression, unchanged behavior)", () => {
   it("still uses the real single output port id at index 0", () => {
-    initModals([HTTP_DESCRIPTOR], () => {});
+    registerNodeDescriptors([HTTP_DESCRIPTOR]);
+    initModals(() => {});
 
     const n8n = {
       name: "wf",
@@ -215,7 +234,8 @@ describe("convertN8nWorkflow — non-branching node types (regression, unchanged
   });
 
   it("falls back to the generic single-port guess for a type with no matching descriptor", () => {
-    initModals([], () => {}); // no descriptors registered at all
+    registerNodeDescriptors([]); // no descriptors registered at all
+    initModals(() => {});
 
     const n8n = {
       name: "wf",
@@ -239,7 +259,8 @@ function n8nNodeParams(name: string, type: string, parameters: Record<string, un
 
 describe("convertN8nWorkflow — If node condition translation", () => {
   it("translates a single v2 filter condition (string equals) against its one predecessor", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -260,7 +281,8 @@ describe("convertN8nWorkflow — If node condition translation", () => {
   });
 
   it("translates a v2 numeric-comparison and a v1-legacy boolean condition correctly", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -280,7 +302,8 @@ describe("convertN8nWorkflow — If node condition translation", () => {
   });
 
   it("leaves the condition unconfigured and emits a warning for chained AND/OR conditions instead of guessing", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -306,7 +329,8 @@ describe("convertN8nWorkflow — If node condition translation", () => {
   });
 
   it("emits a warning instead of guessing when the predecessor is ambiguous (two upstream nodes)", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -324,7 +348,8 @@ describe("convertN8nWorkflow — If node condition translation", () => {
   });
 
   it("emits a warning for an operator Aerini's If node doesn't support (e.g. regex) rather than dropping/misrouting it", () => {
-    initModals([IF_DESCRIPTOR], () => {});
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -343,7 +368,8 @@ describe("convertN8nWorkflow — If node condition translation", () => {
 
 describe("convertN8nWorkflow — Switch node condition translation", () => {
   it("translates rules-mode equals rules into field/cases/source_node, matching the existing case_N port mapping", () => {
-    initModals([SWITCH_DESCRIPTOR], () => {});
+    registerNodeDescriptors([SWITCH_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -379,7 +405,8 @@ describe("convertN8nWorkflow — Switch node condition translation", () => {
   });
 
   it("leaves field/cases unconfigured (loud MISSING_FIELD at run time, not a silent guess) for expression mode", () => {
-    initModals([SWITCH_DESCRIPTOR], () => {});
+    registerNodeDescriptors([SWITCH_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -396,7 +423,8 @@ describe("convertN8nWorkflow — Switch node condition translation", () => {
   });
 
   it("emits a warning rather than a wrong single-field guess when rules compare different fields", () => {
-    initModals([SWITCH_DESCRIPTOR], () => {});
+    registerNodeDescriptors([SWITCH_DESCRIPTOR]);
+    initModals(() => {});
     const n8n = {
       name: "wf",
       nodes: [
@@ -422,7 +450,8 @@ describe("convertN8nWorkflow — Switch node condition translation", () => {
 describe("showImportPreview — n8n condition-translation warnings surfaced pre-import", () => {
   it("renders warnings in the requirements list and strips the ephemeral field before handing off to the confirm callback", () => {
     let confirmed: Record<string, unknown> | null = null;
-    initModals([IF_DESCRIPTOR], obj => { confirmed = obj; });
+    registerNodeDescriptors([IF_DESCRIPTOR]);
+    initModals(obj => { confirmed = obj; });
 
     const n8n = {
       name: "wf",

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractPreview, syntaxHighlight, renderErrorsTab, renderSummaryTab, ICON_CIRCLE_ALERT } from "../output-renderer";
+import { extractPreview, syntaxHighlight, renderErrorsTab, renderSummaryTab, renderLogsView, renderDebugView, ICON_CIRCLE_ALERT } from "../output-renderer";
 import type { WorkflowResult } from "../ipc/workflow";
 
 // output-renderer.ts imports invoke/convertFileSrc from @tauri-apps/api/core.
@@ -186,5 +186,73 @@ describe("renderSummaryTab — error icon", () => {
       logs: [{ level: "warn", message: "hmm", timestamp: new Date().toISOString() }],
     };
     expect(renderSummaryTab(result, new Map())).not.toContain("sum-error-card");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderDebugView — node_id escaping
+// ---------------------------------------------------------------------------
+
+describe("renderDebugView — node_id escaping", () => {
+  it("normal case: a plain alphanumeric node id renders unchanged inside the bracket", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [{ level: "info", message: "ok", node_id: "node_1727291091", timestamp: new Date().toISOString() }],
+    };
+    expect(renderDebugView(result)).toContain("[node_1727291]"); // sliced to 12 chars
+  });
+
+  it("edge case: a node id containing HTML metacharacters is escaped, not injected raw", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [{ level: "info", message: "ok", node_id: `"><img src=x>`, timestamp: new Date().toISOString() }],
+    };
+    const html = renderDebugView(result);
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderLogsView — click-to-node data
+// ---------------------------------------------------------------------------
+
+describe("renderLogsView — data-node-id", () => {
+  it("normal case: a log entry with a node id gets a data-node-id attribute and a visible badge", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [{ level: "info", message: "hello", node_id: "node_abc123", timestamp: new Date().toISOString() }],
+    };
+    const html = renderLogsView(result);
+    expect(html).toContain('data-node-id="node_abc123"');
+    expect(html).toContain('<span class="log-node">[node_abc123]</span>');
+    expect(html).toContain('tabindex="0"');
+    expect(html).toContain('role="button"');
+  });
+
+  it("edge case: a log entry with no node id gets no attribute and no badge (unchanged from before)", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [{ level: "info", message: "hello", timestamp: new Date().toISOString() }],
+    };
+    const html = renderLogsView(result);
+    expect(html).not.toContain("data-node-id");
+    expect(html).not.toContain("log-node");
+  });
+
+  it("edge case: a node id with quote/angle-bracket characters is escaped in both the attribute and the badge", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: {},
+      logs: [{ level: "info", message: "hello", node_id: `n"><script>`, timestamp: new Date().toISOString() }],
+    };
+    const html = renderLogsView(result);
+    expect(html).not.toContain('"><script>');
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&quot;&gt;&lt;script&gt;");
   });
 });

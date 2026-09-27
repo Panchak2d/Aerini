@@ -30,7 +30,7 @@ export function bindDropImport(toast: ToastFn): void {
       // Reading arbitrary file paths from a DOM File object is browser-sandboxed,
       // so plugin installs from DOM drag are not supported here — the Tauri
       // native drop path (below) handles the actual install.
-      toast("To install a plugin, use the Install button in Settings → Plugins.", "info");
+      toast("To install a plugin, use the Install button in the Plugins tab.", "info");
       return;
     }
     readAndPreviewFile(file, toast);
@@ -107,7 +107,7 @@ export async function handlePluginDrop(srcPath: string, toast: ToastFn): Promise
     pluginDir = null;
   }
   if (!pluginDir) {
-    toast("Set a plugin directory in Settings → Plugins first.", "info");
+    toast("Set a plugin directory in the Plugins tab first.", "info");
     return;
   }
   // A dropped plugin (single .wasm or .aerinipkg pack) runs with the same

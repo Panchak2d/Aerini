@@ -77,6 +77,7 @@ export function renderAiAttachments(ctx: ExtensionContext): void {
       const lbl = document.createElement("span");
       lbl.className = "attachment-chip-label";
       lbl.innerHTML = FILE_ICON + " " + escapeHtml(att.filename);
+      lbl.title = att.filename;
       chip.appendChild(lbl);
 
       const removeBtn = document.createElement("button");

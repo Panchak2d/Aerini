@@ -8,17 +8,18 @@ members = [
 # (see its own Cargo.toml / README), built via its own `cargo build --target
 # wasm32-wasip2` invocation, not as a host-target member of this workspace.
 # Excluded (not made a member) so `cargo build --workspace`/`cargo test --workspace`
-# never attempt to compile it for the host target. Without this line, `cargo
-# build`/`cargo check` run *inside* examples/plugin-template fails with cargo's
-# own "current package believes it's in a workspace when it's not" error, since
-# the directory sits under this root Cargo.toml but was previously neither a
-# member nor excluded.
+# never attempt to compile it for the host target, and so `cargo build`/`cargo
+# check` run *inside* examples/plugin-template don't fail with cargo's own
+# "current package believes it's in a workspace when it's not" error.
 exclude = [
     "examples/plugin-template",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "AGPL-3.0-only"
+# Shared floor for aerini-engine and aerini-server (set by the aws-sdk crates'
+# rust-version). The desktop crate needs a higher one and declares its own.
+rust-version = "1.94.1"

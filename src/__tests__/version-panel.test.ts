@@ -116,13 +116,18 @@ describe("showVersionPanel — Compare", () => {
     await showVersionPanel(wf, vi.fn());
     await flush();
 
-    document.querySelector<HTMLButtonElement>(".version-compare-btn")!.click();
+    const btn = document.querySelector<HTMLButtonElement>(".version-compare-btn")!;
+    btn.click();
+    expect(btn.disabled).toBe(true); // mid-flight, before getVersionJson resolves
+    expect(btn.textContent).toBe("Comparing…");
     await flush();
 
     expect(wf.getVersionJson).toHaveBeenCalledWith("v1");
     expect(diffPanelMock.showDiffPanel).toHaveBeenCalledWith(
       expect.stringContaining("Snap"), '{"id":"old"}', "Current canvas", '{"id":"now"}',
     );
+    expect(btn.disabled).toBe(false); // restored after completion
+    expect(btn.textContent).toBe("Compare");
   });
 
   it("toasts an error and does not open the diff panel when the version JSON is missing", async () => {
@@ -242,11 +247,13 @@ describe("showVersionPanel — Delete", () => {
     await showVersionPanel(wf, toast);
     await flush();
 
-    document.querySelector<HTMLButtonElement>(".version-delete-btn")!.click();
+    const btn = document.querySelector<HTMLButtonElement>(".version-delete-btn")!;
+    btn.click();
     await flush();
 
     expect(toast).toHaveBeenCalledWith(expect.stringContaining("locked"), "error");
     expect(document.querySelectorAll(".version-item")).toHaveLength(1);
+    expect(btn.disabled).toBe(false); // re-enabled on failure, not left stuck
   });
 });
 
@@ -262,12 +269,17 @@ describe("showVersionPanel — Save Snapshot", () => {
 
     const input = document.querySelector<HTMLInputElement>(".version-snapshot-input")!;
     input.value = "New snap";
-    document.querySelector<HTMLButtonElement>(".version-snapshot-btn")!.click();
+    const btn = document.querySelector<HTMLButtonElement>(".version-snapshot-btn")!;
+    btn.click();
+    expect(btn.disabled).toBe(true); // mid-flight, before saveNamedVersion resolves
+    expect(btn.textContent).toBe("Saving…");
     await flush();
 
     expect(wf.saveNamedVersion).toHaveBeenCalledWith("New snap");
     expect(input.value).toBe("");
     expect(toast).toHaveBeenCalledWith(expect.stringContaining("Snapshot saved"), "success");
+    expect(btn.disabled).toBe(false); // restored after completion
+    expect(btn.textContent).toBe("Save Snapshot");
   });
 
   it("toasts 'no changes' (info) when saveNamedVersion succeeds but the list length is unchanged", async () => {

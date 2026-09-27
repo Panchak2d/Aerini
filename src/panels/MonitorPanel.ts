@@ -5,25 +5,23 @@ import {
   parseSchedulerError,
   type WorkflowSummary,
 } from "../ipc/workflow";
-import { getBgJobs, type BgJob } from "../run-manager";
+import { getBgJobs } from "../run-manager";
 import { isWorkflowRunning, type WorkflowManager } from "../workflow-manager";
 import { getMemoryBreakdown, getProcessMemory, type RunBreakdown } from "../ipc/memory";
 import { getRecentPerformance } from "../ipc/performance";
 import { summarizeMemory, formatBytes, type MemSummary } from "../mem-summary";
 import { isTauri } from "../utils";
 import { showConfirm } from "../confirm";
-
-type RowStatus = "running" | "done" | "failed" | "stopped" | "idle";
-
-interface MonitorRow {
-  id: string;
-  name: string;
-  status: RowStatus;
-  startedAt?: number;
-  finishedAt?: number;
-  nextRunAt?: string | null;
-  alwaysOn?: boolean;
-}
+import {
+  getStartAllTargets,
+  getStopAllTargets,
+  collectRows,
+  applyFilter,
+  formatRowStatusCopy,
+  updatePeak,
+  formatNextRun,
+  type MonitorRow,
+} from "../monitor-helpers";
 
 const POLL_MS = 1000;
 // listWorkflows() is a real IPC round-trip; getBgJobs() just reads an
@@ -72,7 +70,7 @@ let _peakProcessBytes: number | null = null;
 
 // Set once by app.ts after WorkflowManager is constructed (mountMonitorPanel()
 // can run before that, on startup, if the last-used zone was Monitor) — same
-// late-injection pattern as popover/lifecycle.ts's setDescriptorRegistry().
+// late-injection pattern as canvas/node-registry.ts's registerNodeDescriptors().
 let _wfManager: WorkflowManager | null = null;
 export function setMonitorWfManager(wfManager: WorkflowManager): void {
   _wfManager = wfManager;
@@ -151,10 +149,10 @@ function buildShell(area: HTMLElement): void {
     <div class="zone-header">
       <span class="zone-title">Monitor</span>
       <div class="zone-header-actions">
-        <button class="zone-action-btn" id="btn-monitor-search-toggle" title="Search workflows" aria-label="Search workflows" aria-expanded="false">
+        <button class="zone-action-btn" id="btn-monitor-search-toggle" title="Search workflows" data-tooltip="Search workflows" aria-label="Search workflows" aria-expanded="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
         </button>
-        <button class="zone-action-btn" id="btn-monitor-filter" title="Filter: All" aria-label="Filter workflows" data-filter="all">
+        <button class="zone-action-btn" id="btn-monitor-filter" title="Filter: All" data-tooltip="Filter: All" aria-label="Filter workflows" data-filter="all">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
         </button>
       </div>
@@ -273,14 +271,6 @@ export async function startWithPortFallback(id: string): Promise<number | null> 
   return busyPort;
 }
 
-export function getStartAllTargets(rows: MonitorRow[]): MonitorRow[] {
-  return rows.filter(r => r.status === "idle" || r.status === "stopped" || r.status === "failed");
-}
-
-export function getStopAllTargets(rows: MonitorRow[]): MonitorRow[] {
-  return rows.filter(r => r.status === "running");
-}
-
 function bindHeaderActions(): void {
   const startBtn = document.getElementById("btn-monitor-start-all") as HTMLButtonElement | null;
   const stopBtn = document.getElementById("btn-monitor-stop-all") as HTMLButtonElement | null;
@@ -369,6 +359,7 @@ function setFilterStatus(value: string): void {
     const label = FILTER_OPTIONS.find(opt => opt.value === value)?.label ?? "All";
     filterBtn.dataset.filter = value;
     filterBtn.title = `Filter: ${label}`;
+    filterBtn.setAttribute("data-tooltip", `Filter: ${label}`);
     filterBtn.classList.toggle("active", value !== "all");
   }
   syncOverviewActiveState();
@@ -465,6 +456,7 @@ function buildPeakResourceRow(wrap: HTMLElement): HTMLElement {
   resetBtn.className = "monitor-resource-reset";
   resetBtn.textContent = "Reset";
   resetBtn.title = "Reset peak memory";
+  resetBtn.setAttribute("data-tooltip", "Reset peak memory");
   resetBtn.addEventListener("click", () => {
     _peakProcessBytes = null;
     valEl.textContent = "—";
@@ -528,7 +520,7 @@ async function renderTick(): Promise<void> {
 
   const allRows = collectRows(jobs, _idleWorkflows);
   _lastAllRows = allRows;
-  const rows = applyFilter(allRows);
+  const rows = applyFilter(allRows, _filterStatus, _filterQuery);
   renderList(rows, memData);
   updateOverviewCounts(allRows);
   updateHeaderActions(allRows);
@@ -537,44 +529,13 @@ async function renderTick(): Promise<void> {
   const activeEl = document.getElementById("monitor-active-count");
   const summary = summarizeMemory(memData);
   const activeCount = jobs.filter(j => j.status === "running").length;
-  // Primary "Memory" figure (header + sidebar) is now process-wide RSS,
-  // not the per-run allocator total — see buildResourcesSidebar's
-  // "workflowMem" comment for where that figure went instead. Fixes the
-  // flicker-to-"—" between runs: this reading is never [] the way
-  // getMemoryBreakdown() is at idle.
+  // Process-wide RSS for the header/sidebar "Memory" figure — see
+  // buildResourcesSidebar's "workflowMem" comment for the separate
+  // per-run allocator total. Never shows "—" between runs: this reading
+  // is never [] the way getMemoryBreakdown() is at idle.
   if (memTotalEl) memTotalEl.textContent = processBytes === null ? "—" : formatBytes(processBytes);
   if (activeEl) activeEl.textContent = String(activeCount);
   updateResources(processBytes, summary, activeCount);
-}
-
-export function collectRows(jobs: BgJob[], idleWfs: WorkflowSummary[]): MonitorRow[] {
-  const rows: MonitorRow[] = jobs.map(j => ({
-    id: j.id,
-    name: j.name,
-    status: j.status,
-    startedAt: j.startedAt,
-    finishedAt: j.finishedAt,
-    nextRunAt: j.nextRunAt,
-    alwaysOn: j.alwaysOn,
-  }));
-  for (const wf of idleWfs) rows.push({ id: wf.id, name: wf.name, status: "idle" });
-  return rows;
-}
-
-export function applyFilter(
-  rows: MonitorRow[],
-  status: string = _filterStatus,
-  query: string = _filterQuery,
-): MonitorRow[] {
-  let out = rows;
-  if (status === "running") out = out.filter(r => r.status === "running");
-  else if (status === "success") out = out.filter(r => r.status === "done");
-  else if (status === "failed") out = out.filter(r => r.status === "failed");
-  else if (status === "stopped") out = out.filter(r => r.status === "stopped");
-  else if (status === "idle") out = out.filter(r => r.status === "idle");
-  else if (status === "scheduled") out = out.filter(r => !!r.nextRunAt || r.alwaysOn === true);
-  if (query) out = out.filter(r => r.name.toLowerCase().includes(query));
-  return out;
 }
 
 // ── Currently-open canvas workflow card ───────────────────────────────
@@ -608,10 +569,12 @@ function renderCanvasCard(): void {
   nameEl.className = "bg-job-name";
   nameEl.textContent = name;
   nameEl.title = name;
+  nameEl.setAttribute("data-tooltip", name);
 
   const btn = document.createElement("button");
   btn.className = "bg-job-action-btn bg-job-action-restart";
   btn.title = running ? "Stop this workflow" : "Run this workflow";
+  btn.setAttribute("data-tooltip", running ? "Stop this workflow" : "Run this workflow");
   btn.innerHTML = running
     ? `<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`
     : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
@@ -668,6 +631,7 @@ function rebuildList(list: HTMLElement, rows: MonitorRow[]): void {
     nameEl.className = "bg-job-name";
     nameEl.textContent = row.name;
     nameEl.title = row.name;
+    nameEl.setAttribute("data-tooltip", row.name);
 
     const memEl = document.createElement("span");
     memEl.className = "monitor-row-mem";
@@ -685,6 +649,7 @@ function rebuildList(list: HTMLElement, rows: MonitorRow[]): void {
       const stopBtn = document.createElement("button");
       stopBtn.className = "bg-job-action-btn bg-job-action-stop";
       stopBtn.title = "Stop workflow";
+      stopBtn.setAttribute("data-tooltip", "Stop workflow");
       stopBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`;
       stopBtn.addEventListener("click", (e) => void handleStop(e, row, stopBtn));
       actions.appendChild(stopBtn);
@@ -698,6 +663,7 @@ function rebuildList(list: HTMLElement, rows: MonitorRow[]): void {
       const restartBtn = document.createElement("button");
       restartBtn.className = "bg-job-action-btn bg-job-action-restart";
       restartBtn.title = "Restart workflow";
+      restartBtn.setAttribute("data-tooltip", "Restart workflow");
       restartBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
       restartBtn.addEventListener("click", (e) => void handleStart(e, row, restartBtn, "Restart failed"));
       actions.appendChild(restartBtn);
@@ -705,6 +671,7 @@ function rebuildList(list: HTMLElement, rows: MonitorRow[]): void {
       const startBtn = document.createElement("button");
       startBtn.className = "bg-job-action-btn bg-job-action-restart";
       startBtn.title = "Run in background";
+      startBtn.setAttribute("data-tooltip", "Run in background");
       startBtn.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`;
       startBtn.addEventListener("click", (e) => void handleStart(e, row, startBtn, "Could not start"));
       actions.appendChild(startBtn);
@@ -713,6 +680,7 @@ function rebuildList(list: HTMLElement, rows: MonitorRow[]): void {
     const openBtn = document.createElement("button");
     openBtn.className = "bg-job-action-btn bg-job-action-open";
     openBtn.title = "Open on canvas";
+    openBtn.setAttribute("data-tooltip", "Open on canvas");
     openBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
     openBtn.addEventListener("click", (e) => { e.stopPropagation(); handleOpen(row); });
     actions.appendChild(openBtn);
@@ -783,18 +751,6 @@ function describeSchedulerError(err: unknown): string {
   }
 }
 
-// Tightened per-status row copy ("Failed 2m ago" / "Last run 12m ago"),
-// reusing formatDuration — the file's one existing time-formatter — rather
-// than adding a second one. `now` defaults to Date.now() but is an explicit
-// param so this stays a pure, directly-testable function.
-export function formatRowStatusCopy(row: MonitorRow, now: number = Date.now()): string {
-  if (row.status === "running" && row.startedAt) return formatDuration(now - row.startedAt);
-  if (row.finishedAt && row.status === "done")    return `Last run ${formatDuration(now - row.finishedAt)} ago`;
-  if (row.finishedAt && row.status === "failed")  return `Failed ${formatDuration(now - row.finishedAt)} ago`;
-  if (row.finishedAt && row.status === "stopped") return `Stopped ${formatDuration(now - row.finishedAt)} ago`;
-  return "—";
-}
-
 function updateRowLiveFields(row: MonitorRow, memData: RunBreakdown[]): void {
   const refs = _rowEls.get(row.id);
   if (!refs) return;
@@ -822,35 +778,9 @@ function updateRowLiveFields(row: MonitorRow, memData: RunBreakdown[]): void {
   }
 }
 
-export function formatDuration(ms: number): string {
-  const secs = Math.max(0, Math.round(ms / 1000));
-  return secs < 60 ? `${secs}s` : `${Math.round(secs / 60)}m`;
-}
-
-/**
- * Pure peak-tracking step: given a fresh process-memory reading and the
- * previously-tracked peak, returns the peak that should be tracked next.
- * A failed read (`null`) never lowers or clears an existing peak — only
- * the "Reset Peak" control does that, by setting `_peakProcessBytes`
- * directly rather than through this function.
- */
-export function updatePeak(reading: number | null, prevPeak: number | null): number | null {
-  if (reading === null) return prevPeak;
-  if (prevPeak === null || reading > prevPeak) return reading;
-  return prevPeak;
-}
-
 function clearCountdowns(): void {
   _countdownIntervals.forEach(id => clearInterval(id));
   _countdownIntervals.clear();
-}
-
-// Reused by startCountdown below — the only place nextRunAt is formatted in
-// this file, so this is that formatting, not a second one alongside it.
-export function formatNextRun(secsLeft: number): string {
-  return secsLeft < 60
-    ? `Next run ${secsLeft}s`
-    : `Next run ${Math.floor(secsLeft / 60)}m ${secsLeft % 60}s`;
 }
 
 function startCountdown(rowId: string, nextRunAt: string, el: HTMLElement): void {

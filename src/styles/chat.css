@@ -53,7 +53,7 @@
    via the wrapper's own auto margins. refreshRunningState() keeps the text
    and the button's hidden state in sync with schedulerRunning/mainRunActive. */
 .chat-empty-state { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; max-width: 240px; }
-.chat-empty-state-text { margin: 0; color: var(--t3); font-size: 12px; line-height: 1.5; }
+.chat-empty-state-text { margin: 0; color: var(--t2); font-size: 12px; line-height: 1.5; }
 .chat-empty-state-start { width: auto; padding: 8px 24px; font-size: 13px; }
 
 .chat-bubble-row { display: flex; }
@@ -105,10 +105,10 @@
 .chat-attachment-chip-label { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .chat-attachment-chip-remove { display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: none; border: none; color: var(--t3); padding: 2px; border-radius: 4px; cursor: pointer; transition: color var(--trans), background var(--trans); }
 .chat-attachment-chip-remove:hover { color: var(--red); background: rgba(248,113,113,.1); }
-.chat-attachment-hint { font-size: 10px; color: var(--t3); margin-left: 2px; }
+.chat-attachment-hint { font-size: 10px; color: var(--t2); margin-left: 2px; }
 .chat-attachment-hint--warn { color: var(--amber); }
 
-.chat-branding-footer { flex-shrink: 0; text-align: center; font-size: 10px; color: var(--t3); padding: 0 0 6px; letter-spacing: .02em; }
+.chat-branding-footer { flex-shrink: 0; text-align: center; font-size: 10px; color: var(--t2); padding: 0 0 6px; letter-spacing: .02em; }
 .chat-attach-btn { flex-shrink: 0; background: none; border: 1px solid var(--bd); border-radius: var(--radius-sm); color: var(--t2); padding: 6px; cursor: pointer; transition: color var(--trans), border-color var(--trans); }
 .chat-attach-btn:hover:not(:disabled) { color: var(--t1); border-color: var(--t3); }
 .chat-attach-btn:disabled { opacity: .4; cursor: not-allowed; }

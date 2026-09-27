@@ -6,7 +6,7 @@ body:
     id: version
     attributes:
       label: Aerini version
-      description: Found in the app title bar or `cargo pkgid aerini`.
+      description: Found in Settings → About, or run `cargo pkgid aerini`.
       placeholder: "e.g. 0.2.0"
     validations:
       required: true

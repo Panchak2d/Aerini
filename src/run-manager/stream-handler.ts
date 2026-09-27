@@ -73,7 +73,6 @@ export class RunManager {
   private resetOutputPanel(): void {
     this._activeHistoryPanel = null;
     this.state.setLastResult(null);
-    this.clearLogs();
     const tabsEl = document.getElementById("drawer-tabs");
     const content = document.getElementById("output-content");
     if (tabsEl) tabsEl.innerHTML = "";
@@ -243,7 +242,7 @@ export class RunManager {
   // Open the output drawer directly to the History tab.
   // Called when the user clicks a bg job in the sidebar — shows past runs
   // for that workflow without needing a live lastResult.
-  openHistoryDrawer(_workflowName?: string): void {
+  openHistoryDrawer(): void {
     const drawer  = document.getElementById("output-drawer");
     const tabsEl  = document.getElementById("drawer-tabs");
     const content = document.getElementById("output-content");
@@ -254,12 +253,8 @@ export class RunManager {
     content.innerHTML = "";
 
     const historyTab = this.makeTab("History", "tab-neutral");
-    // R-bug (Issue 1): every other makeTab() call site in this file wires a
-    // click listener before/after appending; this one didn't, so clicking
-    // back to History after navigating to another tab (e.g. Performance)
-    // silently did nothing. #output-content still holds the panel appended
-    // below (Performance's own toggle never clears it), so re-showing this
-    // pane is all a click needs to do — no re-fetch required.
+    // #output-content keeps the panel appended below (the Performance toggle
+    // never clears it), so re-showing this pane is all a click needs to do.
     historyTab.addEventListener("click", () => this.setActiveTab(historyTab));
     this.setActiveTab(historyTab);
     tabsEl.appendChild(historyTab);
@@ -325,7 +320,6 @@ export class RunManager {
     drawer.classList.remove("hidden");
     this.showEphemeralPane();
     content.innerHTML = '<div class="run-placeholder">Running workflow…</div>';
-    this.clearLogs();
     this.onStatus("Running…");
     document.getElementById("drawer-tabs")!.innerHTML = "";
 
@@ -416,7 +410,6 @@ export class RunManager {
       this.onRunResult?.(result.success);
 
       this.buildDrawerTabs(result);
-      this.populateLogs(result);
 
       if (rs) {
         rs.textContent = result.success ? "Complete" : "Failed";
@@ -657,6 +650,7 @@ export class RunManager {
       this._activeHistoryPanel = null;
       this.setActiveTab(logsTab);
       content.innerHTML = renderLogsView(result);
+      this.wireLogNodeLinks(content);
     });
     tabsEl.appendChild(logsTab);
 
@@ -751,6 +745,7 @@ export class RunManager {
       this.setActiveTab(logsTab);
       content.innerHTML = "";
       content.insertAdjacentHTML("beforeend", renderLogsView(result));
+      this.wireLogNodeLinks(content);
     });
     tabsEl.appendChild(logsTab);
 
@@ -794,29 +789,23 @@ export class RunManager {
     document.getElementById("output-content-performance")?.classList.add("hidden");
   }
 
-  clearLogs(): void {
-    const el = document.getElementById("logs-list");
-    if (el) el.innerHTML = "";
-  }
-
-  private populateLogs(result: WorkflowResult): void {
-    const el = document.getElementById("logs-list");
-    if (!el) return;
-    el.innerHTML = "";
-    for (const log of result.logs) {
-      const entry = document.createElement("div");
-      entry.className = `log-entry ${log.level}`;
-      const t = new Date(log.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      entry.innerHTML = `<span class="log-time">${t}</span>${log.node_id ? `<span class="log-node">[${log.node_id.slice(0, 12)}]</span>` : ""}<span class="log-msg">${escapeHtml(log.message)}</span>`;
-      if (log.node_id) {
-        entry.style.cursor = "pointer";
-        entry.addEventListener("click", () => {
-          const n = this.canvas.nodes.get(log.node_id!);
-          if (n) { this.canvas.clearSelection(); this.canvas.selectNode(n); }
-        });
-      }
-      el.appendChild(entry);
-    }
+  // Wires click (and Enter/Space, for keyboard users) on every rendered
+  // log line that carries a data-node-id — same select-on-canvas affordance
+  // and same click+keydown pairing as run-history.ts's buildItem().
+  private wireLogNodeLinks(container: Element): void {
+    container.querySelectorAll<HTMLElement>(".log-line[data-node-id]").forEach(line => {
+      const id = line.dataset.nodeId!;
+      const select = (): void => {
+        const n = this.canvas.nodes.get(id);
+        if (n) { this.canvas.clearSelection(); this.canvas.selectNode(n); }
+      };
+      line.addEventListener("click", select);
+      line.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        select();
+      });
+    });
   }
 
   private resetBtns(p: HTMLButtonElement | null): void {

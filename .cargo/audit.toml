@@ -14,7 +14,7 @@ ignore = [
     #
     # If you run Aerini in API mode and allow untrusted callers to configure Database
     # node connection strings, treat this advisory as unmitigated until sqlx ships
-    # a fix. See docs/security.md#known-transitive-dependency-risks for details.
+    # a fix. See the "Dangerous nodes" section of docs/guide/security.md.
     #
     # Exploiting requires: sustained measurement of many handshakes by a
     # network-adjacent attacker (high bar on WAN; realistic on LAN or same-host).
@@ -30,39 +30,9 @@ ignore = [
     # Cannot upgrade without Tauri migrating to GTK4. Track: https://github.com/tauri-apps/tauri
     "RUSTSEC-2024-0429",
 
-    # GTK3 bindings unmaintained (RUSTSEC-2024-0411 through 0420).
-    # All transitive via Tauri 2 → webkit2gtk. Cannot remove without replacing Tauri.
-    "RUSTSEC-2024-0411",
-    "RUSTSEC-2024-0412",
-    "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0414",
-    "RUSTSEC-2024-0415",
-    "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0417",
-    "RUSTSEC-2024-0418",
-    "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420",
-
     # RUSTSEC-2024-0370: proc-macro-error unmaintained.
     # Transitive build dep. No prod impact. Track replacement upstream.
     "RUSTSEC-2024-0370",
-
-    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml 0.36.2 DoS (quadratic
-    # attribute-dup check / unbounded namespace allocation).
-    # Transitive via docx-rs 0.4.20 (direct dep, nodes/text_to_file.rs DOCX
-    # export), which pins quick-xml = "^0.36". Verified via crates.io API
-    # (2026-07-17): 0.4.20 is docx-rs's latest published release — no newer
-    # version exists to pull a patched quick-xml (>=0.41.0). Cannot fix by
-    # upgrading; would require docx-rs's maintainer to bump the pin, or
-    # replacing docx-rs. Same advisory pair against docx-rs's other resolved
-    # copy of quick-xml is fixed via plist 1.10.0 (`cargo update -p plist`).
-    #
-    # Exploiting requires: feeding a crafted/oversized DOCX-internal XML
-    # payload through docx-rs's parser. Aerini only uses docx-rs to *write*
-    # DOCX output (nodes/text_to_file.rs), not to parse untrusted input —
-    # low real-world exposure. Re-check when docx-rs publishes a new release.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
 
     # unic-* crate family (all "unmaintained", no vulnerability, no fix available):
     # Transitive via Tauri: tauri-utils -> urlpattern 0.3.0 -> unic-ucd-ident ->

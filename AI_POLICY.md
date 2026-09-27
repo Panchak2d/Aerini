@@ -43,12 +43,20 @@ This policy is binding on:
 - Contributors (via the Contributor License Agreement)
 - Parties who receive this software directly from this project with explicit
   notice of this restriction
+- End customers of a commercial licensee, through the restriction the licensee
+  is required to include in its own end-user agreement (see Section 5 of the
+  [Commercial License Agreement](https://aerini.org/license-terms))
 
 **Limitation:** Parties who receive the AGPL-licensed code through downstream
 distribution are governed by AGPL-3.0 terms only. The AGPL does not include
 an AI training restriction. This policy represents the project's values regarding
 contributor agency and is a binding commitment for direct recipients — it is not
 a claim of enforcement beyond its legal reach.
+
+A commercial licensee's end customers are bound by the restriction in their own
+agreement with that licensee. The licensee is responsible for including it, and
+this project is not a party to that agreement. A licensee that omits the
+restriction breaches its own license.
 
 ---
 

@@ -128,6 +128,7 @@ Treat a publicly embedded widget the same way you'd treat any other public form:
 
 ## See also
 
+- [Chat Panel](chat-panel.md), for the desktop-only equivalent of this feature — same workflow shape, no secret or token needed since it never leaves the machine
 - [Nodes Reference](nodes.md#webhook), for the Webhook node's full field table and the Output node's fields
 - [Background Runs](background-runs.md#how-webhook-behaves-in-the-background), for what it means for a Webhook-triggered workflow to be running in the background
 - [Credentials](credentials.md), for the encrypted credential store, a separate mechanism from the secret and token this page covers

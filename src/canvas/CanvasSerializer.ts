@@ -1,20 +1,11 @@
 import { CanvasNode }  from "./Node";
 import { Connector }  from "./Connector";
 import type { CanvasNodeData } from "./Node";
-import type { NodeDescriptor } from "../ipc/workflow";
 import { NODE_IDS } from "../node-ids";
+import { getNodeDescriptor } from "./node-registry";
 
 // Populated by app.ts after ALL_NODES is defined
-let _nodeRegistry: Map<string, NodeDescriptor> = new Map();
-
-export function registerNodeDescriptors(descriptors: NodeDescriptor[]): void {
-  _nodeRegistry = new Map(descriptors.map(d => [d.type_id, d]));
-}
-
-/** True when `typeId` was loaded from a WASM plugin rather than built in. */
-export function isPluginNodeType(typeId: string): boolean {
-  return _nodeRegistry.get(typeId)?.is_plugin === true;
-}
+export { registerNodeDescriptors } from "./node-registry";
 
 /**
  * Per-workflow Chat Panel feature toggles. Field names and defaults
@@ -135,9 +126,24 @@ export function serialize(
   return JSON.stringify(doc, null, 2);
 }
 
-export function deserializeWorkflowName(json: string): string {
-  try { return JSON.parse(json).name ?? "Untitled"; }
-  catch { return "Untitled"; }
+// Matches every id already produced in this codebase (node_..., e_..., wf_...,
+// hand-authored ones like "n1"/"wf-1" in docs and fixtures) while excluding
+// HTML/JS metacharacters and unbounded length — defense in depth on top of
+// the escaping already done at every render site, not a replacement for it.
+const IMPORTED_ID_RE = /^[\w.-]{1,256}$/;
+
+// Accepts `raw` as an id only if it's a non-empty string matching
+// IMPORTED_ID_RE and not already used in this document; otherwise generates
+// a fresh one with the existing `${prefix}_${Date.now()}_${random}` scheme.
+// A genuinely absent id (undefined/null) isn't flagged as `replaced` — that's
+// the normal case for a hand-built or freshly-created node, not bad input.
+function resolveImportedId(raw: unknown, prefix: string, used: Set<string>): { id: string; replaced: boolean } {
+  const present  = raw !== undefined && raw !== null;
+  const candidate = present ? String(raw) : "";
+  const valid = present && IMPORTED_ID_RE.test(candidate) && !used.has(candidate);
+  const id = valid ? candidate : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  used.add(id);
+  return { id, replaced: present && !valid };
 }
 
 export function deserialize(json: string): {
@@ -152,6 +158,8 @@ export function deserialize(json: string): {
   tags: string[];
   collectionId: string | null;
   maxDurationSecs: number | undefined;
+  /** Human-readable notes on data this import had to correct (invalid/duplicate ids, dropped dangling edges). Empty when nothing needed fixing. */
+  importWarnings: string[];
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
@@ -168,18 +176,25 @@ export function deserialize(json: string): {
   const name = doc.name ?? "Untitled";
   const nodes      = new Map<string, CanvasNode>();
   const connectors = new Map<string, Connector>();
+  const usedNodeIds = new Set<string>();
+  const usedEdgeIds = new Set<string>();
+  let fixedNodeIds = 0;
+  let fixedEdgeIds = 0;
+  let droppedEdges = 0;
 
   for (const raw of (doc.nodes ?? []) as Array<Record<string, unknown>>) {
     try {
+      const nodeId = resolveImportedId(raw.id, "node", usedNodeIds);
+      if (nodeId.replaced) fixedNodeIds++;
       const data: CanvasNodeData = {
-        id:            String(raw.id           ?? `node_${Date.now()}_${Math.random().toString(36).slice(2)}`),
+        id:            nodeId.id,
         node_type_id:  String(raw.node_type_id ?? NODE_IDS.MANUAL_TRIGGER),
         node_type:     (raw.node_type as "action"|"ai"|"logic"|"utility") ?? "action",
         name:          String(raw.name         ?? "Node"),
         config:        (raw.config             as Record<string, unknown>) ?? {},
         credentials:   (raw.credentials        as Record<string, string>)  ?? {},
         position:      (raw.position           as { x: number; y: number }) ?? { x: 100, y: 100 },
-        ports:         (raw.ports as { inputs: Array<{id:string;label:string;position:"left"|"right"|"top"|"bottom"}>; outputs: Array<{id:string;label:string;position:"left"|"right"|"top"|"bottom"}>}) ?? _nodeRegistry.get(String(raw.node_type_id ?? ""))?.ports ?? { inputs: [], outputs: [] },
+        ports:         (raw.ports as { inputs: Array<{id:string;label:string;position:"left"|"right"|"top"|"bottom"}>; outputs: Array<{id:string;label:string;position:"left"|"right"|"top"|"bottom"}>}) ?? getNodeDescriptor(String(raw.node_type_id ?? ""))?.ports ?? { inputs: [], outputs: [] },
         input_schema:  (raw.input_schema  as Record<string, unknown>) ?? {},
         output_schema: (raw.output_schema as Record<string, unknown>) ?? {},
         retry:         (raw.retry as { max_attempts: number; backoff_ms: number }) ?? { max_attempts: 1, backoff_ms: 500 },
@@ -188,7 +203,7 @@ export function deserialize(json: string): {
         disabled:      (raw.disabled as boolean | undefined) ?? false,
         // Prefer the live registry value (authoritative) over saved JSON, since
         // saved files may predate the dynamic_ports field.
-        dynamic_ports: _nodeRegistry.get(String(raw.node_type_id ?? ""))?.dynamic_ports ?? (raw.dynamic_ports as boolean | undefined) ?? false,
+        dynamic_ports: getNodeDescriptor(String(raw.node_type_id ?? ""))?.dynamic_ports ?? (raw.dynamic_ports as boolean | undefined) ?? false,
       };
       const n = new CanvasNode(data);
       nodes.set(n.data.id, n);
@@ -197,8 +212,10 @@ export function deserialize(json: string): {
 
   for (const raw of (doc.edges ?? []) as Array<Record<string, unknown>>) {
     try {
+      const edgeId = resolveImportedId(raw.id, "e", usedEdgeIds);
+      if (edgeId.replaced) fixedEdgeIds++;
       const c = new Connector({
-        id:         String(raw.id        ?? `e_${Date.now()}_${Math.random().toString(36).slice(2)}`),
+        id:         edgeId.id,
         from_node:  String(raw.from_node ?? ""),
         from_port:  String(raw.from_port ?? "output"),
         to_node:    String(raw.to_node   ?? ""),
@@ -209,9 +226,16 @@ export function deserialize(json: string): {
       });
       if (nodes.has(c.data.from_node) && nodes.has(c.data.to_node)) {
         connectors.set(c.data.id, c);
+      } else {
+        droppedEdges++;
       }
     } catch { /* skip malformed edge */ }
   }
+
+  const importWarnings: string[] = [];
+  if (fixedNodeIds) importWarnings.push(`${fixedNodeIds} node id${fixedNodeIds === 1 ? "" : "s"} had an invalid or duplicate format and ${fixedNodeIds === 1 ? "was" : "were"} replaced.`);
+  if (fixedEdgeIds) importWarnings.push(`${fixedEdgeIds} edge id${fixedEdgeIds === 1 ? "" : "s"} had an invalid or duplicate format and ${fixedEdgeIds === 1 ? "was" : "were"} replaced.`);
+  if (droppedEdges) importWarnings.push(`${droppedEdges} edge${droppedEdges === 1 ? "" : "s"} referencing a missing node ${droppedEdges === 1 ? "was" : "were"} dropped.`);
 
   return {
     id,
@@ -225,5 +249,6 @@ export function deserialize(json: string): {
     tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
     collectionId: typeof doc.metadata?.collection_id === "string" ? doc.metadata.collection_id : null,
     maxDurationSecs: typeof doc.max_duration_secs === "number" ? doc.max_duration_secs : undefined,
+    importWarnings,
   };
 }

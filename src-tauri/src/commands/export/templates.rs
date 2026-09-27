@@ -168,25 +168,56 @@ ARG AERINI_REPO=https://github.com/Panchak2d/aerini
 ARG AERINI_REF=main
 
 RUN apt-get update && \
-    apt-get install -y git musl-tools && \
+    apt-get install -y git musl-tools curl ca-certificates xz-utils binutils && \
     rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /app
+# src-tauri is dropped from the workspace members: its desktop dependencies
+# cannot build in a headless container and aerini-server does not depend on it.
+# The cloned manifest is edited rather than replaced so the [workspace.package]
+# fields (version, edition, license) still reach the member crates. Dropping the
+# member prunes Cargo.lock, so the build must not pass --locked.
 RUN git clone --depth 1 --branch "$AERINI_REF" "$AERINI_REPO" . && \
-    printf '[workspace]\nmembers = ["aerini-engine", "aerini-server"]\nresolver = "2"\n' \
-    > Cargo.toml && \
+    sed -i '/^[[:space:]]*"src-tauri",[[:space:]]*$/d' Cargo.toml && \
+    if grep -q 'src-tauri' Cargo.toml; then \
+      echo "ERROR: src-tauri is still referenced in Cargo.toml after the sed edit; the cloned repository's workspace layout is not supported by this Dockerfile" >&2; \
+      exit 1; \
+    fi && \
     cargo build --release --target x86_64-unknown-linux-musl -p aerini-server
+
+# Node.js for the Code node's server-side sandbox. Version is read from the
+# cloned repository's own NODE_VERSION file, the same source
+# scripts/fetch-node-binaries.sh and this repository's root Dockerfile use,
+# so a fork built via AERINI_REPO/AERINI_REF above pins whatever version that
+# fork declares.
+RUN NODE_VERSION="$(head -n1 NODE_VERSION | tr -d '\r')" && \
+    if ! echo "$NODE_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then \
+      echo "ERROR: NODE_VERSION file must have a bare semver as its first line, got: '$NODE_VERSION'" >&2; \
+      exit 1; \
+    fi && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/node-shasums.txt && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && \
+    NODE_EXPECTED_SHA256="$(awk -v f="node-v${NODE_VERSION}-linux-x64.tar.xz" '$2==f {print $1; exit}' /tmp/node-shasums.txt)" && \
+    [ -n "$NODE_EXPECTED_SHA256" ] && \
+    echo "${NODE_EXPECTED_SHA256}  /tmp/node.tar.xz" | sha256sum -c - && \
+    tar -xJf /tmp/node.tar.xz -C /tmp && \
+    cp "/tmp/node-v${NODE_VERSION}-linux-x64/bin/node" /app/node-bundled && \
+    chmod +x /app/node-bundled && \
+    strip /app/node-bundled && \
+    [ "$(/app/node-bundled --version)" = "v${NODE_VERSION}" ] && \
+    rm -rf /tmp/node.tar.xz /tmp/node-shasums.txt "/tmp/node-v${NODE_VERSION}-linux-x64"
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
+    apt-get install -y ca-certificates libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder \
     /app/target/x86_64-unknown-linux-musl/release/aerini-server \
     /usr/local/bin/aerini-server
+COPY --from=builder /app/node-bundled /usr/local/bin/node-bundled
 
 RUN useradd -r -s /bin/false aerini && \
     mkdir -p /data && \
@@ -646,6 +677,60 @@ mod dangerous_export_tests {
         let unsafe_ = build_serve_docker_compose("wf", 7700, &[], &["shell_exec"]);
         assert!(unsafe_.contains("# command:"));
         assert!(unsafe_.contains("\"--allow-shell\""));
+    }
+
+    #[test]
+    fn serve_dockerfile_bundles_node_next_to_the_binary() {
+        let out = build_serve_dockerfile();
+        // code_node.rs::resolve_node_bin_from only ever looks for `node-bundled`
+        // next to its own executable, never PATH, so the exported image has to
+        // put it exactly there for a Code (JS) node to work at all.
+        assert!(out.contains("NODE_VERSION"));
+        assert!(out.contains("sha256sum -c -"));
+        assert!(out.contains(
+            "COPY --from=builder /app/node-bundled /usr/local/bin/node-bundled"
+        ));
+    }
+
+    #[test]
+    fn serve_dockerfile_runtime_stage_can_run_the_bundled_node() {
+        let out = build_serve_dockerfile();
+        // Official nodejs.org Linux builds are dynamically linked against
+        // glibc/libstdc++ — without this, node-bundled would be present but
+        // fail to start in the debian:bookworm-slim runtime stage.
+        assert!(out.contains("libstdc++6"));
+    }
+
+    #[test]
+    fn serve_dockerfile_edits_cloned_manifest_instead_of_replacing_it() {
+        let out = build_serve_dockerfile();
+        // A replacement manifest has no [workspace.package], so every member
+        // crate's `version.workspace`/`edition.workspace`/`license.workspace`
+        // fails to resolve and the image never builds.
+        assert!(!out.contains("> Cargo.toml"));
+        assert!(!out.contains("printf '[workspace]"));
+        let sed_pos = out
+            .find("sed -i '/^[[:space:]]*\"src-tauri\",[[:space:]]*$/d' Cargo.toml")
+            .expect("member-removal sed missing");
+        let guard_pos = out
+            .find("grep -q 'src-tauri' Cargo.toml")
+            .expect("post-edit guard missing");
+        let build_pos = out
+            .find("cargo build --release")
+            .expect("cargo build missing");
+        assert!(sed_pos < guard_pos && guard_pos < build_pos);
+    }
+
+    #[test]
+    fn serve_dockerfile_build_is_not_locked() {
+        let out = build_serve_dockerfile();
+        // Removing a member prunes Cargo.lock, which `--locked` rejects.
+        let build_line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("cargo build"))
+            .expect("cargo build line missing");
+        assert!(!build_line.contains("--locked"));
+        assert!(build_line.contains("-p aerini-server"));
     }
 }
 

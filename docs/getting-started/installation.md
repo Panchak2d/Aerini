@@ -40,8 +40,8 @@ You'll need:
 
 | Tool | Version |
 |---|---|
-| Rust (stable) | 1.77+ |
-| Node.js | 18+ |
+| Rust (stable) | 1.95+ |
+| Node.js | 20.19+, 22.13+, or 24+ |
 | Tauri CLI | 2.x |
 
 ```bash

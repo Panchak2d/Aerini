@@ -9,12 +9,12 @@ import { initStatusBarFields } from "./statusbar-fields";
 import { initPerformancePanel } from "./panels/PerformancePanel";
 import {
   buildSidebarPalette, bindSidebarSearch, filterByCategory,
-  initCommandPalette, openPalette, setCommandPaletteNodes,
+  initCommandPalette, openPalette,
 } from "./palette-manager";
-import { initModals, setModalNodes } from "./modal-manager";
+import { initModals } from "./modal-manager";
 import { bindDropImport, bindFileInput } from "./drag-drop";
 import { bindPluginSettings } from "./plugin-settings";
-import { showPopover, closePopover, setDescriptorRegistry } from "./popover";
+import { showPopover, closePopover } from "./popover";
 import { listenCloseRequested } from "./ipc/events";
 import { getVersion } from "@tauri-apps/api/app";
 import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionControls, bindBgRunsFilter, activateZone, getCurrentZone } from "./sidebar-sections";
@@ -64,7 +64,6 @@ async function init() {
   }
   const allNodes = await getNodeTypes().catch((): NodeDescriptor[] => []);
   registerNodeDescriptors(allNodes);
-  setDescriptorRegistry(allNodes);
 
   const canvasEl   = document.getElementById("canvas") as HTMLCanvasElement;
   const canvas     = new Canvas(canvasEl);
@@ -93,16 +92,19 @@ async function init() {
   }
   function setTitle(n: string) {
     const el = document.getElementById("workflow-name-label");
-    if (el) { el.textContent = n; el.title = n; }
+    if (el) { el.textContent = n; el.title = n; el.setAttribute("data-tooltip", n); }
   }
   function markUnsaved(on: boolean) {
     document.getElementById("unsaved-dot")?.classList.toggle("visible", on);
   }
   function updateStatusHint() {
     const el = document.getElementById("status-hint"); if (!el) return;
-    if (canvas.nodes.size === 0) el.textContent = "Click a node to place it · Space to search · Ctrl+S to save";
-    else if (canvas.selectedNode) el.textContent = "Del to delete · Ctrl+D to duplicate · Double-click to configure";
-    else el.textContent = "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
+    const hint = canvas.nodes.size === 0
+      ? "Click a node to place it · Space to search · Ctrl+S to save"
+      : canvas.selectedNode
+      ? "Del to delete · Ctrl+D to duplicate · Double-click to configure"
+      : "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
+    el.textContent = hint; el.title = hint;
   }
 
   // Persist viewport per workflow so zoom/pan survive workflow switches
@@ -115,7 +117,6 @@ async function init() {
   };
 
   if (!isTauri()) {
-    document.getElementById("browser-run-notice")?.classList.remove("hidden");
     setTimeout(() => {
       const ann = document.getElementById("a11y-announcer");
       if (ann) ann.textContent = "Browser mode. Execution requires the Tauri desktop app. Workflow builder works fully here.";
@@ -218,7 +219,7 @@ async function init() {
   // Update status hint when run starts/ends
   runManager.addRunStateListener((running) => {
     const el = document.getElementById("status-hint"); if (!el) return;
-    if (running) el.textContent = "Workflow running\u2026 Ctrl+. to stop";
+    if (running) { const hint = "Workflow running\u2026 Ctrl+. to stop"; el.textContent = hint; el.title = hint; }
     else updateStatusHint();
   });
 
@@ -260,11 +261,11 @@ async function init() {
 
   // Wire-drop: connector released on empty space → open node picker at drop point
   canvas.onWireDropRequest = (_fromNode, _fromPort, _wx, _wy) => {
-    openWireDropPicker(allNodes, canvas, canvasEl, setStatus);
+    openWireDropPicker(canvas, setStatus);
   };
 
   canvas.onInputWireDropRequest = (_toNode, _toPort, _wx, _wy) => {
-    openInputWireDropPicker(allNodes, canvas, canvasEl, setStatus);
+    openInputWireDropPicker(canvas, setStatus);
   };
 
   canvas.onWarn = (msg) => toast(msg, "info");
@@ -278,10 +279,10 @@ async function init() {
   document.querySelectorAll<HTMLElement>(".cat-chip").forEach(chip => {
     chip.addEventListener("click", () => filterByCategory(chip.dataset.cat ?? "all"));
   });
-  initCommandPalette(allNodes, canvas, setStatus);
-  initModals(allNodes, (obj) => {
+  initCommandPalette(canvas, setStatus);
+  initModals((obj) => {
     try {
-      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(JSON.stringify(obj));
+      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs, importWarnings } = deserialize(JSON.stringify(obj));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
       wfManager.parallelExecution  = parallelExecution;
@@ -294,21 +295,23 @@ async function init() {
       wfManager.currentId = id; wfManager.currentName = name;
       wfManager.markUnsaved(false); setTitle(name);
       document.getElementById("output-drawer")!.classList.add("hidden");
-      runManager.clearLogs();
       setStatus(`Imported "${name}"`);
       wfManager.refreshWorkflowList();
-      toast(`Imported "${name}"`, "success");
+      // One toast either way — this app has no toast queue/stacking, so a
+      // second call right after would just render on top of the first at
+      // the same fixed position (see .toast in base.css).
+      if (importWarnings.length) toast(`Imported "${name}" — ${importWarnings.join(" ")}`, "warning");
+      else toast(`Imported "${name}"`, "success");
     } catch (e) { toast(`Import failed: ${e}`, "error"); }
   });
   bindDropImport(toast);
   bindFileInput(toast);
 
-  // A plugin install/remove/reload swaps the backend node registry
-  // atomically, but every frontend cache of the node-descriptor list
-  // (sidebar palette, command palette, canvas/popover registries, the
-  // wire-drop pickers' `allNodes` closure) was only ever populated from
-  // the single getNodeTypes() call above. Without this, none of them see
-  // a new/removed node type until the whole app restarts.
+  // A plugin install/remove/reload swaps the backend node registry. Re-fetch
+  // the descriptor list and register it — the command palette and modals
+  // read the registry live on each use, so only the sidebar palette (which
+  // takes its list as an explicit argument, not a subscription) needs its
+  // own rebuild call here.
   async function refreshNodeDescriptors(): Promise<void> {
     let fresh: NodeDescriptor[];
     try {
@@ -319,12 +322,7 @@ async function init() {
       // the previous (still-valid, just not-quite-current) list in place.
       return;
     }
-    allNodes.length = 0;
-    allNodes.push(...fresh);
     registerNodeDescriptors(fresh);
-    setDescriptorRegistry(fresh);
-    setCommandPaletteNodes(fresh);
-    setModalNodes(fresh);
     buildSidebarPalette(fresh, canvas, setStatus);
   }
 

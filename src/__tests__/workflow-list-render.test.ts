@@ -125,11 +125,50 @@ describe("collection header — double-click-to-rename does not flicker collapse
     const name  = group.querySelector<HTMLElement>(".workflow-collection-name")!;
 
     // Simulate the real click/click/dblclick sequence a double-click on the
-    // name dispatches; without the e.detail guard this used to toggle
+    // name dispatches; without the e.detail guard this would toggle
     // collapsed -> expanded -> collapsed before the rename input ever showed.
     name.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     name.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
 
     expect(group.classList.contains("collapsed")).toBe(false);
+  });
+});
+
+describe("browser mode -- deleting a workflow", () => {
+  const LS_KEY = "aerini_workflows_v1";
+
+  beforeEach(() => {
+    setTauri(false);
+    localStorage.clear();
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      "wf-1": { id: "wf-1", name: "A", json: "{}", updated_at: "2024-01-01T00:00:00Z", tags: [], collection_id: null },
+    }));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("removes the workflow from localStorage and the rendered list", async () => {
+    const mgr = makeManager();
+    await mgr.refreshWorkflowList();
+
+    document.querySelector<HTMLButtonElement>(".workflow-item-del")!.click();
+
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll(".workflow-item").length).toBe(0);
+    });
+    expect(JSON.parse(localStorage.getItem(LS_KEY)!)).toEqual({});
+  });
+
+  it("logs the error instead of swallowing it when localStorage cannot be written", async () => {
+    const mgr = makeManager();
+    await mgr.refreshWorkflowList();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
+
+    document.querySelector<HTMLButtonElement>(".workflow-item-del")!.click();
+
+    await vi.waitFor(() => {
+      expect(err).toHaveBeenCalledWith("Aerini: localStorage delete failed", expect.any(Error));
+    });
   });
 });

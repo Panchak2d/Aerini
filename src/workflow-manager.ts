@@ -31,9 +31,16 @@ function lsLoad(id: string): string | null {
   try { return (JSON.parse(localStorage.getItem(LS_KEY) ?? "{}")[id] as { json: string })?.json ?? null; }
   catch { return null; }
 }
-function lsDelete(id: string): void {
-  try { const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}"); delete all[id]; localStorage.setItem(LS_KEY, JSON.stringify(all)); }
-  catch {}
+function lsDelete(id: string): boolean {
+  try {
+    const all = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    delete all[id];
+    localStorage.setItem(LS_KEY, JSON.stringify(all));
+    return true;
+  } catch (e) {
+    console.error("Aerini: localStorage delete failed", e);
+    return false;
+  }
 }
 
 // -- Workflow Collections (named folders in the Workflows sidebar) --
@@ -55,8 +62,8 @@ export const COLLECTION_COLORS: readonly CollectionColor[] = ["blue", "green", "
 /** Maps a stored color name to an existing theme CSS variable, never a
  *  literal hex, so a collection's color stays correct under both the dark
  *  and paper themes. "slate" reuses --cat-trigger rather than a new token:
- *  its dark-theme value (#8aa9c9) is exactly the neutral the brief asked
- *  for, and it already exists for exactly this "muted category" purpose. */
+ *  its dark-theme value (#8aa9c9) is a suitable neutral, and it already
+ *  exists for exactly this "muted category" purpose. */
 export function collectionColorVar(color: CollectionColor): string {
   switch (color) {
     case "blue":   return "var(--blue)";
@@ -163,7 +170,7 @@ export function setWorkflowRunning(id: string, running: boolean): void {
     if (_runningWorkflows.has(id)) {
       item.classList.add("wf-is-running");
       const dot = document.createElement("span");
-      dot.className = "wf-run-dot"; dot.title = "Running";
+      dot.className = "wf-run-dot"; dot.title = "Running"; dot.setAttribute("data-tooltip", "Running");
       wrap.appendChild(dot);
     } else {
       item.classList.remove("wf-is-running");
@@ -360,9 +367,8 @@ export class WorkflowManager {
     this.refreshWorkflowList();
   }
 
-  /** Shift+Click: range-select from the last-clicked anchor. No-op (per
-   *  computeSelectionRange) if there's no anchor yet, matching the brief:
-   *  shift-click behaves like a plain toggle would with nothing to anchor on. */
+  /** Shift+Click: range-select from the last-clicked anchor. With no anchor
+   *  yet it behaves like a plain toggle would with nothing to anchor on. */
   selectRange(toId: string): void {
     if (!this.selectAnchorId) { this.toggleSelected(toId); return; }
     const list = document.getElementById("workflow-list");
@@ -453,8 +459,7 @@ export class WorkflowManager {
     this.refreshWorkflowList();
   }
 
-  /** Workflows inside move to Uncategorized; nothing is deleted (per the
-   *  brief's own confirm-modal copy, reproduced verbatim at the call site). */
+  /** Workflows inside move to Uncategorized; nothing is deleted. */
   async deleteCollection(id: string): Promise<void> {
     const col = this.collections.find(c => c.id === id);
     if (!col) return;
@@ -650,6 +655,7 @@ export class WorkflowManager {
       dot.classList.add("workflow-collection-dot-muted");
     } else {
       dot.title = "Change color";
+      dot.setAttribute("data-tooltip", "Change color");
       dot.addEventListener("click", e => { e.stopPropagation(); this.openColorMenu(dot, collection.id); });
     }
     header.appendChild(dot);
@@ -686,6 +692,7 @@ export class WorkflowManager {
       // Full name in the tooltip too, not just the rename hint -- otherwise
       // a name long enough to ellipsis has no way to be read in full.
       name.title = isUncategorized ? "Uncategorized" : `${collection.name} • Double-click to rename`;
+      name.setAttribute("data-tooltip", name.title);
       if (!isUncategorized) {
         name.addEventListener("dblclick", e => { e.stopPropagation(); this.startCollectionRename(collection.id); });
       }
@@ -700,6 +707,7 @@ export class WorkflowManager {
         const newBtn = document.createElement("button");
         newBtn.className = "zone-action-btn workflow-collection-new-btn";
         newBtn.title = `New workflow in ${collection.name}`;
+        newBtn.setAttribute("data-tooltip", `New workflow in ${collection.name}`);
         newBtn.setAttribute("aria-label", `New workflow in ${collection.name}`);
         newBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
         newBtn.addEventListener("click", e => { e.stopPropagation(); this.handleNew(collection.id); });
@@ -708,6 +716,7 @@ export class WorkflowManager {
         const menuBtn = document.createElement("button");
         menuBtn.className = "zone-action-btn workflow-collection-menu-btn";
         menuBtn.title = "Collection options";
+        menuBtn.setAttribute("data-tooltip", "Collection options");
         menuBtn.setAttribute("aria-label", `Options for ${collection.name}`);
         menuBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>`;
         menuBtn.addEventListener("click", e => { e.stopPropagation(); this.openCollectionMenu(menuBtn, collection.id); });
@@ -716,11 +725,10 @@ export class WorkflowManager {
 
       const toggle = () => this.toggleCollectionCollapsed(collection?.id ?? null);
       header.addEventListener("click", (e: MouseEvent) => {
-        // Pre-existing latent bug, found auditing the same pattern just added
-        // for workflow-item rename: double-clicking the name to rename it
-        // fires two ordinary clicks before the dblclick handler above runs,
-        // each toggling collapse/expand -- a visible flicker right before the
-        // rename input appears. e.detail (click count) skips the repeats.
+        // Double-clicking the name to rename it fires two ordinary clicks
+        // before the dblclick handler above runs, each toggling
+        // collapse/expand -- a visible flicker right before the rename input
+        // appears. e.detail (click count) skips the repeats.
         if (e.detail > 1) return;
         toggle();
       });
@@ -745,8 +753,7 @@ export class WorkflowManager {
       wrap.appendChild(body);
     }
 
-    // Drop target: the whole group (header + collapsed-or-not) accepts drops,
-    // per the brief: drop target is the entire collection group.
+    // Drop target: the whole group (header + collapsed-or-not) accepts drops.
     wrap.addEventListener("dragover", e => { e.preventDefault(); wrap.classList.add("drop-target"); });
     wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-target"));
     wrap.addEventListener("drop", e => {
@@ -801,8 +808,7 @@ export class WorkflowManager {
     nameEl.className = "workflow-item-name";
     nameEl.textContent = wf.name;
     // Double-click to rename in place -- mirrors the collection header's own
-    // rename gesture exactly, so renaming a workflow no longer requires
-    // opening it first and double-clicking the canvas title bar.
+    // rename gesture exactly, so a workflow can be renamed without opening it.
     nameEl.addEventListener("dblclick", e => { e.stopPropagation(); this.startItemRename(nameEl, wf); });
 
     const tags = wf.tags ?? [];
@@ -816,6 +822,7 @@ export class WorkflowManager {
     // has no way to be read in full (the rest of the tooltip only ever
     // carried save-date/tags, never the name itself).
     item.title = [wf.name, savedLabel, tags.length ? `Tags: ${tags.join(", ")}` : ""].filter(Boolean).join(" • ");
+    item.setAttribute("data-tooltip", item.title);
 
     let tagsEl: HTMLElement | null = null;
     if (tags.length) {
@@ -842,6 +849,7 @@ export class WorkflowManager {
     delBtn.className = "workflow-item-del";
     delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>`;
     delBtn.title = "Delete workflow";
+    delBtn.setAttribute("data-tooltip", "Delete workflow");
     delBtn.addEventListener("click", async e => {
       e.stopPropagation();
       // Block deletion while the workflow is actively running in the background
@@ -854,15 +862,19 @@ export class WorkflowManager {
       }
       const ok = await this.confirmFn(`Delete "${wf.name}"? This cannot be undone.`, true);
       if (!ok) return;
+      delBtn.disabled = true;
       if (isTauri()) {
         try {
           await deleteWorkflow(wf.id);
         } catch (err) {
+          delBtn.disabled = false;
           this.onToast(`Delete failed: ${err}`, "error");
           return;
         }
-      } else {
-        lsDelete(wf.id);
+      } else if (!lsDelete(wf.id)) {
+        delBtn.disabled = false;
+        this.onToast("Delete failed: browser storage could not be updated", "error");
+        return;
       }
       this.selectedIds.delete(wf.id);
       if (wf.id === this.currentId) this.handleNew();
@@ -875,10 +887,13 @@ export class WorkflowManager {
     const dupBtn = document.createElement("button");
     dupBtn.className = "workflow-item-dup";
     dupBtn.title = "Duplicate workflow";
+    dupBtn.setAttribute("data-tooltip", "Duplicate workflow");
     dupBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
     dupBtn.addEventListener("click", async e => {
       e.stopPropagation();
+      dupBtn.disabled = true;
       await this.duplicateWorkflow(wf.id, wf.name);
+      dupBtn.disabled = false;
     });
 
     item.appendChild(dupBtn);
@@ -1133,32 +1148,60 @@ export class WorkflowManager {
       }
       const ok = await this.confirmFn(`Delete ${ids.length} workflow${ids.length > 1 ? "s" : ""}? This cannot be undone.`, true);
       if (!ok) return;
-      for (const id of ids) {
-        try {
-          if (isTauri()) await deleteWorkflow(id);
-          else lsDelete(id);
-        } catch (e) {
-          console.error(`Aerini: failed to delete workflow ${id}`, e);
+      const btn = document.getElementById("wf-bulk-delete") as HTMLButtonElement;
+      const btnLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Deleting…";
+      try {
+        let deleted = 0;
+        let openedWasDeleted = false;
+        for (const id of ids) {
+          try {
+            let removed: boolean;
+            if (isTauri()) { await deleteWorkflow(id); removed = true; }
+            else removed = lsDelete(id);
+            if (removed) {
+              deleted++;
+              if (id === this.currentId) openedWasDeleted = true;
+            }
+          } catch (e) {
+            console.error(`Aerini: failed to delete workflow ${id}`, e);
+          }
         }
+        if (deleted === ids.length) {
+          this.onToast(`Deleted ${ids.length} workflow${ids.length > 1 ? "s" : ""}`, "success");
+        } else {
+          this.onToast(`Deleted ${deleted} of ${ids.length} workflows; ${ids.length - deleted} could not be deleted`, "error");
+        }
+        this.selectedIds.clear();
+        if (openedWasDeleted) this.handleNew();
+        else await this.refreshWorkflowList();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = btnLabel;
       }
-      this.onToast(`Deleted ${ids.length} workflow${ids.length > 1 ? "s" : ""}`, "success");
-      const openedWasDeleted = ids.includes(this.currentId);
-      this.selectedIds.clear();
-      if (openedWasDeleted) this.handleNew();
-      else await this.refreshWorkflowList();
     });
 
     document.getElementById("wf-bulk-duplicate")?.addEventListener("click", async () => {
       const ids = Array.from(this.selectedIds);
       if (!ids.length) return;
-      const wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
-      const byId = new Map(wfs.map(w => [w.id, w]));
-      for (const id of ids) {
-        const wf = byId.get(id);
-        if (wf) await this.duplicateWorkflow(id, wf.name);
+      const btn = document.getElementById("wf-bulk-duplicate") as HTMLButtonElement;
+      const btnLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Duplicating…";
+      try {
+        const wfs = isTauri() ? await listWorkflows().catch(() => []) : lsList();
+        const byId = new Map(wfs.map(w => [w.id, w]));
+        for (const id of ids) {
+          const wf = byId.get(id);
+          if (wf) await this.duplicateWorkflow(id, wf.name);
+        }
+        this.selectedIds.clear();
+        await this.refreshWorkflowList();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = btnLabel;
       }
-      this.selectedIds.clear();
-      await this.refreshWorkflowList();
     });
 
     document.getElementById("wf-bulk-move")?.addEventListener("click", e => {
@@ -1224,6 +1267,7 @@ export class WorkflowManager {
       sw.className = "workflow-collection-swatch" + (color === current ? " selected" : "");
       sw.style.background = collectionColorVar(color);
       sw.title = color;
+      sw.setAttribute("data-tooltip", color);
       sw.setAttribute("aria-label", `Set color ${color}`);
       sw.addEventListener("mousedown", ev => { ev.preventDefault(); dd.remove(); this.setCollectionColor(collectionId, color); });
       dd.appendChild(sw);
@@ -1639,7 +1683,7 @@ export class WorkflowManager {
         if (v) this.markUnsaved(true);
         const lbl = document.createElement("span");
         lbl.id = "workflow-name-label"; lbl.className = "workflow-title";
-        lbl.title = "Double-click to rename"; lbl.textContent = this.currentName;
+        lbl.title = "Double-click to rename"; lbl.setAttribute("data-tooltip", "Double-click to rename"); lbl.textContent = this.currentName;
         lbl.addEventListener("dblclick", () => this.startRename(lbl));
         inp.replaceWith(lbl);
         resolve(v);

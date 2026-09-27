@@ -16,6 +16,7 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
       remove.className = "wf-tag-chip-remove";
       remove.textContent = "✕";
       remove.title = `Remove "${tag}"`;
+      remove.setAttribute("data-tooltip", `Remove "${tag}"`);
       remove.addEventListener("click", () => {
         wfManager.currentTags = wfManager.currentTags.filter(t => t !== tag);
         wfManager.markUnsaved(true);

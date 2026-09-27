@@ -1,17 +1,24 @@
 import { mk, mkSection, type ExtensionContext } from "../../node-configs/popover-utils";
 
 /**
- * Generic raw-JSON editor for a plugin node's full config object. Plugin
- * input_schema properties can be object- or array-typed (unlike every
- * built-in node's flat schema), and field-renderer.ts's generic loop has no
- * renderer for either — this is the fallback that lets a plugin author's
- * nested config still be edited, and the only config surface at all for a
- * trigger-only plugin with zero declared schema properties.
+ * Raw-JSON editor for a plugin node's config object. Plugin input_schema
+ * properties can be object- or array-typed (unlike every built-in node's
+ * flat schema), and field-renderer.ts's generic loop has no control for
+ * either; this lets a plugin author's nested config still be edited.
+ *
+ * `hiddenKeys` (the node's credential fields) are left out of the displayed
+ * JSON so an inline secret never shows in plaintext here, and are kept as-is
+ * when an edit commits.
  *
  * Edits commit on blur, not on every keystroke, so in-progress/invalid
- * typing is never destroyed mid-edit.
+ * typing is never destroyed mid-edit. Leaving the box without changing its
+ * text commits nothing, so tabbing past it doesn't mark the workflow unsaved
+ * or rebuild the panel.
  */
-export function renderPluginRawConfigEditor(ctx: ExtensionContext): void {
+export function renderPluginRawConfigEditor(
+  ctx: ExtensionContext,
+  hiddenKeys: ReadonlySet<string> = new Set(),
+): void {
   const { node, body, onChange, rerender, hasConfigSection } = ctx;
 
   if (!hasConfigSection) {
@@ -32,7 +39,10 @@ export function renderPluginRawConfigEditor(ctx: ExtensionContext): void {
   ta.rows = 10;
   ta.spellcheck = false;
   ta.autocomplete = "off";
-  ta.value = JSON.stringify(node.data.config, null, 2);
+  ta.value = JSON.stringify(
+    Object.fromEntries(Object.entries(node.data.config).filter(([k]) => !hiddenKeys.has(k))),
+    null, 2,
+  );
 
   const error = document.createElement("div");
   error.className = "field-hint field-hint--warn";
@@ -48,7 +58,13 @@ export function renderPluginRawConfigEditor(ctx: ExtensionContext): void {
     }
   });
 
+  const shown = ta.value;
+
   ta.addEventListener("blur", () => {
+    if (ta.value === shown) {
+      error.style.display = "none";
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(ta.value);
@@ -68,8 +84,10 @@ export function renderPluginRawConfigEditor(ctx: ExtensionContext): void {
     // existing reference to the same object (e.g. a dynamic-ports node's
     // derivePorts closure) sees the update without needing its own resync.
     const config = node.data.config as Record<string, unknown>;
-    for (const k of Object.keys(config)) delete config[k];
-    Object.assign(config, parsed as Record<string, unknown>);
+    for (const k of Object.keys(config)) if (!hiddenKeys.has(k)) delete config[k];
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!hiddenKeys.has(k)) config[k] = v;
+    }
 
     onChange();
     rerender();

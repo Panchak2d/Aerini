@@ -65,8 +65,8 @@ Make an HTTP request to any URL. Supports GET, POST, PUT, PATCH, DELETE, custom 
 |---|---|---|
 | `url` | URL | Required. |
 | `method` | Method | Required. `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
-| `headers` | Headers | Request headers, as an object. |
-| `body` | Body | Request body, for POST/PUT/PATCH. |
+| `headers` | Headers | Request headers, as an object. Edited as JSON in **Advanced: full config**. |
+| `body` | Body | Request body, for POST/PUT/PATCH. Plain text or an expression edits normally; a JSON object/array value is edited in **Advanced: full config** instead. |
 | `api_key` | API Key | Resolved from Connections. |
 
 **Ports:** In → Success, Error.
@@ -81,7 +81,7 @@ Run a shell command on the machine Aerini is on, and capture its stdout, stderr,
 |---|---|---|
 | `command` | Command | Required. |
 | `cwd` | Cwd | Working directory. |
-| `env` | Env | Environment variables, as an object. |
+| `env` | Env | Environment variables, as an object. Edited as JSON in **Advanced: full config**. |
 | `timeout_secs` | Timeout (seconds) | Default 30. |
 
 **Ports:** default (In → Out).
@@ -436,6 +436,8 @@ Read or write persistent AI conversation history, scoped per session, so an AI n
 
 **Output:** `messages` (array of `{role, content}`), `count`, `session_id`.
 
+The [Chat Panel](chat-panel.md)'s Clear button and session delete call this node's `clear` operation directly, using the Chat Panel's own session ID — if a workflow uses that same ID for its AI Memory calls, clearing a chat session clears its memory too.
+
 ### Text Splitter
 
 Split a long piece of text into smaller chunks, by character count, word count, sentence count, or paragraph boundaries.
@@ -602,7 +604,7 @@ Reshape or extract data from the previous node's output using a template or expr
 | Field | Label | Notes |
 |---|---|---|
 | `source_node` | Source Node | Required. Which node to pull output from. |
-| `mappings` | Mappings | Required. Array of `{from, to}` pairs: `from` is a JSON pointer into the source (e.g. `/user/name`), `to` is the key it lands on in this node's output. |
+| `mappings` | Mappings | Required. Array of `{from, to}` pairs: `from` is a JSON pointer into the source (e.g. `/user/name`), `to` is the key it lands on in this node's output. Edited as JSON in **Advanced: full config**. |
 
 **Ports:** default (In → Out).
 

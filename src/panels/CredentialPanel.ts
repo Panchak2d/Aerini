@@ -7,7 +7,7 @@ import {
   deleteCredential,
   exportEncryptionKey,
 } from "../ipc/credentials";
-import { listProviderModels } from "../ipc/providers";
+import { listProviderModels, describeModelFetchError } from "../ipc/providers";
 import { mkCustomSelect } from "../node-configs/popover-utils";
 import { showConfirm } from "../confirm";
 import { escapeHtml as escHtml } from "../utils";
@@ -146,7 +146,7 @@ export class CredentialPanel {
             <div class="cred-panel-subtitle">API keys and service credentials — stored encrypted on your device. Never sent anywhere.</div>
           </div>
           <button class="cred-panel-close" id="cred-close" aria-label="Close">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
@@ -215,9 +215,9 @@ export class CredentialPanel {
       <div class="cred-item${this.editing?.id === c.id ? " editing" : ""}" data-id="${escHtml(c.id)}">
         <div class="cred-item-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg></div>
         <div class="cred-item-info">
-          <div class="cred-item-name">${escHtml(c.name)}</div>
-          <div class="cred-item-id">${escHtml(c.id)}</div>
-          <div class="cred-item-usage${names.length ? "" : " unused"}" title="${escHtml(usageTitle)}">${escHtml(usageLabel)}</div>
+          <div class="cred-item-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
+          <div class="cred-item-id" title="${escHtml(c.id)}">${escHtml(c.id)}</div>
+          <div class="cred-item-usage${names.length ? "" : " unused"}" title="${escHtml(usageTitle)}" data-tooltip="${escHtml(usageTitle)}">${escHtml(usageLabel)}</div>
         </div>
         <span class="cred-item-type">${escHtml(credTypeLabel(c.cred_type))}</span>
         <div class="cred-item-actions">
@@ -251,7 +251,7 @@ export class CredentialPanel {
         <label class="field-label">Secret Value</label>
         <div class="cred-secret-wrap">
           <input id="cred-value" type="password" placeholder="${escHtml(activeType.placeholder)}" autocomplete="new-password" value="${escHtml(e?.value ?? "")}" />
-          <button type="button" class="cred-show-btn" id="cred-show" title="Show / hide" aria-label="Show or hide secret value">
+          <button type="button" class="cred-show-btn" id="cred-show" title="Show / hide" data-tooltip="Show / hide" aria-label="Show or hide secret value">
             <svg id="cred-eye-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
             </svg>
@@ -263,7 +263,11 @@ export class CredentialPanel {
         <summary class="cred-advanced-summary">Advanced (optional) — provider, model, base URL</summary>
         <div class="field-group">
           <label class="field-label">Provider</label>
-          <input id="cred-meta-provider" type="text" placeholder="e.g. openai, anthropic, gemini" autocomplete="off" value="${escHtml(e?.provider ?? "")}" />
+          <div class="field-multiline-wrap">
+            <input id="cred-meta-provider" type="text" placeholder="e.g. openai, anthropic, gemini" autocomplete="off" value="${escHtml(e?.provider ?? "")}" />
+            <div id="cred-provider-picker-slot"></div>
+          </div>
+          <div class="field-hint">Pick a known provider, or type any other value (a proxy or self-hosted alias) — the field always stays editable.</div>
         </div>
         <div class="field-group">
           <label class="field-label">Model</label>
@@ -275,7 +279,10 @@ export class CredentialPanel {
         </div>
         <div class="field-group">
           <label class="field-label">Base URL</label>
-          <input id="cred-meta-base-url" type="text" placeholder="Leave blank for provider default" autocomplete="off" value="${escHtml(e?.base_url ?? "")}" />
+          <div class="field-multiline-wrap">
+            <input id="cred-meta-base-url" type="text" placeholder="Leave blank for provider default" autocomplete="off" value="${escHtml(e?.base_url ?? "")}" />
+            <div id="cred-base-url-help-slot"></div>
+          </div>
         </div>
         <div class="field-hint">Not secret — used to auto-fill matching fields on AI nodes when this credential is selected.</div>
       </details>`;
@@ -297,6 +304,7 @@ export class CredentialPanel {
     const baseUrlInp  = this.el.querySelector("#cred-meta-base-url") as HTMLInputElement;
     const fetchModelsBtn = this.el.querySelector("#cred-fetch-models")   as HTMLButtonElement;
     const modelListSlot  = this.el.querySelector("#cred-model-list-slot") as HTMLElement;
+    const providerPickerSlot = this.el.querySelector("#cred-provider-picker-slot") as HTMLElement;
 
     // Build custom select — avoids WebKitGTK Linux native <select> rendering bug
     let selectedCredType = this.editing?.cred_type ?? CRED_TYPES[0].value;
@@ -305,6 +313,52 @@ export class CredentialPanel {
       valInp.placeholder = t.placeholder;
       selectedCredType   = t.value;
     }, selectedCredType));
+
+    // Provider is deliberately free text, not a closed enum — this metadata
+    // has to accept any string (a proxy alias, a self-hosted name), not just
+    // the built-in ids (see formatProviderLabel in field-renderer.ts). This
+    // picker is a convenience layer on top, same pattern as the Model field
+    // below: click to fill the four built-in ids, or keep typing anything
+    // else — the input stays the actual, authoritative value either way.
+    const KNOWN_PROVIDERS = ["openai", "anthropic", "gemini", "local"];
+    function refreshProviderPicker(): void {
+      providerPickerSlot.innerHTML = "";
+      providerPickerSlot.appendChild(mkCustomSelect(KNOWN_PROVIDERS, providerInp.value.trim(), (v) => {
+        providerInp.value = v;
+        refreshProviderPicker();
+        refreshBaseUrlHelp();
+      }));
+    }
+    refreshProviderPicker();
+
+    // "local" has no cloud default by design (any OpenAI-compatible local
+    // server, any port) — leaving Base URL blank under it resolves to an
+    // empty string and Fetch Models (and the node itself) fails immediately.
+    // That's correct, but the generic placeholder below actively told users
+    // to do the one thing guaranteed to break it. Ollama is the common case
+    // (the only local backend with its own sidebar preset), so swap in a
+    // concrete example and a one-click fill once Provider is actually
+    // "local"; any other local server still just needs its own URL typed in.
+    const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1";
+    const GENERIC_BASE_URL_PLACEHOLDER = "Leave blank for provider default";
+    const baseUrlHelpSlot = this.el.querySelector("#cred-base-url-help-slot") as HTMLElement;
+    function refreshBaseUrlHelp(): void {
+      const isLocal = providerInp.value.trim() === "local";
+      baseUrlInp.placeholder = isLocal ? `e.g. ${OLLAMA_DEFAULT_BASE_URL} (Ollama)` : GENERIC_BASE_URL_PLACEHOLDER;
+      baseUrlHelpSlot.innerHTML = "";
+      if (!isLocal) return;
+      const fillBtn = document.createElement("button");
+      fillBtn.type = "button";
+      fillBtn.className = "code-load-btn";
+      fillBtn.textContent = "Use Ollama defaults";
+      fillBtn.addEventListener("click", () => { baseUrlInp.value = OLLAMA_DEFAULT_BASE_URL; });
+      baseUrlHelpSlot.appendChild(fillBtn);
+    }
+    refreshBaseUrlHelp();
+    // Keeps both the picker's own label and the Base URL help in sync with
+    // manual typing too, not just picker clicks — rebuilding a plain select
+    // on every keystroke is cheap (DOM construction only, no network).
+    providerInp.addEventListener("input", () => { refreshProviderPicker(); refreshBaseUrlHelp(); });
 
     // Auto-slug ID from name — skipped entirely while editing, since the ID
     // field is read-only and re-deriving it would fight the locked value.
@@ -358,8 +412,13 @@ export class CredentialPanel {
         }));
 
         fetchModelsBtn.textContent = FETCH_MODELS_LABEL;
-      } catch {
+      } catch (err) {
         fetchModelsBtn.textContent = "Couldn't fetch — try again";
+        modelListSlot.innerHTML = "";
+        const errHint = document.createElement("div");
+        errHint.className = "config-hint config-hint-warn";
+        errHint.textContent = describeModelFetchError(err);
+        modelListSlot.appendChild(errHint);
         setTimeout(() => { fetchModelsBtn.textContent = FETCH_MODELS_LABEL; }, 2500);
       } finally {
         fetchModelsBtn.disabled = false;
@@ -519,6 +578,7 @@ export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) =
   const label = document.createElement("span");
   label.className = "csel-label";
   label.textContent = current.label;
+  label.title = current.label;
 
   const arrow = document.createElement("span");
   arrow.className = "csel-arrow";
@@ -540,6 +600,7 @@ export function buildCredTypeSelect(types: CredType[], onChange: (t: CredType) =
       e.preventDefault();
       current = t;
       label.textContent = t.label;
+      label.title = t.label;
       dropdown.querySelectorAll(".csel-option").forEach(el => el.classList.remove("selected"));
       item.classList.add("selected");
       dropdown.classList.add("hidden");

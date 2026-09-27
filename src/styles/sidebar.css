@@ -173,7 +173,7 @@
 .zone-mem-badge {
   font-size: 10px;
   font-weight: 600;
-  color: var(--t3);
+  color: var(--t2);
   background: var(--bg4);
   border: 1px solid var(--bd);
   border-radius: 4px;
@@ -256,7 +256,7 @@
   border-color: var(--color-focus);
   background: var(--bg4);
 }
-.zone-search input::placeholder { color: var(--t3); }
+.zone-search input::placeholder { color: var(--t2); }
 
 .wf-search-input-wrap { position: relative; display: flex; align-items: center; }
 .wf-search-icon {
@@ -386,7 +386,7 @@
   padding: 3px 6px;
   border-radius: 4px;
   background: var(--bg4);
-  color: var(--t3);
+  color: var(--t2);
   white-space: nowrap;
   max-width: 72px;
   overflow: hidden;
@@ -526,12 +526,12 @@
   transition: opacity 120ms ease;
 }
 .workflow-collection-header:hover .workflow-collection-name { opacity: 1; }
-.workflow-collection-name-muted { color: var(--t3); opacity: 1; }
+.workflow-collection-name-muted { color: var(--t2); opacity: 1; }
 .workflow-collection-count {
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
-  color: var(--t3);
+  color: var(--t2);
   background: var(--bg4);
   border-radius: 3px;
   padding: 1px 5px;
@@ -556,7 +556,7 @@
 .workflow-collection-empty {
   padding: 5px 8px 7px 14px;
   font-size: 11px;
-  color: var(--t3);
+  color: var(--t2);
   font-style: italic;
 }
 
@@ -755,7 +755,7 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
 .tpt-name { font-size: 12px; font-weight: 600; color: var(--t1); }
 .tpt-config { display: flex; flex-direction: column; gap: 4px; }
 .tpt-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
-.tpt-label { color: var(--t3); flex-shrink: 0; }
+.tpt-label { color: var(--t2); flex-shrink: 0; }
 .tpt-val { color: var(--t2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
 
 /* -- Node info tooltip (palette item hover) -- */
@@ -776,6 +776,7 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
   gap: 7px;
   margin-bottom: 6px;
 }
+.nit-header .nit-plugin-tag { margin-left: auto; }
 .nit-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .nit-name { font-size: 12px; font-weight: 600; color: var(--t1); }
 .nit-desc {
@@ -786,7 +787,7 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
 }
 .nit-ports {
   font-size: 10.5px;
-  color: var(--t3);
+  color: var(--t2);
   border-top: 1px solid var(--bd);
   padding-top: 6px;
   margin-top: 2px;

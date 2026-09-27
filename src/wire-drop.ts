@@ -4,9 +4,7 @@ import type { NodeDescriptor } from "./ipc/workflow";
 // Shows the command palette in wire-drop mode: user picks a node, which is
 // placed at the drop point and auto-connected to the source wire.
 export function openWireDropPicker(
-  _allNodes: NodeDescriptor[],
   canvas: Canvas,
-  _canvasEl: HTMLCanvasElement,
   onStatus: (m: string) => void,
 ): void {
   const overlay = document.getElementById("command-palette-overlay")!;
@@ -42,9 +40,7 @@ export function openWireDropPicker(
 // Shows the command palette in input-wire-drop mode: user picks a node, which
 // is placed to the left of the dragged input port and auto-connected into it.
 export function openInputWireDropPicker(
-  _allNodes: NodeDescriptor[],
   canvas: Canvas,
-  _canvasEl: HTMLCanvasElement,
   onStatus: (m: string) => void,
 ): void {
   const overlay = document.getElementById("command-palette-overlay")!;

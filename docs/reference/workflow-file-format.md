@@ -40,7 +40,7 @@ The `metadata` object as a whole is optional: leave it out entirely and every fi
 
 ### Chat settings
 
-`settings.chat` mirrors the Chat Panel toggles set from the Workflow Settings modal. Each field defaults independently, so a file that sets only some of them still loads correctly.
+`settings.chat` mirrors the Chat Panel toggles set from the Workflow Settings modal. Each field defaults independently, so a file that sets only some of them still loads correctly. See [Chat Panel](../guide/chat-panel.md) for what each toggle actually does in the app.
 
 | Field | Type | Default |
 |---|---|---|
