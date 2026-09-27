@@ -8,9 +8,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ### Added
 - Execution Transcript: clicking a log line that's tied to a specific node now selects that node on the canvas, the same way clicking a run-history entry does; keyboard-accessible via Enter/Space when the line is focused
+- `aerini-server`: a prebuilt container image is now published to GHCR (`ghcr.io/panchak2d/aerini-server`) on every tagged release, tagged with the release version and `latest`; `docker pull` replaces cloning the repo and building the image yourself as the fastest way to get a working binary. See [Server Deployment](docs/operations/server-deploy.md#getting-the-aerini-server-binary)
 
 ### Security
 - Debug tab: the node id fragment shown in each log line is now HTML-escaped before being inserted into the panel, matching the message text next to it. Verified exploitable: node ids are taken as-is from imported workflow JSON with no validation, so a crafted `id` value could inject markup into the Debug tab once a log entry referenced that node
+- Embeddable chat widget (`aerini-widget.js`): session-id generation now tries `crypto.getRandomValues()` before falling back to `Math.random()` for the last `data-session-id` (CWE-338) — closes the gap between `crypto.randomUUID()`, tried first, and the previous direct-to-`Math.random()` fallback. The session id is stored in `localStorage` and sent to the target workflow's Webhook trigger as `session_id`, where it commonly keys per-visitor state (e.g. an AI Memory node, as in `examples/Chatbot + AI Memory + Widget.md`); a `Math.random()`-derived id is predictable enough that another visitor could guess it and inject messages into someone else's conversation thread on a browser/runtime that lacks `crypto.randomUUID` but still has the older, more widely supported `crypto.getRandomValues`
 
 ### Planned (v0.5)
 - Sub-workflows

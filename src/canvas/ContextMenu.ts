@@ -127,15 +127,26 @@ export class ContextMenu {
     document.body.appendChild(inp);
     inp.focus(); inp.select();
 
+    let settled = false;
+    let dismiss: (ev: MouseEvent) => void;
     const commit = () => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("mousedown", dismiss, true);
       const v = inp.value.trim();
       if (v) { node.data.name = v; c.onCanvasChanged?.(); }
       inp.remove();
     };
+    dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
     inp.addEventListener("blur", commit);
     inp.addEventListener("keydown", (e) => {
       if (e.key === "Enter")  { e.preventDefault(); commit(); }
-      if (e.key === "Escape") { inp.remove(); }
+      if (e.key === "Escape") {
+        settled = true;
+        document.removeEventListener("mousedown", dismiss, true);
+        inp.remove();
+      }
     });
   }
 }

@@ -18,18 +18,27 @@ The check asks GitHub's Releases API for the latest tagged release and compares 
 
 ## Server (`aerini-server`)
 
-As of Aerini 0.4.0, no prebuilt `aerini-server` binary is published anywhere, not on the [Releases page](https://github.com/Panchak2d/aerini/releases) or otherwise; that page only carries desktop installers. There's nothing to download for an update either, so the update path depends on how you're running the server. [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary) covers this same gap for a first install; this section covers keeping an existing deployment current.
+A prebuilt `aerini-server` container image is published to GHCR with every release (see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), so the official Docker image now updates by pulling a new tag rather than rebuilding. There's still no standalone, downloadable binary for the other two deployment shapes below — the [Releases page](https://github.com/Panchak2d/aerini/releases) only carries desktop installers — so bare metal and the desktop's Docker export still update by rebuilding from source.
 
 ### Official Docker image
 
-The repository's own `Dockerfile` and `docker-compose.yml` aren't published to any container registry. `docker compose build` builds the image from the source tree already on your disk, so updating means pulling that source and rebuilding:
+If you're running the published image (`docker pull ghcr.io/panchak2d/aerini-server:<version>`, see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), update by pulling the new tag and recreating the container:
+
+```bash
+docker pull ghcr.io/panchak2d/aerini-server:<newer-version>
+docker compose up -d
+```
+
+(or `docker stop`/`docker rm` and `docker run` again with the new tag, if you started it with `docker run` instead of Compose).
+
+If you built the image locally instead — `git clone` plus `docker compose up --build`, for customizing the `Dockerfile` — update the same way as before, by pulling the source and rebuilding:
 
 ```bash
 git pull
 docker compose up -d --build
 ```
 
-This image's build stage copies your source into the image with `COPY`, so a `git pull` that changes any tracked file invalidates the layers built from it, and the rebuild picks up the new code correctly. No `--no-cache` needed here. The named data volume isn't touched by a rebuild, so your workflows and run history persist across the update.
+This image's build stage copies your source into the image with `COPY`, so a `git pull` that changes any tracked file invalidates the layers built from it, and the rebuild picks up the new code correctly. No `--no-cache` needed here. Either way, the named data volume isn't touched by an update, so your workflows and run history persist across it.
 
 ### Bare metal (Linux, built from source)
 

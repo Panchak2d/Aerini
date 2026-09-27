@@ -260,8 +260,13 @@ export class ChatPanel {
   applyToggles(settings: ChatSettings): void {
     this.chatSettings = settings;
 
-    this.attachBtn.classList.toggle("hidden", !settings.allow_attachments);
-    this.attachBtn.disabled      = !settings.allow_attachments;
+    if (settings.allow_attachments) {
+      this.attachBtn.removeAttribute("aria-disabled");
+      this.attachBtn.setAttribute("data-tooltip", "Attach file");
+    } else {
+      this.attachBtn.setAttribute("aria-disabled", "true");
+      this.attachBtn.setAttribute("data-tooltip", "Attachments are off — enable in Workflow Settings → Chat");
+    }
     // Settings can be toggled off while attachments are already queued (e.g. user
     // opens Workflow Settings without closing Chat). Drop them rather than leaving
     // an invisible queue that still gets sent on the next message.
@@ -299,7 +304,8 @@ export class ChatPanel {
   }
 
   private handleAttachClick(): void {
-    if (this.attachBtn.disabled) return;
+    if (!this.chatSettings.allow_attachments) return; // gated off — aria-disabled, not native disabled
+    if (this.attachBtn.disabled) return;               // transient: still reading a previous file
 
     const fileInput = document.createElement("input");
     fileInput.type   = "file";
@@ -332,12 +338,12 @@ export class ChatPanel {
       const reader = new FileReader();
 
       reader.onerror = () => {
-        this.attachBtn.disabled = !this.chatSettings.allow_attachments;
+        this.attachBtn.disabled = false;
         this.toast(`Could not read "${file.name}".`, "error");
       };
 
       reader.onload = () => {
-        this.attachBtn.disabled = !this.chatSettings.allow_attachments;
+        this.attachBtn.disabled = false;
 
         // Guard: FileReader.result is typed string | ArrayBuffer | null; must be string here.
         const raw = reader.result;

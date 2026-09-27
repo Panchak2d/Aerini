@@ -306,7 +306,7 @@ function installLocalStorageStub(): void {
     removeItem: (key: string) => { store.delete(key); },
     clear: () => { store.clear(); },
   };
-  globalThis.localStorage = stub as Storage;
+  Object.defineProperty(globalThis, "localStorage", { value: stub as Storage, writable: true, configurable: true });
 }
 
 function lsSaveRaw(id: string, name: string, json: string): void {

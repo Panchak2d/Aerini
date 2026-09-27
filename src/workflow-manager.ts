@@ -497,7 +497,7 @@ export class WorkflowManager {
         if (isTauri()) await saveWorkflow(json);
         else lsSave(id, name, json, tags, collectionId);
       } catch (e) {
-        console.error(`Aerini: failed to move workflow ${id} to a collection`, e);
+        console.error("Aerini: failed to move workflow to a collection", id, e);
       }
     }
     const n = ids.length;
@@ -670,15 +670,21 @@ export class WorkflowManager {
       setTimeout(() => { inp.focus(); inp.select(); }, 0);
 
       let settled = false;
-      inp.addEventListener("blur", () => {
+      let dismiss: (ev: MouseEvent) => void;
+      const commit = () => {
         if (settled) return;
         settled = true;
+        document.removeEventListener("mousedown", dismiss, true);
         this.commitCollectionRename(collection.id, inp.value);
-      });
+      };
+      dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };
+      setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+      inp.addEventListener("blur", commit);
       inp.addEventListener("keydown", e => {
         if (e.key === "Enter") { inp.blur(); }
         if (e.key === "Escape") {
           settled = true;
+          document.removeEventListener("mousedown", dismiss, true);
           this.cancelCollectionRename(collection.id);
         }
       });
@@ -988,6 +994,7 @@ export class WorkflowManager {
     inp.focus(); inp.select();
 
     let settled = false;
+    let dismiss: (ev: MouseEvent) => void;
     const restore = (text: string): HTMLElement => {
       const span = document.createElement("span");
       span.className = "workflow-item-name";
@@ -999,16 +1006,23 @@ export class WorkflowManager {
     const commit = () => {
       if (settled) return;
       settled = true;
+      document.removeEventListener("mousedown", dismiss, true);
       const value = inp.value.trim();
       if (!value || value === wf.name) { restore(wf.name); return; }
       restore(value); // optimistic: renameWorkflowById re-syncs from disk if the save actually fails
       void this.renameWorkflowById(wf.id, value);
     };
+    dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };
+    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
     inp.addEventListener("blur", commit);
     inp.addEventListener("keydown", e => {
       e.stopPropagation(); // don't let Enter/Escape reach the row's own roving-nav handler
       if (e.key === "Enter") inp.blur();
-      if (e.key === "Escape") { settled = true; restore(wf.name); }
+      if (e.key === "Escape") {
+        settled = true;
+        document.removeEventListener("mousedown", dismiss, true);
+        restore(wf.name);
+      }
     });
   }
 
@@ -1165,7 +1179,7 @@ export class WorkflowManager {
               if (id === this.currentId) openedWasDeleted = true;
             }
           } catch (e) {
-            console.error(`Aerini: failed to delete workflow ${id}`, e);
+            console.error("Aerini: failed to delete workflow", id, e);
           }
         }
         if (deleted === ids.length) {
@@ -1674,10 +1688,12 @@ export class WorkflowManager {
 
       let cancelled = false;
       let settled   = false;
+      let dismiss: (ev: MouseEvent) => void;
 
       const commit = () => {
         if (settled) return;
         settled = true;
+        document.removeEventListener("mousedown", dismiss, true);
         const v = cancelled ? null : (inp.value.trim() || null);
         this.currentName = v ?? this.currentName;
         if (v) this.markUnsaved(true);
@@ -1688,6 +1704,9 @@ export class WorkflowManager {
         inp.replaceWith(lbl);
         resolve(v);
       };
+
+      dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };
+      setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
 
       inp.addEventListener("blur", commit);
       inp.addEventListener("keydown", e => {
