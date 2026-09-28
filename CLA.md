@@ -106,7 +106,7 @@ The Corporate CLA is set out in Part II of this document. Individuals making Con
 
 Where a Contribution is submitted outside the GitHub pull request flow — including by email, patch file, or any other channel — the Contribution must be accompanied by a signed statement of acceptance before it may be merged into the Project. Unsigned contributions submitted outside the GitHub pull request flow will not be accepted.
 
-The signed statement must be delivered to **panchak2d@aerini.org** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
+The signed statement must be delivered to **support@aerini.org** using the subject line **CLA Acceptance — [Your Full Legal Name]** and must include the following declaration, completed in full:
 
 > *I, [full legal name], agree to the terms of the Aerini Contributor License Agreement, Version [version number in force at the date of signing], as published at [canonical URL of the Agreement]. I confirm that I have the legal authority to make this Contribution and to grant the licenses described in that Agreement. My GitHub username is [GitHub username]. Date of signing: [DD Month YYYY].*
 
@@ -261,7 +261,7 @@ Contributions from individuals not on the authorised list at the time of submiss
 
 This Corporate CLA takes effect only upon written confirmation from the Maintainer following receipt of a properly executed copy.
 
-To execute this Agreement, the Corporation must send to the Maintainer at **panchak2d@aerini.org** using the subject line **Corporate CLA — [Legal Company Name]**:
+To execute this Agreement, the Corporation must send to the Maintainer at **support@aerini.org** using the subject line **Corporate CLA — [Legal Company Name]**:
 
 - the legal name and registered address of the Corporation;
 - the full name, title, and evidence of authority of the signatory (such as a board resolution, power of attorney, or a written statement signed by a director confirming the signatory's role and authority to bind the Corporation in intellectual property matters);

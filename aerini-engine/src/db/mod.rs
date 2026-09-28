@@ -23,13 +23,23 @@ pub struct ChatImageFile {
     pub mime_type: String,
 }
 
+/// A file the user attached to a sent chat message — same shape as
+/// [`ChatImageFile`], but not limited to images.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAttachment {
+    pub filename:  String,
+    pub data:      String,
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessageRecord {
-    pub id:        String,
-    pub role:      String,
-    pub text:      Option<String>,
-    pub images:    Option<Vec<ChatImageFile>>,
-    pub timestamp: i64,
+    pub id:          String,
+    pub role:        String,
+    pub text:        Option<String>,
+    pub images:      Option<Vec<ChatImageFile>>,
+    pub attachments: Option<Vec<ChatAttachment>>,
+    pub timestamp:   i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +128,7 @@ pub struct WorkflowDb {
 impl WorkflowDb {
     /// Current schema version. Increment this and add a `migrate_vN` block
     /// in `run_migrations` for every schema change.
-    pub(super) const SCHEMA_VERSION: i64 = 8;
+    pub(super) const SCHEMA_VERSION: i64 = 9;
 
     pub fn open(path: &PathBuf, pool_size: usize) -> Result<Self, String> {
         let manager = SqliteConnectionManager::file(path)
@@ -223,6 +233,9 @@ impl WorkflowDb {
         }
         if current_version < 8 {
             Self::migrate_v8(conn)?;
+        }
+        if current_version < 9 {
+            Self::migrate_v9(conn)?;
         }
 
         Ok(())
@@ -406,6 +419,20 @@ impl WorkflowDb {
             COMMIT;
         ").map_err(|e| e.to_string())
     }
+
+    /// Version 9 — adds `attachments_json` to `chat_messages`: the
+    /// JSON-encoded list of files the user attached to a sent message,
+    /// stored the same way as `images_json`. No `DEFAULT` — a message with
+    /// no attachments, including every row that predates this column, is
+    /// `NULL`.
+    fn migrate_v9(conn: &rusqlite::Connection) -> Result<(), String> {
+        conn.execute_batch("
+            BEGIN;
+            ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT;
+            PRAGMA user_version = 9;
+            COMMIT;
+        ").map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +511,47 @@ mod tests {
 
         WorkflowDb::open(&path, 8).expect("first open failed");
         WorkflowDb::open(&path, 8).expect("second open must not fail");
+
+        cleanup(&path);
+    }
+
+    // Edge case: a chat message written while the schema was still at v8 — no
+    // attachments_json column yet — survives the v9 upgrade and reads back
+    // with no attachments.
+    #[test]
+    fn chat_message_from_v8_database_upgrades_with_no_attachments() {
+        let path = temp_path("chat_v8_upgrade");
+        cleanup(&path);
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            WorkflowDb::migrate_v1(&conn).unwrap();
+            WorkflowDb::migrate_v2(&conn).unwrap();
+            WorkflowDb::migrate_v3(&conn).unwrap();
+            WorkflowDb::migrate_v4(&conn).unwrap();
+            WorkflowDb::migrate_v5(&conn).unwrap();
+            WorkflowDb::migrate_v6(&conn).unwrap();
+            WorkflowDb::migrate_v7(&conn).unwrap();
+            WorkflowDb::migrate_v8(&conn).unwrap();
+            conn.execute_batch("
+                INSERT INTO chat_sessions (id, workflow_id, name, created_at)
+                VALUES ('s1', 'wf-1', 'Old', 1000);
+                INSERT INTO chat_messages (id, session_id, role, text, images_json, timestamp)
+                VALUES ('m1', 's1', 'user', 'hello', NULL, 1001);
+            ").unwrap();
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, 8, "fixture must start at the pre-upgrade schema version");
+        }
+
+        let db = WorkflowDb::open(&path, 8).expect("upgrade failed");
+
+        let sessions = db.list_chat_sessions("wf-1").expect("list failed");
+        assert_eq!(sessions[0].messages[0].text.as_deref(), Some("hello"));
+        assert!(sessions[0].messages[0].attachments.is_none());
+
+        let conn = db.pool.get().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, WorkflowDb::SCHEMA_VERSION);
 
         cleanup(&path);
     }

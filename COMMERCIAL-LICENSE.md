@@ -154,7 +154,7 @@ Licensee will indemnify, defend, and hold harmless Licensor against any third-pa
 
 ## 15. Certificate
 
-Licensor's checkout process issues the Certificate automatically when payment completes, as described in Section 1. The Certificate is evidence of this Agreement and of the license it grants; it is not itself the operative legal document — this Agreement is. Licensee should keep the order confirmation and license key it receives, and is responsible for entering its identity and the Embedded Product name accurately at checkout; Licensee may ask Licensor at panchak2d@aerini.org to correct an entry. Licensor may, at its discretion, provide a separate written certificate on request. Licensee's rights arise on the Effective Date; a delayed, lost, or unissued Certificate does not reduce them. If the Certificate and this Agreement conflict on anything other than Licensee's identity, the Licensed Version, the Embedded Product, or the License ID, this Agreement controls.
+Licensor's checkout process issues the Certificate automatically when payment completes, as described in Section 1. The Certificate is evidence of this Agreement and of the license it grants; it is not itself the operative legal document — this Agreement is. Licensee should keep the order confirmation and license key it receives, and is responsible for entering its identity and the Embedded Product name accurately at checkout; Licensee may ask Licensor at support@aerini.org to correct an entry. Licensor may, at its discretion, provide a separate written certificate on request. Licensee's rights arise on the Effective Date; a delayed, lost, or unissued Certificate does not reduce them. If the Certificate and this Agreement conflict on anything other than Licensee's identity, the Licensed Version, the Embedded Product, or the License ID, this Agreement controls.
 
 ---
 
@@ -180,7 +180,7 @@ This Agreement is governed by the laws of India, without regard to conflict-of-l
 
 **No Waiver.** Licensor's failure to enforce a provision on one occasion is not a waiver of the right to enforce it later.
 
-**Notices.** Notices to Licensor go to panchak2d@aerini.org. Notices to Licensee go to the email address used at checkout.
+**Notices.** Notices to Licensor go to support@aerini.org. Notices to Licensee go to the email address used at checkout.
 
 ---
 
