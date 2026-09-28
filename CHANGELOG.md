@@ -7,13 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 ## [Unreleased]
 
 ### Added
-- Chat panel: files attached to a sent message now appear as filename chips in that message, and are saved with the session, so they are still shown after switching sessions or restarting the app. Adds a nullable `attachments_json` column to the local chat-message table (local database version 9, unrelated to a workflow file's `schema_version`; existing messages are unaffected); see `docs/guide/chat-panel.md#attachments`
-- Webhook: a request body with an `attachments` array (as the desktop Chat panel sends when files are attached) is now also exposed as a top-level `files` output, so `{{Webhook.output.files}}` can be wired to a Files input such as AI Prompt's; `body.attachments` is unchanged, and `files` is omitted when the body has no `attachments` array. Applies to both ad-hoc Run and background (scheduler-driven) runs; see `docs/guide/nodes.md#webhook`
 - Execution Transcript: clicking a log line that's tied to a specific node now selects that node on the canvas, the same way clicking a run-history entry does; keyboard-accessible via Enter/Space when the line is focused
 - `aerini-server`: a prebuilt container image is now published to GHCR (`ghcr.io/panchak2d/aerini-server`) on every tagged release, tagged with the release version and `latest`; `docker pull` replaces cloning the repo and building the image yourself as the fastest way to get a working binary. See [Server Deployment](docs/operations/server-deploy.md#getting-the-aerini-server-binary)
-
-### Changed
-- Chat panel: restyled for legibility and accessibility. The "not running" banner now has a visible amber background and left edge, and its **Start** button no longer inherits the full-width primary-button style (which could squeeze the banner text); your messages and the Send button use a darker blue so white text meets 4.5:1 contrast on the dark theme; the message box and attach button have outlines that stand out against the panel, and the attach button's disabled state is more legible; Send, attach, and **Start** are at least 44 px tall, and the message box shows a keyboard focus ring; the message box and icon-only buttons are labelled for screen readers; the panel's slide-in and typing animations are skipped when the OS reduce-motion setting is on
 
 ### Security
 - Debug tab: the node id fragment shown in each log line is now HTML-escaped before being inserted into the panel, matching the message text next to it. Verified exploitable: node ids are taken as-is from imported workflow JSON with no validation, so a crafted `id` value could inject markup into the Debug tab once a log entry referenced that node

@@ -736,20 +736,14 @@ async fn fire_once_with_vars_inner(
         let has_incoming: std::collections::HashSet<&str> =
             workflow.edges.iter().map(|e| e.to_node.as_str()).collect();
         if let Some(entry) = workflow.nodes.iter().find(|n| !has_incoming.contains(n.id.as_str())) {
-            let body_value = vars.get("body").cloned().unwrap_or(Value::Null);
-            let files = crate::nodes::webhook::files_from_body(&body_value);
-            let mut payload = serde_json::json!({
-                "body":    body_value,
-                "headers": vars.get("headers").cloned().unwrap_or(Value::Null),
-                "method":  vars.get("method").cloned().unwrap_or(Value::Null),
-                "path":    vars.get("path").cloned().unwrap_or(Value::Null),
-            });
-            if let Some(files) = files {
-                payload["files"] = Value::Array(files);
-            }
             let reserved_value = serde_json::json!({
                 "node_id": entry.id,
-                "payload": payload
+                "payload": {
+                    "body":    vars.get("body").cloned().unwrap_or(Value::Null),
+                    "headers": vars.get("headers").cloned().unwrap_or(Value::Null),
+                    "method":  vars.get("method").cloned().unwrap_or(Value::Null),
+                    "path":    vars.get("path").cloned().unwrap_or(Value::Null),
+                }
             });
             vars.insert(
                 crate::nodes::webhook::WEBHOOK_TRIGGER_PAYLOAD_KEY.to_string(),
@@ -1455,8 +1449,9 @@ mod integration_tests {
         wf
     }
 
-    /// A provider (Stripe, GitHub, ...) resends the same event body because it
-    /// didn't see the ack in time. With `dedup_window_secs` set, the second identical
+    /// Reproduces the #8 backlog scenario directly: a provider (Stripe,
+    /// GitHub, ...) resends the same event body because it didn't see the
+    /// ack in time. With `dedup_window_secs` set, the second identical
     /// delivery must not re-run the workflow — asserted by counting
     /// `scheduler-status` events carrying a `last_result`, which only fire
     /// once per actual run.
@@ -1540,85 +1535,6 @@ mod integration_tests {
             })
         };
         assert!(skip_logged, "duplicate delivery must be logged via scheduler-skip");
-
-        daemon.stop_job(&workflow.id).ok();
-        cleanup_db(&db_path);
-        let _ = std::fs::remove_dir_all(&data_dir);
-    }
-
-    /// A scheduler-driven run (the path the desktop Chat panel actually uses)
-    /// must expose a body's `attachments` array as the trigger node's
-    /// top-level `files` output, with `body` left intact, and must omit
-    /// `files` entirely when the body carries none.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn scheduler_webhook_run_exposes_attachments_as_files() {
-        const PORT: u16 = 38486;
-        let data_dir = temp_data_dir("files-repro");
-        let db_path = data_dir.join("scheduler.db");
-        cleanup_db(&db_path);
-
-        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
-        let workflow = webhook_repro_workflow(PORT);
-        wf_db.save(&workflow).expect("save workflow failed");
-        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
-
-        let mut registry = NodeRegistry::new();
-        register_builtins(&mut registry, &data_dir, None);
-
-        let sink = CapturingSink::default();
-        let daemon = SchedulerDaemon::new(
-            db,
-            Arc::new(Reloadable::new(registry)),
-            Arc::new(NoopCredentials),
-            Arc::new(sink.clone()),
-        );
-
-        daemon.start_job(&workflow.id, Some(PORT), Some(false))
-            .expect("start_job failed to arm the webhook listener");
-
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{}/hook", PORT);
-        let attachments = json!([{ "filename": "a.png", "data": "AAAA", "mime_type": "image/png" }]);
-
-        // Two deliveries, one run each: first with attachments, then without.
-        // The listener re-arms after each run, so the second connect retries.
-        let bodies = [
-            json!({ "message": "hi", "attachments": attachments }),
-            json!({ "message": "hi again" }),
-        ];
-        let mut trigger_outs: Vec<Value> = Vec::new();
-        for (i, body) in bodies.iter().enumerate() {
-            let mut response = None;
-            for _ in 0..40 {
-                match client.post(&url).json(body).send().await {
-                    Ok(r) => { response = Some(r); break; }
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-                }
-            }
-            let response = response.expect("webhook listener never accepted a connection (bind likely failed)");
-            assert!(response.status().is_success(), "webhook HTTP response was not success: {}", response.status());
-
-            let mut out: Option<Value> = None;
-            for _ in 0..60 {
-                {
-                    let events = sink.0.lock().expect("CapturingSink mutex poisoned");
-                    let runs: Vec<&Value> = events.iter()
-                        .filter(|(name, p)| name.as_str() == "scheduler-status" && !p["last_result"].is_null())
-                        .map(|(_, p)| p)
-                        .collect();
-                    if runs.len() > i {
-                        out = Some(runs[i]["last_result"]["node_outputs"]["trigger"].clone());
-                        break;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            trigger_outs.push(out.expect("workflow run never produced a scheduler-status event with last_result"));
-        }
-
-        assert_eq!(trigger_outs[0]["files"], attachments);
-        assert_eq!(trigger_outs[0]["body"]["attachments"], attachments);
-        assert!(trigger_outs[1].as_object().unwrap().get("files").is_none());
 
         daemon.stop_job(&workflow.id).ok();
         cleanup_db(&db_path);

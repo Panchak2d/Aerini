@@ -1,6 +1,5 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
-import type { ChatSettings } from "./canvas/CanvasSerializer";
 import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow, parseSchedulerError, exportAllWorkflows } from "./ipc/workflow";
 import { isTauri } from "./utils";
@@ -25,7 +24,6 @@ export interface IChatPanel {
   onWorkflowSwitched(): void;
   isOpen(): boolean;
   startForChat(): void;
-  applyToggles(settings: ChatSettings): void;
 }
 
 export interface ToolbarResult {
@@ -239,7 +237,7 @@ export function bindToolbar(
   $("btn-versions").addEventListener("click", () =>
     import("./panels/VersionPanel").then(m => m.showVersionPanel(wfManager, toast))
   );
-  bindWfSettings(wfManager, chatPanel);
+  bindWfSettings(wfManager);
 
   $("btn-run-now")?.addEventListener("click", () => { closeAllDropdowns(); runWithValidation(); });
   $("btn-run-chevron").addEventListener("click", (e) => {

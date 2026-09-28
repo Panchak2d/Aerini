@@ -26,9 +26,7 @@ A reply's Output value is rendered as Markdown (sanitized before display, so a w
 
 ### Attachments
 
-With **Allow file attachments** on, the paperclip button accepts `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.pdf`, `.txt`, and `.md` files — the same types the AI Prompt node's static attachments accept. There's a running byte budget shown under the attachment chips as the request fills up: the whole request body, message text plus attachments plus JSON overhead, has to fit in the Webhook listener's own 1 MB hard cap, the same limit the [Widget](widget-embedding.md#what-each-error-means)'s "message too large" error refers to and shared with any other traffic hitting that same listener. Chat blocks an attachment that would exceed it before sending, rather than letting the request fail. Attached files reach the workflow on the Webhook node's `files` output (`{{Webhook.output.files}}`) as well as in `body.attachments`, so you can wire the Webhook node's output to a Files input such as an AI Prompt node's.
-
-Once a message with attachments is sent, each file appears as a chip showing its filename inside your message. The file itself is saved with the session in the app's local database, so the chip is still there after you switch sessions or restart the app. Clearing or deleting the session removes the stored files with it.
+With **Allow file attachments** on, the paperclip button accepts `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.pdf`, `.txt`, and `.md` files — the same types the AI Prompt node's static attachments accept. There's a running byte budget shown under the attachment chips as the request fills up: the whole request body, message text plus attachments plus JSON overhead, has to fit in the Webhook listener's own 1 MB hard cap, the same limit the [Widget](widget-embedding.md#what-each-error-means)'s "message too large" error refers to and shared with any other traffic hitting that same listener. Chat blocks an attachment that would exceed it before sending, rather than letting the request fail.
 
 ## Sessions
 

@@ -2,7 +2,7 @@
 # Images are pinned to SHA-256 digests to prevent supply-chain tag overwrites.
 # To update: docker pull <image>, then docker inspect --format='{{index .RepoDigests 0}}' <image>
 # Dependabot (.github/dependabot.yml) will keep digests current automatically.
-FROM rust:1-slim@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS builder
+FROM rust:1-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
 WORKDIR /app
 
@@ -72,7 +72,7 @@ RUN mkdir -p /data && chown 65532:65532 /data
 # statically compiled wget from busybox:musl. It is ~1 MB and adds no runtime
 # attack surface because it is only invoked by the Docker daemon's health prober,
 # not by the container process itself.
-FROM busybox:1.38-musl@sha256:ea2b9914a16a4ac1981994af97b318f7c7d4db76b580c56177f08bf76f4a0be8 AS busybox
+FROM busybox:1.38-musl@sha256:8635836765b0c4c43970660219739baa58b0883c2e429e4b8918f7dd1519455c AS busybox
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 

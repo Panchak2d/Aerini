@@ -28,7 +28,7 @@ Run a workflow yourself, by pressing Run in the app or calling the server API. N
 
 ### Webhook
 
-Starts a workflow when an HTTP request hits a local address. Outputs the request body, headers, method, and path. If the JSON body has an `attachments` array (as Chat sends when you attach files), it's also exposed as `files`, so `{{Webhook.output.files}}` can be wired to a Files input such as AI Prompt's; the same array stays in `body.attachments`. `files` is absent when the body has no `attachments` array.
+Starts a workflow when an HTTP request hits a local address. Outputs the request body, headers, method, and path.
 
 | Field | Label | Notes |
 |---|---|---|

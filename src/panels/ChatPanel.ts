@@ -62,7 +62,6 @@ interface ChatMessage {
   role: "user" | "ai" | "error";
   text?: string;
   images?: ChatImageFile[];
-  attachments?: ChatAttachment[];
   timestamp: number;
 }
 
@@ -680,11 +679,7 @@ export class ChatPanel {
     if (!overrideText) {
       this.inputEl.value = "";
       this.autosizeInput();
-      this.appendMessage({
-        id: crypto.randomUUID(), role: "user", text,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        timestamp: Date.now(),
-      });
+      this.appendMessage({ id: crypto.randomUUID(), role: "user", text, timestamp: Date.now() });
       this.persist();
       this.pendingAttachments = [];
       this.renderPendingAttachments();
@@ -879,12 +874,12 @@ export class ChatPanel {
     row.appendChild(
       msg.images && msg.images.length > 0
         ? this.buildImageBubble(msg.images)
-        : this.buildTextBubble(msg.text ?? "", msg.role, msg.attachments)
+        : this.buildTextBubble(msg.text ?? "", msg.role)
     );
     this.messagesEl.appendChild(row);
   }
 
-  private buildTextBubble(text: string, role: ChatMessage["role"], attachments?: ChatAttachment[]): HTMLElement {
+  private buildTextBubble(text: string, role: ChatMessage["role"]): HTMLElement {
     const bubble = document.createElement("div");
     bubble.className = role === "user"
       ? "chat-bubble chat-bubble--user"
@@ -893,8 +888,6 @@ export class ChatPanel {
     const content = document.createElement("div");
     content.innerHTML = this.renderMarkdown(text);
     bubble.appendChild(content);
-
-    for (const att of attachments ?? []) bubble.appendChild(this.buildSentAttachmentChip(att));
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "chat-bubble-copy";
@@ -907,20 +900,6 @@ export class ChatPanel {
     });
     bubble.appendChild(copyBtn);
     return bubble;
-  }
-
-  private buildSentAttachmentChip(att: ChatAttachment): HTMLElement {
-    const chip = document.createElement("div");
-    chip.className = "chat-attachment-chip";
-
-    const lbl = document.createElement("span");
-    lbl.className = "chat-attachment-chip-label";
-    lbl.innerHTML = CHAT_ATTACHMENT_FILE_ICON;
-    // Filename is user-supplied — inserted as a text node, never as markup.
-    lbl.appendChild(document.createTextNode(" " + att.filename));
-    lbl.title = att.filename;
-    chip.appendChild(lbl);
-    return chip;
   }
 
   private renderMarkdown(text: string): string {
@@ -1095,7 +1074,6 @@ export class ChatPanel {
         role: m.role as ChatMessage["role"],
         text: m.text ?? undefined,
         images: m.images ?? undefined,
-        attachments: m.attachments ?? undefined,
         timestamp: m.timestamp,
       })),
     };
@@ -1108,7 +1086,7 @@ export class ChatPanel {
       name: s.name,
       created_at: s.createdAt,
       messages: s.messages.map((m) => ({
-        id: m.id, role: m.role, text: m.text, images: m.images, attachments: m.attachments, timestamp: m.timestamp,
+        id: m.id, role: m.role, text: m.text, images: m.images, timestamp: m.timestamp,
       })),
     };
   }

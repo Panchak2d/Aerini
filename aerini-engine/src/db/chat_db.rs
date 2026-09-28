@@ -3,18 +3,16 @@
 use super::{WorkflowDb, ChatSessionRecord, ChatMessageRecord};
 
 fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> {
-    // A malformed images_json or attachments_json degrades to `None` rather
-    // than failing the whole row — same choice performance_reports.rs makes
-    // for history_json. One corrupt blob shouldn't hide the rest of the message.
-    let images_json:      Option<String> = row.get(3)?;
-    let attachments_json: Option<String> = row.get(4)?;
+    // A malformed images_json degrades to `None` rather than failing the
+    // whole row — same choice performance_reports.rs makes for history_json.
+    // One corrupt attachment blob shouldn't hide the rest of the message.
+    let images_json: Option<String> = row.get(3)?;
     Ok(ChatMessageRecord {
-        id:          row.get(0)?,
-        role:        row.get(1)?,
-        text:        row.get(2)?,
-        images:      images_json.and_then(|j| serde_json::from_str(&j).ok()),
-        attachments: attachments_json.and_then(|j| serde_json::from_str(&j).ok()),
-        timestamp:   row.get(5)?,
+        id:        row.get(0)?,
+        role:      row.get(1)?,
+        text:      row.get(2)?,
+        images:    images_json.and_then(|j| serde_json::from_str(&j).ok()),
+        timestamp: row.get(4)?,
     })
 }
 
@@ -34,7 +32,7 @@ impl WorkflowDb {
           .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
 
         let mut message_stmt = conn.prepare(
-            "SELECT id, role, text, images_json, attachments_json, timestamp FROM chat_messages
+            "SELECT id, role, text, images_json, timestamp FROM chat_messages
              WHERE session_id = ?1 ORDER BY timestamp ASC"
         ).map_err(|e| e.to_string())?;
 
@@ -73,14 +71,10 @@ impl WorkflowDb {
                 Some(imgs) => Some(serde_json::to_string(imgs).map_err(|e| e.to_string())?),
                 None => None,
             };
-            let attachments_json = match &m.attachments {
-                Some(atts) => Some(serde_json::to_string(atts).map_err(|e| e.to_string())?),
-                None => None,
-            };
             tx.execute(
-                "INSERT INTO chat_messages (id, session_id, role, text, images_json, attachments_json, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![m.id, session.id, m.role, m.text, images_json, attachments_json, m.timestamp],
+                "INSERT INTO chat_messages (id, session_id, role, text, images_json, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![m.id, session.id, m.role, m.text, images_json, m.timestamp],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -100,7 +94,7 @@ impl WorkflowDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ChatAttachment, ChatImageFile};
+    use crate::db::ChatImageFile;
     use std::path::PathBuf;
 
     fn temp_path(tag: &str) -> PathBuf {
@@ -128,11 +122,7 @@ mod tests {
             messages: vec![
                 ChatMessageRecord {
                     id: format!("{id}-m1"), role: "user".to_string(),
-                    text: Some("hi".to_string()), images: None,
-                    attachments: Some(vec![ChatAttachment {
-                        filename: "notes.pdf".to_string(), data: "Yg==".to_string(), mime_type: "application/pdf".to_string(),
-                    }]),
-                    timestamp: created_at + 1,
+                    text: Some("hi".to_string()), images: None, timestamp: created_at + 1,
                 },
                 ChatMessageRecord {
                     id: format!("{id}-m2"), role: "ai".to_string(),
@@ -140,7 +130,6 @@ mod tests {
                     images: Some(vec![ChatImageFile {
                         filename: "a.png".to_string(), data: "YQ==".to_string(), mime_type: "image/png".to_string(),
                     }]),
-                    attachments: None,
                     timestamp: created_at + 2,
                 },
             ],
@@ -148,10 +137,9 @@ mod tests {
     }
 
     // Normal case: save then list — session metadata and every message field,
-    // including the images_json and attachments_json round trips, come back
-    // intact and in order; a message with no attachments stays `None`.
+    // including the images_json round trip, come back intact and in order.
     #[test]
-    fn save_and_list_chat_session_round_trips_messages_images_and_attachments() {
+    fn save_and_list_chat_session_round_trips_messages_and_images() {
         let path = temp_path("roundtrip");
         cleanup(&path);
         let db = WorkflowDb::open(&path, 8).expect("open failed");
@@ -163,10 +151,6 @@ mod tests {
         assert_eq!(sessions[0].messages.len(), 2);
         assert_eq!(sessions[0].messages[0].text.as_deref(), Some("hi"));
         assert_eq!(sessions[0].messages[1].images.as_ref().unwrap()[0].filename, "a.png");
-        let atts = sessions[0].messages[0].attachments.as_ref().expect("attachments must round-trip");
-        assert_eq!((atts[0].filename.as_str(), atts[0].data.as_str(), atts[0].mime_type.as_str()),
-                   ("notes.pdf", "Yg==", "application/pdf"));
-        assert!(sessions[0].messages[1].attachments.is_none());
 
         cleanup(&path);
     }

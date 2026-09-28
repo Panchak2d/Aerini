@@ -34,8 +34,7 @@ static ACTIVE_PORTS: Lazy<DashSet<u16>> = Lazy::new(DashSet::new);
 /// the same port always fails. Namespaced with `__aerini_` so it cannot
 /// collide with a workflow author's own `Set Variable` key.
 ///
-/// Value shape: `{"node_id": string, "payload": {body,headers,method,path[,files]}}`
-/// (`files` present only when `body.attachments` is an array).
+/// Value shape: `{"node_id": string, "payload": {body,headers,method,path}}`.
 /// `node_id` identifies which Webhook node this came from — `execute()` only
 /// short-circuits when it matches its own `input.node_id`, so an unrelated
 /// second Webhook node elsewhere in the same workflow still binds and waits
@@ -128,7 +127,7 @@ impl Node for WebhookNode {
     fn display_name(&self) -> &'static str { "Webhook" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Start a workflow when an HTTP request arrives. Outputs the request body, headers, method, and path, plus files when the body has an attachments array." }
+    fn description(&self) -> &'static str { "Start a workflow when an HTTP request arrives. Outputs the request body, headers, method, and path." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -185,8 +184,7 @@ impl Node for WebhookNode {
                 "body":    {},
                 "headers": { "type": "object" },
                 "method":  { "type": "string" },
-                "path":    { "type": "string" },
-                "files":   { "type": "array", "description": "Present when the body has an `attachments` array (e.g. Chat panel uploads); mirrors it for wiring to a Files port." }
+                "path":    { "type": "string" }
             }
         })
     }
@@ -313,22 +311,6 @@ impl Node for WebhookNode {
             ),
         }
     }
-}
-
-/// A caller (e.g. the Chat panel) may put an `attachments` array in the JSON
-/// body. AI Prompt's Files port is wired via the expression
-/// `{{Node.output.files}}` (written by Canvas.ts on drop), which can only ever
-/// resolve against a top-level `files` key — never a nested `body.attachments`
-/// path — so the trigger payload mirrors it there, additively: `body` is left
-/// untouched. Returns `None` unless `body` is a JSON object whose
-/// `attachments` value is an array. Shared by `handle_request` and the
-/// scheduler's reserved-payload handoff, which build the trigger payload
-/// independently and must agree on its shape.
-pub(crate) fn files_from_body(body: &Value) -> Option<Vec<Value>> {
-    body.as_object()
-        .and_then(|o| o.get("attachments"))
-        .and_then(|v| v.as_array())
-        .cloned()
 }
 
 /// Clamps a user-supplied `timeout_secs` to the same 1-3600s bounds
@@ -606,17 +588,12 @@ async fn handle_request(
     let body_value: Value =
         serde_json::from_str(&body_str).unwrap_or(Value::String(body_str));
 
-    let files = files_from_body(&body_value);
-
-    let mut result = json!({
+    let result = json!({
         "body":    body_value,
         "headers": headers,
         "method":  req_method,
         "path":    req_path,
     });
-    if let Some(files) = files {
-        result["files"] = Value::Array(files);
-    }
 
     if let Some(s) = st.tx.take() {
         let _ = s.send(Ok(result));
@@ -795,83 +772,6 @@ mod tests {
         tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("port must be free immediately after a cancelled run");
-    }
-
-    /// A POSTed body with a top-level `attachments` array must be mirrored
-    /// into `output.files`, unchanged, alongside the untouched original
-    /// `body`. Exercises the real bind-and-accept path (`execute()` ->
-    /// `run_accept_loop` -> `handle_request`), which cannot be driven with a
-    /// hand-built `hyper::Request` (see the NOTE on
-    /// `port_already_held_in_registry_returns_port_in_use`, above) — same
-    /// real-listener-and-`reqwest` technique already used by
-    /// `scheduler::runner::integration_tests::scheduler_webhook_run_completes_against_real_listener`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn attachments_in_body_are_mirrored_into_files_output() {
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test setup: must be able to bind an OS-assigned port");
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-
-        let input = make_input("n1", port as u64, "/hook", HashMap::new());
-        let run = tokio::spawn(WebhookNode.execute(input));
-
-        let attachments = json!([{ "filename": "a.png", "data": "AAAA", "mime_type": "image/png" }]);
-        let body = json!({ "message": "hi", "attachments": attachments });
-        let url = format!("http://127.0.0.1:{}/hook", port);
-        let client = reqwest::Client::new();
-
-        let mut response = None;
-        for _ in 0..40 {
-            match client.post(&url).json(&body).send().await {
-                Ok(r) => { response = Some(r); break; }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        }
-        let response = response.expect("webhook listener never accepted a connection (bind likely failed)");
-        assert!(response.status().is_success(), "webhook HTTP response was not success: {}", response.status());
-
-        let out = run.await.expect("execute() task panicked");
-        assert!(out.success, "expected success, got: {:?}", out.error);
-        let o = out.output.unwrap();
-        assert_eq!(o["files"], attachments);
-        assert_eq!(o["body"]["attachments"], attachments);
-    }
-
-    /// A POSTed body with no `attachments` key must produce no `files` key at
-    /// all — not an empty array under a present key. Either shape is handled
-    /// identically downstream (`ai_prompt::attachments::extract_port_attachments`
-    /// treats a missing `files` key and an empty `files: []` array the same
-    /// way), so this asserts the specific shape this node actually emits.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn no_attachments_key_produces_no_files_key() {
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test setup: must be able to bind an OS-assigned port");
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-
-        let input = make_input("n1", port as u64, "/hook", HashMap::new());
-        let run = tokio::spawn(WebhookNode.execute(input));
-
-        let body = json!({ "message": "hi" });
-        let url = format!("http://127.0.0.1:{}/hook", port);
-        let client = reqwest::Client::new();
-
-        let mut response = None;
-        for _ in 0..40 {
-            match client.post(&url).json(&body).send().await {
-                Ok(r) => { response = Some(r); break; }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        }
-        let response = response.expect("webhook listener never accepted a connection (bind likely failed)");
-        assert!(response.status().is_success(), "webhook HTTP response was not success: {}", response.status());
-
-        let out = run.await.expect("execute() task panicked");
-        assert!(out.success, "expected success, got: {:?}", out.error);
-        let o = out.output.unwrap();
-        assert!(o.as_object().unwrap().get("files").is_none());
     }
 
     /// A token minted by `mint_signed_token` must validate against the same
