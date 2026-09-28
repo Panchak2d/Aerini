@@ -6,12 +6,19 @@ export interface ChatImageFileWire {
   mime_type: string;
 }
 
+export interface ChatAttachmentWire {
+  filename:  string;
+  data:      string;
+  mime_type: string;
+}
+
 export interface ChatMessageWire {
-  id:        string;
-  role:      string;
-  text?:     string | null;
-  images?:   ChatImageFileWire[] | null;
-  timestamp: number;
+  id:           string;
+  role:         string;
+  text?:        string | null;
+  images?:      ChatImageFileWire[] | null;
+  attachments?: ChatAttachmentWire[] | null;
+  timestamp:    number;
 }
 
 export interface ChatSessionWire {

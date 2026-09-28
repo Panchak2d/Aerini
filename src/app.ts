@@ -1,6 +1,7 @@
 import { Canvas } from "./canvas/Canvas";
 import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
+import type { ChatSettings } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
 import { getNodeTypes, checkBundledNode } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
@@ -214,6 +215,9 @@ async function init() {
       return _chatPanelInst ? _chatPanelInst.isOpen() : false;
     },
     startForChat() { _loadChat().then(p => p.startForChat()); },
+    applyToggles(settings: ChatSettings) {
+      if (_chatPanelInst) _chatPanelInst.applyToggles(settings);
+    },
   };
 
   // Update status hint when run starts/ends

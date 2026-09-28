@@ -1,7 +1,12 @@
 import type { WorkflowManager } from "./workflow-manager";
+import type { IChatPanel } from "./toolbar";
 
-export function bindWfSettings(wfManager: WorkflowManager): void {
+export function bindWfSettings(wfManager: WorkflowManager, chatPanel: IChatPanel): void {
   const $ = (id: string) => document.getElementById(id)!;
+
+  function applyChatSettingsLive(): void {
+    chatPanel.applyToggles(wfManager.chatSettings);
+  }
 
   function renderTagChips(): void {
     const chips = $("wf-setting-tags-chips");
@@ -108,11 +113,13 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
   document.getElementById("wf-setting-chat-attachments")!.addEventListener("change", (e) => {
     wfManager.chatSettings.allow_attachments = (e.target as HTMLInputElement).checked;
     wfManager.markUnsaved(true);
+    applyChatSettingsLive();
   });
 
   document.getElementById("wf-setting-chat-images")!.addEventListener("change", (e) => {
     wfManager.chatSettings.allow_image_responses = (e.target as HTMLInputElement).checked;
     wfManager.markUnsaved(true);
+    applyChatSettingsLive();
   });
 
   document.getElementById("wf-setting-chat-max-length")!.addEventListener("change", (e) => {
@@ -120,17 +127,20 @@ export function bindWfSettings(wfManager: WorkflowManager): void {
     if (!isNaN(val) && val >= 1 && val <= 100_000) {
       wfManager.chatSettings.max_message_length = val;
       wfManager.markUnsaved(true);
+      applyChatSettingsLive();
     }
   });
 
   document.getElementById("wf-setting-chat-persistence")!.addEventListener("change", (e) => {
     wfManager.chatSettings.session_persistence = (e.target as HTMLInputElement).checked;
     wfManager.markUnsaved(true);
+    applyChatSettingsLive();
   });
 
   document.getElementById("wf-setting-chat-branding")!.addEventListener("change", (e) => {
     wfManager.chatSettings.show_branding = (e.target as HTMLInputElement).checked;
     wfManager.markUnsaved(true);
+    applyChatSettingsLive();
   });
 
   $("wf-settings-modal").addEventListener("click", (e) => {

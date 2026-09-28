@@ -28,7 +28,7 @@ engineering organization? If yes, it belongs here. If not, it does not.
 
 ## Enforcement
 
-Report issues to [panchak2d@aerini.org](mailto:panchak2d@aerini.org). Reports are handled privately.
+Report issues to [support@aerini.org](mailto:support@aerini.org). Reports are handled privately.
 
 Consequences range from a private warning to a permanent contribution ban,
 depending on severity and pattern of behavior.
