@@ -19,7 +19,10 @@ vi.mock("../ipc/workflow", () => ({
 }));
 
 vi.mock("../ipc/chat", () => ({
-  listChatSessions: vi.fn().mockResolvedValue([]),
+  listChatSessionMeta: vi.fn().mockResolvedValue([]),
+  loadChatMessages: vi.fn().mockResolvedValue([]),
+  appendChatMessage: vi.fn(),
+  saveChatSessionMeta: vi.fn(),
   saveChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
 }));
@@ -33,7 +36,7 @@ import type { SchedulerStatusEvent } from "../ipc/events";
 
 const mockGetScheduledJob = vi.mocked(getScheduledJob);
 
-// Mirrors index.html's real banner markup (span + Start button) — the
+// Mirrors index.html's real status markup (text + Start button) — the
 // other ChatPanel test files' fixtures omit the span since they don't
 // exercise banner text, but this file specifically does.
 const CHAT_PANEL_HTML = `
@@ -46,9 +49,9 @@ const CHAT_PANEL_HTML = `
       <button class="drawer-btn" id="btn-chat-clear">Clear</button>
       <button class="drawer-btn" id="btn-chat-close">×</button>
     </div>
-    <div class="chat-banner hidden" id="chat-not-running-banner">
-      <span>Start this workflow to begin chatting</span>
-      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    <div class="chat-status hidden" id="chat-status" data-layout="banner">
+      <p class="chat-status-text" id="chat-status-text">Start this workflow to begin chatting</p>
+      <button class="btn-primary chat-status-btn" id="btn-chat-start">Start</button>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">
@@ -96,7 +99,7 @@ function activeJobRow(port: number) {
 }
 
 function bannerText(): string {
-  return document.querySelector("#chat-not-running-banner span")!.textContent ?? "";
+  return document.getElementById("chat-status-text")!.textContent ?? "";
 }
 
 describe("ChatPanel — main Run button state (onMainRunStateChange)", () => {

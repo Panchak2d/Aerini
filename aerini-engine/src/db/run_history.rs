@@ -1,10 +1,97 @@
 //! Run history persistence methods for [`super::WorkflowDb`].
 
 use super::{WorkflowDb, RunRecord, row_to_run};
+use serde_json::{json, Value};
+
+/// Key of the marker object that stands in for `body.attachments` when it is
+/// byte-for-byte the sibling `files` array of the same node output.
+const SAME_AS_KEY: &str = "$same_as";
+
+/// Root-level key listing the node ids whose `body.attachments` was replaced
+/// by the marker. The root of a stored result is engine-built, so unlike the
+/// node bodies (which carry arbitrary webhook input) it cannot already hold
+/// this key; expansion only touches listed nodes, so a caller-supplied
+/// `{"$same_as": "files"}` inside a body is never rewritten.
+const COMPACTED_KEY: &str = "$compacted";
+
+/// A Webhook trigger fed chat attachments emits them twice: under
+/// `body.attachments` and under `files`. Both are base64, so every stored run
+/// would carry the payload twice. Swaps the `body.attachments` copy for a
+/// marker; [`expand_result_json`] restores it on read, so callers never see
+/// the marker. Anything that doesn't match exactly is stored untouched.
+pub(super) fn compact_result_json(raw: &str) -> String {
+    if !raw.contains("\"attachments\"") {
+        return raw.to_string();
+    }
+    let Ok(mut root) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    if root.get(COMPACTED_KEY).is_some() {
+        return raw.to_string();
+    }
+    let mut compacted: Vec<Value> = Vec::new();
+    if let Some(outputs) = root.get_mut("node_outputs").and_then(Value::as_object_mut) {
+        for (node_id, out) in outputs.iter_mut() {
+            let Some(obj) = out.as_object_mut() else { continue };
+            let duplicated = match (obj.get("files"), obj.get("body").and_then(|b| b.get("attachments"))) {
+                (Some(files), Some(attachments)) => files.is_array() && files == attachments,
+                _ => false,
+            };
+            if !duplicated {
+                continue;
+            }
+            if let Some(body) = obj.get_mut("body").and_then(Value::as_object_mut) {
+                body.insert("attachments".to_string(), json!({ SAME_AS_KEY: "files" }));
+                compacted.push(Value::String(node_id.clone()));
+            }
+        }
+    }
+    if compacted.is_empty() {
+        return raw.to_string();
+    }
+    if let Some(map) = root.as_object_mut() {
+        map.insert(COMPACTED_KEY.to_string(), Value::Array(compacted));
+    }
+    serde_json::to_string(&root).unwrap_or_else(|_| raw.to_string())
+}
+
+/// Inverse of [`compact_result_json`]. A listed node whose marker or sibling
+/// `files` is missing is left as-is rather than guessed at.
+pub(super) fn expand_result_json(raw: String) -> String {
+    if !raw.contains(COMPACTED_KEY) {
+        return raw;
+    }
+    let Ok(mut root) = serde_json::from_str::<Value>(&raw) else {
+        return raw;
+    };
+    let Some(Value::Array(compacted)) = root.as_object_mut().and_then(|m| m.remove(COMPACTED_KEY)) else {
+        return raw;
+    };
+    if let Some(outputs) = root.get_mut("node_outputs").and_then(Value::as_object_mut) {
+        for node_id in compacted.iter().filter_map(Value::as_str) {
+            let Some(obj) = outputs.get_mut(node_id).and_then(Value::as_object_mut) else { continue };
+            let is_marker = obj
+                .get("body")
+                .and_then(|b| b.get("attachments"))
+                .and_then(|a| a.get(SAME_AS_KEY))
+                .and_then(Value::as_str)
+                == Some("files");
+            if !is_marker {
+                continue;
+            }
+            let Some(files) = obj.get("files").filter(|f| f.is_array()).cloned() else { continue };
+            if let Some(body) = obj.get_mut("body").and_then(Value::as_object_mut) {
+                body.insert("attachments".to_string(), files);
+            }
+        }
+    }
+    serde_json::to_string(&root).unwrap_or(raw)
+}
 
 impl WorkflowDb {
     pub fn save_run(&self, record: &RunRecord) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
+        let result_json = compact_result_json(&record.result_json);
         conn.execute(
             "INSERT OR REPLACE INTO run_history
              (id, workflow_id, workflow_name, ran_at, success, duration_ms, result_json, status)
@@ -16,7 +103,7 @@ impl WorkflowDb {
                 record.ran_at,
                 record.success as i64,
                 record.duration_ms,
-                record.result_json,
+                result_json,
                 record.status,
             ],
         ).map_err(|e| e.to_string())?;
