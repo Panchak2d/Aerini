@@ -42,6 +42,16 @@ pub struct ChatMessageRecord {
     pub timestamp:   i64,
 }
 
+/// A chat session without its messages — what the session list and the
+/// per-message append command carry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionMeta {
+    pub id:          String,
+    pub workflow_id: String,
+    pub name:        String,
+    pub created_at:  i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSessionRecord {
     pub id:          String,
@@ -89,7 +99,7 @@ pub(super) fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         ran_at:        row.get(3)?,
         success:       row.get::<_, i64>(4)? != 0,
         duration_ms:   row.get(5)?,
-        result_json:   row.get(6)?,
+        result_json:   run_history::expand_result_json(row.get(6)?),
         status:        row.get(7)?,
     })
 }
@@ -545,13 +555,94 @@ mod tests {
 
         let db = WorkflowDb::open(&path, 8).expect("upgrade failed");
 
-        let sessions = db.list_chat_sessions("wf-1").expect("list failed");
-        assert_eq!(sessions[0].messages[0].text.as_deref(), Some("hello"));
-        assert!(sessions[0].messages[0].attachments.is_none());
+        let metas = db.list_chat_session_meta("wf-1").expect("list failed");
+        let messages = db.load_chat_messages(&metas[0].id).expect("load failed");
+        assert_eq!(messages[0].text.as_deref(), Some("hello"));
+        assert!(messages[0].attachments.is_none());
 
         let conn = db.pool.get().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, WorkflowDb::SCHEMA_VERSION);
+
+        cleanup(&path);
+    }
+
+    fn run_with_result(id: &str, result: &serde_json::Value) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            workflow_id: "wf-1".to_string(),
+            workflow_name: "Chat".to_string(),
+            ran_at: "2024-01-01T00:00:00Z".to_string(),
+            success: true,
+            duration_ms: 1,
+            result_json: result.to_string(),
+            status: "success".to_string(),
+        }
+    }
+
+    fn stored_result_json(db: &WorkflowDb, id: &str) -> String {
+        let conn = db.pool.get().unwrap();
+        conn.query_row("SELECT result_json FROM run_history WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    }
+
+    // Normal case: attachments duplicated under body.attachments and files are
+    // stored once, and every read path hands back the original document.
+    #[test]
+    fn run_history_stores_duplicated_attachments_once_and_reads_them_back_intact() {
+        let path = temp_path("run_dedupe");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let blob = "A".repeat(4096);
+        let files = serde_json::json!([{ "filename": "a.pdf", "data": blob, "mime_type": "application/pdf" }]);
+        let result = serde_json::json!({
+            "success": true,
+            "node_outputs": { "trigger": { "body": { "message": "hi", "attachments": files }, "files": files } },
+        });
+        db.save_run(&run_with_result("r1", &result)).expect("save failed");
+
+        let raw = stored_result_json(&db, "r1");
+        assert!(raw.len() < result.to_string().len() * 6 / 10, "attachment payload must be stored once");
+        assert!(raw.contains("$same_as"));
+
+        let got = db.get_run("r1").unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&got.result_json).unwrap(), result);
+        let listed = db.list_runs("wf-1", 0, 10, "all").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&listed[0].result_json).unwrap(), result);
+
+        cleanup(&path);
+    }
+
+    // Edge case: anything that is not an exact duplicate — differing arrays, a
+    // missing `files`, a body that merely looks like the marker, non-JSON — is
+    // stored byte-for-byte as received and read back unchanged.
+    #[test]
+    fn run_history_leaves_non_duplicate_results_untouched() {
+        let path = temp_path("run_dedupe_edge");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+
+        let differing = serde_json::json!({ "node_outputs": { "t": {
+            "body": { "attachments": [{ "filename": "a" }] }, "files": [{ "filename": "b" }] } } });
+        let no_files = serde_json::json!({ "node_outputs": { "t": { "body": { "attachments": [{ "filename": "a" }] } } } });
+        for (id, r) in [("r-diff", &differing), ("r-nofiles", &no_files)] {
+            db.save_run(&run_with_result(id, r)).unwrap();
+            assert_eq!(stored_result_json(&db, id), r.to_string());
+        }
+
+        // A caller-supplied body that happens to look like the marker is data,
+        // not something to expand.
+        let literal = serde_json::json!({ "node_outputs": { "t": {
+            "body": { "attachments": { "$same_as": "files" } }, "files": [{ "filename": "b" }] } } });
+        db.save_run(&run_with_result("r-literal", &literal)).unwrap();
+        assert_eq!(stored_result_json(&db, "r-literal"), literal.to_string());
+        let read = db.get_run("r-literal").unwrap().unwrap().result_json;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&read).unwrap(), literal);
+
+        let mut junk = run_with_result("r-junk", &differing);
+        junk.result_json = "not json \"attachments\"".to_string();
+        db.save_run(&junk).unwrap();
+        assert_eq!(db.get_run("r-junk").unwrap().unwrap().result_json, "not json \"attachments\"");
 
         cleanup(&path);
     }

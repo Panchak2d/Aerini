@@ -6,8 +6,8 @@ import type { RunManager } from "../run-manager";
 import { NODE_IDS } from "../node-ids";
 import { startScheduledWorkflow, stopScheduledWorkflow, getScheduledJobs, getScheduledJob, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
 import type { WorkflowResult, ScheduledJobRow } from "../ipc/workflow";
-import { listChatSessions, saveChatSession, deleteChatSession } from "../ipc/chat";
-import type { ChatSessionWire } from "../ipc/chat";
+import { listChatSessionMeta, loadChatMessages, appendChatMessage, saveChatSessionMeta, saveChatSession, deleteChatSession } from "../ipc/chat";
+import type { ChatSessionWire, ChatSessionMetaWire, ChatMessageWire } from "../ipc/chat";
 import type { SchedulerStatusEvent } from "../ipc/events";
 import { addSchedulerStatusListener } from "../scheduler-events";
 import { escapeHtml } from "../utils";
@@ -76,6 +76,19 @@ interface ChatSession {
 interface ChatStore { sessions: ChatSession[]; activeId: string; }
 
 /**
+ * What the backend is known to hold for one session. Messages are only ever
+ * appended in the UI, so the backend copy is the messages in `syncedIds`.
+ * `loaded` is false for a session fetched from the session list until its
+ * messages are requested.
+ */
+interface SessionSync {
+  loaded:     boolean;
+  syncedIds:  Set<string>;
+  metaSynced: boolean;
+  loading:    Promise<void> | null;
+}
+
+/**
  * Chat Panel.
  *
  * IMPORTANT — message flow does NOT use the webhook's HTTP response.
@@ -92,16 +105,13 @@ export class ChatPanel {
   private messagesEl:   HTMLElement;
   private inputEl:      HTMLTextAreaElement;
   private sendBtn:      HTMLButtonElement;
-  private bannerEl:     HTMLElement;
-  private bannerTextEl: HTMLElement | null;
+  /** The single "not running / no messages yet" notice — see syncStatus(). */
+  private statusEl:     HTMLElement;
+  private statusTextEl: HTMLElement;
   private startBtn:     HTMLButtonElement;
-  /** Set only while the active session has zero messages (see renderMessages/
-   *  buildEmptyState) — null the rest of the time, once messagesEl has been
-   *  rebuilt with real chat bubbles. */
-  private emptyStateTextEl:   HTMLElement | null = null;
-  private emptyStateStartBtn: HTMLButtonElement | null = null;
   private sessionLabel: HTMLElement;
   private sessionMenu:  HTMLElement;
+  private sessionBtn:   HTMLElement | null;
   private chatBtn:      HTMLButtonElement | null;
   private attachBtn:    HTMLButtonElement;
   private brandingEl:   HTMLElement | null;
@@ -113,6 +123,8 @@ export class ChatPanel {
   private toast:     Toast;
 
   private store: ChatStore = { sessions: [], activeId: "" };
+  /** Workflow `store` was loaded for. It can lag `wfManager.currentId` after a workflow switch, until the panel is reopened. */
+  private storeWorkflowId = "";
   /** Set on every panel open via applyToggles(wfManager.chatSettings). */
   private chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
 
@@ -130,6 +142,13 @@ export class ChatPanel {
   /** Snapshot of what was actually sent, for the error-bubble Retry button. */
   private lastSentAttachments: ChatAttachment[] = [];
   private persistFailureToasted = false;
+  /** Keyed by session id. A session with no entry exists only in memory: all its messages count as unsynced, its row as stored. */
+  private syncState = new Map<string, SessionSync>();
+  /** Every backend write for chat history runs on this chain, one at a time and in call order. */
+  private persistChain: Promise<void> = Promise.resolve();
+  /** Bumped whenever a pending session switch stops being the user's latest intent. */
+  private switchSeq = 0;
+  private pendingSwitchId: string | null = null;
   /** Port the workflow's Webhook trigger is actually bound to right now —
    *  distinct from the node's static config port, since startOnFreePort()
    *  may have fallen back to a different one. Null until start/sync learns
@@ -161,11 +180,12 @@ export class ChatPanel {
     this.messagesEl   = document.getElementById("chat-messages")!;
     this.inputEl      = document.getElementById("chat-input") as HTMLTextAreaElement;
     this.sendBtn      = document.getElementById("chat-send-btn") as HTMLButtonElement;
-    this.bannerEl     = document.getElementById("chat-not-running-banner")!;
-    this.bannerTextEl = this.bannerEl.querySelector("span");
+    this.statusEl     = document.getElementById("chat-status")!;
+    this.statusTextEl = document.getElementById("chat-status-text")!;
     this.startBtn     = document.getElementById("btn-chat-start") as HTMLButtonElement;
     this.sessionLabel = document.getElementById("chat-session-label")!;
     this.sessionMenu  = document.getElementById("chat-session-menu")!;
+    this.sessionBtn   = document.getElementById("chat-session-btn");
     this.chatBtn      = document.getElementById("btn-chat") as HTMLButtonElement | null;
     this.attachBtn    = document.getElementById("chat-attach-btn") as HTMLButtonElement;
     this.brandingEl   = document.getElementById("chat-branding-footer");
@@ -244,6 +264,7 @@ export class ChatPanel {
   /** Call on workflow navigation — the open session and pending request belong to the old workflow. */
   onWorkflowSwitched(): void {
     this.cancelPending();
+    this.cancelPendingSwitch();
     this.activeWebhookPort = null;
     this.schedulerRunning = false;
     this.mainRunActive = false;
@@ -365,6 +386,7 @@ export class ChatPanel {
 
   private renderPendingAttachments(): void {
     this.pendingAttachmentsEl.innerHTML = "";
+    this.sendBtn.disabled = !this.canSend();
 
     if (this.pendingAttachments.length === 0) {
       this.pendingAttachmentsEl.style.display = "none";
@@ -456,33 +478,51 @@ export class ChatPanel {
     if (this.el.classList.contains("chat-open")) this.refreshRunningState();
   }
 
-  /** Text shared by the top banner (history exists) and the centered
-   *  empty-state (no history yet) for the "not running" case — kept in one
-   *  place so the two surfaces can't drift out of sync with each other. */
+  /** Status copy for the "workflow isn't live" case. */
   private notRunningStatusText(): string {
     return this.mainRunActive
-      ? "Running as a one-time test (Run button) \u2014 replies aren't available this way. Stop it, then use Start below for an interactive chat session."
+      ? "Running as a one-time test (Run button) \u2014 replies aren't available this way. Stop it, then press Start to chat interactively."
       : "Start this workflow to begin chatting";
   }
 
-  private refreshRunningState(): void {
+  /**
+   * Drives the one status notice (#chat-status). Not live -> shown, with Start.
+   * Live but no messages yet -> shown centered, without Start. Live with
+   * messages -> hidden. With no messages the notice fills the panel and the
+   * (empty) message list is hidden so the two don't split the space.
+   */
+  private syncStatus(): void {
     const running     = this.schedulerRunning;
     const hasMessages = this.activeSession().messages.length > 0;
 
-    // Top banner only makes sense once there's message history to anchor it
-    // to; a fresh/empty session uses the centered empty-state instead.
-    this.bannerEl.classList.toggle("hidden", running || !hasMessages);
-    if (this.bannerTextEl) this.bannerTextEl.textContent = this.notRunningStatusText();
+    let text: string | null = null;
+    if (!running)          text = this.notRunningStatusText();
+    else if (!hasMessages) text = "Send a message to start chatting with this workflow.";
 
-    if (this.emptyStateTextEl) {
-      this.emptyStateTextEl.textContent = running
-        ? "Send a message to start chatting with this workflow."
-        : this.notRunningStatusText();
-    }
-    this.emptyStateStartBtn?.classList.toggle("hidden", running);
+    const centered = text !== null && !hasMessages;
+    const listWasHidden = this.messagesEl.classList.contains("hidden");
 
-    this.inputEl.disabled = !running || this.awaitingReply;
-    this.sendBtn.disabled = this.inputEl.disabled || this.inputEl.value.trim().length === 0;
+    this.statusEl.classList.toggle("hidden", text === null);
+    this.statusEl.dataset.layout = hasMessages ? "banner" : "centered";
+    if (text !== null) this.statusTextEl.textContent = text;
+    this.startBtn.classList.toggle("hidden", running);
+    this.messagesEl.classList.toggle("hidden", centered);
+    if (listWasHidden && !centered) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+  }
+
+  private canSend(): boolean {
+    return !this.inputEl.disabled
+      && (this.inputEl.value.trim().length > 0 || this.pendingAttachments.length > 0);
+  }
+
+  private refreshRunningState(): void {
+    this.syncStatus();
+    this.syncInputLock();
+  }
+
+  private syncInputLock(): void {
+    this.inputEl.disabled = !this.schedulerRunning || this.awaitingReply || this.pendingSwitchId !== null;
+    this.sendBtn.disabled = !this.canSend();
   }
 
   private onSchedulerStatus(evt: SchedulerStatusEvent): void {
@@ -504,12 +544,7 @@ export class ChatPanel {
   private async handleStart(): Promise<void> {
     this.startBtn.disabled = true;
     const startLabel = this.startBtn.textContent;
-    const emptyStateStartLabel = this.emptyStateStartBtn?.textContent;
     this.startBtn.textContent = "Starting…";
-    if (this.emptyStateStartBtn) {
-      this.emptyStateStartBtn.disabled = true;
-      this.emptyStateStartBtn.textContent = "Starting…";
-    }
     try {
       const snapshot = await this.wfManager.prepareForBgRun();
       if (!snapshot) return;
@@ -540,10 +575,6 @@ export class ChatPanel {
     } finally {
       this.startBtn.disabled = false;
       this.startBtn.textContent = startLabel;
-      if (this.emptyStateStartBtn) {
-        this.emptyStateStartBtn.disabled = false;
-        this.emptyStateStartBtn.textContent = emptyStateStartLabel ?? "Start";
-      }
     }
   }
 
@@ -659,8 +690,10 @@ export class ChatPanel {
   // ── Sending ──────────────────────────────────────────────────────────────
 
   private async handleSend(overrideText?: string, overrideAttachments?: ChatAttachment[]): Promise<void> {
-    const text = (overrideText ?? this.inputEl.value).trim();
-    if (!text) return;
+    const isRetry     = overrideText !== undefined;
+    const text        = (overrideText ?? this.inputEl.value).trim();
+    const attachments = overrideAttachments ?? this.pendingAttachments;
+    if (!text && attachments.length === 0) return;
     if (text.length > this.chatSettings.max_message_length) {
       this.toast(`Message exceeds the ${this.chatSettings.max_message_length}-character limit.`, "error");
       return;
@@ -671,13 +704,11 @@ export class ChatPanel {
     const webhook = this.findWebhookConfig();
     if (!webhook) { this.toast("No Webhook node found on this workflow.", "error"); return; }
 
-    // Captured before any clear below — reassigning this.pendingAttachments to a new
-    // array (not mutating it) means this reference stays valid either way.
-    const attachments = overrideAttachments ?? this.pendingAttachments;
-
+    // `attachments` was captured above, before any clear below — reassigning
+    // this.pendingAttachments to a new array (not mutating it) keeps it valid.
     this.lastSentText        = text;
     this.lastSentAttachments = attachments;
-    if (!overrideText) {
+    if (!isRetry) {
       this.inputEl.value = "";
       this.autosizeInput();
       this.appendMessage({
@@ -824,56 +855,20 @@ export class ChatPanel {
 
   private appendMessage(msg: ChatMessage): void {
     this.activeSession().messages.push(msg);
+    this.syncStatus();
     this.renderOneMessage(msg);
     this.scrollIfAtBottom();
   }
 
   private renderMessages(): void {
     this.messagesEl.innerHTML = "";
-    this.emptyStateTextEl = null;
-    this.emptyStateStartBtn = null;
     const session = this.activeSession();
-    if (session.messages.length === 0) {
-      this.messagesEl.appendChild(this.buildEmptyState());
-      this.refreshRunningState(); // freshly built — sync text/button to current state now
-      return;
-    }
     for (const m of session.messages) this.renderOneMessage(m);
+    this.syncStatus();
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
-  /** Centered "no messages yet" state: explanatory text above a single Start
-   *  action, replacing the old top banner for this case (see refreshRunningState). */
-  private buildEmptyState(): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "chat-empty-state";
-
-    const text = document.createElement("p");
-    text.className = "chat-empty-state-text";
-    this.emptyStateTextEl = text;
-
-    const btn = document.createElement("button");
-    btn.className = "btn-primary chat-empty-state-start";
-    btn.textContent = "Start";
-    btn.addEventListener("click", () => this.handleStart());
-    this.emptyStateStartBtn = btn;
-
-    wrap.appendChild(text);
-    wrap.appendChild(btn);
-    return wrap;
-  }
-
-  /** Clears the centered empty-state block (if present) and its field refs —
-   *  called wherever real content is about to appear in .chat-messages, so a
-   *  stale Start button/text never lingers alongside an actual message. */
-  private removeEmptyState(): void {
-    this.messagesEl.querySelector(".chat-empty-state")?.remove();
-    this.emptyStateTextEl = null;
-    this.emptyStateStartBtn = null;
-  }
-
   private renderOneMessage(msg: ChatMessage): void {
-    this.removeEmptyState();
     const row = document.createElement("div");
     row.className = `chat-bubble-row chat-bubble-row--${msg.role === "user" ? "user" : "ai"}`;
     row.appendChild(
@@ -890,11 +885,15 @@ export class ChatPanel {
       ? "chat-bubble chat-bubble--user"
       : role === "error" ? "chat-bubble chat-bubble--ai chat-bubble--error" : "chat-bubble chat-bubble--ai";
 
-    const content = document.createElement("div");
-    content.innerHTML = this.renderMarkdown(text);
-    bubble.appendChild(content);
+    if (text) {
+      const content = document.createElement("div");
+      content.innerHTML = this.renderMarkdown(text);
+      bubble.appendChild(content);
+    }
 
     for (const att of attachments ?? []) bubble.appendChild(this.buildSentAttachmentChip(att));
+
+    if (!text) return bubble;
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "chat-bubble-copy";
@@ -909,17 +908,27 @@ export class ChatPanel {
     return bubble;
   }
 
+  /** Sent chip: images open in the lightbox, everything else downloads. */
   private buildSentAttachmentChip(att: ChatAttachment): HTMLElement {
-    const chip = document.createElement("div");
+    const isImage = att.mime_type.startsWith("image/");
+    const chip = document.createElement("button");
+    chip.type      = "button";
     chip.className = "chat-attachment-chip";
+    const action   = isImage ? "Open" : "Download";
+    chip.setAttribute("aria-label", `${action} ${att.filename}`);
+    chip.title = `${action} ${att.filename}`;
 
     const lbl = document.createElement("span");
     lbl.className = "chat-attachment-chip-label";
     lbl.innerHTML = CHAT_ATTACHMENT_FILE_ICON;
     // Filename is user-supplied — inserted as a text node, never as markup.
     lbl.appendChild(document.createTextNode(" " + att.filename));
-    lbl.title = att.filename;
     chip.appendChild(lbl);
+
+    chip.addEventListener("click", () => {
+      if (isImage) this.openLightbox(`data:${att.mime_type};base64,${att.data}`);
+      else this.downloadFile(att, "Could not download attachment.");
+    });
     return chip;
   }
 
@@ -972,7 +981,7 @@ export class ChatPanel {
     return bubble;
   }
 
-  private base64ToBlob(img: ChatImageFile): Blob {
+  private base64ToBlob(img: ChatAttachment): Blob {
     const bytes = atob(img.data);
     const arr = new Uint8Array(bytes.length);
     for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
@@ -980,14 +989,18 @@ export class ChatPanel {
   }
 
   private downloadImage(img: ChatImageFile): void {
+    this.downloadFile(img, "Could not download image.", "image");
+  }
+
+  private downloadFile(file: ChatAttachment, failMessage: string, fallbackName = "attachment"): void {
     try {
-      const url = URL.createObjectURL(this.base64ToBlob(img));
+      const url = URL.createObjectURL(this.base64ToBlob(file));
       const a = document.createElement("a");
-      a.href = url; a.download = img.filename || "image";
+      a.href = url; a.download = file.filename || fallbackName;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch {
-      this.toast("Could not download image.", "error");
+      this.toast(failMessage, "error");
     }
   }
 
@@ -1018,7 +1031,6 @@ export class ChatPanel {
   }
 
   private appendTypingBubble(): void {
-    this.removeEmptyState();
     const row = document.createElement("div");
     row.className = "chat-bubble-row chat-bubble-row--ai";
     row.id = "chat-typing-row";
@@ -1072,7 +1084,18 @@ export class ChatPanel {
   }
 
   private newSessionObject(): ChatSession {
-    return { id: crypto.randomUUID(), name: `Session ${new Date().toLocaleString()}`, messages: [], createdAt: Date.now() };
+    const s: ChatSession = { id: crypto.randomUUID(), name: `Session ${new Date().toLocaleString()}`, messages: [], createdAt: Date.now() };
+    this.syncState.set(s.id, { loaded: true, syncedIds: new Set(), metaSynced: false, loading: null });
+    return s;
+  }
+
+  private syncOf(id: string): SessionSync {
+    let sync = this.syncState.get(id);
+    if (!sync) {
+      sync = { loaded: true, syncedIds: new Set(), metaSynced: true, loading: null };
+      this.syncState.set(id, sync);
+    }
+    return sync;
   }
 
   /** Legacy localStorage key — read (and cleared) only by the one-time migration below. */
@@ -1085,39 +1108,33 @@ export class ChatPanel {
     return `chat_active_session:${workflowId}`;
   }
 
-  private sessionFromWire(s: ChatSessionWire): ChatSession {
+  private messageFromWire(m: ChatMessageWire): ChatMessage {
     return {
-      id: s.id,
-      name: s.name,
-      createdAt: s.created_at,
-      messages: s.messages.map((m) => ({
-        id: m.id,
-        role: m.role as ChatMessage["role"],
-        text: m.text ?? undefined,
-        images: m.images ?? undefined,
-        attachments: m.attachments ?? undefined,
-        timestamp: m.timestamp,
-      })),
+      id: m.id,
+      role: m.role as ChatMessage["role"],
+      text: m.text ?? undefined,
+      images: m.images ?? undefined,
+      attachments: m.attachments ?? undefined,
+      timestamp: m.timestamp,
     };
   }
 
+  private messageToWire(m: ChatMessage): ChatMessageWire {
+    return { id: m.id, role: m.role, text: m.text, images: m.images, attachments: m.attachments, timestamp: m.timestamp };
+  }
+
+  private sessionMetaWire(s: ChatSession, workflowId: string): ChatSessionMetaWire {
+    return { id: s.id, workflow_id: workflowId, name: s.name, created_at: s.createdAt };
+  }
+
   private sessionToWire(s: ChatSession, workflowId: string): ChatSessionWire {
-    return {
-      id: s.id,
-      workflow_id: workflowId,
-      name: s.name,
-      created_at: s.createdAt,
-      messages: s.messages.map((m) => ({
-        id: m.id, role: m.role, text: m.text, images: m.images, attachments: m.attachments, timestamp: m.timestamp,
-      })),
-    };
+    return { ...this.sessionMetaWire(s, workflowId), messages: s.messages.map((m) => this.messageToWire(m)) };
   }
 
   /**
    * One-time migration for a workflow that has legacy localStorage chat data
    * but no rows in the backend yet. Reads the old blob, saves each session
-   * through the same backend calls persist() now uses, then removes the old
-   * key. Returns the migrated store, or null if there was nothing to migrate.
+   * whole with saveChatSession, then removes the old key. Returns the migrated store, or null if there was nothing to migrate.
    */
   private async migrateLegacyLocalStorage(workflowId: string): Promise<ChatStore | null> {
     let raw: string | null = null;
@@ -1133,6 +1150,9 @@ export class ChatPanel {
 
     for (const session of parsed.sessions) {
       await saveChatSession(this.sessionToWire(session, workflowId));
+      this.syncState.set(session.id, {
+        loaded: true, syncedIds: new Set(session.messages.map((m) => m.id)), metaSynced: true, loading: null,
+      });
     }
     if (parsed.activeId) {
       await setSetting(this.activeSessionSettingKey(workflowId), parsed.activeId);
@@ -1147,34 +1167,91 @@ export class ChatPanel {
    * each `await` — if the user switches workflows while this is in flight,
    * every `this.store = ...` assignment below is guarded so a late-resolving
    * load for the OLD workflow can't clobber a newer load that already won.
+   *
+   * Only the active session's messages are fetched here; the others load
+   * when switched to.
    */
   private async loadStoreForCurrentWorkflow(): Promise<void> {
     const workflowId = this.wfManager.currentId;
+    await this.persist();
     try {
-      const sessions = await listChatSessions(workflowId);
-      if (sessions.length > 0) {
-        const activeId = (await getSetting(this.activeSessionSettingKey(workflowId))) ?? sessions[0].id;
+      const metas = await listChatSessionMeta(workflowId);
+      if (metas.length > 0) {
+        const activeId = (await getSetting(this.activeSessionSettingKey(workflowId))) ?? metas[0].id;
+        const sessions: ChatSession[] = metas.map((m) => ({ id: m.id, name: m.name, createdAt: m.created_at, messages: [] }));
+        const active = sessions.find((s) => s.id === activeId);
+        if (active) active.messages = (await loadChatMessages(active.id)).map((m) => this.messageFromWire(m));
         if (this.wfManager.currentId === workflowId) {
-          this.store = { sessions: sessions.map((s) => this.sessionFromWire(s)), activeId };
+          this.cancelPendingSwitch();
+          this.store = { sessions, activeId };
+          this.storeWorkflowId = workflowId;
+          for (const s of sessions) {
+            this.syncState.set(s.id, {
+              loaded: s === active, syncedIds: new Set(s.messages.map((m) => m.id)), metaSynced: true, loading: null,
+            });
+          }
         }
         return;
       }
       const migrated = await this.migrateLegacyLocalStorage(workflowId);
       if (migrated) {
-        if (this.wfManager.currentId === workflowId) this.store = migrated;
+        if (this.wfManager.currentId === workflowId) {
+          this.cancelPendingSwitch();
+          this.store = migrated;
+          this.storeWorkflowId = workflowId;
+        }
         return;
       }
     } catch (e) {
       console.error("Aerini: failed to load chat sessions from backend", e);
+      this.toast("Couldn't load chat history — check the app's connection to its backend.", "error");
     }
-    if (this.wfManager.currentId === workflowId) this.store = { sessions: [], activeId: "" };
+    if (this.wfManager.currentId === workflowId) {
+      this.cancelPendingSwitch();
+      this.store = { sessions: [], activeId: "" };
+      this.storeWorkflowId = workflowId;
+    }
   }
 
-  private async persist(): Promise<void> {
-    const workflowId = this.wfManager.currentId;
+  /** Runs `task` after every earlier chat-history write has finished. A failing task does not block later ones. */
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.persistChain.then(task);
+    this.persistChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /**
+   * Writes whatever the backend doesn't have yet: each loaded session's
+   * unsynced messages, one appendChatMessage call apiece, plus the active-
+   * session pointer. Never rejects. A failed write leaves its message
+   * unsynced, so the next call retries exactly those messages; the backend
+   * treats a repeated message id as the same row, so a retry after an
+   * ambiguous failure can't duplicate it.
+   */
+  private persist(): Promise<void> {
+    const store = this.store;
+    const workflowId = this.storeWorkflowId || this.wfManager.currentId;
+    return this.enqueue(() => this.flush(store, workflowId));
+  }
+
+  private async flush(store: ChatStore, workflowId: string): Promise<void> {
     try {
-      await saveChatSession(this.sessionToWire(this.activeSession(), workflowId));
-      await setSetting(this.activeSessionSettingKey(workflowId), this.store.activeId);
+      for (const s of store.sessions) {
+        const sync = this.syncOf(s.id);
+        if (!sync.loaded) continue;
+        const meta = this.sessionMetaWire(s, workflowId);
+        const fresh = s.messages.filter((m) => !sync.syncedIds.has(m.id));
+        if (fresh.length === 0 && !sync.metaSynced) {
+          await saveChatSessionMeta(meta);
+          sync.metaSynced = true;
+        }
+        for (const m of fresh) {
+          await appendChatMessage(meta, this.messageToWire(m));
+          sync.syncedIds.add(m.id);
+          sync.metaSynced = true;
+        }
+      }
+      if (store.activeId) await setSetting(this.activeSessionSettingKey(workflowId), store.activeId);
       this.persistFailureToasted = false;
     } catch {
       if (!this.persistFailureToasted) {
@@ -1182,6 +1259,21 @@ export class ChatPanel {
         this.toast("Chat history isn't saving — check the app's connection to its backend.", "error");
       }
     }
+  }
+
+  private loadSessionMessages(s: ChatSession): Promise<void> {
+    const sync = this.syncOf(s.id);
+    if (sync.loaded) return Promise.resolve();
+    if (!sync.loading) {
+      sync.loading = loadChatMessages(s.id)
+        .then((wire) => {
+          s.messages = wire.map((m) => this.messageFromWire(m));
+          sync.syncedIds = new Set(s.messages.map((m) => m.id));
+          sync.loaded = true;
+        })
+        .finally(() => { sync.loading = null; });
+    }
+    return sync.loading;
   }
 
   private renderSessionLabel(): void {
@@ -1193,16 +1285,26 @@ export class ChatPanel {
   private renderSessionMenu(): void {
     this.sessionMenu.innerHTML = "";
     for (const s of this.store.sessions) {
-      const item = document.createElement("button");
-      item.className = "toolbar-dropdown-item chat-session-item";
-      item.innerHTML = `<span class="chat-session-item-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>`;
-      const del = document.createElement("span");
+      const row = document.createElement("div");
+      row.className = "toolbar-dropdown-item chat-session-item";
+
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "chat-session-item-select";
+      select.textContent = s.name;
+      select.title = s.name;
+      select.addEventListener("click", () => this.switchSession(s.id));
+
+      const del = document.createElement("button");
+      del.type = "button";
       del.className = "chat-session-item-del";
-      del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+      del.setAttribute("aria-label", `Delete session ${s.name}`);
+      del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
       del.addEventListener("click", (e) => { e.stopPropagation(); this.deleteSession(s.id); });
-      item.appendChild(del);
-      item.addEventListener("click", () => this.switchSession(s.id));
-      this.sessionMenu.appendChild(item);
+
+      row.appendChild(select);
+      row.appendChild(del);
+      this.sessionMenu.appendChild(row);
     }
     const newBtn = document.createElement("button");
     newBtn.className = "toolbar-dropdown-item chat-session-new";
@@ -1211,17 +1313,77 @@ export class ChatPanel {
     this.sessionMenu.appendChild(newBtn);
   }
 
-  private switchSession(id: string): void {
+  /**
+   * Switching to a session whose messages aren't loaded shows a loading
+   * state and keeps the current session active until the load succeeds. Only
+   * the latest click may complete: an older load that resolves later is
+   * dropped, and a failed load leaves the previous session in place.
+   */
+  private async switchSession(id: string): Promise<void> {
     if (this.awaitingReply) { this.toast("Wait for the current reply before switching sessions.", "info"); return; }
+    await this.activateSession(id);
+  }
+
+  private async activateSession(id: string): Promise<void> {
+    const target = this.store.sessions.find((s) => s.id === id);
+    if (!target) return;
+    const seq = ++this.switchSeq;
+    this.closeSessionMenu();
+
+    if (!this.syncOf(id).loaded) {
+      this.pendingSwitchId = id;
+      this.showSessionLoading();
+      try {
+        await this.loadSessionMessages(target);
+      } catch (e) {
+        if (seq !== this.switchSeq) return;
+        console.error("Aerini: failed to load chat session", e);
+        this.endSessionLoading();
+        this.renderSessionLabel();
+        this.renderMessages();
+        this.toast("Couldn't load that session — check the app's connection to its backend.", "error");
+        return;
+      }
+      if (seq !== this.switchSeq) return;
+      this.endSessionLoading();
+    } else {
+      this.endSessionLoading();
+    }
+
     this.store.activeId = id;
     this.persist();
     this.renderSessionLabel();
     this.renderMessages();
-    this.closeSessionMenu();
+  }
+
+  private showSessionLoading(): void {
+    const note = document.createElement("div");
+    note.className = "chat-loading";
+    note.setAttribute("role", "status");
+    note.textContent = "Loading conversation…";
+    this.messagesEl.replaceChildren(note);
+    this.messagesEl.setAttribute("aria-busy", "true");
+    this.messagesEl.classList.remove("hidden");
+    this.statusEl.classList.add("hidden");
+    this.syncInputLock();
+  }
+
+  /** Clears the loading state; the caller renders whatever comes next. */
+  private endSessionLoading(): void {
+    this.pendingSwitchId = null;
+    this.messagesEl.removeAttribute("aria-busy");
+    this.syncInputLock();
+  }
+
+  /** Drops any switch still loading, so its result is ignored when it arrives. */
+  private cancelPendingSwitch(): void {
+    this.switchSeq++;
+    this.endSessionLoading();
   }
 
   private createNewSession(): void {
     if (this.awaitingReply) { this.toast("Wait for the current reply before starting a new session.", "info"); return; }
+    this.cancelPendingSwitch();
     const s = this.newSessionObject();
     this.store.sessions.unshift(s);
     this.store.activeId = s.id;
@@ -1239,27 +1401,38 @@ export class ChatPanel {
       console.error("Aerini: clearChatSession failed", e);
       this.toast("Could not clear AI memory on the backend — session was deleted locally.", "error");
     }
+    if (this.pendingSwitchId === id) this.cancelPendingSwitch();
+    const wasActive = this.store.activeId === id;
     this.store.sessions = this.store.sessions.filter(s => s.id !== id);
-    if (this.store.activeId === id) this.store.activeId = this.store.sessions[0].id;
+    this.syncState.delete(id);
+    if (wasActive) this.store.activeId = "";
+    const deletion = this.enqueue(() => deleteChatSession(id));
+
+    if (wasActive) {
+      await this.activateSession(this.store.sessions[0].id);
+    } else if (this.pendingSwitchId === null) {
+      this.renderSessionLabel();
+      this.renderMessages();
+    }
     try {
-      await deleteChatSession(id);
+      await deletion;
     } catch (e) {
       console.error("Aerini: deleteChatSession failed", e);
       this.toast("Could not remove the session from storage — it may reappear after restart.", "error");
     }
     this.persist();
-    this.renderSessionLabel();
-    this.renderMessages();
     this.renderSessionMenu();
   }
 
   private toggleSessionMenu(): void {
     this.renderSessionMenu();
-    this.sessionMenu.classList.toggle("open");
+    const open = this.sessionMenu.classList.toggle("open");
+    this.sessionBtn?.setAttribute("aria-expanded", String(open));
   }
 
   private closeSessionMenu(): void {
     this.sessionMenu.classList.remove("open");
+    this.sessionBtn?.setAttribute("aria-expanded", "false");
   }
 
   /**
@@ -1273,6 +1446,7 @@ export class ChatPanel {
     if (clearBtn) { clearBtn.disabled = true; clearBtn.textContent = "Clearing…"; }
     try {
       if (this.awaitingReply) this.cancelPending();
+      this.cancelPendingSwitch();
       const current = this.activeSession();
       try {
         await clearChatSession(current.id);
@@ -1285,8 +1459,9 @@ export class ChatPanel {
       fresh.name = current.name;
       this.store.sessions[idx] = fresh;
       this.store.activeId = fresh.id;
+      this.syncState.delete(current.id);
       try {
-        await deleteChatSession(current.id);
+        await this.enqueue(() => deleteChatSession(current.id));
       } catch (e) {
         console.error("Aerini: deleteChatSession failed", e);
       }
@@ -1307,7 +1482,7 @@ export class ChatPanel {
     this.sendBtn.addEventListener("click", () => this.handleSend());
     this.attachBtn.addEventListener("click", () => this.handleAttachClick());
 
-    document.getElementById("chat-session-btn")?.addEventListener("click", (e) => {
+    this.sessionBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggleSessionMenu();
     });
@@ -1315,7 +1490,7 @@ export class ChatPanel {
 
     this.inputEl.addEventListener("input", () => {
       this.autosizeInput();
-      this.sendBtn.disabled = this.inputEl.disabled || this.inputEl.value.trim().length === 0;
+      this.sendBtn.disabled = !this.canSend();
     });
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.handleSend(); }
@@ -1324,7 +1499,9 @@ export class ChatPanel {
 
   private autosizeInput(): void {
     this.inputEl.style.height = "auto";
-    this.inputEl.style.height = `${Math.min(this.inputEl.scrollHeight, 120)}px`;
+    // scrollHeight excludes the border; the textarea is border-box, so add it back.
+    const borders = this.inputEl.offsetHeight - this.inputEl.clientHeight;
+    this.inputEl.style.height = `${Math.min(this.inputEl.scrollHeight + borders, 120)}px`;
   }
 
   private scrollIfAtBottom(): void {

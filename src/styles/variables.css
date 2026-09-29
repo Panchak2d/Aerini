@@ -22,6 +22,7 @@
   /* Actions (semantic) */
   --color-action-run: #34d399; 
   --color-action-nav: #4d9eff; 
+  --color-on-action: #000;
   --color-warning:    #f59e0b;
   --color-error:      #f87171;
   --color-ai:         #a78bfa;
@@ -122,6 +123,7 @@ html[data-theme="paper"] {
   --color-text-muted:     #625b49;
 
   --color-action-nav: #4c6558;
+  --color-on-action: #fff;
   --color-focus-rgb: 76,101,88; 
   --color-warning:    #7c5a27;
   --color-ai:         #7a508c;

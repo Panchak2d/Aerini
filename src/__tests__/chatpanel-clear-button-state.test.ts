@@ -18,7 +18,10 @@ vi.mock("../ipc/workflow", () => ({
 
 const chatMocks = vi.hoisted(() => ({ deleteChatSession: vi.fn() }));
 vi.mock("../ipc/chat", () => ({
-  listChatSessions: vi.fn().mockResolvedValue([]),
+  listChatSessionMeta: vi.fn().mockResolvedValue([]),
+  loadChatMessages: vi.fn().mockResolvedValue([]),
+  appendChatMessage: vi.fn(),
+  saveChatSessionMeta: vi.fn(),
   saveChatSession: vi.fn(),
   deleteChatSession: chatMocks.deleteChatSession,
 }));
@@ -40,8 +43,9 @@ const CHAT_PANEL_HTML = `
       <button class="drawer-btn" id="btn-chat-clear">Clear</button>
       <button class="drawer-btn" id="btn-chat-close">×</button>
     </div>
-    <div class="chat-banner hidden" id="chat-not-running-banner">
-      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    <div class="chat-status hidden" id="chat-status" data-layout="banner">
+      <p class="chat-status-text" id="chat-status-text">Start this workflow to begin chatting</p>
+      <button class="btn-primary chat-status-btn" id="btn-chat-start">Start</button>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">
@@ -85,11 +89,10 @@ describe("ChatPanel — Clear button loading state", () => {
     btn.click();
     expect(btn.disabled).toBe(true); // mid-flight, before clearChatSession resolves
     expect(btn.textContent).toBe("Clearing…");
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    await vi.waitFor(() => expect(btn.disabled).toBe(false));
 
     expect(wfMocks.clearChatSession).toHaveBeenCalledWith("s1");
     expect(chatMocks.deleteChatSession).toHaveBeenCalledWith("s1");
-    expect(btn.disabled).toBe(false);
     expect(btn.textContent).toBe("Clear");
   });
 
@@ -99,9 +102,8 @@ describe("ChatPanel — Clear button loading state", () => {
     const btn = clearBtn();
 
     btn.click();
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    await vi.waitFor(() => expect(btn.disabled).toBe(false));
 
-    expect(btn.disabled).toBe(false);
     expect(btn.textContent).toBe("Clear");
   });
 });
