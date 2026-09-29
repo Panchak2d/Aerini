@@ -2,13 +2,13 @@
 
 The desktop app's frontend never touches the filesystem, a database, or the Rust engine directly. Every one of those operations crosses through Tauri's IPC bridge as a named command, registered once in `src-tauri/src/lib.rs`'s `invoke_handler!` list. This page is the exhaustive list: every registered command, its parameters, what it returns, and where in the frontend it's actually called from. It assumes you've read [Architecture](architecture.md), specifically the [Tauri shell](architecture.md#the-tauri-shell-src-tauri) section this page is the detail behind.
 
-70 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 13 commands declared directly in `lib.rs` that don't belong to any one domain.
+74 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 14 commands declared directly in `lib.rs` that don't belong to any one domain.
 
 ## Conventions
 
 **Calling a command.** The frontend calls `invoke("command_name", { param1, param2 })` from `@tauri-apps/api/core`. Tauri converts each Rust parameter's `snake_case` name to `camelCase` on the JS side automatically; a Rust parameter named `workflow_id` is passed as `workflowId` in the `invoke()` call. This page names parameters in their Rust form and notes the JS call shape only where it's easy to get wrong.
 
-**Where a command is actually called from.** `architecture.md` describes each command module as mapping closely to one file under `src/ipc/`. That holds for `chat.rs`, `credentials.rs`, `oauth.rs`, `update.rs`, and most of `workflow.rs`, but not for the rest: `scheduler.rs` and `plugins.rs` commands are wrapped in `src/ipc/workflow.ts` rather than files of their own; `export.rs`'s three package-generating commands are called with a bare `invoke()` directly from `src/export-server-panel.ts`; `workflow.rs`'s six run-history commands are called directly from `src/run-history.ts`; and the 13 top-level `lib.rs` commands are scattered across `src/drag-drop.ts`, `src/workflow-manager.ts`, `src/toolbar.ts`, `src/app.ts`, `src/output-renderer.ts`, `src/ipc/autostart.ts`, and `src/ipc/workflow.ts`. There is no single file that owns "the IPC layer"; this page's own "Frontend caller" column is the authoritative map, not the module name.
+**Where a command is actually called from.** `architecture.md` describes each command module as mapping closely to one file under `src/ipc/`. That holds for `chat.rs`, `credentials.rs`, `oauth.rs`, `update.rs`, and most of `workflow.rs`, but not for the rest: `scheduler.rs` and `plugins.rs` commands are wrapped in `src/ipc/workflow.ts` rather than files of their own; `export.rs`'s three package-generating commands are called with a bare `invoke()` directly from `src/export-server-panel.ts`; `workflow.rs`'s six run-history commands are called directly from `src/run-history.ts`; and the 14 top-level `lib.rs` commands are scattered across `src/drag-drop.ts`, `src/workflow-manager.ts`, `src/toolbar.ts`, `src/app.ts`, `src/output-renderer.ts`, `src/ipc/autostart.ts`, and `src/ipc/workflow.ts`. There is no single file that owns "the IPC layer"; this page's own "Frontend caller" column is the authoritative map, not the module name.
 
 **Error shape.** The overwhelming majority of commands return `Result<T, String>`, and on failure the frontend's `invoke()` promise rejects with that plain string as the reason (`catch (err) { /* err is a string */ }`). Three deliberate exceptions:
 
@@ -78,15 +78,18 @@ None of these six are wrapped in `src/ipc/workflow.ts`; `src/run-history.ts` cal
 
 ## Chat
 
-`chat.rs` (36 lines), all three commands wrapped in `src/ipc/chat.ts`.
+`chat.rs` (71 lines), all six commands wrapped in `src/ipc/chat.ts`.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
-| `list_chat_sessions` | `workflow_id: String` | `Result<Vec<ChatSessionRecord>, String>` | `listChatSessions` |
+| `list_chat_session_meta` | `workflow_id: String` | `Result<Vec<ChatSessionMeta>, String>` | `listChatSessionMeta` |
+| `load_chat_messages` | `session_id: String` | `Result<Vec<ChatMessageRecord>, String>` | `loadChatMessages` |
+| `append_chat_message` | `session: ChatSessionMeta`, `message: ChatMessageRecord` | `Result<(), String>` | `appendChatMessage` |
+| `save_chat_session_meta` | `session: ChatSessionMeta` | `Result<(), String>` | `saveChatSessionMeta` |
 | `save_chat_session` | `session: ChatSessionRecord` | `Result<(), String>` | `saveChatSession` |
 | `delete_chat_session` | `id: String` | `Result<(), String>` | `deleteChatSession` |
 
-`save_chat_session` upserts a session's metadata and replaces its entire message list in one call; there is no separate append-one-message command. `delete_chat_session` relies on a foreign-key cascade to remove the session's messages.
+`list_chat_session_meta` returns each session's id, name, and creation time without its messages; `load_chat_messages` fetches one session's messages on demand. `append_chat_message` upserts the session row and inserts one message in a single transaction. Repeating a call with the same message id does not add a second row, so a failed send can be retried safely; an id already owned by another session is rejected and the whole call rolls back. `save_chat_session_meta` saves a session with no messages yet. `save_chat_session` upserts a session's metadata and syncs its message list to the list sent, in one transaction: new message ids are inserted, rows whose content changed are rewritten, unchanged rows are left alone, and ids no longer present are deleted. The chat panel now calls it only for the one-time migration of history from older browser storage. `delete_chat_session` relies on a foreign-key cascade to remove the session's messages.
 
 ## Credentials
 
@@ -212,7 +215,7 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 
 ## Top-level commands
 
-13 commands declared directly in `lib.rs` rather than under `commands/`, because none belongs to one of the eleven domains above. Callers are scattered across several frontend files; there is no single wrapper file for this group.
+14 commands declared directly in `lib.rs` rather than under `commands/`, because none belongs to one of the eleven domains above. Callers are scattered across several frontend files; there is no single wrapper file for this group.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
@@ -228,6 +231,7 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 | `set_autostart` | `enabled: bool` | `Result<(), String>` | `setAutostart` (`ipc/autostart.ts`), called from `toolbar.ts` |
 | `pick_folder_dialog` | none | `Option<String>` | `pickFolderDialog` (`ipc/workflow.ts`), called from `plugin-settings.ts` |
 | `pick_plugin_file_dialog` | none | `Option<String>` | `pickPluginFileDialog` (`ipc/workflow.ts`), called from `plugin-settings.ts` |
+| `pick_file_dialog` | none | `Option<String>` | `src/popover/field-renderer.ts`, a bare `invoke()` behind the "Choose File…" button |
 | `write_temp_file` | `filename: String`, `data: String` (base64) | `Result<String, String>` | `output-renderer.ts`, for rendering video/audio output |
 
 `read_text_file` only opens a path ending in `.aerini` or `.json`, rejecting anything else outright, and only after canonicalizing the path first. `save_export_zip` requires its `zip_path` to canonicalize to somewhere inside the system temp directory, refusing anything else; it always deletes the source temp file afterward, whether the save succeeded or the user cancelled the dialog. `write_temp_file` strips `/`, `\`, and any `..` sequence from the filename before writing, caps the decoded payload at 50 MiB, and writes into a fixed `aerini_media` subdirectory of the system temp directory, never a caller-chosen location. `pick_folder_dialog` and `pick_plugin_file_dialog` both return `None`, not an error, when the user cancels the native dialog; `pick_plugin_file_dialog` filters the picker to `.wasm` and `.aerinipkg` files.

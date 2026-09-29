@@ -429,7 +429,7 @@
     <div class="chat-panel-header">
       <span class="chat-panel-title">Chat</span>
       <div class="chat-session-wrap" id="chat-session-wrap">
-        <button class="chat-session-btn" id="chat-session-btn" title="Sessions" data-tooltip="Sessions">
+        <button class="chat-session-btn" id="chat-session-btn" title="Sessions" data-tooltip="Sessions" aria-haspopup="menu" aria-expanded="false">
           <span id="chat-session-label">Session</span>
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
@@ -437,13 +437,13 @@
       </div>
       <div class="chat-header-spacer"></div>
       <button class="drawer-btn" id="btn-chat-clear" title="Clear chat">Clear</button>
-      <button class="drawer-btn" id="btn-chat-close" title="Close" data-tooltip="Close">
+      <button class="drawer-btn" id="btn-chat-close" title="Close" aria-label="Close chat" data-tooltip="Close">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
-    <div class="chat-banner hidden" id="chat-not-running-banner">
-      <span>Start this workflow to begin chatting</span>
-      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    <div class="chat-status hidden" id="chat-status" role="status" data-layout="banner">
+      <p class="chat-status-text" id="chat-status-text">Start this workflow to begin chatting</p>
+      <button type="button" class="btn-primary chat-status-btn" id="btn-chat-start">Start</button>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">

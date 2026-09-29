@@ -19,12 +19,18 @@ vi.mock("../ipc/workflow", () => ({
 }));
 
 const chatMocks = vi.hoisted(() => ({
-  listChatSessions: vi.fn(),
+  listChatSessionMeta: vi.fn(),
+  loadChatMessages: vi.fn(),
+  appendChatMessage: vi.fn(),
+  saveChatSessionMeta: vi.fn(),
   saveChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
 }));
 vi.mock("../ipc/chat", () => ({
-  listChatSessions: chatMocks.listChatSessions,
+  listChatSessionMeta: chatMocks.listChatSessionMeta,
+  loadChatMessages: chatMocks.loadChatMessages,
+  appendChatMessage: chatMocks.appendChatMessage,
+  saveChatSessionMeta: chatMocks.saveChatSessionMeta,
   saveChatSession: chatMocks.saveChatSession,
   deleteChatSession: chatMocks.deleteChatSession,
 }));
@@ -45,9 +51,9 @@ const CHAT_PANEL_HTML = `
       <button class="drawer-btn" id="btn-chat-clear">Clear</button>
       <button class="drawer-btn" id="btn-chat-close">×</button>
     </div>
-    <div class="chat-banner hidden" id="chat-not-running-banner">
-      <span>Start this workflow to begin chatting</span>
-      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    <div class="chat-status hidden" id="chat-status" data-layout="banner">
+      <p class="chat-status-text" id="chat-status-text">Start this workflow to begin chatting</p>
+      <button class="btn-primary chat-status-btn" id="btn-chat-start">Start</button>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">
@@ -91,7 +97,10 @@ function waitingEvent(): SchedulerStatusEvent {
 const SENT_CHIPS = "#chat-messages .chat-bubble--user .chat-attachment-chip";
 
 beforeEach(() => {
-  chatMocks.listChatSessions.mockReset();
+  chatMocks.listChatSessionMeta.mockReset();
+  chatMocks.loadChatMessages.mockReset().mockResolvedValue([]);
+  chatMocks.appendChatMessage.mockReset().mockResolvedValue(undefined);
+  chatMocks.saveChatSessionMeta.mockReset().mockResolvedValue(undefined);
   chatMocks.saveChatSession.mockReset().mockResolvedValue(undefined);
   chatMocks.deleteChatSession.mockReset().mockResolvedValue(undefined);
   localStorage.clear();
@@ -113,9 +122,10 @@ describe("ChatPanel — sent attachments in the message bubble", () => {
     const chips = document.querySelectorAll(SENT_CHIPS);
     expect(chips).toHaveLength(1);
     expect(chips[0].textContent).toContain("notes.pdf");
-    expect(chatMocks.saveChatSession).toHaveBeenCalledWith(expect.objectContaining({
-      messages: [expect.objectContaining({ role: "user", text: "see attached", attachments: [att] })],
-    }));
+    expect(chatMocks.appendChatMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ workflow_id: "wf1" }),
+      expect.objectContaining({ role: "user", text: "see attached", attachments: [att] }),
+    );
     expect(p.pendingAttachments).toEqual([]);
     expect(document.querySelectorAll(".chat-pending-attachments .chat-attachment-chip")).toHaveLength(0);
   });
@@ -128,23 +138,21 @@ describe("ChatPanel — sent attachments in the message bubble", () => {
     await p.handleSend();
 
     expect(document.querySelectorAll("#chat-messages .chat-attachment-chip")).toHaveLength(0);
-    const saved = chatMocks.saveChatSession.mock.calls[0][0];
-    expect(saved.messages[0].attachments).toBeUndefined();
+    const saved = chatMocks.appendChatMessage.mock.calls[0][1];
+    expect(saved.attachments).toBeUndefined();
   });
 });
 
 describe("ChatPanel — sent attachments after reload", () => {
   it("normal + edge case: stored attachments come back as chips (filename rendered as text, not markup); a null attachments field renders none", async () => {
-    chatMocks.listChatSessions.mockResolvedValue([{
-      id: "s1", workflow_id: "wf1", name: "A", created_at: 1_000,
-      messages: [
-        {
-          id: "m1", role: "user", text: "look", images: null, timestamp: 1,
-          attachments: [{ filename: "<img src=x onerror=alert(1)>.txt", data: "YQ==", mime_type: "text/plain" }],
-        },
-        { id: "m2", role: "user", text: "plain", images: null, attachments: null, timestamp: 2 },
-      ],
-    }]);
+    chatMocks.listChatSessionMeta.mockResolvedValue([{ id: "s1", workflow_id: "wf1", name: "A", created_at: 1_000 }]);
+    chatMocks.loadChatMessages.mockResolvedValue([
+      {
+        id: "m1", role: "user", text: "look", images: null, timestamp: 1,
+        attachments: [{ filename: "<img src=x onerror=alert(1)>.txt", data: "YQ==", mime_type: "text/plain" }],
+      },
+      { id: "m2", role: "user", text: "plain", images: null, attachments: null, timestamp: 2 },
+    ]);
     const p = makePanel();
 
     await p.loadStoreForCurrentWorkflow();

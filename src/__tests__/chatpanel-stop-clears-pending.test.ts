@@ -19,7 +19,10 @@ vi.mock("../ipc/workflow", () => ({
 }));
 
 vi.mock("../ipc/chat", () => ({
-  listChatSessions: vi.fn().mockResolvedValue([]),
+  listChatSessionMeta: vi.fn().mockResolvedValue([]),
+  loadChatMessages: vi.fn().mockResolvedValue([]),
+  appendChatMessage: vi.fn(),
+  saveChatSessionMeta: vi.fn(),
   saveChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
 }));
@@ -40,9 +43,9 @@ const CHAT_PANEL_HTML = `
       <button class="drawer-btn" id="btn-chat-clear">Clear</button>
       <button class="drawer-btn" id="btn-chat-close">×</button>
     </div>
-    <div class="chat-banner hidden" id="chat-not-running-banner">
-      <span>Start this workflow to begin chatting</span>
-      <button class="btn-primary chat-banner-btn" id="btn-chat-start">Start</button>
+    <div class="chat-status hidden" id="chat-status" data-layout="banner">
+      <p class="chat-status-text" id="chat-status-text">Start this workflow to begin chatting</p>
+      <button class="btn-primary chat-status-btn" id="btn-chat-start">Start</button>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-row">

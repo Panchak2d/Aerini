@@ -42,9 +42,9 @@ input[type="datetime-local"] { color-scheme: dark; }
 .field-hint--warn { color: var(--amber) !important; font-weight: 500; }
 
 
-.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 100%; padding: 7px; background: var(--color-action-nav); color: #000; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity var(--trans), transform var(--trans); }
+.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 100%; padding: 7px; background: var(--color-action-nav); color: var(--color-on-action); border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity var(--trans), transform var(--trans); }
 /* Action-forward variant — uses the run/success green */
-.btn-primary-action { background: var(--color-action-run) !important; color: #000 !important; }
+.btn-primary-action { background: var(--color-action-run) !important; color: var(--color-on-action) !important; }
 .btn-primary:hover { opacity: .88; }
 .btn-primary:active { transform: scale(.98); }
 .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
