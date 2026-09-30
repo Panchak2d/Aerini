@@ -1,9 +1,11 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, InterruptHandle};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput};
+use crate::nodes::util::OnDrop;
 
 pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
     let db_path = match input.input["db_path"].as_str() {
@@ -96,15 +98,35 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         Err(e) => return NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
     };
 
+    let interrupt_slot: Arc<Mutex<Option<InterruptHandle>>> = Arc::new(Mutex::new(None));
+    let interrupt_on_drop = {
+        let slot = Arc::clone(&interrupt_slot);
+        OnDrop::new(move || {
+            if let Ok(guard) = slot.lock() {
+                if let Some(handle) = guard.as_ref() {
+                    handle.interrupt();
+                }
+            }
+        })
+    };
+    let blocking_slot = Arc::clone(&interrupt_slot);
     let blocking_result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let conn = pool.get()
             .map_err(|e| format!("Could not acquire connection for '{}': {}", db_path, e))?;
-        if is_execute {
+        if let Ok(mut slot) = blocking_slot.lock() {
+            *slot = Some(conn.get_interrupt_handle());
+        }
+        let result = if is_execute {
             sqlite_run_execute(&conn, &query, &params)
         } else {
             sqlite_run_query(&conn, &query, &params)
+        };
+        if let Ok(mut slot) = blocking_slot.lock() {
+            *slot = None;
         }
+        result
     }).await;
+    interrupt_on_drop.disarm();
 
     match blocking_result {
         Err(e)       => NodeOutput::failure(NodeError::unrecoverable("TASK_PANIC",
@@ -269,5 +291,50 @@ mod sqlite_bind_tests {
     #[test]
     fn empty_params_ok() {
         assert!(sqlite_bind_params(&[]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::execute_sqlite;
+    use crate::model::{ExecutionContext, NodeInput};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn dropping_sqlite_query_future_interrupts_running_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("runaway.db").to_string_lossy().to_string();
+        let input = NodeInput {
+            node_id: "n".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({
+                "db_path": db_path,
+                "operation": "query",
+                "query": "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 500000000) SELECT count(*) FROM c"
+            }),
+            resolved_credentials: std::collections::HashMap::new(),
+            context: ExecutionContext::default(),
+            cancel_token: None,
+        };
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            execute_sqlite(input),
+        )
+        .await;
+        assert!(outcome.is_err(), "statement should still be running when the future is dropped");
+
+        let pool = super::super::pool::get_sqlite_pool(&db_path).unwrap();
+        let mut released = false;
+        for _ in 0..60 {
+            let state = pool.state();
+            if state.connections > 0 && state.idle_connections == state.connections {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(released, "connection was never returned to the pool after the future was dropped");
     }
 }

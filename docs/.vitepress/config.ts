@@ -89,6 +89,7 @@ export default defineConfig({
           { text: 'FAQ', link: '/faq' },
           { text: 'Glossary', link: '/glossary' },
           { text: 'Troubleshooting', link: '/troubleshooting' },
+          { text: 'Known Issues', link: '/known-issues' },
           { text: 'Why Aerini is dual-licensed', link: '/dual-licensing' }
         ]
       }

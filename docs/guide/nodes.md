@@ -82,7 +82,7 @@ Run a shell command on the machine Aerini is on, and capture its stdout, stderr,
 | `command` | Command | Required. |
 | `cwd` | Cwd | Working directory. |
 | `env` | Env | Environment variables, as an object. Edited as JSON in **Advanced: full config**. |
-| `timeout_secs` | Timeout (seconds) | Default 30. |
+| `timeout_secs` | Timeout (seconds) | Default 30. On timeout, or when the run is stopped, the command and every process it started are killed on macOS and Linux; on Windows only the command's own process is. |
 
 **Ports:** default (In → Out).
 
@@ -97,7 +97,7 @@ Run a JavaScript snippet with a full Node.js runtime and return its result.
 | Field | Label | Notes |
 |---|---|---|
 | `code` | Code | Required. Call `output(value)` to return a result. Has access to `input` and `context`. |
-| `timeout_secs` | Timeout (seconds) | Max execution time. Default 10, max 60. |
+| `timeout_secs` | Timeout (seconds) | Max execution time. Default 10, max 60. On timeout, or when the run is stopped, the Node.js process and any process it started are killed on macOS and Linux; on Windows only the Node.js process is. |
 
 **Ports:** In → Out, Error.
 
@@ -383,7 +383,7 @@ Send a prompt to an AI model, Claude, GPT, Gemini, or a local Ollama model, and 
 
 | Field | Label | Notes |
 |---|---|---|
-| `prompt` | Prompt | Required. |
+| `prompt` | Prompt | Required, unless the node has at least one readable attachment (for example a file-only Chat message), in which case a default instruction stands in for the missing text. |
 | `system` | System | System/persona instructions. |
 | `model` | Model | Model name, e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash`, `llama3`. A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. |
 | `provider` | Provider | `auto`, `openai`, `anthropic`, `gemini`, or `local`. `auto` detects from Base URL, including local servers such as Ollama. |
@@ -403,7 +403,7 @@ Give an AI model a set of tools it can call to work toward a goal across multipl
 
 | Field | Label | Notes |
 |---|---|---|
-| `goal` | Goal | Required. What the agent should accomplish. Be specific and state constraints. |
+| `goal` | Goal | Required, unless the node has at least one readable attachment (for example a file-only Chat message), in which case a default instruction stands in for the missing text. What the agent should accomplish. Be specific and state constraints. |
 | `system` | System | System instructions for the agent's persona and behavior. |
 | `tools` | Tools | JSON array of tool definitions, each `{name, description, parameters}`. Used with OpenAI-compatible and Gemini providers. |
 | `context` | Context | Extra context to hand the agent, e.g. from earlier nodes or variables. |

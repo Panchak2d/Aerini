@@ -6,16 +6,16 @@ use axum::{
     response::{IntoResponse, Sse},
     Json,
 };
-use aerini_engine::{db::SaveOutcome, model::Workflow};
+use aerini_engine::{db::{SaveOutcome, WorkflowSummary}, model::Workflow};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read, require_write};
+use super::state::{ApiState, require_read, require_workflow_acl, require_write};
 
 pub async fn health() -> Json<Value> {
     let node_bundled = match tokio::task::spawn_blocking(
@@ -48,9 +48,23 @@ pub struct SseParams {
     /// `last_result` whose triggering request's `session_id` doesn't match.
     /// A workflow-scoped token is shared by every visitor of an embedded
     /// widget (see routes::widget) — without this, one visitor's SSE
-    /// connection receives every other visitor's reply too. Opt-in and
-    /// additive: a connection that omits this behaves exactly as before.
+    /// connection receives every other visitor's reply too. Opt-in: a
+    /// connection that omits this is not session-filtered.
     pub session_id: Option<String>,
+}
+
+/// Restricts `all` to `allowed`, then applies the offset/limit window.
+/// Returns the page and the number of workflows visible to the caller.
+fn filter_and_paginate(
+    all:     Vec<WorkflowSummary>,
+    allowed: &std::collections::HashSet<String>,
+    offset:  usize,
+    limit:   usize,
+) -> (Vec<WorkflowSummary>, usize) {
+    let visible: Vec<WorkflowSummary> = all.into_iter().filter(|w| allowed.contains(&w.id)).collect();
+    let total = visible.len();
+    let page  = visible.into_iter().skip(offset).take(limit).collect();
+    (page, total)
 }
 
 pub async fn list_workflows(
@@ -59,10 +73,22 @@ pub async fn list_workflows(
     Query(p):          Query<PaginationParams>,
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) { return e.into_response(); }
-    let limit = p.limit.min(500);
-    match tokio::task::spawn_blocking(move || s.db.list_paginated(limit, p.offset)).await {
+    let limit  = p.limit.min(500);
+    let offset = p.offset;
+    let acl_filter = match s.acl_filter(&caller).await {
+        Ok(f)  => f,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
+        ).into_response(),
+    };
+    let listed = tokio::task::spawn_blocking(move || match acl_filter {
+        None          => s.db.list_paginated(limit, offset),
+        Some(allowed) => s.db.list().map(|all| filter_and_paginate(all, &allowed, offset, limit)),
+    }).await;
+    match listed {
         Ok(Ok((items, total))) => {
-            (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": p.offset}))).into_response()
+            (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": offset}))).into_response()
         },
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
         Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
@@ -75,12 +101,16 @@ pub async fn get_workflow(
     Path(id):          Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) { return e.into_response(); }
+    if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     match tokio::task::spawn_blocking(move || s.db.load_with_row_version(&id)).await {
-        Ok(Ok(Some((wf, row_version)))) => {
-            let mut resp = (StatusCode::OK, Json(json!(wf.to_json_pretty().unwrap_or_default()))).into_response();
-            set_etag(&mut resp, row_version);
-            resp
-        }
+        Ok(Ok(Some((wf, row_version)))) => match wf.to_json_pretty() {
+            Ok(body) => {
+                let mut resp = (StatusCode::OK, Json(json!(body))).into_response();
+                set_etag(&mut resp, row_version);
+                resp
+            }
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        },
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))).into_response(),
         Ok(Err(e))   => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
         Err(e)       => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
@@ -124,6 +154,7 @@ pub async fn save_workflow(
         Ok(w)  => w,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error":e.to_string()}))).into_response(),
     };
+    if let Err(e) = require_workflow_acl(&s, &caller, &wf.id).await { return e.into_response(); }
 
     // No If-Match header → unconditional save (last-write-wins). Only a
     // client that opts in by sending back the ETag it last read gets the
@@ -173,8 +204,13 @@ pub async fn delete_workflow(
     Path(id):          Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
-    if let Err(e) = s.scheduler.stop_job(&id) {
-        tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job failed before delete");
+    if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
+    let scheduler = Arc::clone(&s.scheduler);
+    let stop_id   = id.clone();
+    match tokio::task::spawn_blocking(move || scheduler.stop_job(&stop_id)).await {
+        Ok(Ok(()))  => {}
+        Ok(Err(e))  => tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job failed before delete"),
+        Err(e)      => tracing::warn!(workflow_id = %id, error = %e, "delete_workflow: stop_job task failed before delete"),
     }
 
     // Acquire (or create) the per-workflow exec lock before deleting.
@@ -214,6 +250,7 @@ pub async fn run_workflow(
     Json(b):           Json<RunBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
+    if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     let wf = match tokio::task::spawn_blocking({
         let db = Arc::clone(&s.db);
         let id = id.clone();
@@ -323,6 +360,35 @@ fn event_passes_session_filter(parsed: &Value, want: &str) -> bool {
     session_ids.is_empty() || session_ids.contains(&want)
 }
 
+/// Forwards `inner` until `shutdown` is cancelled, then ends. The cancellation
+/// future is polled first so shutdown wins over a busy inner stream. The
+/// semaphore permit is released when the stream is dropped.
+struct GuardedStream<S> {
+    inner:     S,
+    shutdown:  std::pin::Pin<Box<WaitForCancellationFutureOwned>>,
+    _permit:   OwnedSemaphorePermit,
+}
+
+impl<S> GuardedStream<S> {
+    fn new(inner: S, shutdown: CancellationToken, permit: OwnedSemaphorePermit) -> Self {
+        Self { inner, shutdown: Box::pin(shutdown.cancelled_owned()), _permit: permit }
+    }
+}
+
+impl<S: futures_core::Stream + Unpin> futures_core::Stream for GuardedStream<S> {
+    type Item = S::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::future::Future;
+        if self.shutdown.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 pub async fn sse_events(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
@@ -345,7 +411,7 @@ pub async fn sse_events(
     // 2. Otherwise, compute the ACL-based filter (None = unrestricted).
     // 3. If caller passed ?workflow_id=X, further restrict to that single ID
     //    (only if their ACL allows it, or if they are unrestricted).
-    let acl_filter: Option<std::collections::HashSet<String>> = match s.token_store.acl_filter(&caller) {
+    let acl_filter: Option<std::collections::HashSet<String>> = match s.acl_filter(&caller).await {
         Ok(f) => f,
         Err(e) => return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -428,20 +494,7 @@ pub async fn sse_events(
             ))
         });
 
-    struct GuardedStream<S> {
-        inner:   S,
-        _permit: OwnedSemaphorePermit,
-    }
-    impl<S: futures_core::Stream + Unpin> futures_core::Stream for GuardedStream<S> {
-        type Item = S::Item;
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            std::pin::Pin::new(&mut self.inner).poll_next(cx)
-        }
-    }
-    let guarded = GuardedStream { inner: stream, _permit: permit };
+    let guarded = GuardedStream::new(stream, s.shutdown.clone(), permit);
 
     Sse::new(guarded).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -468,7 +521,7 @@ mod session_filter_tests {
         assert!(event_passes_session_filter(&event, "visitor-a"));
     }
 
-    // The actual vulnerability F1 fixed: a reply meant for one visitor must
+    // Security case: a reply meant for one visitor must
     // not be forwarded to a differently-scoped connection.
     #[test]
     fn drops_when_session_id_differs() {
@@ -482,8 +535,8 @@ mod session_filter_tests {
     }
 
     // Edge case: events with no session_id anywhere in their node outputs
-    // (non-widget workflows, or a widget trigger predating this field)
-    // must still pass — this fix is opt-in, not a breaking default.
+    // (non-widget workflows, or a widget trigger without one) must still
+    // pass; session filtering is opt-in.
     #[test]
     fn passes_when_event_carries_no_session_id() {
         let heartbeat = json!({ "event": "heartbeat" });
@@ -528,5 +581,101 @@ mod if_match_tests {
         assert_eq!(parse_if_match("*"), None);
         assert_eq!(parse_if_match("W/\"5\""), None);
         assert_eq!(parse_if_match("not-a-version"), None);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_stream_tests {
+    use super::GuardedStream;
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Semaphore;
+    use tokio_stream::StreamExt;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn stream_forwards_items_until_shutdown_then_ends_and_frees_permit() {
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem).try_acquire_owned().unwrap();
+        let token = CancellationToken::new();
+        let mut stream = GuardedStream::new(
+            tokio_stream::iter([1u8, 2]).chain(tokio_stream::pending()),
+            token.clone(),
+            permit,
+        );
+
+        assert_eq!(stream.next().await, Some(1));
+        assert_eq!(stream.next().await, Some(2));
+        assert_eq!(sem.available_permits(), 0);
+
+        token.cancel();
+        let end = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream did not end after shutdown");
+        assert_eq!(end, None);
+
+        drop(stream);
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_connected_after_shutdown_ends_immediately() {
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem).try_acquire_owned().unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut stream = GuardedStream::new(tokio_stream::pending::<u8>(), token, permit);
+
+        let end = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream did not end when token already cancelled");
+        assert_eq!(end, None);
+    }
+}
+
+#[cfg(test)]
+mod workflow_list_filter_tests {
+    use super::filter_and_paginate;
+    use aerini_engine::db::WorkflowSummary;
+    use std::collections::HashSet;
+
+    fn summary(id: &str) -> WorkflowSummary {
+        WorkflowSummary {
+            id:            id.to_string(),
+            name:          id.to_string(),
+            updated_at:    String::new(),
+            tags:          Vec::new(),
+            collection_id: None,
+        }
+    }
+
+    fn ids(page: &[WorkflowSummary]) -> Vec<&str> {
+        page.iter().map(|w| w.id.as_str()).collect()
+    }
+
+    #[test]
+    fn only_granted_workflows_are_listed_and_counted() {
+        let all = vec![summary("a"), summary("b"), summary("c")];
+        let allowed = HashSet::from(["a".to_string(), "c".to_string()]);
+        let (page, total) = filter_and_paginate(all, &allowed, 0, 100);
+        assert_eq!(ids(&page), vec!["a", "c"]);
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn offset_and_limit_window_applies_after_filtering() {
+        let all = vec![summary("a"), summary("x"), summary("b"), summary("y"), summary("c")];
+        let allowed = HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        let (page, total) = filter_and_paginate(all, &allowed, 1, 1);
+        assert_eq!(ids(&page), vec!["b"]);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn grants_for_missing_workflows_yield_an_empty_page() {
+        let all = vec![summary("a")];
+        let allowed = HashSet::from(["gone".to_string()]);
+        let (page, total) = filter_and_paginate(all, &allowed, 0, 100);
+        assert!(page.is_empty());
+        assert_eq!(total, 0);
     }
 }

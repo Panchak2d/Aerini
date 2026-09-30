@@ -454,6 +454,30 @@ export class ChatPanel {
     return null;
   }
 
+  /**
+   * Whether any non-Webhook node's config references the Webhook's `files` output
+   * (or `body.attachments`). Answers "true" when the Webhook can't be identified by
+   * name, so an unknowable case never raises a false warning.
+   */
+  private attachmentsHaveConsumer(): boolean {
+    let name: string | null = null;
+    for (const n of this.canvas.nodes.values()) {
+      if (n.data.node_type_id === NODE_IDS.WEBHOOK) { name = n.data.name || null; break; }
+    }
+    if (!name) return true;
+    const needles = [`${name}.output.files`, `${name}.output.body.attachments`];
+    const refs = (v: unknown, depth: number): boolean => {
+      if (typeof v === "string") return v.length < 1000 && needles.some(x => v.includes(x));
+      if (depth > 4 || !v || typeof v !== "object") return false;
+      return Object.values(v as Record<string, unknown>).some(x => refs(x, depth + 1));
+    };
+    for (const n of this.canvas.nodes.values()) {
+      if (n.data.node_type_id === NODE_IDS.WEBHOOK) continue;
+      if (refs(n.data.config, 0)) return true;
+    }
+    return false;
+  }
+
   private findOutputNodeId(): string | null {
     for (const n of this.canvas.nodes.values()) {
       if (n.data.node_type_id === NODE_IDS.OUTPUT) return n.data.id;
@@ -746,6 +770,10 @@ export class ChatPanel {
       this.replyPending = false; // request never sent — no event will ever resolve it
       this.failPending("Could not reach the workflow's webhook. Is it still running?", true);
       return;
+    }
+
+    if (attachments.length > 0 && !this.attachmentsHaveConsumer()) {
+      this.toast("Files sent, but no node reads them. Connect the Webhook to an AI Prompt's Files port.", "info");
     }
 
     this.pendingTimer = setTimeout(() => {

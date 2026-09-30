@@ -16,6 +16,19 @@ pub(crate) struct ProcessedAttachments {
     pub(crate) logs:    Vec<String>,
 }
 
+impl ProcessedAttachments {
+    /// True when at least one attachment produced content a model can read:
+    /// an image, a PDF, or decoded text/markdown.
+    pub(crate) fn has_content(&self) -> bool {
+        !self.images.is_empty() || !self.docs.is_empty() || !self.warning.is_empty()
+    }
+}
+
+/// Stands in for the user's text when a request carries readable attachments but
+/// no text of its own (e.g. a Chat panel message that is only a file).
+pub(crate) const ATTACHMENT_ONLY_PROMPT: &str =
+    "The user attached file(s) with no message. Look at what was attached and respond helpfully.";
+
 /// Splits the raw `attachments` array into provider-agnostic buckets.
 ///
 /// Each item follows Aerini's file-object contract:

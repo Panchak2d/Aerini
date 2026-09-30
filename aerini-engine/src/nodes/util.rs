@@ -3,6 +3,73 @@ use serde_json::Value;
 use crate::error::NodeError;
 use crate::model::{ExecutionContext, NodeOutput};
 
+/// Runs a closure when dropped unless disarmed first. Releases external
+/// resources (child process groups, running DB statements) when a node future
+/// is dropped mid-flight by cancellation or a workflow-level timeout.
+pub(crate) struct OnDrop(Option<Box<dyn FnOnce() + Send>>);
+
+impl OnDrop {
+    pub(crate) fn new(f: impl FnOnce() + Send + 'static) -> Self {
+        OnDrop(Some(Box::new(f)))
+    }
+
+    pub(crate) fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for OnDrop {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+/// Guard that SIGKILLs the whole process group led by `pid` when dropped.
+/// The child must have been spawned with `process_group(0)`. Does nothing
+/// on non-Unix targets or when `pid` is `None`.
+#[cfg(unix)]
+pub(crate) fn kill_group_on_drop(pid: Option<u32>) -> OnDrop {
+    match pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0) {
+        Some(pgid) => OnDrop::new(move || {
+            // SAFETY: kill(2) takes plain integers and has no memory-safety preconditions.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }),
+        None => OnDrop(None),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn kill_group_on_drop(_pid: Option<u32>) -> OnDrop {
+    OnDrop(None)
+}
+
+#[cfg(test)]
+mod on_drop_tests {
+    use super::OnDrop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn on_drop_runs_action_when_dropped() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = fired.clone();
+        drop(OnDrop::new(move || flag.store(true, Ordering::SeqCst)));
+        assert!(fired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn on_drop_skips_action_when_disarmed() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = fired.clone();
+        OnDrop::new(move || flag.store(true, Ordering::SeqCst)).disarm();
+        assert!(!fired.load(Ordering::SeqCst));
+    }
+}
+
 /// Scrubs embedded URL passwords from a driver error string before it is
 /// stored or returned to callers.
 ///

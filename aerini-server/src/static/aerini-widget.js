@@ -99,12 +99,9 @@
       }
       return hex;
     }
-    // RFC4122-ish fallback for environments with no Web Crypto API at all.
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-      var r = (Math.random() * 16) | 0;
-      var v = c === "x" ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
+    // The session id is what keeps one visitor's replies from being delivered to
+    // another, so it must be unguessable; never fall back to Math.random().
+    return null;
   }
 
   var SESSION_ID = attr("data-session-id", "") || (function () {
@@ -113,13 +110,20 @@
       var existing = window.localStorage ? window.localStorage.getItem(key) : null;
       if (existing) return existing;
       var id = makeUuid();
-      if (window.localStorage) window.localStorage.setItem(key, id);
-      return id;
+      if (id && window.localStorage) window.localStorage.setItem(key, id);
+      return id || "";
     } catch (e) {
       // Private browsing / storage disabled — fall back to a per-load id.
-      return makeUuid();
+      return makeUuid() || "";
     }
   })();
+
+  if (!SESSION_ID) {
+    console.error(
+      "[aerini-widget] no Web Crypto API available to generate a session id — widget not started. Set data-session-id to supply one."
+    );
+    return;
+  }
 
   var outputNodeId = null;
   var panelOpen = false;
@@ -341,7 +345,10 @@
               return {};
             })
             .then(function (j) {
-              throw new Error(j.error || "Request failed (" + res.status + ")");
+              var msg = j.error || "Request failed (" + res.status + ")";
+              var retryAfter = res.status === 429 ? res.headers.get("Retry-After") : null;
+              if (retryAfter) msg += " (try again in " + retryAfter + "s)";
+              throw new Error(msg);
             });
         }
         return res.json();

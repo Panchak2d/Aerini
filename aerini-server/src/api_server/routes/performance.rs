@@ -1,4 +1,8 @@
-//! Server REST for the Performance Monitor 
+//! Server REST for the Performance Monitor.
+//!
+//! Routes addressed by run id resolve the run's workflow first; a run whose
+//! workflow lies outside the caller's ACL grants gets the same `404` as a run
+//! that does not exist.
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -11,41 +15,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read, require_write};
-
-/// Single-workflow ACL gate — verbatim copy of
-/// `scheduler::require_workflow_acl`. `Ok(())` if `caller` is unrestricted
-/// (admin, or no ACL rows) or `workflow_id` is explicitly granted.
-fn require_workflow_acl(
-    s:           &ApiState,
-    caller:      &TokenRecord,
-    workflow_id: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    match s.token_store.acl_filter(caller) {
-        Ok(None) => Ok(()),
-        Ok(Some(allowed)) if allowed.contains(workflow_id) => Ok(()),
-        Ok(Some(_)) => Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "token ACL does not permit access to this workflow"})),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-        )),
-    }
-}
-
-/// Fetch-then-check ACL gate for the `{run_id}` routes — see module doc
-/// comment's 404-vs-403 decision for why this returns a bare `bool` rather
-/// than committing to a status code itself (both call sites map `false` to
-/// `404`, never `403`).
-fn acl_permits(s: &ApiState, caller: &TokenRecord, workflow_id: &str) -> Result<bool, String> {
-    match s.token_store.acl_filter(caller) {
-        Ok(None)          => Ok(true),
-        Ok(Some(allowed)) => Ok(allowed.contains(workflow_id)),
-        Err(e)            => Err(e.to_string()),
-    }
-}
+use super::state::{ApiState, acl_permits, require_read, require_workflow_acl, require_write};
 
 pub async fn get_live(
     State(s):          State<ApiState>,
@@ -55,7 +25,7 @@ pub async fn get_live(
         return e.into_response();
     }
 
-    let acl_filter = match s.token_store.acl_filter(&caller) {
+    let acl_filter = match s.acl_filter(&caller).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -93,7 +63,7 @@ pub async fn list_reports(
     Query(p):          Query<ListReportsParams>,
 ) -> impl IntoResponse {
     if let Err(e) = require_read(&caller) { return e.into_response(); }
-    if let Err(e) = require_workflow_acl(&s, &caller, &p.workflow_id) { return e.into_response(); }
+    if let Err(e) = require_workflow_acl(&s, &caller, &p.workflow_id).await { return e.into_response(); }
 
     let db          = Arc::clone(&s.db);
     let workflow_id = p.workflow_id.clone();
@@ -126,7 +96,7 @@ pub async fn get_report(
     let db      = Arc::clone(&s.db);
     let lookup  = run_id.clone();
     match tokio::task::spawn_blocking(move || db.get_performance_report(&lookup)).await {
-        Ok(Ok(Some(record))) => match acl_permits(&s, &caller, &record.report.workflow_id) {
+        Ok(Ok(Some(record))) => match acl_permits(&s, &caller, &record.report.workflow_id).await {
             Ok(true)  => (StatusCode::OK, Json(json!(record))).into_response(),
             Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
             Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("ACL lookup failed: {}", e)}))).into_response(),
@@ -153,7 +123,7 @@ pub async fn delete_report(
         Err(e)       => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
 
-    match acl_permits(&s, &caller, &record.report.workflow_id) {
+    match acl_permits(&s, &caller, &record.report.workflow_id).await {
         Ok(true)  => {}
         Ok(false) => return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
         Err(e)    => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("ACL lookup failed: {}", e)}))).into_response(),
@@ -184,7 +154,7 @@ pub async fn clear_reports(
     Query(p):          Query<ClearReportsParams>,
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
-    if let Err(e) = require_workflow_acl(&s, &caller, &p.workflow_id) { return e.into_response(); }
+    if let Err(e) = require_workflow_acl(&s, &caller, &p.workflow_id).await { return e.into_response(); }
 
     let db          = Arc::clone(&s.db);
     let workflow_id = p.workflow_id.clone();
@@ -278,6 +248,7 @@ mod tests {
             data_dir: Arc::new(dir),
             plugin_dir: None,
             sse_tx,
+            shutdown: tokio_util::sync::CancellationToken::new(),
             token_store,
             exec_locks: Arc::new(dashmap::DashMap::new()),
             env_allowlist: None,
@@ -488,7 +459,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        // Ungranted run_id -> 404, not 403 (see module doc comment).
+        // A run of an ungranted workflow -> 404, not 403.
         let res = app
             .clone()
             .oneshot(
@@ -503,7 +474,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         // Truly nonexistent run_id -> also 404, indistinguishable from the
-        // ACL-denied case above (that's the point of the decision).
+        // ACL-denied case above.
         let res = app
             .clone()
             .oneshot(

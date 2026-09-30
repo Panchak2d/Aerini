@@ -68,10 +68,10 @@ impl TokenStore {
                 created_at TEXT NOT NULL,
                 revoked_at TEXT
             );
-            -- Per-workflow SSE ACL.
-            -- Row presence = token is restricted to that workflow's events.
-            -- Tokens with NO rows in this table see ALL events (backward compat).
-            -- Admin-scoped tokens always see all events regardless of this table.
+            -- Per-workflow ACL.
+            -- Row presence = token is restricted to the granted workflows.
+            -- Tokens with NO rows in this table are unrestricted.
+            -- Admin-scoped tokens are always unrestricted regardless of this table.
             -- Note: no ON DELETE CASCADE — foreign_keys pragma is off in this db.
             -- ACL rows for revoked tokens are deleted by revoke_token().
             CREATE TABLE IF NOT EXISTS token_workflow_acl (
@@ -81,7 +81,7 @@ impl TokenStore {
                 PRIMARY KEY (token_id, workflow_id)
             );",
         )?;
-        // Schema migration: add expires_at column for existing databases that predate M-1 fix.
+        // Schema migration: add expires_at to databases created before that column existed.
         let has_expires: bool = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('tokens') WHERE name='expires_at'",
             [],
@@ -111,7 +111,7 @@ impl TokenStore {
         self.create_token_with_workflows(label, scopes, expires_in_secs, &[])
     }
 
-    /// Same as [`create_token_with_id`], additionally granting SSE ACL access
+    /// Same as [`create_token_with_id`], additionally granting ACL access
     /// to each of `workflow_ids` in the same transaction as the token row
     /// itself — a failure partway through the ACL grants rolls back the
     /// token row too, instead of leaving an orphaned, partially-scoped token
@@ -124,7 +124,6 @@ impl TokenStore {
         workflow_ids: &[String],
     ) -> rusqlite::Result<(String, String)> {
         // 32 bytes from OsRng → 256 bits of entropy, URL-safe base64 encoded.
-        // Replaces UUID v4 which had only 122 bits due to fixed version/variant bits.
         let mut raw_bytes = [0u8; 32];
         rand::rngs::SysRng.try_fill_bytes(&mut raw_bytes).expect("OS RNG failure");
         let raw      = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
@@ -213,10 +212,9 @@ impl TokenStore {
             let scopes: Vec<String> = serde_json::from_str(&scopes_j).unwrap_or_default();
             let record = TokenRecord { token_id, label, scopes, created_at, expires_at };
             if let Some(ref exp_str) = record.expires_at {
-                if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(exp_str) {
-                    if Utc::now() >= exp.with_timezone(&Utc) {
-                        return None;
-                    }
+                match chrono::DateTime::parse_from_rfc3339(exp_str) {
+                    Ok(exp) if Utc::now() < exp.with_timezone(&Utc) => {}
+                    _ => return None,
                 }
             }
             Some(record)
@@ -274,9 +272,9 @@ impl TokenStore {
          .unwrap_or(true)
     }
 
-    // ── Per-workflow SSE ACL ──────────────────────────────────────────────
+    // ── Per-workflow ACL ──────────────────────────────────────────────────
 
-    /// Grant a token access to a specific workflow's SSE events.
+    /// Grant a token access to a specific workflow.
     /// Once ANY ACL row exists for a token, it is restricted to those workflows only.
     /// No-op if already granted.
     pub fn acl_grant(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
@@ -290,8 +288,8 @@ impl TokenStore {
         Ok(())
     }
 
-    /// Revoke a token's access to a specific workflow's SSE events.
-    /// No-op if not present.
+    /// Revoke a token's access to a specific workflow. No-op if not present.
+    /// Revoking a token's last grant leaves it unrestricted, not blocked.
     pub fn acl_revoke(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
@@ -314,7 +312,7 @@ impl TokenStore {
         rows.collect()
     }
 
-    /// Determine which workflow IDs a token may observe via SSE.
+    /// Determine which workflow IDs a token may access.
     ///
     /// Returns `None`  → no filter (see all workflows).
     /// Returns `Some(set)` → only those workflow IDs are visible.
@@ -360,10 +358,7 @@ mod tests {
         assert_eq!(granted, vec!["wf_a".to_string(), "wf_b".to_string()]);
     }
 
-    /// An empty `workflow_ids` slice must behave exactly like the old
-    /// `create_token_with_id` — a token with no ACL rows (unrestricted).
-    /// Guards the refactor where `create_token_with_id` now delegates to
-    /// `create_token_with_workflows(..., &[])`.
+    /// A token created without workflow ids has no ACL rows (unrestricted).
     #[test]
     fn create_token_with_workflows_empty_slice_leaves_token_unrestricted() {
         let store = open_temp_store();
@@ -371,5 +366,38 @@ mod tests {
             .create_token_with_id("no-restriction", &["read"], None)
             .expect("create token");
         assert!(store.acl_list(&token_id).expect("acl_list").is_empty());
+    }
+
+    #[test]
+    fn revoking_last_grant_leaves_token_unrestricted() {
+        let store = open_temp_store();
+        let (token_id, raw) = store
+            .create_token_with_workflows("scoped", &["write"], None, &["wf_a".to_string()])
+            .expect("create token with workflows");
+        let record = store.verify_token(&raw).expect("verify");
+        assert!(store.acl_filter(&record).expect("filter").is_some());
+        store.acl_revoke(&token_id, "wf_a").expect("revoke grant");
+        assert!(store.acl_filter(&record).expect("filter").is_none());
+    }
+
+    #[test]
+    fn admin_token_is_unrestricted_despite_grants() {
+        let store = open_temp_store();
+        let (_, raw) = store
+            .create_token_with_workflows("root", &["admin"], None, &["wf_a".to_string()])
+            .expect("create token with workflows");
+        let record = store.verify_token(&raw).expect("verify");
+        assert!(store.acl_filter(&record).expect("filter").is_none());
+    }
+
+    #[test]
+    fn verify_token_rejects_unparseable_expiry() {
+        let store = open_temp_store();
+        let raw = store.create_token("t", &["read"], Some(3600)).expect("create");
+        assert!(store.verify_token(&raw).is_some());
+        store.conn.lock().unwrap()
+            .execute("UPDATE tokens SET expires_at = 'garbage'", [])
+            .expect("corrupt expiry");
+        assert!(store.verify_token(&raw).is_none());
     }
 }

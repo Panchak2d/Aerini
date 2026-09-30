@@ -10,11 +10,14 @@ Each token carries one or more scopes: `read`, `write`, `admin`. A route's requi
 
 ## Per-token workflow ACL
 
-Beyond scope, a token can be restricted to a specific set of workflow IDs. `GET /api/tokens/:id/workflows` lists a token's current grants; `POST` and `DELETE` on `/api/tokens/:id/workflows/:workflow_id` add or remove one. A token with zero ACL grants is unrestricted, not blocked: the ACL only starts filtering once at least one workflow is explicitly granted.
+Beyond scope, a token can be restricted to a specific set of workflow IDs. `GET /api/tokens/:id/workflows` lists a token's current grants; `POST` and `DELETE` on `/api/tokens/:id/workflows/:workflow_id` add or remove one. `POST /api/tokens` can also set the grants at creation with `workflow_ids`. A token with zero grants is unrestricted, not blocked: the ACL only starts filtering once at least one workflow is explicitly granted, so revoking a token's last grant makes it unrestricted again (the response says so). Admin tokens are always unrestricted. To cut a token off entirely, revoke the token itself.
 
-The ACL is enforced by four route families: scheduler (`GET /api/scheduler`, `POST /api/scheduler/:id/start`, `POST /api/scheduler/:id/stop`), `GET /api/memory`, performance (`GET /api/performance/live`, `GET|DELETE /api/performance/reports`, `GET|DELETE /api/performance/reports/:run_id`), and `GET /api/events`. Two enforcement shapes exist: a pre-check that returns `403` with `{"error": "token ACL does not permit access to this workflow"}` before doing any work (scheduler start/stop, performance list/clear, SSE), and a fetch-then-check on the two `:run_id` performance routes that returns a plain `404` instead of `403` for a row the caller's ACL excludes, so a restricted token can't distinguish "doesn't exist" from "exists, not yours."
+A restricted token is confined to its granted workflows on every route that addresses workflows:
 
-The ACL does **not** apply to `GET /api/workflows`, `GET|DELETE /api/workflows/:id`, or `POST /api/workflows/:id/run`: those four routes check only the base `read`/`write` scope. A write-scoped token restricted by ACL to one workflow can still list, read, delete, or run any workflow on the server through these routes. The token management endpoints' own response text and the source comments above them describe this ACL as gating "SSE events," which was true when it was introduced but has not matched its actual scope (scheduler, memory, and performance too) since the ACL was extended to those route families; the label is stale, the enforcement described above is what actually runs.
+- **Pre-check, `403`** with `{"error": "token ACL does not permit access to this workflow"}` before any work is done: `GET|DELETE /api/workflows/:id`, `POST /api/workflows/:id/run`, `POST /api/workflows` (the workflow's own `id` must be granted, so a restricted token cannot create a new workflow or overwrite another one), `POST /api/scheduler/:id/start`, `POST /api/scheduler/:id/stop`, `GET|DELETE /api/performance/reports`, and `GET /api/events?workflow_id=`. The answer depends only on the token's own grants, never on whether the workflow exists, so it reveals nothing about other workflows.
+- **Filtered lists:** `GET /api/workflows`, `GET /api/scheduler`, `GET /api/memory`, `GET /api/performance/live`, and `GET /api/events` without a `workflow_id` return only what the token may see. On the two paginated lists, filtering happens before pagination, so `total` and the page reflect only the token's own workflows.
+- **Fetch-then-check, `404`:** `GET|DELETE /api/performance/reports/:run_id` return a plain `404` for a run whose workflow is outside the grants, identical to a run that does not exist.
+- **Server-wide routes, `403`:** `GET`, `POST` and `DELETE` on `/api/credentials` belong to no single workflow, so a restricted token is refused with `{"error": "token is restricted to specific workflows and cannot use server-wide routes"}`. Scope still applies on top of the ACL.
 
 ## Conventions
 
@@ -22,9 +25,9 @@ The ACL does **not** apply to `GET /api/workflows`, `GET|DELETE /api/workflows/:
 
 **Pagination.** `GET /api/workflows` and `GET /api/scheduler` share one shape: `limit` (default `100`, capped at `500`) and `offset` (default `0`) as query parameters, and a response body of `{"items": [...], "total": <n>, "limit": <n>, "offset": <n>}`. `GET /api/performance/reports` uses a similar but distinct shape: `limit` (default `100`, clamped to `1..=1000` server-side) and `offset`, with a response of `{"items": [...], "limit": <n>, "offset": <n>, "has_more": <bool>}` (no `total`).
 
-**Concurrency and limits.** Requests are capped at 300 per client IP per 60-second window; over that returns `429 Too Many Requests` with no body. The client IP is the socket's own address unless `--trusted-proxy-count` is set, in which case that many hops are trusted out of `X-Forwarded-For`. Request bodies are capped at 5 MiB. `GET /api/events` connections are capped at 64 concurrent, server-wide; a connection past that limit gets `429` with `{"error": "too many active SSE connections"}`. `POST /api/workflows/:id/run` draws from a global run semaphore sized by `--max-concurrent-runs` (default `10`); a request that can't get a slot within `--max-queue-wait-secs` (default `30`) gets `503 Service Unavailable` with a `Retry-After` header, and a request for a workflow that's already running waits up to 5 seconds for that workflow's own lock before returning `429` with `{"error": "workflow already running"}`.
+**Concurrency and limits.** Requests are capped at 300 per client IP per 60-second window; over that returns `429 Too Many Requests` with `{"error": "rate limit exceeded"}` and a `Retry-After: 60` header. The widget routes' own stricter limits return the same response. Both carry the usual CORS headers for an allowed origin, so a browser client can read the `429` status and body; preflight (`OPTIONS`) requests are answered by the CORS layer before the limiter and don't count toward it; browsers cache a preflight answer for an hour. The client IP is the socket's own address unless `--trusted-proxy-count` is set, in which case that many hops are trusted out of `X-Forwarded-For`. Request bodies are capped at 5 MiB. `GET /api/events` connections are capped at 64 concurrent, server-wide; a connection past that limit gets `429` with `{"error": "too many active SSE connections"}`. `POST /api/workflows/:id/run` draws from a global run semaphore sized by `--max-concurrent-runs` (default `10`); a request that can't get a slot within `--max-queue-wait-secs` (default `30`) gets `503 Service Unavailable` with a `Retry-After` header, and a request for a workflow that's already running waits up to 5 seconds for that workflow's own lock before returning `429` with `{"error": "workflow already running"}`.
 
-**CORS.** Cross-origin requests are allowed from `localhost`/`127.0.0.1` on any port plus any origin passed via `--allow-origin`, for `GET`, `POST`, and `DELETE`, with `Authorization`, `Content-Type`, and `If-Match` as allowed request headers and `ETag` exposed to the browser.
+**CORS.** Cross-origin requests are allowed from `localhost`/`127.0.0.1` on any port plus any origin passed via `--allow-origin`, for `GET`, `POST`, and `DELETE`, with `Authorization`, `Content-Type`, and `If-Match` as allowed request headers and `ETag` and `Retry-After` exposed to the browser. `POST /api/widget/:workflow_id/mint-token` is the one exception: no origin is ever allowed on it, `--allow-origin` included, because it is meant to be called from your own server, not a browser (see [Embeddable Chat Widget](../guide/widget-embedding.md)).
 
 **Response headers.** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and `Strict-Transport-Security`. JSON responses also get `Content-Security-Policy: default-src 'none'` and a no-store `Cache-Control`; `GET /aerini-widget.js` gets a 5-minute `Cache-Control` instead, since it's a static asset with no content hash to bust on deploy.
 
@@ -62,7 +65,7 @@ On success: `200` with `{"token": "<signed token>", "expires_at": "<RFC 3339 tim
 | `DELETE` | `/api/workflows/:id` | write |
 | `POST` | `/api/workflows/:id/run` | write |
 
-None of these five enforce the per-token workflow ACL; see [Per-token workflow ACL](#per-token-workflow-acl).
+All five enforce the [per-token workflow ACL](#per-token-workflow-acl): a token restricted to other workflows gets `403` on a workflow outside its grants, and `GET /api/workflows` lists only its granted workflows.
 
 **`GET /api/workflows`** takes the shared pagination params (see [Conventions](#conventions)). Each item is `{"id", "name", "updated_at", "tags": [...], "collection_id"}` (a summary, not the full workflow).
 
@@ -124,6 +127,8 @@ Enforces the [per-token workflow ACL](#per-token-workflow-acl). No pagination; r
 
 This is the `api`-mode credential store described in [Credentials](../guide/credentials.md), separate from the desktop app's own store.
 
+A token restricted to specific workflows gets `403` on all three routes (see [Per-token workflow ACL](#per-token-workflow-acl)).
+
 **`GET /api/credentials`** returns a flat array of `{"id", "name", "cred_type"}`. Never includes the secret value, and never includes the optional `provider`/`model`/`base_url` metadata a credential can carry, since the desktop-side `list` response type this route reuses doesn't have those fields.
 
 **`POST /api/credentials`** body: `{"id", "name", "value", "cred_type"}` (`cred_type` defaults to `"api_key"` if omitted). `provider`, `model`, and `base_url` are not accepted by this route: it always stores a credential with those three set to none, even though the underlying store supports them (the desktop app's own credential UI can set them; this REST route currently can't). `200` with `{"ok": true}` on success.
@@ -158,7 +163,7 @@ All six require `admin`; this is the REST equivalent of the CLI's `tokens` subco
 
 **`GET /api/tokens`** returns a flat array of `{"token_id", "label", "scopes": [...], "created_at", "revoked_at", "expires_at"}`. Never includes the token's own secret value; that only exists at creation time.
 
-**`POST /api/tokens`** body: `{"label": "<1-256 chars>", "scopes": [...], "expires_in_secs": <u64 or omitted>}` (`scopes` defaults to `["read", "write"]` if omitted; each entry must be `read`, `write`, or `admin`, anything else is `400`). On success, `201 Created` with `{"token": "<raw token, shown once>", "label", "scopes", "expires_in_secs", "note": "Save this token, it will not be shown again."}`.
+**`POST /api/tokens`** body: `{"label": "<1-256 chars>", "scopes": [...], "expires_in_secs": <u64 or omitted>, "workflow_ids": [...]}` (`scopes` defaults to `["read", "write"]` if omitted; each entry must be `read`, `write`, or `admin`, anything else is `400`; an `expires_in_secs` too large to represent as a date is also `400`; `workflow_ids`, if non-empty, restricts the token to those workflows in the same call, see [Per-token workflow ACL](#per-token-workflow-acl)). On success, `201 Created` with `{"token": "<raw token, shown once>", "token_id", "label", "scopes", "expires_in_secs", "workflow_ids", "note": "Save this token — it will not be shown again."}`.
 
 **`DELETE /api/tokens/:id`** `200` with `{"ok": true}`, except a token cannot revoke itself: revoking the same token ID present in the caller's own `Authorization` header returns `400` with `{"error": "Cannot revoke the token you are currently using"}`.
 
@@ -166,7 +171,7 @@ All six require `admin`; this is the REST equivalent of the CLI's `tokens` subco
 
 **`POST /api/tokens/:id/workflows/:workflow_id`** grants the target token access to one workflow. `201` with `{"ok": true, "token_id", "workflow_id", "note": "..."}`.
 
-**`DELETE /api/tokens/:id/workflows/:workflow_id`** revokes that grant. `200` with `{"ok": true}`.
+**`DELETE /api/tokens/:id/workflows/:workflow_id`** revokes that grant. `200` with `{"ok": true}`; when it was the token's last grant, the body also carries a `note` saying the token is now unrestricted.
 
 ## Events (SSE)
 
@@ -175,6 +180,8 @@ All six require `admin`; this is the REST equivalent of the CLI's `tokens` subco
 | `GET` | `/api/events` | read |
 
 A long-lived `text/event-stream` connection, capped at 64 concurrent connections server-wide (see [Conventions](#conventions)). Enforces the [per-token workflow ACL](#per-token-workflow-acl); an optional `?workflow_id=` query parameter narrows the connection to one workflow's events, and is rejected with `403` if the caller's ACL doesn't include that workflow. Each message's `data` field is a JSON object of the form `{"event": "<type>", "payload": {...}}`. The server also sends a keep-alive `ping` every 30 seconds on an otherwise-idle connection.
+
+When the server receives a shutdown signal (`SIGINT` or `SIGTERM`) it ends every open event stream, so clients see an ordinary end-of-stream rather than a dropped connection. A browser `EventSource` will try to reconnect on its own; those attempts fail until the server is running again. Events are not numbered or replayed, so anything emitted while a client is disconnected is not delivered after it reconnects. Connections other than event streams get up to 10 seconds to finish before the server closes them.
 
 Six event types are emitted:
 

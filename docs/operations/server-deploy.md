@@ -93,7 +93,7 @@ sudo apt install -y libdbus-1-dev   # Debian/Ubuntu; needed for OS-keyring suppo
 cargo build --release -p aerini-server
 ```
 
-Rust 1.94.1+ is required to build `aerini-server`; building the desktop app needs 1.95+, as [Installation](../getting-started/installation.md#building-from-source) states. The compiled binary lands at `target/release/aerini-server`. This does not build or fetch a Node.js runtime; see the Code node section below if your workflow needs one.
+Rust 1.96+ is required to build `aerini-server` and the desktop app, as [Installation](../getting-started/installation.md#building-from-source) states. The compiled binary lands at `target/release/aerini-server`. This does not build or fetch a Node.js runtime; see the Code node section below if your workflow needs one.
 
 ### `serve` mode
 
