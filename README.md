@@ -94,7 +94,7 @@ See [Embedding aerini-engine](docs/development/embedding.md) for a working examp
 
 | Tool | Version | Why |
 | - | - | - |
-| Rust (stable) | 1.95+ | Builds the engine and desktop shell |
+| Rust (stable) | 1.96+ | Builds the engine and desktop shell |
 | Node.js | 20.19+, 22.13+, or 24+ | Only to run the frontend build, not needed to use the app itself |
 | Tauri CLI | 2.x | Packages the desktop app |
 

@@ -8,9 +8,11 @@ use aerini_engine::{
     scheduler::SchedulerDaemon,
     store::CredentialStore,
 };
+use axum::{http::StatusCode, Json};
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Semaphore};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::token_store::{TokenRecord, TokenStore};
 
@@ -38,6 +40,8 @@ pub struct ApiState {
     pub data_dir:         Arc<std::path::PathBuf>,
     pub plugin_dir:       Option<Arc<std::path::PathBuf>>,
     pub sse_tx:           broadcast::Sender<String>,
+    /// Cancelled when shutdown begins; long-lived streams end on it.
+    pub shutdown:         CancellationToken,
     pub token_store:      Arc<TokenStore>,
     pub exec_locks:       Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub env_allowlist:    Option<Arc<std::collections::HashSet<String>>>,
@@ -78,5 +82,142 @@ pub fn require_write(record: &TokenRecord) -> Result<(), (axum::http::StatusCode
         Ok(())
     } else {
         Err((axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"error":"write scope required"}))))
+    }
+}
+
+pub type ApiError = (StatusCode, Json<serde_json::Value>);
+
+impl ApiState {
+    /// Verifies a bearer token on the blocking pool: the lookup is a locked
+    /// SQLite read. An empty token can never match a stored hash, so it is
+    /// rejected without touching the database. A failed task denies access.
+    pub async fn verify_token(&self, raw: &str) -> Option<TokenRecord> {
+        if raw.is_empty() {
+            return None;
+        }
+        let store = Arc::clone(&self.token_store);
+        let raw = raw.to_owned();
+        deny_on_join_error(tokio::task::spawn_blocking(move || store.verify_token(&raw)).await)
+    }
+
+    /// Runs a token-store operation on the blocking pool. Store errors and
+    /// task failures are both returned as their display text.
+    pub async fn with_token_store<T, F>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&TokenStore) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let store = Arc::clone(&self.token_store);
+        tokio::task::spawn_blocking(move || f(store.as_ref()).map_err(|e| e.to_string()))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    /// `None` = the caller may see every workflow; `Some(set)` = only those.
+    /// See [`TokenStore::acl_filter`].
+    pub async fn acl_filter(&self, caller: &TokenRecord) -> Result<Option<HashSet<String>>, String> {
+        let record = caller.clone();
+        self.with_token_store(move |store| store.acl_filter(&record)).await
+    }
+}
+
+fn deny_on_join_error(joined: Result<Option<TokenRecord>, tokio::task::JoinError>) -> Option<TokenRecord> {
+    joined.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "token verification task failed, denying access");
+        None
+    })
+}
+
+pub fn acl_allows(filter: &Option<HashSet<String>>, workflow_id: &str) -> bool {
+    match filter {
+        None          => true,
+        Some(allowed) => allowed.contains(workflow_id),
+    }
+}
+
+fn acl_lookup_failed(e: &str) -> ApiError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": format!("ACL lookup failed: {}", e)})),
+    )
+}
+
+/// Whether `caller` may act on `workflow_id`: admin and tokens with no grants
+/// always may; a token with grants may only for a granted workflow.
+pub async fn acl_permits(s: &ApiState, caller: &TokenRecord, workflow_id: &str) -> Result<bool, String> {
+    s.acl_filter(caller).await.map(|filter| acl_allows(&filter, workflow_id))
+}
+
+/// Pre-check for routes addressed by workflow id. The answer depends only on
+/// the caller's own grants, never on whether the workflow exists, so a `403`
+/// reveals nothing about other workflows.
+pub async fn require_workflow_acl(
+    s:           &ApiState,
+    caller:      &TokenRecord,
+    workflow_id: &str,
+) -> Result<(), ApiError> {
+    match acl_permits(s, caller, workflow_id).await {
+        Ok(true)  => Ok(()),
+        Ok(false) => Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "token ACL does not permit access to this workflow"})),
+        )),
+        Err(e) => Err(acl_lookup_failed(&e)),
+    }
+}
+
+/// For server-wide routes that belong to no single workflow: a token
+/// restricted to specific workflows may not use them.
+pub async fn require_unrestricted(s: &ApiState, caller: &TokenRecord) -> Result<(), ApiError> {
+    match s.acl_filter(caller).await {
+        Ok(None)    => Ok(()),
+        Ok(Some(_)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "token is restricted to specific workflows and cannot use server-wide routes"})),
+        )),
+        Err(e) => Err(acl_lookup_failed(&e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record() -> TokenRecord {
+        TokenRecord {
+            token_id:   "t".to_string(),
+            label:      "l".to_string(),
+            scopes:     vec!["read".to_string()],
+            created_at: "c".to_string(),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn unrestricted_filter_allows_any_workflow() {
+        assert!(acl_allows(&None, "wf_a"));
+    }
+
+    #[test]
+    fn restricted_filter_allows_only_granted_workflows() {
+        let filter = Some(HashSet::from(["wf_a".to_string()]));
+        assert!(acl_allows(&filter, "wf_a"));
+        assert!(!acl_allows(&filter, "wf_b"));
+    }
+
+    #[tokio::test]
+    async fn verification_task_panic_denies_access() {
+        let joined = tokio::task::spawn_blocking(|| -> Option<TokenRecord> {
+            panic!("simulated verification panic")
+        })
+        .await;
+        assert!(joined.is_err());
+        assert!(deny_on_join_error(joined).is_none());
+    }
+
+    #[tokio::test]
+    async fn successful_verification_result_is_returned_unchanged() {
+        let joined = tokio::task::spawn_blocking(|| Some(record())).await;
+        assert_eq!(deny_on_join_error(joined).map(|r| r.token_id), Some("t".to_string()));
     }
 }

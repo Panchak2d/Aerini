@@ -69,13 +69,14 @@ use std::{
 };
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Semaphore};
+use tokio_util::sync::CancellationToken;
 use rand::TryRng;
 
 use crate::event_bridge::BroadcastEventSink;
 use crate::token_store::TokenStore;
 use crate::util::extract_client_ip;
 
-/// Configuration bundle for [`run`]. Groups the 17 server parameters to stay
+/// Configuration bundle for [`run`]. Groups the server parameters to stay
 /// under the clippy `too_many_arguments` limit.
 pub struct ServerConfig {
     pub token:                    Option<String>,
@@ -257,6 +258,25 @@ fn is_localhost_origin(b: &[u8]) -> bool {
     false
 }
 
+/// True for `/api/widget/{workflow_id}/mint-token`. Its caller is the embedding
+/// site's own backend, which sends no `Origin`, so browsers are never granted
+/// cross-origin access to it.
+fn is_mint_token_path(path: &str) -> bool {
+    path.strip_prefix("/api/widget/")
+        .and_then(|rest| rest.strip_suffix("/mint-token"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+fn cors_origin_allowed(origin: &[u8], path: &str, extra_origins: &[Vec<u8>]) -> bool {
+    if is_mint_token_path(path) {
+        return false;
+    }
+    is_localhost_origin(origin) || extra_origins.iter().any(|o| o.as_slice() == origin)
+}
+
+/// Upper bound on how long shutdown waits for open HTTP connections to close.
+const SHUTDOWN_DRAIN_SECS: u64 = 10;
+
 pub async fn run(cfg: ServerConfig) {
     let ServerConfig {
         token, port, data_dir, allow_origins, allow_env_vars, bind,
@@ -373,6 +393,7 @@ pub async fn run(cfg: ServerConfig) {
     let reload_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     let (sse_tx, _) = broadcast::channel::<String>(256);
+    let shutdown_token = CancellationToken::new();
     let event_sink  = Arc::new(BroadcastEventSink { tx: sse_tx.clone() });
     let resolver    = Arc::new(StoreCredentialResolver { store: Arc::clone(&creds) });
 
@@ -468,6 +489,7 @@ pub async fn run(cfg: ServerConfig) {
         data_dir:         Arc::new(data_dir),
         plugin_dir:       plugin_dir.map(Arc::new),
         sse_tx:           sse_tx.clone(),
+        shutdown:         shutdown_token.clone(),
         token_store:      Arc::clone(&token_store),
         exec_locks:       Arc::new(DashMap::new()),
         env_allowlist:    env_allowlist.clone(),
@@ -511,14 +533,13 @@ pub async fn run(cfg: ServerConfig) {
     );
     let extra_c = std::sync::Arc::clone(&extra_origins);
     let cors = tower_http::cors::CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |origin: &axum::http::HeaderValue, _| {
-            let b = origin.as_bytes();
-            is_localhost_origin(b)
-                || extra_c.iter().any(|o| o.as_slice() == b)
+        .allow_origin(AllowOrigin::predicate(move |origin: &axum::http::HeaderValue, parts| {
+            cors_origin_allowed(origin.as_bytes(), parts.uri.path(), &extra_c)
         }))
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE, axum::http::header::IF_MATCH])
-        .expose_headers([axum::http::header::ETAG]);
+        .expose_headers([axum::http::header::ETAG, axum::http::header::RETRY_AFTER])
+        .max_age(std::time::Duration::from_secs(3600));
 
     let rl = Arc::new(crate::middleware::RateLimiter::new(300, 60));
     Arc::clone(&rl).spawn_eviction_task();
@@ -530,7 +551,7 @@ pub async fn run(cfg: ServerConfig) {
             if rl.is_allowed(ip) {
                 next.run(req).await
             } else {
-                StatusCode::TOO_MANY_REQUESTS.into_response()
+                crate::middleware::too_many_requests()
             }
         }
     });
@@ -560,7 +581,7 @@ pub async fn run(cfg: ServerConfig) {
             async move {
                 let ip: IpAddr = extract_client_ip(&req, tpc_wt);
                 if !ip_rl.is_allowed(ip) || !wf_rl.is_allowed(&workflow_id) {
-                    return StatusCode::TOO_MANY_REQUESTS.into_response();
+                    return crate::middleware::too_many_requests();
                 }
                 next.run(req).await
             }
@@ -575,7 +596,7 @@ pub async fn run(cfg: ServerConfig) {
         async move {
             let ip: IpAddr = extract_client_ip(&req, tpc_wm);
             if !ip_rl.is_allowed(ip) {
-                return StatusCode::TOO_MANY_REQUESTS.into_response();
+                return crate::middleware::too_many_requests();
             }
             next.run(req).await
         }
@@ -610,8 +631,11 @@ pub async fn run(cfg: ServerConfig) {
         .merge(protected)
         .with_state(state)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
-        .layer(cors)
+        // `cors` must wrap `rate_limit_layer`: a 429 built inside it still
+        // gets CORS headers. `cors` answers every OPTIONS itself, so preflights
+        // never reach the limiter; `max_age` keeps browsers from sending many.
         .layer(rate_limit_layer)
+        .layer(cors)
         .layer(middleware::from_fn(crate::middleware::api_security_headers));
 
     let addr     = format!("{}:{}", bind, port);
@@ -646,7 +670,8 @@ pub async fn run(cfg: ServerConfig) {
     eprintln!("  aerini-server tokens list   --token YOUR_TOKEN");
     eprintln!("  aerini-server tokens create --label ci --scopes read,write --token YOUR_TOKEN");
 
-    let shutdown = async {
+    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
@@ -658,13 +683,32 @@ pub async fn run(cfg: ServerConfig) {
         }
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Shutdown signal received — draining in-flight requests (10s max)");
+        tracing::info!("Shutdown signal received — draining in-flight requests ({}s max)", SHUTDOWN_DRAIN_SECS);
+        shutdown_token.cancel();
+        let _ = signal_tx.send(());
     };
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown)
-        .await
-        .unwrap_or_else(|e| tracing::error!("Server error: {}", e));
+    // Graceful shutdown waits for every open connection, and an SSE stream
+    // never finishes on its own. The deadline is armed only once the signal
+    // fires, so it bounds the drain and never a healthy running server.
+    let drain_deadline = async move {
+        if signal_rx.await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS)).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let serve = std::future::IntoFuture::into_future(
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(shutdown),
+    );
+    tokio::select! {
+        res = serve => res.unwrap_or_else(|e| tracing::error!("Server error: {}", e)),
+        _ = drain_deadline => tracing::warn!(
+            "HTTP drain exceeded {}s (open SSE streams?) — closing remaining connections",
+            SHUTDOWN_DRAIN_SECS
+        ),
+    }
 
     let in_flight = scheduler.active_runs();
     if in_flight > 0 {
@@ -672,6 +716,13 @@ pub async fn run(cfg: ServerConfig) {
     }
     scheduler.drain_all().await;
     tracing::info!("Shutdown complete");
+}
+
+/// Extracts the credential from an `Authorization: Bearer <token>` value.
+/// The scheme name is case-insensitive (RFC 7235 §2.1).
+fn parse_bearer(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(rest)
 }
 
 async fn auth_middleware(
@@ -683,10 +734,10 @@ async fn auth_middleware(
     let provided = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(parse_bearer)
         .unwrap_or("");
 
-    match s.token_store.verify_token(provided) {
+    match s.verify_token(provided).await {
         Some(record) => {
             request.extensions_mut().insert(record);
             next.run(request).await
@@ -701,7 +752,7 @@ async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_client_ip;
+    use super::{cors_origin_allowed, extract_client_ip, is_mint_token_path, parse_bearer};
     use axum::body::Body;
     use axum::extract::Request;
     use std::net::{IpAddr, Ipv4Addr};
@@ -715,9 +766,23 @@ mod tests {
 
     #[test]
     fn rate_limiter_uses_forwarded_ip() {
-        let req = req_with_xff("1.2.3.4, 10.0.0.1");
+        let req = req_with_xff("1.2.3.4");
         let ip = extract_client_ip(&req, 1);
         assert_eq!(ip, "1.2.3.4".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn client_supplied_leading_xff_entries_are_ignored() {
+        let req = req_with_xff("9.9.9.9, 1.2.3.4");
+        assert_eq!(extract_client_ip(&req, 1), "1.2.3.4".parse::<IpAddr>().unwrap());
+        let req = req_with_xff("9.9.9.9, 1.2.3.4, 10.0.0.1");
+        assert_eq!(extract_client_ip(&req, 2), "1.2.3.4".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn fewer_xff_entries_than_trusted_hops_falls_back_to_tcp_ip() {
+        let req = req_with_xff("1.2.3.4");
+        assert_eq!(extract_client_ip(&req, 2), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]
@@ -725,5 +790,44 @@ mod tests {
         let req = req_with_xff("1.2.3.4, 10.0.0.1");
         let ip = extract_client_ip(&req, 0);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        assert_eq!(parse_bearer("Bearer abc"), Some("abc"));
+        assert_eq!(parse_bearer("bearer abc"), Some("abc"));
+        assert_eq!(parse_bearer("BEARER abc"), Some("abc"));
+    }
+
+    #[test]
+    fn non_bearer_or_malformed_authorization_is_rejected() {
+        assert_eq!(parse_bearer("Basic abc"), None);
+        assert_eq!(parse_bearer("Bearer"), None);
+    }
+
+    #[test]
+    fn mint_token_path_matches_only_the_mint_route() {
+        assert!(is_mint_token_path("/api/widget/wf_abc123/mint-token"));
+        assert!(!is_mint_token_path("/api/widget/wf_abc123/trigger"));
+        assert!(!is_mint_token_path("/api/widget//mint-token"));
+        assert!(!is_mint_token_path("/api/widget/a/b/mint-token"));
+        assert!(!is_mint_token_path("/api/workflows/wf_abc123/mint-token"));
+    }
+
+    #[test]
+    fn cors_refuses_every_browser_origin_on_mint_token() {
+        let extra = vec![b"https://site.example".to_vec()];
+        let path = "/api/widget/wf_abc123/mint-token";
+        assert!(!cors_origin_allowed(b"http://localhost:3000", path, &extra));
+        assert!(!cors_origin_allowed(b"https://site.example", path, &extra));
+    }
+
+    #[test]
+    fn cors_allows_localhost_and_listed_origins_elsewhere() {
+        let extra = vec![b"https://site.example".to_vec()];
+        let path = "/api/widget/wf_abc123/trigger";
+        assert!(cors_origin_allowed(b"http://localhost:3000", path, &extra));
+        assert!(cors_origin_allowed(b"https://site.example", path, &extra));
+        assert!(!cors_origin_allowed(b"https://other.example", path, &extra));
     }
 }

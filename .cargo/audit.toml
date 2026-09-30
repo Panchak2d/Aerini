@@ -26,8 +26,11 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2024-0429: glib 0.18.5 VariantStrIter unsoundness.
-    # Patched in glib >=0.20.0 which requires GTK4. Transitive via Tauri 2 → webkit2gtk → GTK3.
-    # Cannot upgrade without Tauri migrating to GTK4. Track: https://github.com/tauri-apps/tauri
+    # Patched only in glib >=0.20.0. Transitive via Tauri 2 → tao/wry/webkit2gtk → gtk 0.18 → glib ^0.18;
+    # the newest tauri (2.12.0), tao (0.37.1), wry (0.57.0) and webkit2gtk (2.0.2) all still pin gtk ^0.18,
+    # so no upgrade reaches a patched glib. Not reachable from this app: the only entry point is
+    # `glib::Variant::array_iter_str`, and no glib-dependent crate in Cargo.lock calls it (Linux desktop
+    # build only). Re-check when Tauri moves off gtk 0.18. Track: https://github.com/tauri-apps/tauri
     "RUSTSEC-2024-0429",
 
     # RUSTSEC-2024-0370: proc-macro-error unmaintained.

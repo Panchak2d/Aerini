@@ -21,7 +21,7 @@ pub async fn get_memory(
 
     // Per-workflow ACL. None = unrestricted
     // (admin, or a token with no ACL rows).
-    let acl_filter = match s.token_store.acl_filter(&caller) {
+    let acl_filter = match s.acl_filter(&caller).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -127,6 +127,7 @@ mod tests {
             data_dir: Arc::new(dir),
             plugin_dir: None,
             sse_tx,
+            shutdown: tokio_util::sync::CancellationToken::new(),
             token_store,
             exec_locks: Arc::new(dashmap::DashMap::new()),
             env_allowlist: None,

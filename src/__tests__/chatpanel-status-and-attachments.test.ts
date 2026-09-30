@@ -231,3 +231,31 @@ describe("ChatPanel — input autosize", () => {
     expect(input.style.height).toBe("62px");
   });
 });
+
+describe("ChatPanel — unread attachments warning", () => {
+  const send = async (nodes: Map<string, unknown>) => {
+    vi.useFakeTimers(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const toast = vi.fn();
+    try {
+      document.body.innerHTML = CHAT_PANEL_HTML;
+      const canvas = { nodes } as unknown as Canvas;
+      const wf = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
+      const rm = { addRunStateListener: vi.fn() } as unknown as RunManager;
+      const p = new ChatPanel(canvas, wf, toast, rm) as unknown as PanelInternals;
+      p.onSchedulerStatus(waitingEvent());
+      await p.handleSend("", [IMG]);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+    return toast;
+  };
+  const hook = { data: { node_type_id: "webhook", name: "Webhook", config: { port: 3456, path: "/webhook" } } };
+
+  it("warns when no node references the Webhook's files output", async () => {
+    const toast = await send(new Map<string, unknown>([["n1", hook], ["n2", { data: { node_type_id: "ai_prompt", name: "AI", config: { prompt: "hi" } } }]]));
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("no node reads them"), "info");
+  });
+
+  it("stays silent when a node's Files port is wired to the Webhook", async () => {
+    const toast = await send(new Map<string, unknown>([["n1", hook], ["n2", { data: { node_type_id: "ai_prompt", name: "AI", config: { attachments_expr: "{{Webhook.output.files}}" } } }]]));
+    expect(toast).not.toHaveBeenCalledWith(expect.stringContaining("no node reads them"), "info");
+  });
+});

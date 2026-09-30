@@ -54,12 +54,10 @@
 //! Every request a plugin sends through `wasi:http/outgoing-handler` is checked
 //! against this crate's standard SSRF policy — the same `SsrfPolicy::Strict` the
 //! Database and HTTP nodes enforce — before `wasmtime_wasi_http`'s default send
-//! path is allowed to run it. Action plugins go through
-//! [`PluginHttpHooks::send_request`] (`wasi:http` p2); trigger plugins go through
-//! [`TriggerHttpHooks::send_request`] (p3, `trigger_engine`'s async ABI) — both
-//! delegate the actual policy to the same [`check_ssrf_uri`], so the two engines
-//! can't drift apart on what's blocked. See that function for exactly what is and
-//! isn't caught.
+//! path is allowed to run it. Action plugins (`wasi:http` p2) and trigger plugins
+//! (p3, `trigger_engine`'s async ABI) share one [`PluginHttpHooks`] implementation,
+//! so the two engines can't drift apart on what's blocked. See [`check_ssrf_uri`]
+//! for exactly what is and isn't caught.
 //!
 //! # Plugin storage
 //!
@@ -104,10 +102,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use chrono::Utc;
-use http_body_util::combinators::UnsyncBoxBody;
-use hyper::Request;
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -118,17 +113,9 @@ use wasmtime::{Config, Engine, StoreLimitsBuilder};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
-use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
-use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, OutgoingRequestConfig};
-use wasmtime_wasi_http::{WasiHttpCtx, p2::{HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, default_send_request}};
-use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
-use wasmtime_wasi_http::p3::{
-    RequestOptions as P3RequestOptions,
-    WasiHttpCtxView as P3WasiHttpCtxView,
-    WasiHttpHooks as P3WasiHttpHooks,
-    WasiHttpView as P3WasiHttpView,
-    default_send_request as p3_default_send_request,
+use wasmtime_wasi_http::{
+    Error as HttpError, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+    default_send_request,
 };
 
 use crate::error::NodeError;
@@ -565,7 +552,7 @@ impl wit_fs_watch::FsWatchHost for PluginState {
 /// Per-instance store state for a trigger-plugin component, run on
 /// [`PluginLoader::trigger_engine`].
 ///
-/// HTTP is linked via `wasi:http` p3 ([`TriggerHttpHooks`]), SSRF-filtered
+/// HTTP is linked via `wasi:http` p3 ([`PluginHttpHooks`]), SSRF-filtered
 /// identically to [`PluginState`]'s p2 HTTP -- see "Outbound HTTP" in this
 /// module's own doc comment. Raw `wasi:sockets` capability is left at
 /// `WasiCtxBuilder`'s own default (no `allow_tcp`/`socket_addr_check`
@@ -583,7 +570,7 @@ struct TriggerPluginState {
     http_ctx: WasiHttpCtx,
     table: ResourceTable,
     limits: wasmtime::StoreLimits,
-    http_hooks: TriggerHttpHooks,
+    http_hooks: PluginHttpHooks,
     /// This instance's `storage` import backing, if any -- same shape and
     /// same "scoped by the resolved `type_id`, `None` if the directory's
     /// storage database couldn't be opened" contract as [`PluginState::storage`].
@@ -601,9 +588,9 @@ impl WasiView for TriggerPluginState {
     }
 }
 
-impl P3WasiHttpView for TriggerPluginState {
-    fn http(&mut self) -> P3WasiHttpCtxView<'_> {
-        P3WasiHttpCtxView {
+impl WasiHttpView for TriggerPluginState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
             ctx: &mut self.http_ctx,
             table: &mut self.table,
             hooks: &mut self.http_hooks,
@@ -656,7 +643,7 @@ fn make_trigger_plugin_state(
         http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
         limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
-        http_hooks: TriggerHttpHooks,
+        http_hooks: PluginHttpHooks,
         storage,
         fs_watch,
     }
@@ -736,55 +723,86 @@ fn make_trigger_store(
 
 // ── Outbound HTTP SSRF enforcement ─────────────────────────────────────────────
 
-/// `wasi:http/outgoing-handler`'s default send path (`default_send_request`) connects
-/// straight to whatever host the guest asks for — it has no knowledge of this
-/// application's SSRF policy. `WasiHttpHooks::send_request` is the documented
-/// interception point, so plugin traffic is now checked exactly like any other
-/// node's HTTP/DB egress before `default_send_request` is allowed to run.
+/// `wasi:http`'s default send path (`default_send_request`) connects straight to
+/// whatever host the guest asks for — it has no knowledge of this application's
+/// SSRF policy. `WasiHttpHooks::send_request` is the documented interception
+/// point, so plugin traffic is checked exactly like any other node's HTTP/DB
+/// egress before `default_send_request` is allowed to run.
+///
+/// One implementation serves both engines: `wasmtime_wasi_http` routes p2
+/// (action plugins) and p3 (trigger plugins) requests through the same
+/// `WasiHttpHooks` trait, and reports rejections through its own
+/// version-agnostic [`HttpError`], which it maps to each protocol's
+/// `error-code` itself.
 struct PluginHttpHooks;
 
 impl WasiHttpHooks for PluginHttpHooks {
     fn send_request(
         &mut self,
-        request: Request<HyperOutgoingBody>,
-        config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
-        if let Err(code) = check_plugin_request_ssrf(request.uri()) {
-            return Ok(HostFutureIncomingResponse::ready(Ok(Err(code))));
-        }
-        Ok(default_send_request(request, config))
+        request: hyper::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        fut: Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+    ) -> Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (
+                        hyper::Response<WasiBody>,
+                        Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+                    ),
+                    HttpError,
+                >,
+            > + Send,
+    > {
+        // Unused: nothing is sent on rejection, and the upstream default
+        // `send_request` (which the success path mirrors) discards it identically.
+        _ = fut;
+        Box::new(async move {
+            // `check_ssrf_uri` does a blocking DNS lookup for a non-IP-literal
+            // host, and both protocol versions drive this future on an async
+            // task, so the check itself has to be offloaded.
+            let uri = request.uri().clone();
+            tokio::task::spawn_blocking(move || check_ssrf_uri(&uri))
+                .await
+                .map_err(|e| HttpError::InternalError(Some(format!("SSRF check task panicked: {e}"))))?
+                .map_err(HttpError::from)?;
+            use http_body_util::BodyExt;
+            let (res, io) = default_send_request(request, options).await?;
+            Ok((
+                res.map(BodyExt::boxed_unsync),
+                Box::new(io) as Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+            ))
+        })
     }
 }
 
-/// Version-agnostic outcome of [`check_ssrf_uri`] — mapped to the caller's own
-/// protocol-version `error-code` type by each thin wrapper
-/// ([`check_plugin_request_ssrf`] for p2, [`check_plugin_request_ssrf_p3`] for
-/// p3). `p2::bindings::http::types::ErrorCode` and
-/// `p3::bindings::http::types::ErrorCode` are distinct Rust types generated
-/// from two different WIT package versions, even though both declare the same
-/// `destination-not-found` / `destination-IP-prohibited` /
-/// `HTTP-request-URI-invalid` variants this enum mirrors.
+/// Outcome of [`check_ssrf_uri`], mapped to [`HttpError`] by the `From` impl below.
 enum SsrfRejection {
     UriInvalid,
     Prohibited,
     NotFound,
 }
 
+impl From<SsrfRejection> for HttpError {
+    fn from(rejection: SsrfRejection) -> Self {
+        match rejection {
+            SsrfRejection::UriInvalid => HttpError::HttpRequestUriInvalid,
+            SsrfRejection::Prohibited => HttpError::DestinationIpProhibited,
+            SsrfRejection::NotFound => HttpError::DestinationNotFound,
+        }
+    }
+}
+
 /// Applies this crate's standard SSRF policy (`SsrfPolicy::Strict` — the same
 /// policy the Database and HTTP nodes enforce, see `nodes::util::check_ssrf_ip`)
 /// to a WASM plugin's outbound request URI before it is sent. Shared by both
-/// [`PluginHttpHooks::send_request`] (p2, action plugins) and
-/// [`TriggerHttpHooks::send_request`] (p3, trigger plugins) via their thin
-/// wrappers below, so the two engines can't drift apart on what's blocked.
+/// [`PluginHttpHooks::send_request`], for both action (p2) and trigger (p3)
+/// plugins.
 ///
 /// IP-literal hosts are checked directly (IPv6 authority brackets are stripped
 /// first — `hyper::Uri::host()` keeps them). Domain names are resolved with a
 /// blocking DNS lookup and every returned address is checked; safe to block on
-/// here since both callers only ever run this inside a blocking context —
-/// `tokio::task::spawn_blocking` for `WasmPluginNode::execute` (p2), the
-/// trigger engine's own blocking-pool-backed I/O for `send_request` (p3, per
-/// `wasmtime_wasi_http::p3`'s own `send_request` contract) — never on an async
-/// worker thread. A missing or unparsable host, a failed resolution, or an
+/// here since the only caller runs it inside `tokio::task::spawn_blocking`,
+/// never on an async worker thread. A missing or unparsable host, a failed resolution, or an
 /// empty result set all reject the request — fail closed, matching this
 /// crate's existing SSRF-check convention (`nodes::util::check_host_ssrf`).
 ///
@@ -827,159 +845,58 @@ fn check_ssrf_uri(uri: &hyper::Uri) -> Result<(), SsrfRejection> {
     Ok(())
 }
 
-/// p2 wrapper around [`check_ssrf_uri`] — see that function's doc comment for
-/// the policy and its residual limits.
-fn check_plugin_request_ssrf(uri: &hyper::Uri) -> Result<(), ErrorCode> {
-    check_ssrf_uri(uri).map_err(|rejection| match rejection {
-        SsrfRejection::UriInvalid => ErrorCode::HttpRequestUriInvalid,
-        SsrfRejection::Prohibited => ErrorCode::DestinationIpProhibited,
-        SsrfRejection::NotFound => ErrorCode::DestinationNotFound,
-    })
-}
-
-/// p3 wrapper around [`check_ssrf_uri`] — see that function's doc comment for
-/// the policy and its residual limits. Used by
-/// [`TriggerHttpHooks::send_request`].
-fn check_plugin_request_ssrf_p3(uri: &hyper::Uri) -> Result<(), P3ErrorCode> {
-    check_ssrf_uri(uri).map_err(|rejection| match rejection {
-        SsrfRejection::UriInvalid => P3ErrorCode::HttpRequestUriInvalid,
-        SsrfRejection::Prohibited => P3ErrorCode::DestinationIpProhibited,
-        SsrfRejection::NotFound => P3ErrorCode::DestinationNotFound,
-    })
-}
-
-/// Trigger-plugin counterpart to [`PluginHttpHooks`], wired through
-/// `wasmtime_wasi_http::p3`'s own `WasiHttpHooks`/`WasiHttpView` traits
-/// instead of `p2`'s — `TriggerPluginState` runs on `trigger_engine`
-/// (`wasm_component_model_async`), and `p3::add_to_linker`'s bound is
-/// `p3::WasiHttpView`, a distinct trait from `p2::WasiHttpView` despite the
-/// identical name (`wasmtime_wasi_http` gives p2 and p3 fully separate
-/// `WasiHttpHooks`/`WasiHttpView`/`WasiHttpCtxView` types; only `WasiHttpCtx`
-/// itself is shared — see `TriggerPluginState::http_ctx`). Same SSRF policy
-/// as `PluginHttpHooks`, via [`check_plugin_request_ssrf_p3`]'s shared
-/// [`check_ssrf_uri`] — the two engines can't drift apart on what's blocked.
-struct TriggerHttpHooks;
-
-impl P3WasiHttpHooks for TriggerHttpHooks {
-    fn send_request(
-        &mut self,
-        request: hyper::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
-        options: Option<P3RequestOptions>,
-        fut: Box<dyn std::future::Future<Output = Result<(), P3ErrorCode>> + Send>,
-    ) -> Box<
-        dyn std::future::Future<
-                Output = Result<
-                    (
-                        hyper::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
-                        Box<dyn std::future::Future<Output = Result<(), P3ErrorCode>> + Send>,
-                    ),
-                    wasmtime_wasi::TrappableError<P3ErrorCode>,
-                >,
-            > + Send,
-    > {
-        // Not used on either path below: nothing is sent on rejection, and
-        // `wasmtime_wasi_http::p3`'s own default `send_request` implementation
-        // (which the success path mirrors) discards this identically.
-        _ = fut;
-        Box::new(async move {
-            // `check_ssrf_uri` does a blocking DNS lookup for a non-IP-literal
-            // host. Unlike the p2 path -- whose caller, `WasmPluginNode::execute`,
-            // already runs entirely inside a `tokio::task::spawn_blocking`
-            // closure -- this future runs on `trigger_engine`'s ordinary async
-            // task (`start_trigger`'s `store.run_concurrent`), so the check
-            // itself has to be the thing offloaded here, not assumed already
-            // off the async reactor thread.
-            let uri = request.uri().clone();
-            let rejection = tokio::task::spawn_blocking(move || check_plugin_request_ssrf_p3(&uri))
-                .await
-                .map_err(|e| {
-                    wasmtime_wasi::TrappableError::trap(wasmtime::Error::msg(format!(
-                        "SSRF check task panicked: {e}"
-                    )))
-                })?;
-            if let Err(code) = rejection {
-                return Err(code.into());
-            }
-            use http_body_util::BodyExt;
-            let (res, io) = p3_default_send_request(request, options).await?;
-            Ok((res.map(BodyExt::boxed_unsync), Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>))
-        })
-    }
-}
-
 #[cfg(test)]
 mod plugin_http_hooks_tests {
-    use super::{
-        Bytes, ErrorCode, P3ErrorCode, P3WasiHttpHooks, UnsyncBoxBody, check_plugin_request_ssrf,
-        check_plugin_request_ssrf_p3,
-    };
+    use super::{HttpError, PluginHttpHooks, SsrfRejection, WasiBody, WasiHttpHooks, check_ssrf_uri};
 
     #[test]
     fn public_ip_allowed() {
         let uri: hyper::Uri = "http://93.184.216.34/".parse().unwrap();
-        assert!(check_plugin_request_ssrf(&uri).is_ok());
+        assert!(check_ssrf_uri(&uri).is_ok());
     }
 
     #[test]
     fn private_ip_blocked() {
         let v4: hyper::Uri = "http://192.168.1.1/".parse().unwrap();
-        assert!(matches!(check_plugin_request_ssrf(&v4), Err(ErrorCode::DestinationIpProhibited)));
+        assert!(matches!(check_ssrf_uri(&v4), Err(SsrfRejection::Prohibited)));
 
         // IPv6 loopback via bracketed authority -- `hyper::Uri::host()` keeps the
         // brackets, exercising the strip-before-parse path above.
         let v6: hyper::Uri = "http://[::1]:8080/".parse().unwrap();
-        assert!(matches!(check_plugin_request_ssrf(&v6), Err(ErrorCode::DestinationIpProhibited)));
+        assert!(matches!(check_ssrf_uri(&v6), Err(SsrfRejection::Prohibited)));
     }
 
     #[test]
     fn relative_uri_without_host_rejected() {
         let uri: hyper::Uri = "/no-authority".parse().unwrap();
-        assert!(matches!(check_plugin_request_ssrf(&uri), Err(ErrorCode::HttpRequestUriInvalid)));
+        assert!(matches!(check_ssrf_uri(&uri), Err(SsrfRejection::UriInvalid)));
     }
 
-    // p3 (trigger-plugin) wrapper: same shared `check_ssrf_uri`, only the
-    // outer `error-code` type differs from the p2 tests above -- one normal
-    // case and the one edge case that exercises the mapping (not a re-proof
-    // of `check_ssrf_uri` itself, already fully covered above).
-    #[test]
-    fn public_ip_allowed_p3() {
-        let uri: hyper::Uri = "http://93.184.216.34/".parse().unwrap();
-        assert!(check_plugin_request_ssrf_p3(&uri).is_ok());
-    }
-
-    #[test]
-    fn private_ip_blocked_p3() {
-        let uri: hyper::Uri = "http://192.168.1.1/".parse().unwrap();
-        assert!(matches!(check_plugin_request_ssrf_p3(&uri), Err(P3ErrorCode::DestinationIpProhibited)));
-    }
-
-    // Exercises `TriggerHttpHooks::send_request` itself, not just the pure
-    // `check_plugin_request_ssrf_p3` mapping above -- the SSRF check has to
-    // survive being offloaded through `spawn_blocking` and converted back
-    // into a `TrappableError` without losing its `error-code`; a test on
-    // the pure mapping function alone can't prove that plumbing compiles
-    // or behaves correctly end to end.
+    // Exercises `PluginHttpHooks::send_request` itself: the SSRF check has to
+    // survive being offloaded through `spawn_blocking` and surface as the
+    // guest-visible `HttpError::DestinationIpProhibited`, which the pure
+    // `check_ssrf_uri` tests above can't prove.
     #[tokio::test]
-    async fn trigger_http_hooks_send_request_rejects_private_ip() {
+    async fn send_request_rejects_private_ip() {
         use http_body_util::{BodyExt, Empty};
+        use hyper::body::Bytes;
         use std::future::Future;
 
-        let body: UnsyncBoxBody<Bytes, P3ErrorCode> = Empty::new().map_err(|_| unreachable!()).boxed_unsync();
+        let body: WasiBody = Empty::<Bytes>::new().map_err(|never| match never {}).boxed_unsync();
         let request = hyper::Request::builder()
             .uri("http://192.168.1.1/")
             .body(body)
             .expect("request build failed");
-        let fut: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send> = Box::new(async { Ok(()) });
+        let fut: Box<dyn Future<Output = Result<(), HttpError>> + Send> = Box::new(async { Ok(()) });
 
-        let mut hooks = super::TriggerHttpHooks;
+        let mut hooks = PluginHttpHooks;
         let result = Box::into_pin(hooks.send_request(request, None, fut)).await;
 
-        let err = match result {
-            Err(e) => e,
+        match result {
+            Err(HttpError::DestinationIpProhibited) => {}
+            Err(other) => panic!("expected DestinationIpProhibited, got {other:?}"),
             Ok(_) => panic!("expected the private-IP request to be rejected"),
-        };
-        let code = err.downcast().expect("expected a guest-visible error-code, not a host trap");
-        assert!(matches!(code, P3ErrorCode::DestinationIpProhibited));
+        }
     }
 }
 

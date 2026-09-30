@@ -369,6 +369,17 @@ pub(super) fn enforce_read_only_query(query: &str) -> Result<(), String> {
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
+/// Spawns `fut` on the current Tokio runtime if there is one; otherwise drops it.
+/// Used from `Drop` paths, which may run outside a runtime during shutdown.
+pub(super) fn spawn_detached<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(fut);
+    }
+}
+
 pub(super) fn parse_params(v: &Value) -> Vec<Value> {
     v.as_str()
         .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())

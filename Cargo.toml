@@ -20,6 +20,5 @@ resolver = "2"
 version = "0.4.1"
 edition = "2021"
 license = "AGPL-3.0-only"
-# Shared floor for aerini-engine and aerini-server (set by the aws-sdk crates'
-# rust-version). The desktop crate needs a higher one and declares its own.
-rust-version = "1.94.1"
+# Shared floor for every crate in the workspace (set by wasmtime's rust-version).
+rust-version = "1.96"

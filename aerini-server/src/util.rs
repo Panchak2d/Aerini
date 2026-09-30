@@ -4,7 +4,10 @@ use std::net::{IpAddr, SocketAddr};
 /// Extracts the real client IP from X-Forwarded-For when behind trusted proxies.
 ///
 /// `trusted_proxy_count` = how many proxy hops sit between the internet and
-/// this server. With count=1 and header "1.2.3.4, 10.0.0.1", returns 1.2.3.4.
+/// this server. Each trusted proxy appends the address of its own peer, so the
+/// client is the Nth entry from the right; anything to its left is
+/// client-supplied and never trusted. With count=1 and header
+/// "9.9.9.9, 1.2.3.4", returns 1.2.3.4.
 /// Falls back to the TCP source IP if: count is 0, header is absent/malformed,
 /// or fewer IPs are present than the trust count.
 pub(crate) fn extract_client_ip(req: &Request, trusted_proxy_count: usize) -> IpAddr {
@@ -29,6 +32,6 @@ pub(crate) fn extract_client_ip(req: &Request, trusted_proxy_count: usize) -> Ip
         return tcp_ip;
     }
 
-    let idx = ips.len().saturating_sub(trusted_proxy_count + 1);
+    let idx = ips.len() - trusted_proxy_count;
     ips[idx].parse::<IpAddr>().unwrap_or(tcp_ip)
 }

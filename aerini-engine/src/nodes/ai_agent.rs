@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
-use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment, extract_provider_error};
+use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment, extract_provider_error, ATTACHMENT_ONLY_PROMPT};
 
 /// AI Agent node — autonomous ReAct loop (Reason → Act → Observe).
 ///
@@ -117,8 +117,22 @@ impl Node for AiAgentNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
+        // Attachment handling — same merge/classify pattern as ai_prompt.
+        // Two sources:
+        //   1. config["attachments"]      — static files added at design time.
+        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
+        //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
+        let static_atts: Vec<Value> = input.input["attachments"].as_array().cloned().unwrap_or_default();
+        let port_atts: Vec<Value>   = extract_port_attachments(&input.input["attachments_expr"]);
+        let mut attachments_raw = static_atts;
+        attachments_raw.extend(port_atts);
+        let pa = process_attachments(&attachments_raw);
+
+        // A file-only message resolves the goal expression to "". Readable
+        // attachments stand in for the text; otherwise the goal stays required.
         let goal = match input.input["goal"].as_str() {
             Some(g) if !g.is_empty() => g.to_string(),
+            _ if pa.has_content() => ATTACHMENT_ONLY_PROMPT.to_string(),
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_GOAL", "goal is required")),
         };
 
@@ -182,16 +196,6 @@ impl Node for AiAgentNode {
 
         let client = crate::provider::shared_ai_client();
 
-        // Attachment handling — same merge/classify pattern as ai_prompt.rs.
-        // Two sources:
-        //   1. config["attachments"]      — static files added at design time.
-        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
-        //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
-        let static_atts: Vec<Value> = input.input["attachments"].as_array().cloned().unwrap_or_default();
-        let port_atts: Vec<Value>   = extract_port_attachments(&input.input["attachments_expr"]);
-        let mut attachments_raw = static_atts;
-        attachments_raw.extend(port_atts);
-        let pa = process_attachments(&attachments_raw);
         let image_attachments   = pa.images;
         let doc_attachments     = pa.docs;
         let attachment_warnings = pa.logs;
@@ -1028,6 +1032,33 @@ mod tests {
         let req = rx.await.expect("mock never received a request");
         let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
         assert_eq!(v["model"].as_str(), Some("claude-sonnet-5"));
+    }
+
+    #[tokio::test]
+    async fn empty_goal_without_readable_attachment_is_missing_goal() {
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "",
+            "attachments": [{ "filename": "x.exe", "mime_type": "application/octet-stream", "data": "zz" }]
+        }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.expect("must carry NodeError").code, "MISSING_GOAL");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_goal_with_image_attachment_sends_text_and_image() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "", "provider": "openai", "base_url": base_url,
+            "attachments_expr": r#"[{"filename":"a.png","mime_type":"image/png","data":"AAAA"}]"#
+        }))).await;
+        assert!(out.success, "attachment-only goal must run: {:?}", out.error);
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        let blocks = &v["messages"][1]["content"];
+        assert!(!blocks[0]["text"].as_str().unwrap_or("").is_empty(), "user text block must not be empty");
+        assert_eq!(blocks[1]["type"].as_str(), Some("image_url"));
     }
 
     /// A 429 from an OpenAI-compatible provider is retry-eligible, not a permanent failure.

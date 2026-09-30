@@ -11,6 +11,7 @@ pub(crate) use attachments::{
     DocAttachment,
     process_attachments,
     extract_port_attachments,
+    ATTACHMENT_ONLY_PROMPT,
 };
 pub(crate) use shared::extract_provider_error;
 
@@ -80,8 +81,24 @@ impl Node for AiPromptNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
+        // Two attachment sources merged before processing:
+        //   1. config["attachments"]      — static files set at design time (config panel).
+        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
+        //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
+        //      The executor resolves the expression to a JSON string; extract_port_attachments()
+        //      parses it back into items so process_attachments() can classify them normally.
+        let static_atts: Vec<Value> = input.input["attachments"].as_array().cloned().unwrap_or_default();
+        let port_atts: Vec<Value>   = extract_port_attachments(&input.input["attachments_expr"]);
+        let mut attachments_raw = static_atts;
+        attachments_raw.extend(port_atts);
+        let pa = process_attachments(&attachments_raw);
+
+        // A message that is only files (e.g. a Chat panel send with no text) resolves
+        // the prompt expression to "". Usable attachment content stands in for the
+        // text; without it there is nothing to send and the prompt stays required.
         let prompt = match input.input["prompt"].as_str() {
             Some(p) if !p.trim().is_empty() => p.to_string(),
+            _ if pa.has_content() => ATTACHMENT_ONLY_PROMPT.to_string(),
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_PROMPT", "prompt field is required")),
         };
 
@@ -142,17 +159,6 @@ impl Node for AiPromptNode {
             }
         }
 
-        // Two attachment sources merged before processing:
-        //   1. config["attachments"]      — static files set at design time (config panel).
-        //   2. config["attachments_expr"] — dynamic files from the "Files" input port.
-        //      Canvas.ts writes {{SourceNode.output.files}} here when a wire is connected.
-        //      The executor resolves the expression to a JSON string; extract_port_attachments()
-        //      parses it back into items so process_attachments() can classify them normally.
-        let static_atts: Vec<Value> = input.input["attachments"].as_array().cloned().unwrap_or_default();
-        let port_atts: Vec<Value>   = extract_port_attachments(&input.input["attachments_expr"]);
-        let mut attachments_raw = static_atts;
-        attachments_raw.extend(port_atts);
-        let pa = process_attachments(&attachments_raw);
         if !pa.warning.is_empty() {
             system.push_str(&pa.warning);
         }
@@ -241,6 +247,33 @@ mod tests {
         let err = out.error.expect("must carry NodeError");
         assert_eq!(err.code, "MISSING_PROMPT");
         assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn empty_prompt_with_only_unusable_attachments_still_missing_prompt() {
+        let out = AiPromptNode.execute(make_input(json!({
+            "prompt": "",
+            "attachments": [{ "filename": "x.exe", "mime_type": "application/octet-stream", "data": "zz" }]
+        }))).await;
+        assert!(!out.success);
+        assert_eq!(out.error.expect("must carry NodeError").code, "MISSING_PROMPT");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_prompt_with_image_attachment_reaches_provider_with_image_and_text() {
+        let (base_url, rx) = spawn_capturing_mock(
+            r#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#
+        ).await;
+        let out = AiPromptNode.execute(make_input(json!({
+            "prompt": "", "provider": "gemini", "base_url": base_url, "api_key": "test-key",
+            "attachments_expr": r#"[{"filename":"a.png","mime_type":"image/png","data":"AAAA"}]"#
+        }))).await;
+        assert!(out.success, "attachment-only request must run: {:?}", out.error);
+        let req = rx.await.expect("mock never received a request");
+        let v: serde_json::Value = serde_json::from_str(&req.body).expect("request body was not valid JSON");
+        let parts = &v["contents"][0]["parts"];
+        assert!(!parts[0]["text"].as_str().unwrap_or("").is_empty(), "user text part must not be empty");
+        assert_eq!(parts[1]["inline_data"]["mime_type"].as_str(), Some("image/png"));
     }
 
     #[tokio::test]

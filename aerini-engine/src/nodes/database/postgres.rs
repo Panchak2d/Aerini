@@ -3,6 +3,7 @@ use tracing::warn;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput};
+use crate::nodes::util::OnDrop;
 
 // ── Postgres / MySQL execution ─────────────────────────────────────────────────
 
@@ -64,7 +65,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         match super::pool::get_mysql_pool(&url).await {
             Err(e) => NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
             Ok(pool) => if is_execute {
-                super::mysql::mysql_run_execute(&pool, &query, &params, input.cancel_token.clone()).await
+                super::mysql::mysql_run_execute(&pool, &query, &params, input.cancel_token.is_some()).await
             } else {
                 super::mysql::mysql_run_query(&pool, &query, &params).await
             },
@@ -76,7 +77,7 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
         match super::pool::get_pg_pool(&url).await {
             Err(e) => NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
             Ok(pool) => if is_execute {
-                pg_run_execute(&pool, &query, &params).await
+                pg_run_execute(&pool, &query, &params, input.cancel_token.is_some()).await
             } else {
                 pg_run_query(&pool, &query, &params).await
             },
@@ -93,18 +94,48 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
 
 // ── Postgres ──────────────────────────────────────────────────────────────────
 
-async fn pg_run_execute(pool: &sqlx::PgPool, query: &str, params: &[Value]) -> NodeOutput {
+async fn pg_run_execute(
+    pool: &sqlx::PgPool,
+    query: &str,
+    params: &[Value],
+    cancel_on_drop: bool,
+) -> NodeOutput {
     let rewritten = rewrite_pg_placeholders(query);
     let mut q = sqlx::query(&rewritten);
     for p in params {
         q = pg_bind_one(q, p);
     }
-    match q.execute(pool).await {
+
+    let mut cancel_unavailable = false;
+    let exec_result = if cancel_on_drop {
+        let mut conn = match pool.acquire().await {
+            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
+                format!("Execute failed: {}", e))),
+            Ok(c) => c,
+        };
+        let backend_pid = pg_capture_backend_pid(&mut conn).await;
+        cancel_unavailable = backend_pid.is_none();
+        let cancel_guard = backend_pid.map(|pid| {
+            let cancel_pool = pool.clone();
+            OnDrop::new(move || {
+                super::spawn_detached(async move { pg_cancel_backend(&cancel_pool, pid).await })
+            })
+        });
+        let result = q.execute(&mut *conn).await;
+        if let Some(guard) = cancel_guard {
+            guard.disarm();
+        }
+        result
+    } else {
+        q.execute(pool).await
+    };
+
+    match exec_result {
         Err(e) => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
             format!("Execute failed: {}", e))),
         Ok(result) => {
             let rows_affected = result.rows_affected();
-            NodeOutput::success_with_logs(
+            let mut output = NodeOutput::success_with_logs(
                 json!({
                     "rows": [],
                     "rows_affected": rows_affected,
@@ -112,9 +143,43 @@ async fn pg_run_execute(pool: &sqlx::PgPool, query: &str, params: &[Value]) -> N
                     "columns": []
                 }),
                 vec![format!("{} row(s) affected", rows_affected)],
-            )
+            );
+            if cancel_unavailable {
+                output.logs.push(
+                    "cancel-safety: could not capture this query's Postgres backend pid; \
+                     a cancellation mid-query cannot be signalled server-side this time".to_string(),
+                );
+            }
+            output
         }
     }
+}
+
+/// Reads the current session's backend pid, for `pg_cancel_backend` to target later.
+/// `None` on any read failure — the caller runs without cancel-safety instead of
+/// failing the query over a diagnostic read.
+async fn pg_capture_backend_pid(conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>) -> Option<i32> {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut **conn)
+        .await
+        .ok()
+}
+
+const CANCEL_BACKEND_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Best-effort: acquires a second pooled connection and asks Postgres to cancel
+/// the statement running on `backend_pid`, then gives up silently on acquire
+/// timeout or error. A cancel landing after the target statement already
+/// finished can hit that backend's next statement instead.
+async fn pg_cancel_backend(pool: &sqlx::PgPool, backend_pid: i32) {
+    let mut conn = match tokio::time::timeout(CANCEL_BACKEND_ACQUIRE_TIMEOUT, pool.acquire()).await {
+        Ok(Ok(c)) => c,
+        _ => return,
+    };
+    let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+        .bind(backend_pid)
+        .execute(&mut *conn)
+        .await;
 }
 
 async fn pg_run_query(pool: &sqlx::PgPool, query: &str, params: &[Value]) -> NodeOutput {

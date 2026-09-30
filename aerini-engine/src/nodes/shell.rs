@@ -7,7 +7,7 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
-use super::util::scrub_url_in_error;
+use super::util::{kill_group_on_drop, scrub_url_in_error};
 
 pub struct ShellExecNode;
 
@@ -81,6 +81,9 @@ impl Node for ShellExecNode {
             c
         };
 
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         if let Some(cwd) = input.input["cwd"].as_str() {
             cmd.current_dir(cwd);
         }
@@ -101,13 +104,14 @@ impl Node for ShellExecNode {
                 NodeError::unrecoverable("SPAWN_FAILED", e.to_string())
             ),
         };
+        let group_guard = kill_group_on_drop(child.id());
 
         // Move pipes into tasks so we can read stdout/stderr concurrently with wait().
         // Required: if the child fills the OS pipe buffer (~64 KB) and nothing is reading,
         // it blocks forever — wait() would never return.
         // child.wait() takes &mut self (not self), so child remains owned here for kill().
         const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB per stream
-        let stdout_task = tokio::spawn({
+        let mut stdout_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stdout.take();
             async move {
@@ -118,7 +122,7 @@ impl Node for ShellExecNode {
                 buf
             }
         });
-        let stderr_task = tokio::spawn({
+        let mut stderr_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stderr.take();
             async move {
@@ -132,11 +136,17 @@ impl Node for ShellExecNode {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            child.wait(),
+            async {
+                let status = child.wait().await;
+                let stdout_bytes = (&mut stdout_task).await.unwrap_or_default();
+                let stderr_bytes = (&mut stderr_task).await.unwrap_or_default();
+                (status, stdout_bytes, stderr_bytes)
+            },
         ).await;
 
         match result {
             Err(_) => {
+                drop(group_guard);
                 let _ = child.kill().await;
                 stdout_task.abort();
                 stderr_task.abort();
@@ -144,14 +154,14 @@ impl Node for ShellExecNode {
                     NodeError::recoverable("TIMEOUT", format!("Command timed out after {}s", timeout_secs))
                 )
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _, _)) => {
+                group_guard.disarm();
                 stdout_task.abort();
                 stderr_task.abort();
                 NodeOutput::failure(NodeError::unrecoverable("EXEC_ERROR", e.to_string()))
             }
-            Ok(Ok(status)) => {
-                let stdout_bytes = stdout_task.await.unwrap_or_default();
-                let stderr_bytes = stderr_task.await.unwrap_or_default();
+            Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
+                group_guard.disarm();
                 let stdout    = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr    = String::from_utf8_lossy(&stderr_bytes).to_string();
                 let exit_code = status.code().unwrap_or(-1);
@@ -364,6 +374,80 @@ fn redact_env_assignments(cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn shell_input(command: &str, timeout_secs: u64) -> NodeInput {
+        NodeInput {
+            node_id: "n".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "command": command, "timeout_secs": timeout_secs }),
+            resolved_credentials: std::collections::HashMap::new(),
+            context: crate::model::ExecutionContext::default(),
+            cancel_token: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn pid_is_running(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Ok(stat) => stat
+                .rsplit(')')
+                .next()
+                .and_then(|rest| rest.trim_start().chars().next())
+                != Some('Z'),
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_shell_node_future_kills_backgrounded_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("bg.pid");
+        let input = shell_input(
+            &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            60,
+        );
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(700),
+            ShellExecNode.execute(input),
+        )
+        .await;
+        assert!(outcome.is_err(), "command should still be running when the future is dropped");
+
+        let bg_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("background pid file written")
+            .trim()
+            .parse()
+            .unwrap();
+        let mut gone = false;
+        for _ in 0..40 {
+            if !pid_is_running(bg_pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if !gone {
+            unsafe { libc::kill(bg_pid, libc::SIGKILL); }
+        }
+        assert!(gone, "backgrounded descendant survived the node future being dropped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_node_times_out_when_a_backgrounded_process_holds_the_output_pipe() {
+        let started = std::time::Instant::now();
+        let out = ShellExecNode.execute(shell_input("sleep 30 &", 1)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!out.success);
+        assert_eq!(out.error.map(|e| e.code), Some("TIMEOUT".to_string()));
+    }
 
     // ── URL credential redaction ────────────────────────────────────────────
 

@@ -1,9 +1,14 @@
 // Uses wasip3's own re-exported `wit_bindgen` (not a direct `wit-bindgen` dependency)
 // so this crate's `generate!` output and wasip3's pre-generated clock/stream bindings
-// share exactly one version of the async runtime-support types.
+// share exactly one version of the async runtime-support types. `runtime_path` is
+// required because the crate has no direct `wit_bindgen` dependency for the macro's
+// default path to resolve, and streams of the generated `Event` must be created with
+// the `wit_stream` module `generate!` emits here, not `wasip3::wit_stream`, whose
+// `StreamPayload` trait is a separate type.
 wasip3::wit_bindgen::generate!({
     world: "spike-trigger",
     path: "wit",
+    runtime_path: "wasip3::wit_bindgen::rt",
 });
 
 use exports::aerini::spike_trigger::trigger::{Event, Guest};
@@ -17,7 +22,7 @@ struct SpikeTrigger;
 
 impl Guest for SpikeTrigger {
     async fn events() -> StreamReader<Event> {
-        let (mut tx, rx) = wasip3::wit_stream::new::<Event>();
+        let (mut tx, rx) = wit_stream::new::<Event>();
 
         // Detached from this call's own task: `events()` hands `rx` to the host and
         // returns immediately, while this task keeps writing until the fixed sequence

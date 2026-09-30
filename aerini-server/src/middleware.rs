@@ -2,9 +2,53 @@ use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use dashmap::DashMap;
 use std::collections::VecDeque;
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// `Instant` is measured from an arbitrary origin (boot time on Windows and
+/// macOS), so `now - window` can underflow shortly after boot. When it does,
+/// nothing can be older than the window yet and nothing is pruned.
+fn evict_stale<K: Eq + Hash>(map: &DashMap<K, VecDeque<Instant>>, window: Duration) {
+    let Some(cutoff) = Instant::now().checked_sub(window) else { return };
+    map.retain(|_, timestamps| {
+        timestamps.retain(|&ts| ts > cutoff);
+        !timestamps.is_empty()
+    });
+}
+
+fn record_hit<K: Eq + Hash>(
+    map:          &DashMap<K, VecDeque<Instant>>,
+    key:          K,
+    max_requests: usize,
+    window:       Duration,
+) -> bool {
+    let now    = Instant::now();
+    let cutoff = now.checked_sub(window);
+
+    let allowed = {
+        let mut entry = map.entry(key).or_default();
+        if let Some(cutoff) = cutoff {
+            while entry.front().is_some_and(|&ts| ts <= cutoff) {
+                entry.pop_front();
+            }
+        }
+        if entry.len() < max_requests {
+            entry.push_back(now);
+            true
+        } else {
+            false
+        }
+    };
+
+    // Best-effort memory bound between background eviction cycles.
+    if map.len() > 10_000 {
+        evict_stale(map, window);
+    }
+
+    allowed
+}
 
 /// Per-IP sliding-window rate limiter backed by a `DashMap`.
 ///
@@ -51,14 +95,7 @@ impl RateLimiter {
                 ticker.tick().await;
                 match weak.upgrade() {
                     None => break,
-                    Some(rl) => {
-                        let cutoff = Instant::now() - rl.window;
-                        // Remove entries that have no timestamps within the window.
-                        rl.map.retain(|_, timestamps| {
-                            timestamps.retain(|&ts| ts > cutoff);
-                            !timestamps.is_empty()
-                        });
-                    }
+                    Some(rl) => evict_stale(&rl.map, rl.window),
                 }
             }
         });
@@ -69,35 +106,21 @@ impl RateLimiter {
     /// Inline eviction fires when the map exceeds 10 000 entries to bound
     /// memory usage between background eviction cycles.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        let now    = Instant::now();
-        let cutoff = now - self.window;
-
-        let allowed = {
-            let mut entry = self.map.entry(ip).or_default();
-            // Prune timestamps outside the sliding window.
-            while entry.front().map(|&ts| ts <= cutoff).unwrap_or(false) {
-                entry.pop_front();
-            }
-            if entry.len() < self.max_requests {
-                entry.push_back(now);
-                true
-            } else {
-                false
-            }
-        };
-
-        // Inline eviction: if the map has grown very large, prune all stale entries.
-        // This is a best-effort bound on memory between background eviction cycles.
-        if self.map.len() > 10_000 {
-            let cutoff2 = now - self.window;
-            self.map.retain(|_, timestamps| {
-                timestamps.retain(|&ts| ts > cutoff2);
-                !timestamps.is_empty()
-            });
-        }
-
-        allowed
+        record_hit(&self.map, ip, self.max_requests, self.window)
     }
+}
+
+const MAX_KEY_BYTES: usize = 128;
+
+fn truncate_key(key: &str) -> &str {
+    if key.len() <= MAX_KEY_BYTES {
+        return key;
+    }
+    let mut end = MAX_KEY_BYTES;
+    while !key.is_char_boundary(end) {
+        end -= 1;
+    }
+    &key[..end]
 }
 
 /// Same sliding-window algorithm as [`RateLimiter`], keyed by an arbitrary
@@ -134,13 +157,7 @@ impl KeyedRateLimiter {
                 ticker.tick().await;
                 match weak.upgrade() {
                     None => break,
-                    Some(rl) => {
-                        let cutoff = Instant::now() - rl.window;
-                        rl.map.retain(|_, timestamps| {
-                            timestamps.retain(|&ts| ts > cutoff);
-                            !timestamps.is_empty()
-                        });
-                    }
+                    Some(rl) => evict_stale(&rl.map, rl.window),
                 }
             }
         });
@@ -149,33 +166,22 @@ impl KeyedRateLimiter {
     /// Returns `true` if a request keyed by `key` is within the rate limit.
     /// `key` is truncated to 128 bytes first (see struct doc).
     pub fn is_allowed(&self, key: &str) -> bool {
-        let key: String = key.chars().take(128).collect();
-        let now    = Instant::now();
-        let cutoff = now - self.window;
-
-        let allowed = {
-            let mut entry = self.map.entry(key).or_default();
-            while entry.front().map(|&ts| ts <= cutoff).unwrap_or(false) {
-                entry.pop_front();
-            }
-            if entry.len() < self.max_requests {
-                entry.push_back(now);
-                true
-            } else {
-                false
-            }
-        };
-
-        if self.map.len() > 10_000 {
-            let cutoff2 = now - self.window;
-            self.map.retain(|_, timestamps| {
-                timestamps.retain(|&ts| ts > cutoff2);
-                !timestamps.is_empty()
-            });
-        }
-
-        allowed
+        record_hit(&self.map, truncate_key(key).to_owned(), self.max_requests, self.window)
     }
+}
+
+/// `429` response shared by every rate-limit layer. Every limiter in this
+/// server uses a 60-second sliding window, so `Retry-After: 60` is the upper
+/// bound on how long a caller must wait before a slot frees up.
+pub fn too_many_requests() -> axum::response::Response {
+    let mut resp = (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({"error": "rate limit exceeded"})),
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(axum::http::header::RETRY_AFTER, HeaderValue::from(60u64));
+    resp
 }
 
 fn insert_common_security_headers(h: &mut axum::http::HeaderMap) {
@@ -285,4 +291,49 @@ pub async fn status_security_headers(
         )).expect("CSP header value is always valid ASCII"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn too_many_requests_sets_status_and_retry_after() {
+        let resp = too_many_requests();
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "60");
+    }
+
+    // A window longer than any possible uptime forces `now - window` to underflow.
+    const UNDERFLOWING_WINDOW_SECS: u64 = u64::MAX / 4;
+
+    #[test]
+    fn rate_limiter_survives_window_exceeding_uptime() {
+        let rl = RateLimiter::new(2, UNDERFLOWING_WINDOW_SECS);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert!(rl.is_allowed(ip));
+        assert!(rl.is_allowed(ip));
+        assert!(!rl.is_allowed(ip));
+    }
+
+    #[test]
+    fn keyed_rate_limiter_survives_window_exceeding_uptime() {
+        let rl = KeyedRateLimiter::new(2, UNDERFLOWING_WINDOW_SECS);
+        assert!(rl.is_allowed("wf"));
+        assert!(rl.is_allowed("wf"));
+        assert!(!rl.is_allowed("wf"));
+        for i in 0..10_001 {
+            rl.is_allowed(&format!("k{i}"));
+        }
+        assert!(!rl.is_allowed("wf"));
+    }
+
+    #[test]
+    fn keyed_limiter_key_cap_is_bytes_on_char_boundary() {
+        assert_eq!(truncate_key("short"), "short");
+        assert_eq!(truncate_key(&"a".repeat(200)).len(), 128);
+        assert_eq!(truncate_key(&"\u{e9}".repeat(100)).len(), 128);
+        assert_eq!(truncate_key(&"\u{20ac}".repeat(50)).len(), 126);
+    }
 }

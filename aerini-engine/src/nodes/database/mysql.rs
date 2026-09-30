@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
+use crate::nodes::util::OnDrop;
 
 // ── MySQL ─────────────────────────────────────────────────────────────────────
 
@@ -11,7 +11,7 @@ pub(super) async fn mysql_run_execute(
     pool: &sqlx::MySqlPool,
     query: &str,
     params: &[Value],
-    cancel_token: Option<CancellationToken>,
+    kill_on_cancel: bool,
 ) -> NodeOutput {
     let mut q = sqlx::query(query);
     for p in params {
@@ -19,7 +19,7 @@ pub(super) async fn mysql_run_execute(
     }
 
     let mut kill_mitigation_unavailable = false;
-    let exec_result = if let Some(token) = cancel_token {
+    let exec_result = if kill_on_cancel {
         let mut conn = match pool.acquire().await {
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
                 format!("Execute failed: {}", e))),
@@ -27,16 +27,15 @@ pub(super) async fn mysql_run_execute(
         };
         let connection_id = mysql_capture_connection_id(&mut conn).await;
         kill_mitigation_unavailable = connection_id.is_none();
-        let watcher = connection_id.map(|id| {
-            let watch_pool = pool.clone();
-            tokio::spawn(async move {
-                token.cancelled().await;
-                mysql_kill_query(&watch_pool, id).await;
+        let kill_on_drop = connection_id.map(|id| {
+            let kill_pool = pool.clone();
+            OnDrop::new(move || {
+                super::spawn_detached(async move { mysql_kill_query(&kill_pool, id).await })
             })
         });
         let result = q.execute(&mut *conn).await;
-        if let Some(handle) = watcher {
-            handle.abort();
+        if let Some(guard) = kill_on_drop {
+            guard.disarm();
         }
         result
     } else {
@@ -219,23 +218,21 @@ mod multi_statement_smuggling_tests {
 #[cfg(test)]
 mod cancellation_kill_tests {
     use super::{mysql_kill_query, mysql_run_execute};
-    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
-    async fn mysql_run_execute_with_cancel_token_completes_normally_when_not_cancelled() {
+    async fn mysql_run_execute_with_kill_on_cancel_completes_normally_when_not_cancelled() {
         let url = std::env::var("DATABASE_URL_MYSQL")
             .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
         let pool = sqlx::MySqlPool::connect(&url)
             .await
             .expect("failed to connect to DATABASE_URL_MYSQL");
 
-        let token = CancellationToken::new();
-        let result = mysql_run_execute(&pool, "SELECT 1", &[], Some(token)).await;
+        let result = mysql_run_execute(&pool, "SELECT 1", &[], true).await;
 
         assert!(
             result.success,
-            "expected a fast query to succeed normally when its cancel_token is never cancelled, got: {:?}",
+            "expected a fast query to succeed normally when kill-on-cancel is armed but never fires, got: {:?}",
             result.error
         );
     }

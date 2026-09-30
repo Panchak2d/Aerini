@@ -315,6 +315,8 @@ function output(v) {{ __result = v; }}
         // kill_on_drop ensures the subprocess is killed on ANY drop path
         // (workflow-level timeout, abort, panic-unwind), not just the per-node timeout branch.
         cmd.kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.arg("--input-type=module");
         if sandbox_enabled {
             // Blocks eval() and new Function() from generating executable code.
@@ -442,6 +444,7 @@ function output(v) {{ __result = v; }}
                 )
             ),
         };
+        let group_guard = super::util::kill_group_on_drop(child.id());
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
@@ -449,7 +452,7 @@ function output(v) {{ __result = v; }}
         }
 
         const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB per stream
-        let stdout_task = tokio::spawn({
+        let mut stdout_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stdout.take();
             async move {
@@ -460,7 +463,7 @@ function output(v) {{ __result = v; }}
                 buf
             }
         });
-        let stderr_task = tokio::spawn({
+        let mut stderr_task = tokio::spawn({
             use tokio::io::AsyncReadExt;
             let mut pipe = child.stderr.take();
             async move {
@@ -474,13 +477,19 @@ function output(v) {{ __result = v; }}
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            child.wait(),
+            async {
+                let status = child.wait().await;
+                let stdout_bytes = (&mut stdout_task).await.unwrap_or_default();
+                let stderr_bytes = (&mut stderr_task).await.unwrap_or_default();
+                (status, stdout_bytes, stderr_bytes)
+            },
         ).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
             Err(_) => {
+                drop(group_guard);
                 let _ = child.kill().await;
                 stdout_task.abort();
                 stderr_task.abort();
@@ -488,14 +497,14 @@ function output(v) {{ __result = v; }}
                     NodeError::unrecoverable("TIMEOUT", format!("Code exceeded {}s timeout", timeout_secs))
                 )
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _, _)) => {
+                group_guard.disarm();
                 stdout_task.abort();
                 stderr_task.abort();
                 NodeOutput::failure(NodeError::unrecoverable("EXEC_ERROR", e.to_string()))
             }
-            Ok(Ok(status)) => {
-                let stdout_bytes = stdout_task.await.unwrap_or_default();
-                let stderr_bytes = stderr_task.await.unwrap_or_default();
+            Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
+                group_guard.disarm();
                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
 

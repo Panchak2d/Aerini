@@ -40,7 +40,7 @@ You'll need:
 
 | Tool | Version |
 |---|---|
-| Rust (stable) | 1.95+ |
+| Rust (stable) | 1.96+ |
 | Node.js | 20.19+, 22.13+, or 24+ |
 | Tauri CLI | 2.x |
 
@@ -62,9 +62,9 @@ Uninstalling the app doesn't delete your workflows, credentials, or settings. Th
 
 | OS | Location |
 |---|---|
-| macOS | `~/Library/Application Support/com.aerini.app` |
-| Windows | `%APPDATA%\com.aerini.app` |
-| Linux | `~/.local/share/com.aerini.app` |
+| macOS | `~/Library/Application Support/org.aerini.desktop` |
+| Windows | `%APPDATA%\org.aerini.desktop` |
+| Linux | `~/.local/share/org.aerini.desktop` |
 
 Delete that folder too if you want a completely clean removal. One thing it won't contain: the encryption key for your stored credentials sits in your OS [keyring](../glossary.md#keyring) (macOS Keychain, Windows Credential Manager, or Linux Secret Service) rather than in that folder, so a thorough wipe means clearing it from there as well if your keyring manager makes that easy to do.
 
