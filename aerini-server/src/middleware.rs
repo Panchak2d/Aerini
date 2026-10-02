@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,13 +19,100 @@ fn evict_stale<K: Eq + Hash>(map: &DashMap<K, VecDeque<Instant>>, window: Durati
     });
 }
 
+/// Inline eviction sweeps start once a limiter holds more than this many keys.
+const EVICT_THRESHOLD: usize = 10_000;
+
+/// Past this many tracked keys, keys not yet in the map are let through
+/// untracked until a sweep brings the map back under the ceiling.
+const MAX_TRACKED_KEYS: usize = 50_000;
+
+/// Minimum spacing between inline maintenance runs.
+const MAINTENANCE_INTERVAL_MS: u64 = 1_000;
+
+const NEVER_RAN: u64 = u64::MAX;
+
+/// Lock-free throttle for inline maintenance, shared by every limiter.
+///
+/// `last_ms` is the millisecond offset from `base` of the last run, so a
+/// single `compare_exchange` lets exactly one concurrent caller win a slot.
+/// `saturated` is refreshed by each run and read on the request path, which
+/// keeps the hot path free of any map-wide operation.
+struct EvictionGate {
+    base:      Instant,
+    last_ms:   AtomicU64,
+    saturated: AtomicBool,
+}
+
+impl EvictionGate {
+    fn new() -> Self {
+        Self {
+            base:      Instant::now(),
+            last_ms:   AtomicU64::new(NEVER_RAN),
+            saturated: AtomicBool::new(false),
+        }
+    }
+
+    fn try_acquire(&self, now: Instant) -> bool {
+        let elapsed = u64::try_from(now.saturating_duration_since(self.base).as_millis())
+            .unwrap_or(NEVER_RAN - 1);
+        let last = self.last_ms.load(Ordering::Relaxed);
+        if last != NEVER_RAN && elapsed.saturating_sub(last) < MAINTENANCE_INTERVAL_MS {
+            return false;
+        }
+        self.last_ms
+            .compare_exchange(last, elapsed, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+
+/// Runs at most once per interval across all callers. Returns whether a
+/// stale-entry sweep ran.
+fn maintain<K: Eq + Hash>(
+    map:    &DashMap<K, VecDeque<Instant>>,
+    gate:   &EvictionGate,
+    window: Duration,
+    now:    Instant,
+) -> bool {
+    if !gate.try_acquire(now) {
+        return false;
+    }
+    let sweep = map.len() > EVICT_THRESHOLD;
+    if sweep {
+        evict_stale(map, window);
+    }
+    let saturated = map.len() >= MAX_TRACKED_KEYS;
+    if gate.saturated.swap(saturated, Ordering::Relaxed) != saturated && saturated {
+        tracing::warn!(
+            limit = MAX_TRACKED_KEYS,
+            "rate limiter key table is full; new keys are not tracked until stale entries expire"
+        );
+    }
+    sweep
+}
+
 fn record_hit<K: Eq + Hash>(
     map:          &DashMap<K, VecDeque<Instant>>,
+    gate:         &EvictionGate,
     key:          K,
     max_requests: usize,
     window:       Duration,
 ) -> bool {
-    let now    = Instant::now();
+    record_hit_at(map, gate, key, max_requests, window, Instant::now())
+}
+
+fn record_hit_at<K: Eq + Hash>(
+    map:          &DashMap<K, VecDeque<Instant>>,
+    gate:         &EvictionGate,
+    key:          K,
+    max_requests: usize,
+    window:       Duration,
+    now:          Instant,
+) -> bool {
+    if gate.saturated.load(Ordering::Relaxed) && !map.contains_key(&key) {
+        maintain(map, gate, window, now);
+        return true;
+    }
+
     let cutoff = now.checked_sub(window);
 
     let allowed = {
@@ -42,11 +130,7 @@ fn record_hit<K: Eq + Hash>(
         }
     };
 
-    // Best-effort memory bound between background eviction cycles.
-    if map.len() > 10_000 {
-        evict_stale(map, window);
-    }
-
+    maintain(map, gate, window, now);
     allowed
 }
 
@@ -63,11 +147,15 @@ fn record_hit<K: Eq + Hash>(
 /// the window boundary because the window is measured from each individual
 /// request's timestamp, not from an epoch boundary.
 ///
-/// Memory: each entry holds at most `max_requests` timestamps. The map is
-/// bounded to 10 000 active IPs, with stale entries evicted via a background
-/// task (see `spawn_eviction_task`).
+/// Memory: each entry holds at most `max_requests` timestamps. Stale entries
+/// are evicted by a background task (see `spawn_eviction_task`). Once the map
+/// holds more than 10 000 IPs, requests also trigger an inline sweep, at most
+/// one per second, so the map can exceed 10 000 entries between sweeps. If
+/// 50 000 IPs are tracked at once, further IPs are let through untracked
+/// (fail open) until a sweep frees space; tracked IPs stay limited.
 pub struct RateLimiter {
     map:          DashMap<IpAddr, VecDeque<Instant>>,
+    gate:         EvictionGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -76,6 +164,7 @@ impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
+            gate:         EvictionGate::new(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -102,11 +191,8 @@ impl RateLimiter {
     }
 
     /// Returns `true` if the request from `ip` is within the rate limit.
-    ///
-    /// Inline eviction fires when the map exceeds 10 000 entries to bound
-    /// memory usage between background eviction cycles.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        record_hit(&self.map, ip, self.max_requests, self.window)
+        record_hit(&self.map, &self.gate, ip, self.max_requests, self.window)
     }
 }
 
@@ -123,17 +209,15 @@ fn truncate_key(key: &str) -> &str {
     &key[..end]
 }
 
-/// Same sliding-window algorithm as [`RateLimiter`], keyed by an arbitrary
-/// `String` instead of `IpAddr`. Not merged into `RateLimiter` as a generic:
-/// `RateLimiter` is public API with its own call sites and tests fixed to
-/// `IpAddr`, and introducing a type parameter there would touch every one of
-/// them for a single new caller. This exists for the widget trigger route's
-/// per-workflow_id limit (routes::widget), where the key is caller-supplied
-/// and unauthenticated, so it is capped at 128 bytes before use — same
-/// reasoning as any untrusted-input-as-map-key case, unbounded key length is
-/// an unbounded-memory footgun.
+/// Same sliding-window algorithm as [`RateLimiter`], keyed by `String`
+/// instead of `IpAddr`. Used for the widget trigger route's per-workflow_id
+/// limit (routes::widget), where the key is caller-supplied and
+/// unauthenticated, so it is truncated to 128 bytes before use. Memory
+/// behaviour matches `RateLimiter`: inline sweeps at most once per second above
+/// 10 000 keys, and unseen keys pass untracked while 50 000 are tracked.
 pub struct KeyedRateLimiter {
     map:          DashMap<String, VecDeque<Instant>>,
+    gate:         EvictionGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -142,6 +226,7 @@ impl KeyedRateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
+            gate:         EvictionGate::new(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -166,7 +251,7 @@ impl KeyedRateLimiter {
     /// Returns `true` if a request keyed by `key` is within the rate limit.
     /// `key` is truncated to 128 bytes first (see struct doc).
     pub fn is_allowed(&self, key: &str) -> bool {
-        record_hit(&self.map, truncate_key(key).to_owned(), self.max_requests, self.window)
+        record_hit(&self.map, &self.gate, truncate_key(key).to_owned(), self.max_requests, self.window)
     }
 }
 
@@ -203,15 +288,12 @@ fn insert_common_security_headers(h: &mut axum::http::HeaderMap) {
 /// (`/aerini-widget.js`) that is intentionally registered outside the
 /// `protected` router (see `api_server/mod.rs` route table doc comment).
 ///
-/// This stays a single layer at its original position — the outermost layer
-/// on `app`, added last in `api_server/mod.rs` — rather than being split into
-/// two Router-level layers around the CORS/rate-limit/body-limit stack.
-/// Splitting it would reorder `cors` to be outermost, and `CorsLayer` returns
-/// preflight (`OPTIONS`) responses directly without calling the inner
-/// service — confirmed via tower-http issue #497. That would mean `/api/*`
-/// preflight responses stop getting these headers entirely, not just a
-/// different `cache-control` value. Branching by path here keeps every other
-/// route's layering, and therefore its preflight behaviour, byte-identical.
+/// This must stay one layer, outermost on `app` (added last in
+/// `api_server/mod.rs`). `CorsLayer` answers preflight (`OPTIONS`) requests
+/// itself without calling the inner service (tower-http issue #497), so any
+/// layer placed outside it would stop `/api/*` preflight responses from
+/// getting these headers. It branches by path instead of splitting into two
+/// layers for the same reason.
 ///
 /// CSP is `default-src 'none'` for the JSON API — it returns only JSON, never
 /// HTML. The widget asset is excluded from that CSP value: a
@@ -295,8 +377,24 @@ pub async fn status_security_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::{too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter};
+    use super::{
+        maintain, record_hit_at, too_many_requests, truncate_key, EvictionGate, KeyedRateLimiter,
+        RateLimiter, EVICT_THRESHOLD, MAINTENANCE_INTERVAL_MS, MAX_TRACKED_KEYS,
+    };
+    use dashmap::DashMap;
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::{Duration, Instant};
+
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    fn live_map(n: usize, at: Instant) -> DashMap<u32, VecDeque<Instant>> {
+        let map = DashMap::new();
+        for i in 0..n {
+            map.insert(i as u32, VecDeque::from([at]));
+        }
+        map
+    }
 
     #[test]
     fn too_many_requests_sets_status_and_retry_after() {
@@ -335,5 +433,55 @@ mod tests {
         assert_eq!(truncate_key(&"a".repeat(200)).len(), 128);
         assert_eq!(truncate_key(&"\u{e9}".repeat(100)).len(), 128);
         assert_eq!(truncate_key(&"\u{20ac}".repeat(50)).len(), 126);
+    }
+
+    #[test]
+    fn inline_sweep_runs_once_per_interval() {
+        let gate = EvictionGate::new();
+        let t0 = gate.base;
+        let map = live_map(EVICT_THRESHOLD + 1, t0);
+        let sweeps = (0..MAINTENANCE_INTERVAL_MS)
+            .filter(|&ms| maintain(&map, &gate, WINDOW, t0 + Duration::from_millis(ms)))
+            .count();
+        assert_eq!(sweeps, 1);
+    }
+
+    #[test]
+    fn inline_sweep_runs_again_after_interval() {
+        let gate = EvictionGate::new();
+        let t0 = gate.base;
+        let map = live_map(EVICT_THRESHOLD + 1, t0);
+        let interval = Duration::from_millis(MAINTENANCE_INTERVAL_MS);
+        assert!(maintain(&map, &gate, WINDOW, t0));
+        assert!(!maintain(&map, &gate, WINDOW, t0 + interval - Duration::from_millis(1)));
+        assert!(maintain(&map, &gate, WINDOW, t0 + interval));
+        assert!(!maintain(&map, &gate, WINDOW, t0 + interval));
+    }
+
+    #[test]
+    fn limit_holds_while_sweeps_are_skipped() {
+        let gate = EvictionGate::new();
+        let t0 = gate.base;
+        let map = live_map(EVICT_THRESHOLD + 1, t0);
+        assert!(maintain(&map, &gate, WINDOW, t0));
+        let results: Vec<bool> = (0..5)
+            .map(|ms| {
+                let now = t0 + Duration::from_millis(ms);
+                record_hit_at(&map, &gate, u32::MAX, 3, WINDOW, now)
+            })
+            .collect();
+        assert_eq!(results, [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn full_table_admits_unseen_keys_untracked_and_keeps_limiting_tracked_ones() {
+        let gate = EvictionGate::new();
+        let t0 = gate.base;
+        let map = live_map(MAX_TRACKED_KEYS, t0);
+        map.insert(u32::MAX, VecDeque::from([t0; 3]));
+        assert!(maintain(&map, &gate, WINDOW, t0));
+        assert!(record_hit_at(&map, &gate, u32::MAX - 1, 3, WINDOW, t0));
+        assert!(!map.contains_key(&(u32::MAX - 1)));
+        assert!(!record_hit_at(&map, &gate, u32::MAX, 3, WINDOW, t0));
     }
 }

@@ -49,17 +49,27 @@ const INTEGRATION_NODE_IDS = new Set([
 const FILES_STORAGE_NODE_IDS = new Set(["file", "save_to_folder", "s3_storage", "social_upload"]);
 const ACTION_SUBHEADER_ORDER = ["Triggers", "Core Actions", "Files & Storage", "Integrations"];
 
-function actionSubheader(typeId: string): string {
-  if (TRIGGER_NODE_IDS.has(typeId)) return "Triggers";
-  if (INTEGRATION_NODE_IDS.has(typeId)) return "Integrations";
-  if (FILES_STORAGE_NODE_IDS.has(typeId)) return "Files & Storage";
+// A built-in trigger is recognized by id; a plugin trigger by the backend's
+// `trigger_capable` flag. Only the palette's grouping and chip filter use
+// this: port layout and canvas overlays still key off TRIGGER_NODE_IDS, since
+// a plugin trigger can also sit mid-graph as an ordinary node.
+function isTriggerDescriptor(desc: NodeDescriptor): boolean {
+  return TRIGGER_NODE_IDS.has(desc.type_id) || desc.trigger_capable === true;
+}
+
+function actionSubheader(desc: NodeDescriptor): string {
+  if (isTriggerDescriptor(desc)) return "Triggers";
+  if (INTEGRATION_NODE_IDS.has(desc.type_id)) return "Integrations";
+  if (FILES_STORAGE_NODE_IDS.has(desc.type_id)) return "Files & Storage";
   return "Core Actions";
 }
 
 function buildCategories(nodes: NodeDescriptor[]): Category[] {
   const groups = new Map<string, NodeDescriptor[]>();
   for (const node of nodes) {
-    const cat = node.node_type ?? "other";
+    // A plugin trigger declares its own category (e.g. "utility"), but is
+    // listed with the built-in triggers, under Actions.
+    const cat = isTriggerDescriptor(node) ? "action" : (node.node_type ?? "other");
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat)!.push(node);
   }
@@ -74,7 +84,7 @@ function buildCategories(nodes: NodeDescriptor[]): Category[] {
     }
     const buckets = new Map<string, NodeDescriptor[]>();
     for (const n of nodesInCat) {
-      const label = actionSubheader(n.type_id);
+      const label = actionSubheader(n);
       if (!buckets.has(label)) buckets.set(label, []);
       buckets.get(label)!.push(n);
     }
@@ -222,7 +232,7 @@ export function buildSidebarPalette(
       // therefore this item's palette-category header) stays untouched —
       // schedule/webhook/manual_trigger still group under "Actions". Only
       // the chip-filter attribute and dot color swap to "trigger".
-      const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
+      const isTrigger = isTriggerDescriptor(desc);
       const catKey = isTrigger ? "trigger" : desc.node_type;
       item.dataset.cat = catKey;
       // Plugins are never in NODE_SVG_INNER (icon-cache.ts is a static,

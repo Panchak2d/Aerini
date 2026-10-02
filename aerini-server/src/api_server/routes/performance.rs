@@ -15,7 +15,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, acl_permits, require_read, require_workflow_acl, require_write};
+use super::state::{internal_error, ApiState, acl_permits, require_read, require_workflow_acl, require_write};
 
 pub async fn get_live(
     State(s):          State<ApiState>,
@@ -27,13 +27,7 @@ pub async fn get_live(
 
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f) => f,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error("ACL lookup failed", e).into_response(),
     };
 
     // In-memory DashMap iteration, same as `all_live_snapshots`'s own doc
@@ -81,8 +75,8 @@ pub async fn list_reports(
                 "items": items, "limit": effective_limit, "offset": offset.max(0), "has_more": has_more
             }))).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("database operation failed", e).into_response(),
+        Err(e)     => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -99,11 +93,11 @@ pub async fn get_report(
         Ok(Ok(Some(record))) => match acl_permits(&s, &caller, &record.report.workflow_id).await {
             Ok(true)  => (StatusCode::OK, Json(json!(record))).into_response(),
             Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
-            Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("ACL lookup failed: {}", e)}))).into_response(),
+            Err(e)    => internal_error("ACL lookup failed", e).into_response(),
         },
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
-        Ok(Err(e))   => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-        Err(e)       => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Err(e))   => internal_error("database operation failed", e).into_response(),
+        Err(e)       => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -119,14 +113,14 @@ pub async fn delete_report(
     let record = match tokio::task::spawn_blocking(move || db.get_performance_report(&lookup)).await {
         Ok(Ok(Some(record))) => record,
         Ok(Ok(None)) => return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
-        Ok(Err(e))   => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-        Err(e)       => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Err(e))   => return internal_error("database operation failed", e).into_response(),
+        Err(e)       => return internal_error("request task failed", e).into_response(),
     };
 
     match acl_permits(&s, &caller, &record.report.workflow_id).await {
         Ok(true)  => {}
         Ok(false) => return (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
-        Err(e)    => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("ACL lookup failed: {}", e)}))).into_response(),
+        Err(e)    => return internal_error("ACL lookup failed", e).into_response(),
     }
 
     // Benign TOCTOU: if another request deletes the same row between the
@@ -138,8 +132,8 @@ pub async fn delete_report(
     let delete = run_id.clone();
     match tokio::task::spawn_blocking(move || db2.delete_performance_report(&delete)).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Err(e))  => internal_error("database operation failed", e).into_response(),
+        Err(e)      => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -160,8 +154,8 @@ pub async fn clear_reports(
     let workflow_id = p.workflow_id.clone();
     match tokio::task::spawn_blocking(move || db.clear_performance_reports(&workflow_id)).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(Err(e))  => internal_error("database operation failed", e).into_response(),
+        Err(e)      => internal_error("request task failed", e).into_response(),
     }
 }
 

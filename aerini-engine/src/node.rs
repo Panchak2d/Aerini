@@ -371,6 +371,12 @@ pub struct NodeDescriptor {
     pub dynamic_ports: bool,
     /// True when this node was loaded from a WASM plugin rather than built in.
     pub is_plugin: bool,
+    /// True when this node can start a workflow run (see
+    /// [`Node::is_trigger_capable`]). The frontend uses this to list a plugin
+    /// trigger under the palette's Triggers section; built-in triggers are
+    /// recognized by type id there.
+    #[serde(default)]
+    pub trigger_capable: bool,
     /// One or two sentence plain-text description of what this node does.
     /// Empty string when the node does not override `Node::description()`.
     #[serde(default)]
@@ -396,6 +402,7 @@ impl NodeDescriptor {
             ports: node.ports(),
             dynamic_ports: node.is_dynamic_ports(),
             is_plugin: node.is_plugin(),
+            trigger_capable: node.is_trigger_capable(),
             description: node.description().to_string(),
             icon: node.icon().to_string(),
             author: node.author().to_string(),
@@ -477,6 +484,28 @@ mod tests {
         async fn execute(&self, _input: NodeInput) -> NodeOutput {
             unimplemented!("not exercised by descriptor tests")
         }
+    }
+
+    struct TriggerStubNode;
+
+    #[async_trait]
+    impl Node for TriggerStubNode {
+        fn type_id(&self) -> &'static str { "trigger_stub" }
+        fn display_name(&self) -> &'static str { "Trigger Stub" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "1.0.0" }
+        fn input_schema(&self) -> Value { Value::Null }
+        fn output_schema(&self) -> Value { Value::Null }
+        fn is_trigger_capable(&self) -> bool { true }
+        async fn execute(&self, _input: NodeInput) -> NodeOutput {
+            unimplemented!("not exercised by descriptor tests")
+        }
+    }
+
+    #[test]
+    fn descriptor_reports_trigger_capability_only_when_node_declares_it() {
+        assert!(NodeDescriptor::from_node(&TriggerStubNode).trigger_capable);
+        assert!(!NodeDescriptor::from_node(&StubNode("plain_node")).trigger_capable);
     }
 
     #[test]

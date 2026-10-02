@@ -20,6 +20,8 @@ export interface NodeDescriptor {
   dynamic_ports?: boolean;
   /** True when this node was loaded from a WASM plugin rather than built in. */
   is_plugin?: boolean;
+  /** True when this node can start a workflow run; plugin triggers are listed under the palette's Triggers section. */
+  trigger_capable?: boolean;
   /** One or two sentence description shown in the palette tooltip. Empty string when not set. */
   description?: string;
   /** Raw inner-SVG-shape markup declared by the plugin; untrusted until passed through getPluginIconSvg. Empty/absent -> generic plugin glyph. */

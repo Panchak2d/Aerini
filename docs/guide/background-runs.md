@@ -63,6 +63,8 @@ Run on launch is meant for Interval, Cron, and Webhook triggers, which repeat in
 
 Click **Background Runs** in the sidebar to see every workflow currently or recently running in the background: name, a status dot, and either a countdown to its next run or how long its last run took.
 
+Schedule triggers always have the countdown. A trigger plugin has one only if the plugin reports when its next event is due (see [Trigger plugins](../development/plugin-authoring.md#showing-a-countdown-to-the-next-event)); otherwise the job just shows "running". If a plugin's reported time passes without an event, the panel shows "running…" until the plugin reports a new one.
+
 ![The Background Runs panel with a live countdown to the next scheduled fire](../public/images/background-runs-panel.png)
 
 From here you can stop a job that's currently running. Anything that isn't running (stopped, done, or failed) instead shows two actions: restart it, or dismiss it from the list. Clicking a job opens that workflow and jumps straight to its **History** tab.

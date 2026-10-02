@@ -1,5 +1,6 @@
 import { runWorkflow, cancelRun, startScheduledWorkflow, parseSchedulerError, REPLAY_NODE_OUTPUT_KEY, type WorkflowResult } from "../ipc/workflow";
 import { TRIGGER_NODE_IDS } from "../node-ids";
+import { isPluginTriggerType } from "../canvas/node-registry";
 import { serialize } from "../canvas/CanvasSerializer";
 import type { Canvas } from "../canvas/Canvas";
 import { checkDangerousNodes } from "../validation";
@@ -838,16 +839,20 @@ export class RunManager {
       return false;
     }
 
-    // Detect trigger type from the snapshot — find the entry node
-    // (first node with node_type_id = schedule or webhook)
+    // Detect trigger type from the snapshot. A built-in trigger node counts
+    // wherever it sits; a plugin trigger counts only as an entry node (no
+    // incoming edge), which is where the scheduler looks for it.
     let triggerType: string | null = null;
     try {
-      const doc = JSON.parse(json) as { nodes?: Array<{ node_type_id: string }> };
+      const doc = JSON.parse(json) as {
+        nodes?: Array<{ id: string; node_type_id: string }>;
+        edges?: Array<{ to_node: string }>;
+      };
       const nodes = doc.nodes ?? [];
-      // entry node = no incoming edges; simplest check: node_type_id is a known trigger
-      const triggerNode = nodes.find(n =>
-        TRIGGER_NODE_IDS.has(n.node_type_id)
-      );
+      const hasIncoming = new Set((doc.edges ?? []).map(e => e.to_node));
+      const triggerNode =
+        nodes.find(n => TRIGGER_NODE_IDS.has(n.node_type_id)) ??
+        nodes.find(n => !hasIncoming.has(n.id) && isPluginTriggerType(n.node_type_id));
       triggerType = triggerNode?.node_type_id ?? null;
     } catch {
       this.onToast(`Could not parse workflow — invalid format`, "error");
@@ -857,7 +862,7 @@ export class RunManager {
     // Manual trigger or no recognised trigger — reject with clear message
     if (!triggerType) {
       this.onToast(
-        `"${name}" has no Schedule or Webhook trigger. Background run is only for recurring workflows. Use the Run button for one-shot execution.`,
+        `"${name}" has no Schedule, Webhook or plugin trigger. Background run is only for recurring workflows. Use the Run button for one-shot execution.`,
         "error"
       );
       return false;
@@ -900,6 +905,27 @@ export class RunManager {
 // ── BgJobStore ────────────────────────────────────────────────────────────────
 // Module-level, survives canvas switches. UI reads this to render the sidebar.
 
+const TRIGGER_TYPES = ["interval", "cron", "once", "webhook", "manual", "plugin"] as const;
+export type TriggerType = typeof TRIGGER_TYPES[number];
+
+export function parseTriggerType(raw: unknown): TriggerType | undefined {
+  return typeof raw === "string" && (TRIGGER_TYPES as readonly string[]).includes(raw)
+    ? (raw as TriggerType)
+    : undefined;
+}
+
+// Reads only the `kind` tag out of a ScheduledJobRow's JSON-encoded trigger;
+// every other field of that JSON (a webhook's secret, a plugin's config) is
+// left unread.
+export function triggerTypeFromRow(triggerKind: string | undefined): TriggerType | undefined {
+  if (!triggerKind) return undefined;
+  try {
+    return parseTriggerType((JSON.parse(triggerKind) as { kind?: unknown }).kind);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface BgJob {
   id: string;
   name: string;
@@ -910,7 +936,10 @@ export interface BgJob {
   error?: string;
   nextRunAt?: string | null;
   runCount?: number;
-  alwaysOn?: boolean;
+  triggerType?: TriggerType;
+  // True only while the scheduler reports the job armed and between runs;
+  // unset when that is not known.
+  waiting?: boolean;
 }
 
 const _bgJobs = new Map<string, BgJob>();
@@ -937,7 +966,7 @@ export function removeBgJob(id: string): void {
 export function hydrateBgJobsFromScheduler(rows: Array<{
   workflow_id: string; workflow_name: string; status: string;
   run_count: number; last_run_at: string | null; last_error: string | null;
-  next_run_at: string | null;
+  next_run_at: string | null; trigger_kind?: string;
 }>): void {
   for (const row of rows) {
     const existing = _bgJobs.get(row.workflow_id);
@@ -958,6 +987,7 @@ export function hydrateBgJobsFromScheduler(rows: Array<{
       // immediately on startup without waiting for the first scheduler event.
       nextRunAt: row.next_run_at ?? undefined,
       runCount:  row.run_count,
+      triggerType: triggerTypeFromRow(row.trigger_kind) ?? existing?.triggerType,
     });
   }
   _bgJobListener?.();
@@ -976,6 +1006,7 @@ export function updateBgJobStoreFromEvent(evt: {
   last_run_at:   string | null;
   next_run_at:   string | null;
   last_error:    string | null;
+  trigger_type?: string | null;
 }): void {
   const existing = _bgJobs.get(evt.workflow_id);
   const startedAt = existing?.startedAt ?? Date.now();
@@ -1006,7 +1037,13 @@ export function updateBgJobStoreFromEvent(evt: {
     // emits a completion event with next_run_at=null immediately before emitting
     // the real next timestamp. Overwriting with null causes a visible countdown
     // flicker. The real value arrives in the very next event and will update it.
-    nextRunAt:   evt.next_run_at ?? existing?.nextRunAt,
+    // A stopped or finished job has no next fire; keeping the old value would
+    // show a stale countdown if it is started again.
+    nextRunAt:   evt.status === "done" || evt.status === "stopped"
+                   ? undefined
+                   : (evt.next_run_at ?? existing?.nextRunAt),
     runCount:    evt.run_count,
+    triggerType: parseTriggerType(evt.trigger_type) ?? existing?.triggerType,
+    waiting:     evt.status === "waiting",
   });
 }

@@ -155,7 +155,9 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # `wasmtime-wasi`'s "p3" feature gates `wasmtime_wasi::p3` (WASI 0.3 /
 # component-model-async), used by the second, dedicated async Engine that
 # hosts trigger-plugin components (`aerini-node-with-trigger` world). The
-# default (p2, sync) plugin engine is unaffected by this feature.
+# default (p2, sync) plugin engine is unaffected by this feature. "p2" is
+# listed explicitly because "p3" does not imply it and the trigger linker
+# registers `wasmtime_wasi::p2` too.
 #
 # All three pinned to an EXACT version (`=49.0.1`) rather than a caret range:
 # both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as
@@ -169,7 +171,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # Wasmtime only patches its two most recent releases (plus periodic LTS
 # lines), so an exact pin also has to be moved forward when the next major ships.
 wasmtime           = { version = "=49.0.1", features = ["component-model"] }
-wasmtime-wasi      = { version = "=49.0.1", features = ["p3"] }
+wasmtime-wasi      = { version = "=49.0.1", features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "=49.0.1", features = ["p2", "p3"] }
 
 # Filesystem watching (WIT `fs-watch` import backing, plugin_loader.rs's

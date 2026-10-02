@@ -1,6 +1,15 @@
 use axum::extract::{ConnectInfo, Request};
 use std::net::{IpAddr, SocketAddr};
 
+/// Extracts the credential from an `Authorization: Bearer <token>` value.
+/// The scheme name is case-insensitive and may be followed by more than one
+/// space (RFC 7235 §2.1); an empty credential is treated as absent.
+pub(crate) fn parse_bearer(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(' ')?;
+    let credential = rest.trim_start_matches(' ');
+    (scheme.eq_ignore_ascii_case("bearer") && !credential.is_empty()).then_some(credential)
+}
+
 /// Extracts the real client IP from X-Forwarded-For when behind trusted proxies.
 ///
 /// `trusted_proxy_count` = how many proxy hops sit between the internet and
@@ -21,13 +30,17 @@ pub(crate) fn extract_client_ip(req: &Request, trusted_proxy_count: usize) -> Ip
         return tcp_ip;
     }
 
-    let xff = req
+    // Repeated field lines are equivalent to one comma-joined line
+    // (RFC 9110 §5.3), and a proxy may append its own line instead of
+    // extending the client's, so every line has to be read, in order.
+    let ips: Vec<&str> = req
         .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect();
     if ips.len() < trusted_proxy_count {
         return tcp_ip;
     }

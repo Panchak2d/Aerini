@@ -2,13 +2,23 @@ use std::sync::Arc;
 
 use aerini_engine::scheduler::{ScheduledJobRow, SchedulerDaemon};
 
+use aerini_engine::db::WorkflowDb;
+
 #[tauri::command]
 pub async fn start_scheduled_workflow(
     workflow_id:   String,
     port_override: Option<u16>,
     always_on:     Option<bool>,
     daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
+    db:     tauri::State<'_, Arc<WorkflowDb>>,
 ) -> Result<(), String> {
+    // The plugin directory is a setting the user can change while the app
+    // runs; pick up its current value for the job being started.
+    let setting_db = Arc::clone(&db);
+    let plugin_dir = tokio::task::spawn_blocking(move || setting_db.get_setting("plugin_dir"))
+        .await
+        .map_err(|e| e.to_string())??;
+    daemon.set_plugin_dir(plugin_dir.map(std::path::PathBuf::from));
     daemon.start_job(&workflow_id, port_override, always_on)
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| format!("{:?}", e)))
 }
