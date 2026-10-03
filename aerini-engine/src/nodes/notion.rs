@@ -9,6 +9,15 @@ const NOTION_VERSION: &str = "2022-06-28";
 
 pub struct NotionNode;
 
+/// Notion IDs are 32 hex digits, optionally dash-separated (UUID form). The
+/// `page_id` is interpolated into the request path, so anything else is
+/// rejected rather than allowed to alter the target endpoint.
+fn valid_notion_id(s: &str) -> bool {
+    (s.len() == 32 || s.len() == 36)
+        && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+        && s.bytes().filter(|b| *b != b'-').count() == 32
+}
+
 #[async_trait]
 impl Node for NotionNode {
     fn type_id(&self) -> &'static str { "notion" }
@@ -102,6 +111,13 @@ impl Node for NotionNode {
                     });
                 }
 
+                if !valid_notion_id(&page_id) {
+                    return NodeOutput::failure(NodeError::unrecoverable(
+                        "INVALID_PAGE_ID",
+                        "page_id must be a 32-character Notion ID (dashes optional)",
+                    ));
+                }
+
                 let url = format!("https://api.notion.com/v1/pages/{}", page_id);
                 let body = json!({ "properties": Value::Object(properties) });
 
@@ -132,7 +148,7 @@ impl NotionNode {
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.json::<Value>().await {
+                match super::util::read_json_response_capped(resp).await {
                     Ok(v) => {
                         if status == 200 || status == 201 {
                             let page_id = v["id"].as_str().unwrap_or("").to_string();
@@ -142,10 +158,10 @@ impl NotionNode {
                             )
                         } else {
                             let msg = v["message"].as_str().unwrap_or("unknown error").to_string();
-                            NodeOutput::failure(NodeError::unrecoverable("NOTION_ERROR", format!("HTTP {}: {}", status, msg)))
+                            NodeOutput::failure(super::util::http_status_error("NOTION_ERROR", status, format!("HTTP {}: {}", status, msg)))
                         }
                     }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e.to_string())),
+                    Err(e) => NodeOutput::failure(super::util::http_status_error("PARSE_ERROR", status, format!("HTTP {}: {}", status, e))),
                 }
             }
             Err(e) => {
@@ -155,3 +171,18 @@ impl NotionNode {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::valid_notion_id;
+
+    #[test]
+    fn notion_id_accepts_plain_and_dashed_forms_only() {
+        assert!(valid_notion_id("0123456789abcdef0123456789abcdef"));
+        assert!(valid_notion_id("01234567-89ab-cdef-0123-456789abcdef"));
+        assert!(!valid_notion_id("../databases"));
+        assert!(!valid_notion_id("0123456789abcdef0123456789abcde"));
+        assert!(!valid_notion_id("0123456789abcdef0123456789abcdeg"));
+        assert!(!valid_notion_id("--------------------------------01234567"));
+    }
+}

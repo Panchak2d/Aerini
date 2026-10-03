@@ -58,7 +58,7 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
         <div class="sum-node-row">
           <span class="sum-node-mark sum-node-mark--${markClass}">${mark}</span>
           <span class="sum-node-name">${escapeHtml(name)}</span>
-          <span class="sum-node-type">${typeLabel(typeId)}</span>
+          <span class="sum-node-type">${escapeHtml(typeLabel(typeId))}</span>
           <span class="sum-node-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>
         </div>`;
     }

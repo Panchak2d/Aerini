@@ -431,12 +431,11 @@ fn signature_status_message(wasm_path: &Path, wasm_bytes: &[u8], trust: &HashMap
 /// later, in `load_plugins` → `load_plugin`
 /// (`aerini_engine::plugin_loader`), which rejects a tampered/invalid/
 /// malformed file outright before compiling it, and whose caller
-/// (`load_plugins_from_dir`) already logs that rejection by path. This
-/// function's own warning for the same file, when it fires, duplicates
-/// that rejection but adds the plugin's declared `type_id` (via
-/// `describe_plugin`, which — unlike `load_plugin` — doesn't check the
-/// signature, so it still succeeds against a tampered file) for easier
-/// identification in logs. Two things here have no equivalent in the
+/// (`load_plugins_from_dir`) already logs that rejection by path.
+/// `describe_plugin` applies the same signature gate, so a tampered or
+/// invalid-signature file is skipped here rather than described, and the
+/// integrity/invalid-signature arms below fire only for a file whose sidecar
+/// changed between the two checks. Two things here have no equivalent in the
 /// shared load path, so this function remains their sole enforcement
 /// point: publisher-key trust pinning (a signature that verifies, but
 /// under a different key than previously trusted for that `type_id`/pack),
@@ -1090,7 +1089,9 @@ pub async fn remove_plugin(filename: String, plugin_dir: String) -> Result<(), S
     // deliberately hostile plugin can't delay the actual removal below,
     // which is what actually matters when someone is trying to get rid of
     // a broken or malicious plugin. Neither this nor the sidecar cleanup
-    // that follows blocks removal on failure.
+    // that follows blocks removal on failure. A file whose signature
+    // sidecar is invalid is rejected by `describe_plugin` without running
+    // its code, so such a plugin is removed without a trust-pin cleanup.
     let target_for_describe = target.clone();
     let type_id_for_cleanup = tokio::time::timeout(
         std::time::Duration::from_secs(2),

@@ -707,9 +707,9 @@ async fn call_openai_agent(
     let response = req.send().await.map_err(|e| {
         let recoverable = e.is_timeout() || e.is_connect();
         if recoverable {
-            AgentApiError::Recoverable(e.to_string())
+            AgentApiError::Recoverable(crate::nodes::util::reqwest_err_msg(&e))
         } else {
-            AgentApiError::Unrecoverable(e.to_string())
+            AgentApiError::Unrecoverable(crate::nodes::util::reqwest_err_msg(&e))
         }
     })?;
 
@@ -772,9 +772,9 @@ async fn call_anthropic_agent(
     let response = req.send().await.map_err(|e| {
         let recoverable = e.is_timeout() || e.is_connect();
         if recoverable {
-            AgentApiError::Recoverable(e.to_string())
+            AgentApiError::Recoverable(crate::nodes::util::reqwest_err_msg(&e))
         } else {
-            AgentApiError::Unrecoverable(e.to_string())
+            AgentApiError::Unrecoverable(crate::nodes::util::reqwest_err_msg(&e))
         }
     })?;
 

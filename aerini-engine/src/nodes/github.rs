@@ -9,13 +9,28 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 
 pub struct GitHubNode;
 
+/// `owner` and `repo` are interpolated into the request path, so anything
+/// outside GitHub's own name charset (`/`, `?`, `#`, `..`) could redirect the
+/// authenticated request to a different API endpoint.
+fn valid_owner(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 39 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn valid_repo(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s != "."
+        && s != ".."
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 #[async_trait]
 impl Node for GitHubNode {
     fn type_id(&self) -> &'static str { "github" }
     fn display_name(&self) -> &'static str { "GitHub" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Interact with the GitHub API: create issues, pull requests, comments, and repository files." }
+    fn description(&self) -> &'static str { "Create GitHub issues and add comments to existing issues." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -64,6 +79,19 @@ impl Node for GitHubNode {
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_REPO", "repo field is required")),
         };
 
+        if !valid_owner(&owner) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_OWNER",
+                "owner may contain only letters, digits and hyphens (max 39 characters)",
+            ));
+        }
+        if !valid_repo(&repo) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_REPO",
+                "repo may contain only letters, digits, '-', '_' and '.' (max 100 characters)",
+            ));
+        }
+
         let (url, request_body) = match action {
             "create_issue" => {
                 let title = match input.input["title"].as_str().filter(|s| !s.is_empty()) {
@@ -80,9 +108,9 @@ impl Node for GitHubNode {
                 )
             }
             "add_comment" => {
-                let issue_number = match input.input["issue_number"].as_u64() {
+                let issue_number = match input.input["issue_number"].as_u64().filter(|n| *n > 0) {
                     Some(n) => n,
-                    None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ISSUE_NUMBER", "issue_number is required for add_comment")),
+                    None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ISSUE_NUMBER", "issue_number must be a positive integer for add_comment")),
                 };
                 let comment_body = match input.input["body"].as_str().filter(|s| !s.is_empty()) {
                     Some(b) => b.to_string(),
@@ -110,7 +138,7 @@ impl Node for GitHubNode {
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.json::<Value>().await {
+                match super::util::read_json_response_capped(resp).await {
                     Ok(v) => {
                         // GitHub returns 201 Created on success.
                         if status == 201 || status == 200 {
@@ -121,14 +149,16 @@ impl Node for GitHubNode {
                             NodeOutput::success_with_logs(v, vec![log])
                         } else {
                             let msg = v["message"].as_str().unwrap_or("unknown error").to_string();
-                            NodeOutput::failure(NodeError::unrecoverable(
+                            NodeOutput::failure(super::util::http_status_error(
                                 "GITHUB_ERROR",
+                                status,
                                 format!("HTTP {}: {}", status, msg),
                             ))
                         }
                     }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable(
+                    Err(e) => NodeOutput::failure(super::util::http_status_error(
                         "PARSE_ERROR",
+                        status,
                         format!("HTTP {}: could not parse GitHub response: {}", status, e),
                     )),
                 }
@@ -140,3 +170,26 @@ impl Node for GitHubNode {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{valid_owner, valid_repo};
+
+    #[test]
+    fn owner_rejects_path_characters() {
+        assert!(valid_owner("octo-org"));
+        assert!(!valid_owner("../user"));
+        assert!(!valid_owner("a/b"));
+        assert!(!valid_owner("a?x=1"));
+        assert!(!valid_owner(""));
+    }
+
+    #[test]
+    fn repo_rejects_dot_segments_and_path_characters() {
+        assert!(valid_repo("my.repo_name-1"));
+        assert!(!valid_repo(".."));
+        assert!(!valid_repo("."));
+        assert!(!valid_repo("a/b"));
+        assert!(!valid_repo("r#frag"));
+    }
+}

@@ -213,7 +213,7 @@ async fn exchange_code_youtube(
         .form(&params)
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     parse_google_token_response(resp).await
 }
@@ -237,7 +237,7 @@ async fn refresh_tokens_youtube(
         .form(&params)
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     let mut new_tokens = parse_google_token_response(resp).await?;
     // Google may not return a new refresh token on refresh — keep the old one.
@@ -254,7 +254,7 @@ async fn parse_google_token_response(
     let body: Value = resp
         .json()
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !status.is_success() {
         let err_desc = body["error_description"]
@@ -308,7 +308,7 @@ async fn exchange_code_instagram(
         .form(&params)
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !short_resp.status().is_success() {
         let body: Value = short_resp.json().await.unwrap_or(Value::Null);
@@ -318,7 +318,7 @@ async fn exchange_code_instagram(
     let short_body: Value = short_resp
         .json()
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
     let short_token = short_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram response"))?;
@@ -333,7 +333,7 @@ async fn exchange_code_instagram(
         ])
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !ll_resp.status().is_success() {
         let body: Value = ll_resp.json().await.unwrap_or(Value::Null);
@@ -343,7 +343,7 @@ async fn exchange_code_instagram(
     let ll_body: Value = ll_resp
         .json()
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
     let ll_token = ll_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No long-lived access_token from Instagram"))?
@@ -365,7 +365,7 @@ async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens,
         ])
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !resp.status().is_success() {
         return Err(NodeError::unrecoverable(
@@ -376,7 +376,7 @@ async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens,
     let body: Value = resp
         .json()
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
     let new_token = body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram refresh response"))?
@@ -411,7 +411,7 @@ async fn exchange_code_tiktok(
         .form(&params)
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     parse_tiktok_token_response(resp).await
 }
@@ -436,7 +436,7 @@ async fn refresh_tokens_tiktok(
         .form(&params)
         .send()
         .await
-        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     parse_tiktok_token_response(resp).await
 }
@@ -448,7 +448,7 @@ async fn parse_tiktok_token_response(
     let body: Value = resp
         .json()
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e.to_string()))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !status.is_success() {
         let msg = body["error_description"]

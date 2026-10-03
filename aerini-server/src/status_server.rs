@@ -349,7 +349,7 @@ async fn check_run_secret(
     let provided = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(crate::util::parse_bearer)
         .unwrap_or("")
         .to_string();
 

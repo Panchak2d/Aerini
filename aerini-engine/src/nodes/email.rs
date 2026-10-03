@@ -58,7 +58,12 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     let smtp_host = cfg["smtp_host"].as_str().filter(|s| !s.is_empty())
         .ok_or_else(|| NodeError::unrecoverable("MISSING_SMTP_HOST", "smtp_host is required"))?
         .to_string();
-    let smtp_port = cfg["smtp_port"].as_u64().unwrap_or(587) as u16;
+    let smtp_port = match cfg["smtp_port"].as_u64() {
+        None => 587,
+        Some(p) => u16::try_from(p).ok().filter(|p| *p != 0).ok_or_else(|| {
+            NodeError::unrecoverable("INVALID_PORT", format!("smtp_port {p} is out of range (1-65535)"))
+        })?,
+    };
 
     let ssrf_host = url::Host::parse(&smtp_host)
         .map_err(|_| NodeError::unrecoverable("INVALID_HOST", "Invalid smtp_host"))?;
@@ -118,7 +123,13 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
 
     builder = builder.port(smtp_port);
 
-    if !username.is_empty() && !password.is_empty() {
+    if username.is_empty() != password.is_empty() {
+        return Err(NodeError::unrecoverable(
+            "INCOMPLETE_CREDENTIALS",
+            "username and password must both be set, or both left empty for an unauthenticated relay",
+        ));
+    }
+    if !username.is_empty() {
         builder = builder.credentials(Credentials::new(username, password));
     }
 
@@ -130,3 +141,17 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     Ok(format!("Email sent to {to_str} via {smtp_host}:{smtp_port}"))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::send_email;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn smtp_port_out_of_range_is_rejected_not_truncated() {
+        let err = send_email(&json!({ "smtp_host": "smtp.example.com", "smtp_port": 65_587 }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "INVALID_PORT");
+    }
+}

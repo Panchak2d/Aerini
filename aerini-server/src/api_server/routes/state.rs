@@ -121,6 +121,16 @@ impl ApiState {
     }
 }
 
+/// Logs `e` and returns a generic `500`, so internal error text (SQL, file
+/// paths) is never sent to the client.
+pub fn internal_error(context: &str, e: impl std::fmt::Display) -> ApiError {
+    tracing::error!(error = %e, "{}", context);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "internal server error"})),
+    )
+}
+
 fn deny_on_join_error(joined: Result<Option<TokenRecord>, tokio::task::JoinError>) -> Option<TokenRecord> {
     joined.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "token verification task failed, denying access");
@@ -136,10 +146,7 @@ pub fn acl_allows(filter: &Option<HashSet<String>>, workflow_id: &str) -> bool {
 }
 
 fn acl_lookup_failed(e: &str) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": format!("ACL lookup failed: {}", e)})),
-    )
+    internal_error("ACL lookup failed", e)
 }
 
 /// Whether `caller` may act on `workflow_id`: admin and tokens with no grants

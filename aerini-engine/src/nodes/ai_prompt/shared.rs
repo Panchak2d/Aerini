@@ -31,9 +31,9 @@ pub(super) async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<(u16,
         Err(e) => {
             let recoverable = e.is_timeout() || e.is_connect();
             return Err(if recoverable {
-                NodeOutput::failure(NodeError::recoverable("NETWORK_ERROR", e.to_string()))
+                NodeOutput::failure(NodeError::recoverable("NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))
             } else {
-                NodeOutput::failure(NodeError::unrecoverable("NETWORK_ERROR", e.to_string()))
+                NodeOutput::failure(NodeError::unrecoverable("NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))
             });
         }
     };

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   formatDuration,
   applyFilter,
+  collectRows,
   getStartAllTargets,
   getStopAllTargets,
   formatRowStatusCopy,
@@ -39,6 +40,31 @@ describe("monitor-helpers.applyFilter", () => {
 
   it("edge case: 'stopped' isolates only stopped rows, excluding every other status", () => {
     expect(applyFilter(rows, "stopped", "").map(r => r.id)).toEqual(["3"]);
+  });
+
+  it("'scheduled' keeps armed rows whose trigger fires on its own (webhook and plugin included, no nextRunAt needed) and drops manual, unarmed and idle rows", () => {
+    const run = (id: string, extra: Record<string, unknown>) => ({ id, name: id, status: "running" as const, ...extra });
+    const all = [
+      run("webhook", { triggerType: "webhook" }),
+      run("plugin", { triggerType: "plugin" }),
+      run("interval", { triggerType: "interval", nextRunAt: "2026-10-02T10:00:00Z" }),
+      run("manual", { triggerType: "manual" }),
+      run("legacy-with-next", { nextRunAt: "2026-10-02T10:00:00Z" }),
+      run("legacy-no-next", {}),
+      { id: "stopped-webhook", name: "x", status: "stopped" as const, triggerType: "webhook" as const },
+      { id: "idle", name: "y", status: "idle" as const },
+    ];
+    expect(applyFilter(all, "scheduled", "").map(r => r.id))
+      .toEqual(["webhook", "plugin", "interval", "legacy-with-next"]);
+  });
+
+  it("collectRows carries a job's triggerType and waiting through to its row", () => {
+    const rows = collectRows(
+      [{ id: "w", name: "w", status: "running", startedAt: 1, triggerType: "webhook", waiting: true }],
+      [],
+    );
+    expect(rows[0].triggerType).toBe("webhook");
+    expect(rows[0].waiting).toBe(true);
   });
 });
 
@@ -91,6 +117,36 @@ describe("monitor-helpers.formatRowStatusCopy", () => {
   it("edge case: no finishedAt/startedAt (idle) renders the placeholder, not a crash", () => {
     const row = { id: "1", name: "a", status: "idle" as const };
     expect(formatRowStatusCopy(row, now)).toBe("—");
+  });
+
+  describe("Listening label", () => {
+    const base = { id: "1", name: "a", status: "running" as const, startedAt: now - 2_820_000 };
+
+    it("a waiting webhook or plugin row with no next run shows Listening", () => {
+      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const, waiting: true }, now)).toBe("Listening");
+      expect(formatRowStatusCopy({ ...base, triggerType: "plugin" as const, waiting: true }, now)).toBe("Listening");
+    });
+
+    it("a plugin that reports a next run is not labelled Listening", () => {
+      const row = { ...base, triggerType: "plugin" as const, waiting: true, nextRunAt: "2026-10-03T10:00:00Z" };
+      expect(formatRowStatusCopy(row, now)).toBe("47m");
+    });
+
+    it("an executing webhook run, or one with unknown waiting, shows elapsed time", () => {
+      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const, waiting: false }, now)).toBe("47m");
+      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const }, now)).toBe("47m");
+    });
+
+    it("manual, interval and unknown-type rows are unchanged even when waiting", () => {
+      for (const triggerType of ["manual", "interval", undefined] as const) {
+        expect(formatRowStatusCopy({ ...base, triggerType, waiting: true }, now)).toBe("47m");
+      }
+    });
+
+    it("a stopped row never shows Listening, even with a stale waiting flag", () => {
+      const row = { id: "1", name: "a", status: "stopped" as const, finishedAt: now - 45_000, triggerType: "webhook" as const, waiting: true };
+      expect(formatRowStatusCopy(row, now)).toBe("Stopped 45s ago");
+    });
   });
 });
 

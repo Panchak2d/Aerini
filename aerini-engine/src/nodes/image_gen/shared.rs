@@ -6,9 +6,9 @@ use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 pub(super) fn network_err(e: reqwest::Error) -> NodeError {
     let recoverable = e.is_timeout() || e.is_connect();
     if recoverable {
-        NodeError::recoverable("NETWORK_ERROR", e.to_string())
+        NodeError::recoverable("NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e))
     } else {
-        NodeError::unrecoverable("NETWORK_ERROR", e.to_string())
+        NodeError::unrecoverable("NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e))
     }
 }
 
@@ -79,7 +79,7 @@ pub(super) async fn read_bytes_response_capped(mut response: reqwest::Response) 
                 bytes.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(crate::nodes::util::reqwest_err_msg(&e)),
         }
     }
 

@@ -499,9 +499,54 @@ pub async fn check_db_url_ssrf(raw_url: &str, policy: SsrfPolicy) -> Result<(), 
 /// All other errors are unrecoverable.
 pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
     if e.is_timeout() || e.is_connect() {
-        NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", e.to_string()))
+        NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", reqwest_err_msg(e)))
     } else {
-        NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
+        NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", reqwest_err_msg(e)))
+    }
+}
+
+/// HTTP 429 is retry-eligible; every other error status is not.
+pub fn http_status_error(code: &str, status: u16, msg: impl Into<String>) -> NodeError {
+    if status == 429 {
+        NodeError::recoverable(code, msg)
+    } else {
+        NodeError::unrecoverable(code, msg)
+    }
+}
+
+/// Reads at most 1 KiB of an error response body for inclusion in a node
+/// error, so a provider returning a huge or hostile body cannot flood run
+/// history or logs.
+pub async fn read_error_snippet(mut response: reqwest::Response) -> String {
+    const MAX: usize = 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() <= MAX {
+        match response.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    let truncated = buf.len() > MAX;
+    buf.truncate(MAX);
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        s.push('…');
+    }
+    s
+}
+
+/// Error text for a `reqwest::Error` with the request URL removed.
+///
+/// `reqwest::Error`'s `Display` appends `for url (<full url>)`, which carries
+/// secrets for URL-embedded credentials (Telegram bot tokens, Discord webhook
+/// tokens, `?key=` API keys) into run history and logs.
+pub fn reqwest_err_msg(e: &reqwest::Error) -> String {
+    let msg = e.to_string();
+    match e.url() {
+        Some(u) => msg
+            .replace(&format!(" for url ({u})"), "")
+            .replace(u.as_str(), "<redacted-url>"),
+        None => msg,
     }
 }
 
@@ -555,7 +600,7 @@ pub async fn read_json_response_capped(mut response: reqwest::Response) -> Resul
                 body_buf.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(e) => return Err(format!("Failed to read response body: {}", e)),
+            Err(e) => return Err(format!("Failed to read response body: {}", reqwest_err_msg(&e))),
         }
     }
 
@@ -769,5 +814,22 @@ mod read_json_response_capped_tests {
         let resp = reqwest::Client::new().get(&url).send().await.unwrap();
         let err = read_json_response_capped(resp).await.expect_err("must fail to parse");
         assert!(err.contains("parse"), "unexpected error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod reqwest_err_tests {
+    use super::reqwest_err_msg;
+
+    #[tokio::test]
+    async fn reqwest_err_msg_omits_url_and_query_secret() {
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/bot123:SECRET/send?key=SECRET")
+            .send()
+            .await
+            .expect_err("port 1 refuses connections");
+        let msg = reqwest_err_msg(&err);
+        assert!(!msg.contains("SECRET"), "got: {msg}");
+        assert!(!msg.contains("127.0.0.1"), "got: {msg}");
     }
 }

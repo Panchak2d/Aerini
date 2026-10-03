@@ -363,6 +363,62 @@ describe("buildSidebarPalette — collapsible categories", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Plugin triggers — grouped with the built-in triggers
+// ---------------------------------------------------------------------------
+
+describe("buildSidebarPalette — plugin trigger grouping", () => {
+  const PLUGIN_TRIGGER = {
+    ...PLUGIN_NODE,
+    type_id: "com.example.heartbeat",
+    display_name: "Heartbeat Trigger",
+    node_type: "utility" as const,
+    trigger_capable: true,
+  };
+  const PLAIN_PLUGIN_UTILITY = {
+    ...PLUGIN_NODE,
+    type_id: "com.example.plain",
+    display_name: "Plain Utility Plugin",
+    node_type: "utility" as const,
+  };
+
+  function headerFor(search: string): HTMLElement {
+    let el: Element | null = document.querySelector(`.palette-item[data-search*="${search}"]`);
+    while (el && !el.classList.contains("palette-category")) el = el.previousElementSibling;
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <div id="canvas"></div>
+    `;
+    buildSidebarPalette(
+      [NO_INPUT_NODE, PLUGIN_TRIGGER, PLAIN_PLUGIN_UTILITY, HTTP_NODE] as never,
+      mockCanvas as never,
+      vi.fn(),
+    );
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("lists a trigger-capable plugin under the same Triggers header as a built-in trigger, not under Utility", () => {
+    const builtInHeader = headerFor("manual trigger");
+    const pluginHeader = headerFor("heartbeat trigger");
+    expect(pluginHeader).toBe(builtInHeader);
+    expect(pluginHeader.textContent).toContain("Triggers");
+    expect(headerFor("plain utility plugin").textContent).toContain("Utility");
+  });
+
+  it("tags a trigger-capable plugin for the Trigger chip filter, and keeps its Plugin badge", () => {
+    const item = document.querySelector<HTMLElement>('.palette-item[data-search*="heartbeat trigger"]')!;
+    expect(item.dataset.cat).toBe("trigger");
+    expect(item.querySelector(".palette-plugin-tag")).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Plugin icon — sidebar list and command palette result row
 //
 // A plugin's own icon (wit/node.wit's metadata.icon) renders as the *main*

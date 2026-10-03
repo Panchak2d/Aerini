@@ -14,9 +14,9 @@ path = "src/main.rs"
 [dependencies]
 # Exact pin, kept identical to aerini-engine/Cargo.toml, so this spike always
 # exercises the same Wasmtime version the real engine ships.
-wasmtime = { version = "=49.0.1", features = ["component-model"] }
+wasmtime = { version = "=49.0.2", features = ["component-model"] }
 # `wasmtime_wasi::p3` and `wasmtime_wasi::p2` (and every fn in them, incl.
 # `add_to_linker` / `add_to_linker_async`) are gated behind the crate's own "p3" and
 # "p2" features, so both are requested explicitly here.
-wasmtime-wasi = { version = "=49.0.1", features = ["p2", "p3"] }
+wasmtime-wasi = { version = "=49.0.2", features = ["p2", "p3"] }
 tokio = { version = "1", features = ["full"] }

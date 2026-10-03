@@ -110,7 +110,7 @@ pub struct SchedulerDaemon {
     /// plugin directory is configured for this scheduler — a `Plugin`
     /// trigger armed under that condition fails immediately with a clear
     /// error rather than the job silently never producing events.
-    plugin_dir: Option<Arc<std::path::PathBuf>>,
+    plugin_dir: std::sync::RwLock<Option<Arc<std::path::PathBuf>>>,
     /// Set to `true` by `drain_all` to prevent new iterations from starting.
     shutting_down: Arc<AtomicBool>,
     /// In-flight `executor.run()` count. Decremented on drop via `ActiveRunGuard`.
@@ -146,7 +146,7 @@ impl SchedulerDaemon {
             run_semaphore:        Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RUNS)),
             server_max_duration_secs: None,
             file_sandbox_dir: None,
-            plugin_dir: None,
+            plugin_dir: std::sync::RwLock::new(None),
             shutting_down: Arc::new(AtomicBool::new(false)),
             active_runs:   Arc::new(AtomicUsize::new(0)),
         }
@@ -236,9 +236,17 @@ impl SchedulerDaemon {
 
     /// Set the directory `TriggerKind::Plugin` jobs resolve their `type_id`
     /// against. Not required for any other trigger kind.
-    pub fn with_plugin_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.plugin_dir = Some(Arc::new(dir));
+    pub fn with_plugin_dir(self, dir: std::path::PathBuf) -> Self {
+        self.set_plugin_dir(Some(dir));
         self
+    }
+
+    /// Changes the plugin directory for jobs started from now on. A job that
+    /// is already running keeps the directory it started with until it is
+    /// restarted. `None` clears it.
+    pub fn set_plugin_dir(&self, dir: Option<std::path::PathBuf>) {
+        let mut guard = self.plugin_dir.write().unwrap_or_else(|e| e.into_inner());
+        *guard = dir.map(Arc::new);
     }
 
     /// Called once at startup. Re-arms all always_on jobs from the DB.
@@ -481,7 +489,7 @@ impl SchedulerDaemon {
         let max_concurrent_nodes = self.max_concurrent_nodes;
         let server_max_duration_secs = self.server_max_duration_secs;
         let file_sandbox_dir = self.file_sandbox_dir.clone();
-        let plugin_dir       = self.plugin_dir.clone();
+        let plugin_dir       = self.plugin_dir.read().unwrap_or_else(|e| e.into_inner()).clone();
         let run_semaphore = Arc::clone(&self.run_semaphore);
         let shutting_down = Arc::clone(&self.shutting_down);
         let active_runs   = Arc::clone(&self.active_runs);
@@ -626,9 +634,10 @@ impl SchedulerDaemon {
         next_run_at: Option<String>,
         last_error:  Option<String>,
     ) {
-        let workflow_name = self.db.scheduler_get(workflow_id)
-            .ok().flatten().map(|r| r.workflow_name)
+        let row = self.db.scheduler_get(workflow_id).ok().flatten();
+        let workflow_name = row.as_ref().map(|r| r.workflow_name.clone())
             .unwrap_or_else(|| workflow_id.to_string());
+        let trigger_type = row.as_ref().and_then(|r| r.trigger_type());
 
         let payload = SchedulerStatusEvent {
             workflow_id:   workflow_id.to_string(),
@@ -638,6 +647,7 @@ impl SchedulerDaemon {
             last_run_at,
             next_run_at,
             last_error,
+            trigger_type,
             last_result:   None,
         };
         self.event_sink.emit("scheduler-status",
