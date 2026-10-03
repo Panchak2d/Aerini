@@ -52,7 +52,13 @@ impl Node for NotificationNode {
             )),
         };
         let body    = cfg["body"].as_str().unwrap_or("").to_string();
-        let urgency = cfg["urgency"].as_str().unwrap_or("normal").to_string();
+        let urgency = cfg["urgency"].as_str().filter(|s| !s.is_empty()).unwrap_or("normal").to_string();
+        if !matches!(urgency.as_str(), "low" | "normal" | "critical") {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_URGENCY",
+                format!("Unknown urgency '{urgency}'. Valid values: low, normal, critical"),
+            ));
+        }
 
         match send_notification(&title, &body, &urgency).await {
             Ok(method) => NodeOutput::success_with_logs(
@@ -71,6 +77,9 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
     {
         let mut cmd = Command::new("notify-send");
         cmd.arg("--urgency").arg(urgency);
+        // "--" ends option parsing so a title or body starting with "-" is
+        // shown as text instead of being read as a notify-send flag.
+        cmd.arg("--");
         cmd.arg(title);
         if !body.is_empty() {
             cmd.arg(body);

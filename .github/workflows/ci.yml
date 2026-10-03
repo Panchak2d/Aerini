@@ -103,6 +103,26 @@ jobs:
           diff aerini-engine/wit/node.wit examples/plugin-template/trigger-example/wit/node.wit || \
             (echo "ERROR: examples/plugin-template/trigger-example/wit/node.wit is stale — copy aerini-engine/wit/node.wit over it and commit" && exit 1)
 
+  trigger-example-build:
+    name: Trigger example plugin builds for wasm32-wasip2
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust (stable) with wasm32-wasip2
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+
+      - name: Build trigger example
+        working-directory: examples/plugin-template/trigger-example
+        run: cargo build --target wasm32-wasip2 --release --locked
+
   node-checks:
     name: Node.js dependency audit and dist staleness
     runs-on: ubuntu-latest

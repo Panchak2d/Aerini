@@ -1,5 +1,5 @@
 import type { NodeDescriptor } from "../ipc/workflow";
-import { DANGEROUS_NODE_IDS } from "../node-ids";
+import { DANGEROUS_NODE_IDS, TRIGGER_NODE_IDS } from "../node-ids";
 
 // Leaf module: imports only a type. Node.ts and CanvasSerializer.ts both read
 // the registry, and CanvasSerializer.ts imports Node.ts, so the registry can't
@@ -25,6 +25,17 @@ export function getAllNodeDescriptors(): NodeDescriptor[] {
 /** True when `typeId` was loaded from a WASM plugin rather than built in. */
 export function isPluginNodeType(typeId: string): boolean {
   return _registry.get(typeId)?.is_plugin === true;
+}
+
+/** True when `typeId` is a plugin whose backend descriptor reports it can
+ *  supply its own trigger (`trigger_capable`). */
+export function isPluginTriggerType(typeId: string): boolean {
+  return _registry.get(typeId)?.trigger_capable === true;
+}
+
+/** True for a built-in trigger or a trigger-capable plugin. */
+export function isTriggerNodeType(typeId: string): boolean {
+  return TRIGGER_NODE_IDS.has(typeId) || isPluginTriggerType(typeId);
 }
 
 /**

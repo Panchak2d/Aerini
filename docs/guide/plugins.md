@@ -30,7 +30,7 @@ An `.aerinipkg` installs as a group: its member nodes appear together under one 
 Every installed plugin shows its display name, its type ID and filename, and (for a multi-node pack) which pack it belongs to. Two more things show up when relevant:
 
 - **A load error**, in place of the type ID/filename line, if Aerini couldn't actually load the file, an incompatible version, corrupt file, or similar.
-- **A signature status.** Publishers can optionally sign a plugin. **Unsigned** is the common, expected case for most community plugins and isn't itself a warning sign. Anything else, verified, unrecognized, or a mismatch, is worth reading; see [Security §The plugin (.wasm) sandbox boundary](security.md#the-plugin-wasm-sandbox-boundary) for exactly what a signature does and doesn't guarantee today.
+- **A signature status.** Publishers can optionally sign a plugin. **Unsigned** is the common, expected case for most community plugins and isn't itself a warning sign. Anything else, verified or unrecognized, is worth reading; a plugin whose signature fails to verify isn't loaded and shows a load error instead; see [Security §The plugin (.wasm) sandbox boundary](security.md#the-plugin-wasm-sandbox-boundary) for exactly what a signature does and doesn't guarantee today.
 
 ## Reloading and restarting
 

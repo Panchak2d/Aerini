@@ -9,7 +9,7 @@ use axum::{
 use serde_json::json;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read};
+use super::state::{internal_error, ApiState, require_read};
 
 pub async fn get_memory(
     State(s):          State<ApiState>,
@@ -23,13 +23,7 @@ pub async fn get_memory(
     // (admin, or a token with no ACL rows).
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f) => f,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error("ACL lookup failed", e).into_response(),
     };
 
     // `snapshot()` is a DashMap iteration over a small, in-memory, process-

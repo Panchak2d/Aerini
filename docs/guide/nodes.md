@@ -65,13 +65,13 @@ Make an HTTP request to any URL. Supports GET, POST, PUT, PATCH, DELETE, custom 
 |---|---|---|
 | `url` | URL | Required. |
 | `method` | Method | Required. `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
-| `headers` | Headers | Request headers, as an object. Edited as JSON in **Advanced: full config**. |
+| `headers` | Headers | Request headers, as an object; text, number, and boolean values are sent. Edited as JSON in **Advanced: full config**. |
 | `body` | Body | Request body, for POST/PUT/PATCH. Plain text or an expression edits normally; a JSON object/array value is edited in **Advanced: full config** instead. |
 | `api_key` | API Key | Resolved from Connections. |
 
 **Ports:** In → Success, Error.
 
-**Output:** `status`, `body`, `headers`.
+**Output:** `status`, `body`, `headers`. A response header sent more than once (such as `Set-Cookie`) appears once, with its values joined by `, `.
 
 ### Shell Command
 
@@ -112,13 +112,13 @@ Send an email over SMTP, plain text or HTML, to one or more recipients.
 | Field | Label | Notes |
 |---|---|---|
 | `smtp_host` | SMTP Host | Required, e.g. `smtp.gmail.com`. |
-| `smtp_port` | SMTP Port | 587 (STARTTLS, recommended) or 465 (SSL). Default 587. |
+| `smtp_port` | SMTP Port | 587 (STARTTLS, recommended) or 465 (SSL). Default 587. A value outside 1-65535 fails with `INVALID_PORT`. |
 | `from` | From | Required. Sender address. |
 | `to` | To | Required. Comma-separated; 50 recipients max. |
 | `subject` | Subject | Required. |
 | `body` | Body | Required. |
 | `html` | HTML | Send as HTML instead of plain text. Default off. |
-| `username` | Username | SMTP username, usually your email address. |
+| `username` | Username | SMTP username, usually your email address. Set together with Password, or leave both empty for an unauthenticated relay. |
 | `password` | Password | Resolved from Connections. |
 
 **Ports:** default (In → Out).
@@ -279,18 +279,18 @@ Create an issue or add a comment via the GitHub API.
 | Field | Label | Notes |
 |---|---|---|
 | `action` | Action | Required. `create_issue` or `add_comment`. |
-| `owner` | Owner | Required. Repository owner, user or org. |
-| `repo` | Repo | Required. |
+| `owner` | Owner | Required. Repository owner, user or org: letters, digits and hyphens only. |
+| `repo` | Repo | Required. Letters, digits, `-`, `_` and `.` only. |
 | `title` | Title | Required for `create_issue`. |
 | `body` | Body | Issue body or comment text. |
-| `issue_number` | Issue Number | Required for `add_comment`. |
+| `issue_number` | Issue Number | Required for `add_comment`. A positive integer. |
 | `api_key` | API Key | GitHub personal access token. Resolved from Connections. |
 
 **Ports:** default (In → Out).
 
 **Output:** `number`, `html_url`, `id`, `state`.
 
-**Gotcha:** only `create_issue` and `add_comment` are implemented. Pull requests and repository file edits aren't available through this node yet, even though they're a natural fit for "interact with GitHub."
+**Gotcha:** only `create_issue` and `add_comment` are implemented. Pull requests and repository file edits aren't available through this node yet.
 
 ### Google Sheets
 
@@ -318,7 +318,7 @@ Create or update pages and database entries.
 |---|---|---|
 | `action` | Action | Required. `create_page` or `update_page`. |
 | `database_id` | Database ID | Required for `create_page`. |
-| `page_id` | Page ID | Required for `update_page`. |
+| `page_id` | Page ID | Required for `update_page`. A 32-character Notion ID, with or without dashes. |
 | `title` | Title | Page title, used in the title property. |
 | `properties` | Properties | Additional Notion page properties, as a JSON object. |
 | `api_key` | API Key | Notion integration token (`secret_...`). Resolved from Connections. |

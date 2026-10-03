@@ -202,7 +202,16 @@ impl Node for WebhookNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        let port = input.input["port"].as_u64().unwrap_or(3456) as u16;
+        let port = match input.input["port"].as_u64() {
+            None => 3456,
+            Some(p) => match u16::try_from(p) {
+                Ok(p) => p,
+                Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
+                    "INVALID_PORT",
+                    format!("Webhook port {p} is out of range (1024-65535)"),
+                )),
+            },
+        };
         let path = input.input["path"].as_str().unwrap_or("/webhook").to_string();
 
         // Scheduler-driven run (TriggerKind::Webhook): the daemon's accept loop
@@ -706,6 +715,16 @@ mod tests {
     #[tokio::test]
     async fn no_reserved_key_falls_through_to_normal_path() {
         let input = make_input("n1", 1, "/hook", HashMap::new());
+        let out = WebhookNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_PORT");
+    }
+
+    /// A port above 65535 is rejected, not truncated to a different (here
+    /// bindable) port.
+    #[tokio::test]
+    async fn port_above_u16_range_is_rejected() {
+        let input = make_input("n1", 66_560, "/hook", HashMap::new());
         let out = WebhookNode.execute(input).await;
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "INVALID_PORT");

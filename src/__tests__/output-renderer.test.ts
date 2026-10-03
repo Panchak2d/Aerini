@@ -169,6 +169,20 @@ describe("renderErrorsTab — error icon", () => {
 // renderSummaryTab — shared error icon
 // ---------------------------------------------------------------------------
 
+describe("renderSummaryTab — node type label escaping", () => {
+  it("escapes an unmapped node type id taken from the workflow file", () => {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: { n1: "ok" },
+      logs: [],
+    };
+    const nodes = new Map([["n1", { data: { name: "n", node_type_id: "<img src=x>" } }]]) as never;
+    const html = renderSummaryTab(result, nodes);
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x&gt;");
+  });
+});
+
 describe("renderSummaryTab — error icon", () => {
   it("includes the shared circle-alert icon in the error card when the run failed", () => {
     const result: WorkflowResult = {

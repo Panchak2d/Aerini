@@ -69,6 +69,20 @@ impl TriggerKind {
         }
     }
 
+    /// Stable lowercase name of the variant, identical to the `kind` value
+    /// it serializes with. Safe to expose in events: unlike the serialized
+    /// trigger, it carries none of the variant's fields.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            TriggerKind::Interval { .. } => "interval",
+            TriggerKind::Cron { .. }     => "cron",
+            TriggerKind::Once { .. }     => "once",
+            TriggerKind::Webhook { .. }  => "webhook",
+            TriggerKind::Manual          => "manual",
+            TriggerKind::Plugin { .. }   => "plugin",
+        }
+    }
+
     /// Returns true if this trigger can sustain an always-on background loop.
     pub fn is_schedulable(&self) -> bool {
         !matches!(self, TriggerKind::Manual)
@@ -111,6 +125,15 @@ pub struct ScheduledJobRow {
 const REDACTED_WEBHOOK_SECRET: &str = "<redacted>";
 
 impl ScheduledJobRow {
+    /// [`TriggerKind::tag`] of this row's trigger, or `None` if the stored
+    /// JSON doesn't parse. Never includes any trigger field, so it is safe
+    /// to put in an event.
+    pub fn trigger_type(&self) -> Option<String> {
+        serde_json::from_str::<TriggerKind>(&self.trigger_kind)
+            .ok()
+            .map(|t| t.tag().to_string())
+    }
+
     /// Returns a copy with any `Webhook` trigger's `secret` replaced by
     /// [`REDACTED_WEBHOOK_SECRET`]. Every other field, and every other
     /// trigger kind, is unchanged.
@@ -152,6 +175,9 @@ pub struct SchedulerStatusEvent {
     pub last_run_at:   Option<String>,
     pub next_run_at:   Option<String>,
     pub last_error:    Option<String>,
+    /// `"interval"` | `"cron"` | `"once"` | `"webhook"` | `"manual"` | `"plugin"`;
+    /// `None` when the job's stored trigger can't be read.
+    pub trigger_type:  Option<String>,
     /// Full `WorkflowResult`. Populated **only** on the post-run emission inside
     /// `fire_once_with_vars` (status `"waiting"` on workflow success, `"error"`
     /// on workflow failure). `None` everywhere else this event is constructed —
@@ -255,6 +281,40 @@ mod tests {
             TriggerKind::Webhook { dedup_window_secs, .. } => assert_eq!(dedup_window_secs, 0),
             other => panic!("expected Webhook trigger, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn tag_matches_the_serialized_kind_for_every_variant() {
+        let triggers = [
+            TriggerKind::Interval { secs: 60 },
+            TriggerKind::Cron { expr: "0 * * * *".to_string() },
+            TriggerKind::Once { run_at: Utc::now() },
+            TriggerKind::Webhook {
+                port: 3456, path: "/hook".to_string(), method: "POST".to_string(),
+                secret: "s".to_string(), dedup_window_secs: 0,
+            },
+            TriggerKind::Manual,
+            TriggerKind::Plugin { type_id: "heartbeat".to_string(), config: "{}".to_string() },
+        ];
+        for trigger in &triggers {
+            let value = serde_json::to_value(trigger).unwrap();
+            assert_eq!(value["kind"].as_str(), Some(trigger.tag()));
+        }
+    }
+
+    #[test]
+    fn trigger_type_is_the_bare_tag_and_none_when_unreadable() {
+        let webhook = TriggerKind::Webhook {
+            port: 3456, path: "/hook".to_string(), method: "POST".to_string(),
+            secret: "super-secret-value".to_string(), dedup_window_secs: 0,
+        };
+        let tag = row_with_trigger(&webhook).trigger_type();
+        assert_eq!(tag.as_deref(), Some("webhook"));
+        assert!(!tag.unwrap().contains("super-secret-value"));
+
+        let mut broken = row_with_trigger(&TriggerKind::Manual);
+        broken.trigger_kind = "{}".to_string();
+        assert_eq!(broken.trigger_type(), None);
     }
 
     #[test]

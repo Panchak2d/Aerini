@@ -97,9 +97,10 @@ impl Node for SendGridNode {
                         vec![format!("Email sent to {} via SendGrid", to_email)],
                     )
                 } else {
-                    let body_text = resp.text().await.unwrap_or_default();
-                    NodeOutput::failure(NodeError::unrecoverable(
+                    let body_text = super::util::read_error_snippet(resp).await;
+                    NodeOutput::failure(super::util::http_status_error(
                         "SENDGRID_ERROR",
+                        status,
                         format!("HTTP {}: {}", status, body_text),
                     ))
                 }

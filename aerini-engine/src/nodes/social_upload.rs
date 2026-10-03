@@ -332,7 +332,7 @@ async fn upload_to_youtube(
         .await
         .map_err(|e| upload_err(
             "NETWORK_ERROR",
-            e.to_string(),
+            crate::nodes::util::reqwest_err_msg(&e),
             "Failed to reach YouTube's servers.",
             "Check your internet connection and retry.",
         ))?;
@@ -493,7 +493,7 @@ async fn upload_to_tiktok(
         .await
         .map_err(|e| upload_err(
             "NETWORK_ERROR",
-            e.to_string(),
+            crate::nodes::util::reqwest_err_msg(&e),
             "Failed to reach TikTok's servers.",
             "Check your internet connection and retry.",
         ))?;
@@ -573,7 +573,7 @@ async fn upload_to_tiktok(
                 Err(e) => {
                     last_error = Some(upload_err(
                         "NETWORK_ERROR",
-                        e.to_string(),
+                        crate::nodes::util::reqwest_err_msg(&e),
                         format!("Network error uploading chunk {} of {} to TikTok.", chunk_idx + 1, total_chunks),
                         "Check your connection and retry.",
                     ));

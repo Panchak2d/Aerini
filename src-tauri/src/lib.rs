@@ -459,7 +459,8 @@ async fn pick_file_dialog(app: tauri::AppHandle) -> Option<String> {
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
 /// Strips `/`, `\`, and `..` from the filename before constructing the path.
-/// The file is written to `{temp_dir}/aerini_media/{safe_filename}`.
+/// The file is written to `{temp_dir}/aerini_media/{8 hex chars}-{safe_filename}`;
+/// the prefix keeps two files with the same name from overwriting each other.
 #[tauri::command]
 async fn write_temp_file(filename: String, data: String) -> Result<String, String> {
     // Path traversal protection — strip separators and collapse ".."
@@ -481,6 +482,14 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     const MAX_TEMP_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+    let max_encoded_len = MAX_TEMP_FILE_BYTES.div_ceil(3) * 4;
+    if data.len() > max_encoded_len {
+        return Err(format!(
+            "File too large: {} encoded bytes (limit {} bytes decoded)",
+            data.len(),
+            MAX_TEMP_FILE_BYTES,
+        ));
+    }
     let bytes = BASE64.decode(&data)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
     if bytes.len() > MAX_TEMP_FILE_BYTES {
@@ -491,7 +500,8 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         ));
     }
 
-    let path = dir.join(&safe_name);
+    let unique_prefix = uuid::Uuid::new_v4().simple().to_string();
+    let path = dir.join(format!("{}-{}", &unique_prefix[..8], safe_name));
     tokio::fs::write(&path, &bytes)
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
@@ -603,6 +613,9 @@ pub fn run() {
             // where a scheduled/webhook run has no per-caller token scope to
             // derive trust from.
             .with_caller_is_admin(true));
+            daemon.set_plugin_dir(
+                db.get_setting("plugin_dir").unwrap_or(None).map(std::path::PathBuf::from),
+            );
             daemon.start(tauri::async_runtime::handle().inner());
 
             app.manage(Arc::clone(&db));

@@ -14,7 +14,7 @@
 use chrono::Utc;
 use rand::TryRng;
 use base64::Engine;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex};
 use subtle::ConstantTimeEq;
@@ -51,6 +51,28 @@ pub struct TokenInfo {
     pub expires_at: Option<String>,
 }
 
+/// Outcome of [`TokenStore::acl_grant`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclGrant {
+    Granted,
+    /// No token with that id, or it is revoked.
+    NoActiveToken,
+    /// Admin tokens ignore the ACL, so a grant would report a restriction
+    /// that is never enforced.
+    AdminToken,
+}
+
+/// Outcome of [`TokenStore::acl_revoke`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclRevoke {
+    Revoked,
+    /// The token does not hold that grant. Nothing changed.
+    NotGranted,
+    /// It is the token's only grant. Removing it would leave the token with no
+    /// grants, which means unrestricted, so nothing was changed.
+    LastGrant,
+}
+
 pub struct TokenStore {
     conn: Mutex<Connection>,
     key:  [u8; 32],
@@ -70,7 +92,9 @@ impl TokenStore {
             );
             -- Per-workflow ACL.
             -- Row presence = token is restricted to the granted workflows.
-            -- Tokens with NO rows in this table are unrestricted.
+            -- Tokens with NO rows in this table are unrestricted, so the last
+            -- row of a restricted token is never removed on its own;
+            -- revoke_token() clears them together with the token.
             -- Admin-scoped tokens are always unrestricted regardless of this table.
             -- Note: no ON DELETE CASCADE — foreign_keys pragma is off in this db.
             -- ACL rows for revoked tokens are deleted by revoke_token().
@@ -221,12 +245,18 @@ impl TokenStore {
         })
     }
 
-    /// Revoke a token by its `token_id`. No-op if already revoked or not found.
+    /// Revoke a token by its `token_id`. Idempotent for an already-revoked token.
+    /// Returns `false` when no token has that id.
     /// Also cleans up ACL rows for the token atomically in the same transaction.
-    pub fn revoke_token(&self, token_id: &str) -> rusqlite::Result<()> {
+    pub fn revoke_token(&self, token_id: &str) -> rusqlite::Result<bool> {
         let now  = Utc::now().to_rfc3339();
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tokens WHERE token_id = ?1)",
+            params![token_id],
+            |row| row.get(0),
+        )?;
         tx.execute(
             "UPDATE tokens SET revoked_at = ?1 WHERE token_id = ?2 AND revoked_at IS NULL",
             params![now, token_id],
@@ -235,7 +265,8 @@ impl TokenStore {
             "DELETE FROM token_workflow_acl WHERE token_id = ?1",
             params![token_id],
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(exists)
     }
 
     /// List all tokens (active and revoked), ordered by creation time.
@@ -274,33 +305,66 @@ impl TokenStore {
 
     // ── Per-workflow ACL ──────────────────────────────────────────────────
 
-    /// Grant a token access to a specific workflow.
+    /// Grant an active (not revoked), non-admin token access to a specific workflow.
     /// Once ANY ACL row exists for a token, it is restricted to those workflows only.
+    /// Writes nothing unless the result is [`AclGrant::Granted`].
     /// No-op if already granted.
-    pub fn acl_grant(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
+    pub fn acl_grant(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<AclGrant> {
         let now  = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let scopes_j: Option<String> = conn.query_row(
+            "SELECT scopes FROM tokens WHERE token_id = ?1 AND revoked_at IS NULL",
+            params![token_id],
+            |row| row.get(0),
+        ).optional()?;
+        let Some(scopes_j) = scopes_j else {
+            return Ok(AclGrant::NoActiveToken);
+        };
+        let scopes: Vec<String> = serde_json::from_str(&scopes_j).unwrap_or_default();
+        if scopes.iter().any(|sc| sc == "admin") {
+            return Ok(AclGrant::AdminToken);
+        }
         conn.execute(
             "INSERT OR IGNORE INTO token_workflow_acl (token_id, workflow_id, granted_at)
              VALUES (?1, ?2, ?3)",
             params![token_id, workflow_id, now],
         )?;
-        Ok(())
+        Ok(AclGrant::Granted)
     }
 
-    /// Revoke a token's access to a specific workflow. No-op if not present.
-    /// Revoking a token's last grant leaves it unrestricted, not blocked.
-    pub fn acl_revoke(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+    /// Revoke a token's access to a specific workflow.
+    ///
+    /// Refuses to remove a token's only grant ([`AclRevoke::LastGrant`]):
+    /// a token with no grants is unrestricted, so that would widen its access.
+    /// To cut a token off, use [`revoke_token`](Self::revoke_token). The check
+    /// and the delete share one write transaction, so concurrent revokes
+    /// cannot both pass the check and empty the list. Writes nothing unless
+    /// the result is [`AclRevoke::Revoked`].
+    pub fn acl_revoke(&self, token_id: &str, workflow_id: &str) -> rusqlite::Result<AclRevoke> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (total, target): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(workflow_id = ?2), 0)
+             FROM token_workflow_acl WHERE token_id = ?1",
+            params![token_id, workflow_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if target == 0 {
+            return Ok(AclRevoke::NotGranted);
+        }
+        if total == 1 {
+            return Ok(AclRevoke::LastGrant);
+        }
+        tx.execute(
             "DELETE FROM token_workflow_acl WHERE token_id = ?1 AND workflow_id = ?2",
             params![token_id, workflow_id],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(AclRevoke::Revoked)
     }
 
     /// List all workflow IDs a token has been granted access to.
-    /// Returns an empty Vec for tokens with no ACL rows (unrestricted).
+    /// Returns an empty Vec for a token created without grants (unrestricted).
     pub fn acl_list(&self, token_id: &str) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -319,8 +383,9 @@ impl TokenStore {
     ///
     /// Rules:
     /// - Admin tokens: always unrestricted (None).
-    /// - Tokens with no ACL rows: unrestricted (None) — backward compat.
-    /// - Tokens with ≥1 ACL row: restricted to that set (Some).
+    /// - Tokens with no ACL rows (created without grants): unrestricted (None).
+    /// - Tokens with ≥1 ACL row: restricted to that set (Some). Revoking the
+    ///   last row is refused, so a restricted token stays restricted.
     pub fn acl_filter(&self, record: &TokenRecord) -> rusqlite::Result<Option<std::collections::HashSet<String>>> {
         if record.has_scope("admin") {
             return Ok(None);
@@ -369,15 +434,37 @@ mod tests {
     }
 
     #[test]
-    fn revoking_last_grant_leaves_token_unrestricted() {
+    fn revoking_only_grant_is_refused_and_token_stays_restricted() {
         let store = open_temp_store();
         let (token_id, raw) = store
             .create_token_with_workflows("scoped", &["write"], None, &["wf_a".to_string()])
             .expect("create token with workflows");
         let record = store.verify_token(&raw).expect("verify");
+        assert_eq!(store.acl_revoke(&token_id, "wf_a").expect("revoke grant"), AclRevoke::LastGrant);
+        assert_eq!(store.acl_list(&token_id).expect("acl_list"), vec!["wf_a".to_string()]);
         assert!(store.acl_filter(&record).expect("filter").is_some());
-        store.acl_revoke(&token_id, "wf_a").expect("revoke grant");
-        assert!(store.acl_filter(&record).expect("filter").is_none());
+    }
+
+    #[test]
+    fn revoking_one_of_two_grants_keeps_the_other() {
+        let store = open_temp_store();
+        let ids = vec!["wf_a".to_string(), "wf_b".to_string()];
+        let (token_id, _raw) = store
+            .create_token_with_workflows("scoped", &["read"], None, &ids)
+            .expect("create token with workflows");
+        assert_eq!(store.acl_revoke(&token_id, "wf_a").expect("revoke grant"), AclRevoke::Revoked);
+        assert_eq!(store.acl_list(&token_id).expect("acl_list"), vec!["wf_b".to_string()]);
+    }
+
+    #[test]
+    fn revoking_an_absent_grant_changes_nothing() {
+        let store = open_temp_store();
+        let (token_id, _raw) = store
+            .create_token_with_workflows("scoped", &["read"], None, &["wf_a".to_string()])
+            .expect("create token with workflows");
+        assert_eq!(store.acl_revoke(&token_id, "wf_x").expect("revoke absent"), AclRevoke::NotGranted);
+        assert_eq!(store.acl_revoke("no-such-token", "wf_a").expect("revoke unknown token"), AclRevoke::NotGranted);
+        assert_eq!(store.acl_list(&token_id).expect("acl_list"), vec!["wf_a".to_string()]);
     }
 
     #[test]
@@ -399,5 +486,40 @@ mod tests {
             .execute("UPDATE tokens SET expires_at = 'garbage'", [])
             .expect("corrupt expiry");
         assert!(store.verify_token(&raw).is_none());
+    }
+
+    #[test]
+    fn acl_grant_refuses_unknown_and_revoked_tokens() {
+        let store = open_temp_store();
+        assert_eq!(store.acl_grant("no-such-token", "wf_a").expect("grant unknown"), AclGrant::NoActiveToken);
+        let (token_id, _raw) = store
+            .create_token_with_id("t", &["read"], None)
+            .expect("create token");
+        assert_eq!(store.acl_grant(&token_id, "wf_a").expect("grant active"), AclGrant::Granted);
+        store.revoke_token(&token_id).expect("revoke");
+        assert_eq!(store.acl_grant(&token_id, "wf_b").expect("grant revoked"), AclGrant::NoActiveToken);
+        assert!(store.acl_list(&token_id).expect("acl_list").is_empty());
+    }
+
+    #[test]
+    fn acl_grant_refuses_admin_tokens_and_writes_nothing() {
+        let store = open_temp_store();
+        let (token_id, _raw) = store
+            .create_token_with_id("root", &["read", "admin"], None)
+            .expect("create admin token");
+        assert_eq!(store.acl_grant(&token_id, "wf_a").expect("grant admin"), AclGrant::AdminToken);
+        assert!(store.acl_list(&token_id).expect("acl_list").is_empty());
+    }
+
+    #[test]
+    fn revoke_token_reports_whether_the_token_exists() {
+        let store = open_temp_store();
+        let (token_id, raw) = store
+            .create_token_with_id("t", &["read"], None)
+            .expect("create token");
+        assert!(store.revoke_token(&token_id).expect("first revoke"));
+        assert!(store.revoke_token(&token_id).expect("repeat revoke"));
+        assert!(store.verify_token(&raw).is_none());
+        assert!(!store.revoke_token("no-such-token").expect("unknown revoke"));
     }
 }

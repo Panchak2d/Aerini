@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 import type { Canvas } from "../canvas/Canvas";
 import { CanvasNode, type CanvasNodeData } from "../canvas/Node";
 import { validateWorkflow } from "../validation";
+import { registerNodeDescriptors } from "../canvas/node-registry";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
 import { vi } from "vitest";
@@ -121,5 +122,26 @@ describe("validateWorkflow — ai_agent required fields", () => {
   it("passes with both goal and provider set", () => {
     const node = makeNode("n1", "ai_agent", { goal: "do the thing", provider: "anthropic" });
     expect(validateWorkflow(canvasOf(node))).toEqual([]);
+  });
+});
+
+describe("validateWorkflow — plugin triggers", () => {
+  const pluginDesc = (trigger_capable: boolean) => ({
+    type_id: "com.example.heartbeat-trigger", display_name: "Heartbeat", node_type: "action" as const,
+    version: "1", input_schema: {}, output_schema: {}, ports: { inputs: [], outputs: [] },
+    is_plugin: true, trigger_capable,
+  });
+  const lone = () => ({ nodes: new Map([["p", makeNode("p", "com.example.heartbeat-trigger")]]) }) as unknown as Canvas;
+
+  it("accepts a trigger-capable plugin as the workflow's trigger", () => {
+    registerNodeDescriptors([pluginDesc(true)]);
+    expect(validateWorkflow(lone())).toEqual([]);
+    registerNodeDescriptors([]);
+  });
+
+  it("still reports no trigger for a plugin that is not trigger-capable", () => {
+    registerNodeDescriptors([pluginDesc(false)]);
+    expect(validateWorkflow(lone()).some(e => e.includes("No trigger node found"))).toBe(true);
+    registerNodeDescriptors([]);
   });
 });

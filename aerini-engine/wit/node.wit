@@ -156,6 +156,52 @@ world aerini-node-with-trigger {
     export trigger;
 }
 
+/// `aerini-node-with-trigger` plus the optional `metadata` export, for a trigger
+/// plugin that wants a custom icon/author/version. Target THIS world instead of
+/// `aerini-node-with-trigger` to get them; a trigger plugin built against
+/// `aerini-node-with-trigger` keeps loading unchanged and gets the host
+/// defaults described on `interface metadata`. Additive, like every other
+/// world in this package.
+world aerini-node-with-trigger-and-metadata {
+    export node;
+    export trigger;
+    export metadata;
+}
+
+/// Optional, host-provided hint about when a trigger plugin's next event is
+/// due, so the Background Runs panel can show a "next in Ns" countdown.
+/// Like `storage` and `fs-watch`, this is an IMPORT the host links
+/// unconditionally: a plugin built before it existed has no such import and
+/// is unaffected (it simply shows plain "running"), and no existing
+/// interface, record or world changes shape.
+///
+/// It is an import, not a query, because only the running `trigger.events`
+/// instance knows its own timer -- the instance `node.execute` runs on is a
+/// separate one that cannot see it. The running instance calls
+/// `report-next-fire` whenever it arms or re-arms its timer.
+interface trigger-schedule {
+    /// Reports when the next event is expected, in milliseconds since the
+    /// Unix epoch (UTC). Advisory only: it never changes when the host runs
+    /// anything. The host ignores a value that is already past, more than a
+    /// year ahead, or earlier than the last event it received, and it may
+    /// coalesce rapid calls, so report once each time the timer is armed, and
+    /// again after each event for the following one. Never traps and never
+    /// blocks.
+    report-next-fire: func(unix-ms: u64);
+}
+
+/// `aerini-node-with-trigger` plus the `trigger-schedule` import. Target THIS
+/// world to report next-fire times; plugins built against
+/// `aerini-node-with-trigger` keep loading unchanged. A trigger plugin that
+/// wants `metadata` as well hand-declares its own world exporting `node`,
+/// `trigger` and `metadata` and importing `trigger-schedule`, the same way
+/// `storage` and `fs-watch` combine with other worlds.
+world aerini-node-with-trigger-and-next-fire {
+    export node;
+    export trigger;
+    import trigger-schedule;
+}
+
 /// Optional, host-provided key-value storage. Unlike `metadata`/`trigger`
 /// above (things a plugin *exports* for the host to call), `storage` is an
 /// *import* -- something the host provides for a plugin to call -- so it

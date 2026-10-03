@@ -12,7 +12,7 @@ Click **Monitor** in the sidebar. It updates on its own roughly once a second wh
 
 ## The workflow list
 
-Every workflow you have, whether it's idle, currently running, or was scheduled and has since stopped, gets a row: status, name, memory (while running), and either how long the current run has taken or a countdown to its next scheduled fire. Hovering a row shows its available actions, which depend on its status:
+Every workflow you have, whether it's idle, currently running, or was scheduled and has since stopped, gets a row: status, name, memory (while running), and either how long the current run has taken or a countdown to its next scheduled fire. A Webhook or trigger-plugin workflow that is armed and waiting for a request or event, with no next fire time to count down to, shows **Listening** instead of a running time; a plugin that reports its next event keeps its countdown, and the running time returns while a run is executing. Hovering a row shows its available actions, which depend on its status:
 
 - **Running**: a stop button.
 - **Idle**: a start button that runs it in the background the same way **Schedule Run** does from the toolbar.
@@ -33,7 +33,7 @@ If a workflow's configured port turns out to be taken by something else, Start (
 
 ## Filtering the list
 
-Two icons in the Monitor tab's header: a search icon that opens a **Filter workflows…** box (matches by name), and a filter icon with a dropdown of statuses (All, Running, Success, Failed, Stopped, Idle, Scheduled) to narrow the list to just one.
+Two icons in the Monitor tab's header: a search icon that opens a **Filter workflows…** box (matches by name), and a filter icon with a dropdown of statuses (All, Running, Success, Failed, Stopped, Idle, Scheduled) to narrow the list to just one. **Scheduled** shows workflows that are running in the background with a trigger that fires on its own: a Schedule, a Webhook listener, or a trigger plugin. They appear whether or not a next fire time is known, since a Webhook or plugin trigger waits for an event rather than a clock. It is a subset of **Running**; a stopped workflow, or one with only a Manual trigger, is not included.
 
 ## The sidebar
 

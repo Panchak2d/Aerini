@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read, require_workflow_acl, require_write};
+use super::state::{internal_error, ApiState, require_read, require_workflow_acl, require_write};
 use super::workflows::PaginationParams;
 
 pub async fn list_scheduler(
@@ -25,10 +25,7 @@ pub async fn list_scheduler(
     // ACL rows).
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f)  => f,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-        ).into_response(),
+        Err(e) => return internal_error("ACL lookup failed", e).into_response(),
     };
 
     let limit  = p.limit.min(500);
@@ -59,8 +56,8 @@ pub async fn list_scheduler(
             let items: Vec<_> = items.iter().map(|row| row.redacted()).collect();
             (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": offset}))).into_response()
         },
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("database operation failed", e).into_response(),
+        Err(e)     => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -77,8 +74,8 @@ pub async fn start_job(
     if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     match tokio::task::spawn_blocking(move || s.scheduler.start_job(&id, b.port_override, Some(b.always_on))).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::BAD_REQUEST, Json(json!({"error":format!("{:?}",e)}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))  => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e)      => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -91,7 +88,7 @@ pub async fn stop_job(
     if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     match tokio::task::spawn_blocking(move || s.scheduler.stop_job(&id)).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))  => internal_error("database operation failed", e).into_response(),
+        Err(e)      => internal_error("request task failed", e).into_response(),
     }
 }

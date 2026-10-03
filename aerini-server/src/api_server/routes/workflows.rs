@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Sse},
     Json,
 };
-use aerini_engine::{db::{SaveOutcome, WorkflowSummary}, model::Workflow};
+use aerini_engine::{db::{SaveOutcome, WorkflowSummary}, error::EngineError, model::Workflow};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -15,18 +15,30 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read, require_workflow_acl, require_write};
+use super::state::{internal_error, ApiState, require_read, require_workflow_acl, require_write};
 
 pub async fn health() -> Json<Value> {
     let node_bundled = match tokio::task::spawn_blocking(
         aerini_engine::nodes::code_node::bundled_node_health_check,
     ).await {
         Ok(Ok(version)) => json!({"status": "ok", "version": version}),
-        Ok(Err(e))      => json!({"status": "error", "message": e}),
-        Err(e)          => json!({"status": "error", "message": e.to_string()}),
+        Ok(Err(detail)) => {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| tracing::warn!(%detail, "bundled Node.js runtime health check failed"));
+            json!({"status": "error", "message": NODE_CHECK_FAILED})
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "bundled Node.js health check task failed");
+            json!({"status": "error", "message": NODE_CHECK_FAILED})
+        }
     };
     Json(json!({"status":"ok","version":aerini_engine::ENGINE_VERSION,"node_bundled":node_bundled}))
 }
+
+/// `/api/health` is unauthenticated, so the check's own text (executable
+/// paths, OS error strings) stays in the server log.
+const NODE_CHECK_FAILED: &str =
+    "Bundled Node.js runtime failed its check. See the server log for details.";
 
 #[derive(Deserialize)]
 pub struct PaginationParams {
@@ -77,10 +89,7 @@ pub async fn list_workflows(
     let offset = p.offset;
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f)  => f,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-        ).into_response(),
+        Err(e) => return internal_error("ACL lookup failed", e).into_response(),
     };
     let listed = tokio::task::spawn_blocking(move || match acl_filter {
         None          => s.db.list_paginated(limit, offset),
@@ -90,8 +99,8 @@ pub async fn list_workflows(
         Ok(Ok((items, total))) => {
             (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": offset}))).into_response()
         },
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("database operation failed", e).into_response(),
+        Err(e)     => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -109,11 +118,11 @@ pub async fn get_workflow(
                 set_etag(&mut resp, row_version);
                 resp
             }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+            Err(e) => internal_error("request task failed", e).into_response(),
         },
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))).into_response(),
-        Ok(Err(e))   => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)       => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))   => internal_error("database operation failed", e).into_response(),
+        Err(e)       => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -193,8 +202,8 @@ pub async fn save_workflow(
             if let Some(v) = row_version { set_etag(&mut resp, v); }
             resp
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("database operation failed", e).into_response(),
+        Err(e)     => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -235,8 +244,8 @@ pub async fn delete_workflow(
             exec_locks.remove(&id_for_lock);
             (StatusCode::OK, Json(json!({"ok":true}))).into_response()
         },
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("database operation failed", e).into_response(),
+        Err(e)     => internal_error("request task failed", e).into_response(),
     }
 }
 
@@ -258,17 +267,15 @@ pub async fn run_workflow(
     }).await {
         Ok(Ok(Some(wf))) => wf,
         Ok(Ok(None))     => return (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))).into_response(),
-        Ok(Err(e))       => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)           => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))       => return internal_error("database operation failed", e).into_response(),
+        Err(e)           => return internal_error("request task failed", e).into_response(),
     };
 
-    {
-        if s.exec_locks.len() > 1000 {
-            let db = Arc::clone(&s.db);
-            if let Ok(Ok(live_ids)) = tokio::task::spawn_blocking(move || db.list_ids()).await {
-                s.exec_locks.retain(|k, _| live_ids.contains(k));
-            }
-        }
+    // A lock nobody holds or waits on has a strong count of 1 and is safe to
+    // drop: the next caller recreates it, and `entry` runs under the shard
+    // lock that `retain` also takes, so a lock being handed out is never pruned.
+    if s.exec_locks.len() > 1000 {
+        s.exec_locks.retain(|_, lock| Arc::strong_count(lock) > 1);
     }
 
     // Acquire the global run semaphore BEFORE the per-workflow exec lock.
@@ -335,7 +342,9 @@ pub async fn run_workflow(
 
     match run_result {
         Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Err(e @ (EngineError::Database(_) | EngineError::Encryption(_) | EngineError::Internal(_))) =>
+            internal_error("workflow run failed", e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
@@ -413,10 +422,7 @@ pub async fn sse_events(
     //    (only if their ACL allows it, or if they are unrestricted).
     let acl_filter: Option<std::collections::HashSet<String>> = match s.acl_filter(&caller).await {
         Ok(f) => f,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-        ).into_response(),
+        Err(e) => return internal_error("ACL lookup failed", e).into_response(),
     };
 
     // Merge explicit ?workflow_id param with ACL filter.
