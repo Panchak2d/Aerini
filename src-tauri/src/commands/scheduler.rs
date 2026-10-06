@@ -1,6 +1,18 @@
 use std::sync::Arc;
 
+use aerini_engine::db::WorkflowDb;
 use aerini_engine::scheduler::{ScheduledJobRow, SchedulerDaemon};
+
+/// The plugin directory saved in Settings, if one is set. Plugin triggers
+/// resolve their plugin from it; a blank value counts as unset.
+pub(crate) fn configured_plugin_dir(db: &WorkflowDb) -> Option<std::path::PathBuf> {
+    db.get_setting("plugin_dir")
+        .ok()
+        .flatten()
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
 
 #[tauri::command]
 pub async fn start_scheduled_workflow(
@@ -8,7 +20,15 @@ pub async fn start_scheduled_workflow(
     port_override: Option<u16>,
     always_on:     Option<bool>,
     daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
+    db:     tauri::State<'_, Arc<WorkflowDb>>,
 ) -> Result<(), String> {
+    // Re-read on every start so a plugin directory changed in Settings is
+    // used by the next job started; a running job keeps the one it began with.
+    let db = Arc::clone(&db);
+    let plugin_dir = tokio::task::spawn_blocking(move || configured_plugin_dir(&db))
+        .await
+        .map_err(|e| e.to_string())?;
+    daemon.set_plugin_dir(plugin_dir);
     daemon.start_job(&workflow_id, port_override, always_on)
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| format!("{:?}", e)))
 }

@@ -32,6 +32,9 @@ The installer isn't code-signed, so Windows Defender SmartScreen will probably s
 
 Aerini's window is rendered with `webkit2gtk` (version 4.1). Most desktop Linux installations already have it, since plenty of other apps depend on it too. If Aerini fails to launch with an error mentioning a missing shared library, install your distribution's `webkit2gtk-4.1` runtime package (for example, `libwebkit2gtk-4.1-0` on Debian and Ubuntu) and try again.
 
+> [!NOTE]
+> Once you're running a release that includes in-app updates, later versions install from **Settings → About → Updates**; you don't need to repeat the steps above. Aerini 0.4.1 and earlier have no in-app updater, so install the first release that has one this way. See [Updating](../operations/updating.md#desktop-app).
+
 ## Building from source
 
 This section is for contributors, or for a platform the installer doesn't cover yet (like Intel Macs today). Most people should use the installer above instead.

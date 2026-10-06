@@ -12,7 +12,7 @@ Click **Monitor** in the sidebar. It updates on its own roughly once a second wh
 
 ## The workflow list
 
-Every workflow you have, whether it's idle, currently running, or was scheduled and has since stopped, gets a row: status, name, memory (while running), and either how long the current run has taken or a countdown to its next scheduled fire. Hovering a row shows its available actions, which depend on its status:
+Every workflow you have, whether it's idle, currently running, or was scheduled and has since stopped, gets a row: status, name, memory (while running), and either how long the current run has taken or a countdown to its next scheduled fire. A Webhook or trigger-plugin workflow that is armed and waiting for a request or event shows **Listening** instead of a time that counts up from when it was armed; a plugin that reports when its next event is due keeps a countdown. Hovering a row shows its available actions, which depend on its status:
 
 - **Running**: a stop button.
 - **Idle**: a start button that runs it in the background the same way **Schedule Run** does from the toolbar.
@@ -26,14 +26,14 @@ A workflow you currently have open on the canvas gets its own card above the mai
 
 Two buttons in the header, each shown only when there's something for it to do:
 
-- **Start All** starts every workflow that's currently idle, stopped, or failed and has a Schedule or Webhook trigger to start from. Same eligibility as pressing start on each one individually, just batched.
+- **Start All** starts every workflow that's currently idle, stopped, or failed and has a Schedule, Webhook, or trigger-plugin trigger to start from. Same eligibility as pressing start on each one individually, just batched.
 - **Stop All** stops every workflow currently running.
 
 If a workflow's configured port turns out to be taken by something else, Start (individually or via Start All) automatically retries on the next port up rather than just failing, and tells you it did so.
 
 ## Filtering the list
 
-Two icons in the Monitor tab's header: a search icon that opens a **Filter workflows…** box (matches by name), and a filter icon with a dropdown of statuses (All, Running, Success, Failed, Stopped, Idle, Scheduled) to narrow the list to just one.
+Two icons in the Monitor tab's header: a search icon that opens a **Filter workflows…** box (matches by name), and a filter icon with a dropdown of statuses (All, Running, Success, Failed, Stopped, Idle, Scheduled) to narrow the list to just one. **Scheduled** lists every workflow running in the background with a Schedule, Webhook, or trigger-plugin trigger, including Webhook and plugin triggers that have no next fire time, plus any workflow with Run on launch turned on. A workflow that was stopped doesn't keep its old countdown when you start it again.
 
 ## The sidebar
 

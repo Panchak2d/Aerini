@@ -1,8 +1,23 @@
 import type { Canvas } from "./Canvas";
-import { CanvasNode, PORT_RADIUS, NODE_WIDTH } from "./Node";
+import { CanvasNode, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 import { isMonitorModeActive } from "../monitor-mode";
+
+/** Screen pixels a pressed port must travel before the press becomes a drag. */
+const PORT_DRAG_THRESHOLD = 4;
+
+type PortPress = {
+  kind: "out" | "in" | "wire";
+  node: string;
+  port: string;
+  /** The wire a drag picks up: a selected wire's handle, or the sole wire on a single-arity input. */
+  conn?: Connector;
+  sx: number;
+  sy: number;
+  /** Ctrl/Cmd held on an output: the drag moves every wire of that output. */
+  moveAll: boolean;
+};
 
 export class InputHandler {
   private canvas: Canvas;
@@ -17,7 +32,9 @@ export class InputHandler {
   didDrag = false;
 
   pendingConn: PendingConnector | null = null;
-  reconnEdge:  { conn: Connector; fromEnd?: boolean } | null = null;
+  reconnEdge:  { conn: Connector } | null = null;
+  portPress:   PortPress | null = null;
+  moveGroup:   Connector[] | null = null;
 
   isCutting = false;
   cutPath: { x: number; y: number }[] = [];
@@ -90,12 +107,8 @@ export class InputHandler {
       e.preventDefault(); c.onPaletteRequest?.();
     }
     if (e.key === "Escape") {
-
-      if (this.reconnEdge) {
-        c.connectors.set(this.reconnEdge.conn.data.id, this.reconnEdge.conn);
-        c.injectDynamicPortExpr(this.reconnEdge.conn);
-        this.reconnEdge = null;
-      }
+      this.portPress = null; this.moveGroup = null;
+      this.reconnEdge = null;
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       c.pendingInsert = null; c.insertGhost = null;
       c._pendingInputWireDrop = null;
@@ -163,39 +176,21 @@ export class InputHandler {
     if (e.button === 1) { this.startPan(sx, sy); return; }
     if (e.button !== 0) return;
 
-    // Grab existing connector — input end or output end — to reroute or disconnect
-    for (const conn of c.connectors.values()) {
-      const tn = c.nodes.get(conn.data.to_node); if (!tn) continue;
-      const tp = tn.ports.find(p => p.id === conn.data.to_port); if (!tp) continue;
-      const fn = c.nodes.get(conn.data.from_node); if (!fn) continue;
-      const fp = fn.ports.find(p => p.id === conn.data.from_port); if (!fp) continue;
-
-      if (Math.hypot(wx - tp.x, wy - tp.y) < PORT_RADIUS + 8) {
-        this.reconnEdge = { conn }; c.connectors.delete(conn.data.id);
-        c.clearDynamicPortExpr(conn);
-        this.pendingConn = new PendingConnector(conn.data.from_node, conn.data.from_port, fp.x, fp.y);
-        this.pendingConn.toX = wx; this.pendingConn.toY = wy;
-        c.el.style.cursor = "crosshair"; return;
-      }
-      if (Math.hypot(wx - fp.x, wy - fp.y) < PORT_RADIUS + 8) {
-        c.connectors.delete(conn.data.id);
-        c.clearDynamicPortExpr(conn);
-        this.reconnEdge = { conn, fromEnd: true };
-        this.pendingConn = new PendingConnector(conn.data.from_node, conn.data.from_port, fp.x, fp.y);
-        this.pendingConn.toX = wx; this.pendingConn.toY = wy;
-        c.el.style.cursor = "crosshair"; return;
-      }
+    // Pressing a port only arms it; nothing happens until the pointer travels
+    // PORT_DRAG_THRESHOLD, and a release before that is a click.
+    const handle = c.wireHandleAt(wx, wy);
+    if (handle) {
+      this.portPress = { kind: "wire", node: handle.data.to_node, port: handle.data.to_port, conn: handle, sx, sy, moveAll: false };
+      return;
     }
 
-    // Output port → new connector
     for (const node of c.nodes.values()) {
       const p = node.portAtPoint(wx, wy);
-      if (p && !p.isInput) { this.pendingConn = new PendingConnector(node.data.id, p.id, p.x, p.y); c.el.style.cursor = "crosshair"; return; }
-      if (p && p.isInput) {
-        c._pendingInputWireDrop = { toNode: node.data.id, toPort: p.id, wx: p.x, wy: p.y };
-        c.onInputWireDropRequest?.(node.data.id, p.id, p.x, p.y);
-        return;
-      }
+      if (!p) continue;
+      this.portPress = p.isInput
+        ? { kind: "in",  node: node.data.id, port: p.id, conn: this.pickupWire(node.data.id, p.id), sx, sy, moveAll: false }
+        : { kind: "out", node: node.data.id, port: p.id, sx, sy, moveAll: e.ctrlKey || e.metaKey };
+      return;
     }
 
     // Node drag
@@ -242,10 +237,48 @@ export class InputHandler {
     this.canvas.el.style.cursor = "grabbing";
   }
 
+  /** The wire a drag from this input would pick up: the sole wire on a single-arity input. */
+  private pickupWire(nodeId: string, portId: string): Connector | undefined {
+    const c = this.canvas;
+    if (c.isMultiInput(nodeId, portId)) return undefined;
+    const wires = c.wiresIntoPort(nodeId, portId);
+    return wires.length === 1 ? wires[0] : undefined;
+  }
+
+  /**
+   * Turns an armed port press into a drag once the pointer has travelled far
+   * enough. Returns true when a drag is now in progress.
+   */
+  private promotePortPress(sx: number, sy: number, wx: number, wy: number): boolean {
+    const press = this.portPress!;
+    if (Math.hypot(sx - press.sx, sy - press.sy) < PORT_DRAG_THRESHOLD) return false;
+    this.portPress = null;
+    const c = this.canvas;
+    const port = c.nodes.get(press.node)?.ports.find(p => p.id === press.port && p.isInput === (press.kind !== "out"));
+    if (!port) return false;
+
+    const wire = press.conn;
+    if (wire) {
+      const source = c.nodes.get(wire.data.from_node)?.ports.find(p => p.id === wire.data.from_port && !p.isInput);
+      if (!source) return false;
+      this.reconnEdge = { conn: wire };
+      this.pendingConn = new PendingConnector(wire.data.from_node, wire.data.from_port, source.x, source.y);
+    } else if (press.kind === "in") {
+      this.pendingConn = new PendingConnector(press.node, press.port, port.x, port.y, "reverse");
+    } else {
+      const wires = press.moveAll ? c.wiresFromPort(press.node, press.port) : [];
+      this.moveGroup = wires.length ? wires : null;
+      this.pendingConn = new PendingConnector(press.node, press.port, port.x, port.y, this.moveGroup ? "move" : "forward");
+    }
+    this.pendingConn.toX = wx; this.pendingConn.toY = wy;
+    c.el.style.cursor = "crosshair";
+    return true;
+  }
+
   onMove(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._move(e, sx, sy); }
 
   onWinMove(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.el.getBoundingClientRect();
     this._move(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -261,6 +294,8 @@ export class InputHandler {
       c.el.style.cursor = "grabbing"; return;
     }
     if (this.isCutting) { this.cutPath.push({ x: wx, y: wy }); return; }
+
+    if (this.portPress && !this.promotePortPress(sx, sy, wx, wy)) return;
 
     if (this.draggingNode) {
       this.didDrag = true;
@@ -281,7 +316,7 @@ export class InputHandler {
     }
 
     if (this.pendingConn) {
-      const snap = c.nearestIn(wx, wy, this.pendingConn.fromNode);
+      const snap = c.snapTarget(this.pendingConn, wx, wy);
       this.pendingConn.toX = snap ? snap.x : wx; this.pendingConn.toY = snap ? snap.y : wy; return;
     }
 
@@ -295,10 +330,16 @@ export class InputHandler {
       return;
     }
 
+    if (c.wireHandleAt(wx, wy)) { c.el.style.cursor = "grab"; return; }
+
     let any = false;
     for (const n of c.nodes.values()) {
       n.hovered = n.containsPoint(wx, wy);
-      if (n.hovered) { any = true; c.el.style.cursor = n.portAtPoint(wx, wy) ? "crosshair" : "grab"; }
+      if (n.hovered) {
+        any = true;
+        const port = n.portAtPoint(wx, wy);
+        c.el.style.cursor = !port ? "grab" : port.isInput && this.pickupWire(n.data.id, port.id) ? "grab" : "crosshair";
+      }
     }
     if (!any) c.el.style.cursor = this.shiftHeld ? "crosshair" : "default";
   }
@@ -306,7 +347,7 @@ export class InputHandler {
   onUp(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._up(e, sx, sy); }
 
   onWinUp(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.el.getBoundingClientRect();
     this._up(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -321,6 +362,16 @@ export class InputHandler {
     }
     c.pendingInsert = null; c.insertGhost = null;
 
+    if (this.portPress) {
+      const press = this.portPress;
+      this.portPress = null;
+      if (press.kind === "in") {
+        const wires = c.wiresIntoPort(press.node, press.port);
+        if (wires.length === 1) c.selectConn(wires[0]);
+      }
+      return;
+    }
+
     if (this.isPanning) { this.isPanning = false; c.el.style.cursor = "default"; c.onViewportChange?.(); return; }
 
     if (this.isCutting) {
@@ -330,18 +381,27 @@ export class InputHandler {
     }
 
     if (this.pendingConn) {
-      const snap = c.nearestIn(wx, wy, this.pendingConn.fromNode);
-      if (snap) {
+      const pending = this.pendingConn;
+      const snap = c.snapTarget(pending, wx, wy);
+      const { fromNode, fromPort } = pending;
+      if (this.reconnEdge) {
+        c.rerouteConn(this.reconnEdge.conn, snap && { nodeId: snap.nodeId, portId: snap.portId });
+      } else if (pending.direction === "move") {
+        if (snap && this.moveGroup) c.moveSources(this.moveGroup, { nodeId: snap.nodeId, portId: snap.portId });
+      } else if (pending.direction === "reverse") {
+        if (snap) {
+          c.connectOrReplace(snap.nodeId, snap.portId, fromNode, fromPort);
+        } else {
+          c._pendingInputWireDrop = { toNode: fromNode, toPort: fromPort, wx, wy };
+          c.onInputWireDropRequest?.(fromNode, fromPort, wx, wy);
+        }
+      } else if (snap) {
         c.finishConn(snap.nodeId, snap.portId);
-      } else if (this.reconnEdge) {
-        c.pushUndo({ type: "delete_edge", connector: this.reconnEdge.conn });
-        c.onCanvasChanged?.();
       } else {
-        const { fromNode, fromPort } = this.pendingConn;
         c._pendingWireDrop = { fromNode, fromPort, wx, wy };
         c.onWireDropRequest?.(fromNode, fromPort, wx, wy);
       }
-      this.reconnEdge = null; this.pendingConn = null; c.el.style.cursor = "default"; return;
+      this.reconnEdge = null; this.pendingConn = null; this.moveGroup = null; c.el.style.cursor = "default"; return;
     }
 
     if (this.draggingNode) {
@@ -376,6 +436,7 @@ export class InputHandler {
   }
 
   onRightClick(e: MouseEvent): void {
+    if (this.portPress || this.pendingConn) return;
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);

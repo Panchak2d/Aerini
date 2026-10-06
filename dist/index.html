@@ -6,9 +6,9 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-DQcnYvtl.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-DgKR9hnD.js">
-  <link rel="stylesheet" crossorigin href="./assets/style-CwAeF6p3.css">
+  <script type="module" crossorigin src="./assets/index-BohINvcU.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-Drke4aWh.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-CVZ5-4CA.css">
 </head>
 <body>
 
@@ -261,7 +261,7 @@
           Chat
         </button>
         <button id="btn-save" class="btn-toolbar btn-toolbar-secondary">Save</button>
-        <span id="always-on-wrap" class="always-on-wrap" data-tooltip="Add a Schedule or Webhook trigger to enable Run on launch" data-tooltip-side="left">
+        <span id="always-on-wrap" class="always-on-wrap" data-tooltip="Add a Schedule, Webhook, or trigger-plugin trigger to enable Run on launch" data-tooltip-side="left">
           <button id="btn-always-on" class="btn-toolbar btn-always-on hidden" title="Run this workflow automatically every time Aerini opens" data-tooltip="Run on launch is OFF" aria-label="Run workflow on every app launch">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             Run on launch
@@ -293,7 +293,7 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/><line x1="19" y1="3" x2="19" y2="21"/></svg>
               <div>
                 <div class="dropdown-item-label">Schedule Run</div>
-                <div class="dropdown-item-desc">Run automatically via Schedule or Webhook trigger</div>
+                <div class="dropdown-item-desc">Run automatically via Schedule, Webhook, or trigger-plugin trigger</div>
               </div>
             </button>
           </div>
@@ -346,6 +346,7 @@
     <div id="status-bar">
       <span id="status-text">Ready</span>
       <span class="status-hint" id="status-hint">Click a node to place it · Space to search · Ctrl+S to save</span>
+      <span class="sync-chip hidden" id="sync-chip" role="status" aria-live="polite"></span>
     </div>
   </main>
 
@@ -518,8 +519,20 @@
           <div class="shortcut-row"><span>Redo</span><div class="shortcut-keys"><kbd>Ctrl+Y</kbd></div></div>
           <div class="shortcut-row"><span>Cut connector</span><div class="shortcut-keys"><kbd>Alt+drag</kbd></div></div>
           <div class="shortcut-row">
-            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Drag away from a port dot</span></div>
+            <div class="shortcut-row-text"><span>Move a wire's end</span><span class="shortcut-desc">Drag from the wired input, or click the wire and drag the ring on its input end</span></div>
             <div class="shortcut-keys"><kbd>Drag</kbd></div>
+          </div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Wire backwards</span><span class="shortcut-desc">Drag from an empty input to an output, or release on empty canvas to pick a node</span></div>
+            <div class="shortcut-keys"><kbd>Drag</kbd></div>
+          </div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Move all wires of an output</span><span class="shortcut-desc">Drag from the output and drop on another output</span></div>
+            <div class="shortcut-keys"><kbd>Ctrl/Cmd+drag</kbd></div>
+          </div>
+          <div class="shortcut-row">
+            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Click the wire, then press Delete, or right-click it</span></div>
+            <div class="shortcut-keys"><kbd>Del</kbd></div>
           </div>
         </div>
         <div class="shortcuts-group">
@@ -595,7 +608,7 @@
           <div class="settings-row">
             <div>
               <div class="settings-label">Launch at login</div>
-              <div class="settings-desc">Start Aerini automatically when you log in — workflows with Schedule or Webhook triggers will run in the background immediately</div>
+              <div class="settings-desc">Start Aerini automatically when you log in — workflows with Schedule, Webhook, or trigger-plugin triggers will run in the background immediately</div>
             </div>
             <input type="checkbox" id="setting-autostart" class="settings-toggle" />
           </div>
@@ -616,7 +629,7 @@
           <div class="settings-about-text">
             <strong class="settings-text-emphasis">Aerini will always be free and open source.</strong><br>
              If you enjoy using it, consider supporting its development. Every contribution helps keep the project moving.<br>
-            <a href="https://www.patreon.com/14702118/join" target="_blank" rel="noopener" class="settings-support-link">Support on Patreon</a>
+            <a href="https://www.patreon.com/14702118/join" target="_blank" rel="noopener noreferrer" class="settings-support-link">Support on Patreon</a>
           </div>
         </div>
         <div class="settings-group">
@@ -634,14 +647,22 @@
             <strong class="settings-text-emphasis">Aerini</strong> — local-first workflow automation<br>
             Version <span id="app-version"></span><br>
             Built with Tauri · Rust · TypeScript<br>
-            <a href="https://github.com/Panchak2d/aerini" target="_blank" class="settings-support-link">View on GitHub</a>
+            <a href="https://github.com/Panchak2d/aerini" target="_blank" rel="noopener noreferrer" class="settings-support-link">View on GitHub</a>
           </div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">Updates</div>
-              <div class="settings-desc" id="update-check-status">Check GitHub for a newer release.</div>
+          <div class="settings-row" id="update-row">
+            <div class="update-row-body">
+              <div class="settings-label" id="update-label">Updates</div>
+              <div class="settings-desc" id="update-check-status" role="status" aria-live="polite" aria-atomic="true">Checks GitHub for a newer release only when you click. Nothing is checked in the background.</div>
+              <div class="update-progress-wrap" id="update-progress-wrap" hidden>
+                <progress class="update-progress" id="update-progress" max="100" aria-labelledby="update-label"></progress>
+                <span class="update-percent" id="update-percent" aria-hidden="true"></span>
+              </div>
             </div>
-            <button id="btn-check-updates" class="btn-sm">Check for Updates</button>
+            <div class="settings-row-actions">
+              <button id="btn-cancel-update" class="btn-sm" hidden>Cancel</button>
+              <button id="btn-install-update" class="btn-sm btn-sm-primary" hidden>Install and restart</button>
+              <button id="btn-check-updates" class="btn-sm">Check for Updates</button>
+            </div>
           </div>
         </div>
       </div>

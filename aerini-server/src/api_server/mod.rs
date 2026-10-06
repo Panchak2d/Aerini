@@ -74,7 +74,7 @@ use rand::TryRng;
 
 use crate::event_bridge::BroadcastEventSink;
 use crate::token_store::TokenStore;
-use crate::util::extract_client_ip;
+use crate::util::{extract_client_ip, parse_bearer};
 
 /// Configuration bundle for [`run`]. Groups the server parameters to stay
 /// under the clippy `too_many_arguments` limit.
@@ -197,65 +197,126 @@ fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
-    if path.exists() {
-        let bytes = std::fs::read(path).unwrap_or_else(|e| {
-            tracing::error!("FATAL: Cannot read token key file {:?}: {}", path, e);
-            std::process::exit(1);
-        });
-        if bytes.len() != 32 {
-            tracing::error!(
-                "FATAL: Token key file {:?} has wrong length ({} bytes, expected 32). \
-                 If you intentionally want to invalidate all tokens, delete the file and restart.",
-                path,
-                bytes.len()
-            );
-            std::process::exit(1);
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
-        key
-    } else {
-        let mut key = [0u8; 32];
-        rand::rngs::SysRng.try_fill_bytes(&mut key).expect("OS RNG failure");
-        std::fs::write(path, key).unwrap_or_else(|e| {
-            tracing::error!("FATAL: Cannot write token key file {:?}: {}", path, e);
-            std::process::exit(1);
-        });
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms).unwrap_or_else(|e| {
-                tracing::error!("FATAL: Cannot set permissions on token key file {:?}: {}", path, e);
-                std::process::exit(1);
-            });
-        }
-
-        #[cfg(windows)]
-        set_owner_only_acl(path).unwrap_or_else(|e| {
-            tracing::error!("FATAL: Cannot set ACL on token key file {:?}: {}", path, e);
-            std::process::exit(1);
-        });
-
-        key
-    }
+/// Prints one error line and exits. Used for failures during startup, where a
+/// panic backtrace would only bury the cause.
+fn fatal(msg: &str) -> ! {
+    eprintln!("ERROR: {msg}");
+    std::process::exit(1);
 }
 
-/// Returns true only for exact localhost origins with an optional port number.
+fn read_token_key(path: &std::path::Path) -> [u8; 32] {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|e| fatal(&format!("cannot read token key file {}: {e}", path.display())));
+    if bytes.len() != 32 {
+        fatal(&format!(
+            "token key file {} has wrong length ({} bytes, expected 32). \
+             If you intentionally want to invalidate all tokens, delete the file and restart.",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    key
+}
+
+fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
+    // Exclusive creation with the owner-only mode set at creation, so the key
+    // never exists on disk readable by others, and a second process starting
+    // on the same data dir cannot replace a key the first just wrote.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return read_token_key(path),
+        Err(e) => fatal(&format!("cannot create token key file {}: {e}", path.display())),
+    };
+
+    let mut key = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut key)
+        .unwrap_or_else(|_| fatal("the operating system's random number generator failed"));
+    {
+        use std::io::Write;
+        if let Err(e) = file.write_all(&key) {
+            // A partial key file would be rejected as the wrong length on every later start.
+            let _ = std::fs::remove_file(path);
+            fatal(&format!("cannot write token key file {}: {e}", path.display()));
+        }
+    }
+    drop(file);
+
+    #[cfg(windows)]
+    set_owner_only_acl(path).unwrap_or_else(|e| {
+        fatal(&format!("cannot restrict token key file {} to its owner: {e}", path.display()))
+    });
+
+    key
+}
+
+/// The current user's home directory: `HOME`, or on Windows `USERPROFILE`
+/// when `HOME` is unset. An empty value counts as unset.
+fn home_dir() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None })
+}
+
+/// Expands `~` and `~/...` against `home`. Anything else, including `~name/...`,
+/// is returned as written and needs no home directory.
+fn expand_home(raw: &str, home: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    let rest = if raw == "~" {
+        ""
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        rest
+    } else {
+        return Ok(PathBuf::from(raw));
+    };
+    let Some(home) = home else {
+        return Err(format!(
+            "cannot expand `~` in --data-dir {raw:?}: no home directory found. \
+             Set {} or pass an absolute --data-dir.",
+            if cfg!(windows) { "HOME or USERPROFILE" } else { "HOME" },
+        ));
+    };
+    // `join` with a rooted argument would discard `home`, so `~//etc` must not become `/etc`.
+    let rest = rest.trim_start_matches(std::path::is_separator);
+    Ok(if rest.is_empty() { home.to_path_buf() } else { home.join(rest) })
+}
+
+/// The first-run banner around the generated API token. Every line has the
+/// same width, so the right border lines up.
+fn token_banner(token: &str) -> String {
+    const INNER: usize = 60;
+    let bar = "─".repeat(INNER);
+    let row = |text: &str| format!("│{:<INNER$}│", format!("  {text}"));
+    [
+        format!("┌{bar}┐"),
+        row("Aerini Server — API Token (save this somewhere safe)"),
+        row(""),
+        row(token),
+        row(""),
+        row("Set AERINI_TOKEN env var to skip this on restart."),
+        format!("└{bar}┘"),
+    ]
+    .join("\n")
+}
+
+/// Returns true only for exact loopback origins with an optional port number:
+/// `http://localhost`, `http://127.0.0.1` and `http://[::1]`.
 /// Rejects subdomain lookalikes such as `http://localhost.evil.com`.
 fn is_localhost_origin(b: &[u8]) -> bool {
-    // Exact: http://localhost  or  http://localhost:<digits>
-    if b == b"http://localhost" { return true; }
-    if let Some(rest) = b.strip_prefix(b"http://localhost:") {
-        return !rest.is_empty() && rest.iter().all(|c| c.is_ascii_digit());
-    }
-    // Exact: http://127.0.0.1  or  http://127.0.0.1:<digits>
-    if b == b"http://127.0.0.1" { return true; }
-    if let Some(rest) = b.strip_prefix(b"http://127.0.0.1:") {
-        return !rest.is_empty() && rest.iter().all(|c| c.is_ascii_digit());
-    }
-    false
+    [&b"http://localhost"[..], b"http://127.0.0.1", b"http://[::1]"]
+        .iter()
+        .any(|host| match b.strip_prefix(*host) {
+            Some([]) => true,
+            Some([b':', port @ ..]) => !port.is_empty() && port.iter().all(u8::is_ascii_digit),
+            _ => false,
+        })
 }
 
 /// True for `/api/widget/{workflow_id}/mint-token`. Its caller is the embedding
@@ -298,13 +359,10 @@ pub async fn run(cfg: ServerConfig) {
             std::process::exit(1);
         }
     }
-    let data_dir = PathBuf::from(if data_dir.starts_with('~') {
-        data_dir.replacen('~',
-            &std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()), 1)
-    } else {
-        data_dir
+    let data_dir = expand_home(&data_dir, home_dir().as_deref()).unwrap_or_else(|e| fatal(&e));
+    std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
+        fatal(&format!("cannot create data directory {}: {e}", data_dir.display()))
     });
-    std::fs::create_dir_all(&data_dir).expect("Cannot create data dir");
 
     // Restrict data dir to owner-only on Unix. Default umask typically produces
     // 0755 which makes the key file discoverable even though it is 0600.
@@ -320,41 +378,41 @@ pub async fn run(cfg: ServerConfig) {
     }
 
     let token_key = load_or_create_token_key(&data_dir.join("tokens.key"));
+    let tokens_db = data_dir.join("tokens.db");
     let token_store = Arc::new(
-        TokenStore::open(&data_dir.join("tokens.db"), token_key)
-            .expect("Cannot open token store")
+        TokenStore::open(&tokens_db, token_key).unwrap_or_else(|e| {
+            fatal(&format!("cannot open token store {}: {e}", tokens_db.display()))
+        })
     );
 
     match &token {
         Some(t) => {
             token_store
                 .import_token(t, "default", &["read", "write", "admin"])
-                .expect("Cannot import token into token store");
+                .unwrap_or_else(|e| fatal(&format!("cannot import token into token store: {e}")));
         }
         None => {
             if token_store.is_empty() {
                 let mut raw_bytes = [0u8; 32];
-                rand::rngs::SysRng.try_fill_bytes(&mut raw_bytes).expect("OS RNG failure");
+                rand::rngs::SysRng
+                    .try_fill_bytes(&mut raw_bytes)
+                    .unwrap_or_else(|_| fatal("the operating system's random number generator failed"));
                 let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
                 eprintln!();
-                eprintln!("┌──────────────────────────────────────────────────────────┐");
-                eprintln!("│  Aerini Server — API Token (save this somewhere safe)      │");
-                eprintln!("│                                                            │");
-                eprintln!("│  {}  │", generated);
-                eprintln!("│                                                            │");
-                eprintln!("│  Set AERINI_TOKEN env var to skip this on restart.         │");
-                eprintln!("└──────────────────────────────────────────────────────────┘");
+                eprintln!("{}", token_banner(&generated));
                 eprintln!();
                 token_store
                     .import_token(&generated, "default", &["read", "write", "admin"])
-                    .expect("Cannot import generated token");
+                    .unwrap_or_else(|e| fatal(&format!("cannot import generated token: {e}")));
             }
         }
     }
 
+    let workflow_db_path = data_dir.join("aerini.db");
     let db = Arc::new(
-        WorkflowDb::open(&data_dir.join("aerini.db"), db_pool_size)
-            .expect("Cannot open workflow database")
+        WorkflowDb::open(&workflow_db_path, db_pool_size).unwrap_or_else(|e| {
+            fatal(&format!("cannot open workflow database {}: {e}", workflow_db_path.display()))
+        })
     );
     // Spawned onto a blocking-pool thread: with keyring's async-secret-service
     // backend, the OsKeychain path makes a blocking D-Bus round trip, and
@@ -371,8 +429,10 @@ pub async fn run(cfg: ServerConfig) {
     let creds = Arc::new(
         tokio::task::spawn_blocking(move || CredentialStore::open(&creds_db_path, creds_key_source))
             .await
-            .expect("Credential store init task panicked")
-            .expect("Cannot open credential store")
+            .unwrap_or_else(|e| fatal(&format!("credential store init task failed: {e}")))
+            .unwrap_or_else(|e| {
+                fatal(&format!("cannot open credential store in {}: {e}", data_dir.display()))
+            })
     );
 
     let mut registry = NodeRegistry::new();
@@ -429,6 +489,9 @@ pub async fn run(cfg: ServerConfig) {
         if let Some(ref sandbox) = file_sandbox_dir {
             daemon = daemon.with_file_sandbox_dir(sandbox.clone());
         }
+        if let Some(ref dir) = plugin_dir {
+            daemon = daemon.with_plugin_dir(dir.clone());
+        }
         Arc::new(daemon)
     };
     scheduler.start(&tokio::runtime::Handle::current());
@@ -437,8 +500,9 @@ pub async fn run(cfg: ServerConfig) {
         Some(d) => { tracing::info!("File node sandbox directory: {:?}", d); d }
         None => {
             let default = data_dir.join("files");
-            std::fs::create_dir_all(&default)
-                .expect("Cannot create default file sandbox directory");
+            std::fs::create_dir_all(&default).unwrap_or_else(|e| {
+                fatal(&format!("cannot create file sandbox directory {}: {e}", default.display()))
+            });
             tracing::info!(
                 "File node sandbox not set — defaulting to {:?}. \
                  Pass --file-sandbox-dir to use a different path.",
@@ -718,13 +782,6 @@ pub async fn run(cfg: ServerConfig) {
     tracing::info!("Shutdown complete");
 }
 
-/// Extracts the credential from an `Authorization: Bearer <token>` value.
-/// The scheme name is case-insensitive (RFC 7235 §2.1).
-fn parse_bearer(value: &str) -> Option<&str> {
-    let (scheme, rest) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then_some(rest)
-}
-
 async fn auth_middleware(
     axum::extract::State(s): axum::extract::State<ApiState>,
     headers:     axum::http::HeaderMap,
@@ -752,10 +809,14 @@ async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::{cors_origin_allowed, extract_client_ip, is_mint_token_path, parse_bearer};
+    use super::{
+        cors_origin_allowed, expand_home, extract_client_ip, is_localhost_origin, is_mint_token_path,
+        token_banner,
+    };
     use axum::body::Body;
     use axum::extract::Request;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::path::{Path, PathBuf};
 
     fn req_with_xff(xff: &str) -> Request<Body> {
         Request::builder()
@@ -793,19 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn bearer_scheme_is_case_insensitive() {
-        assert_eq!(parse_bearer("Bearer abc"), Some("abc"));
-        assert_eq!(parse_bearer("bearer abc"), Some("abc"));
-        assert_eq!(parse_bearer("BEARER abc"), Some("abc"));
-    }
-
-    #[test]
-    fn non_bearer_or_malformed_authorization_is_rejected() {
-        assert_eq!(parse_bearer("Basic abc"), None);
-        assert_eq!(parse_bearer("Bearer"), None);
-    }
-
-    #[test]
     fn mint_token_path_matches_only_the_mint_route() {
         assert!(is_mint_token_path("/api/widget/wf_abc123/mint-token"));
         assert!(!is_mint_token_path("/api/widget/wf_abc123/trigger"));
@@ -829,5 +877,51 @@ mod tests {
         assert!(cors_origin_allowed(b"http://localhost:3000", path, &extra));
         assert!(cors_origin_allowed(b"https://site.example", path, &extra));
         assert!(!cors_origin_allowed(b"https://other.example", path, &extra));
+    }
+
+    #[test]
+    fn localhost_origin_accepts_loopback_hosts_with_optional_numeric_port() {
+        for ok in [
+            "http://localhost", "http://localhost:3000",
+            "http://127.0.0.1", "http://127.0.0.1:8080",
+            "http://[::1]", "http://[::1]:5173",
+        ] {
+            assert!(is_localhost_origin(ok.as_bytes()), "{ok}");
+        }
+        for bad in [
+            "https://[::1]", "http://[::1]:", "http://[::1]:80a", "http://[::1]x",
+            "http://[::1].evil.com", "http://[::2]", "http://[::1", "http://localhost.evil.com",
+            "http://localhost:", "http://127.0.0.1.evil.com",
+        ] {
+            assert!(!is_localhost_origin(bad.as_bytes()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn data_dir_expands_tilde_only_as_tilde_or_tilde_slash() {
+        let home = Path::new("/home/u");
+        assert_eq!(expand_home("~", Some(home)), Ok(PathBuf::from("/home/u")));
+        assert_eq!(expand_home("~/", Some(home)), Ok(PathBuf::from("/home/u")));
+        assert_eq!(expand_home("~/.aerini-server", Some(home)), Ok(PathBuf::from("/home/u/.aerini-server")));
+        assert_eq!(expand_home("~//etc", Some(home)), Ok(PathBuf::from("/home/u/etc")));
+        assert_eq!(expand_home("~other/x", Some(home)), Ok(PathBuf::from("~other/x")));
+        assert_eq!(expand_home("/data/~", Some(home)), Ok(PathBuf::from("/data/~")));
+    }
+
+    #[test]
+    fn data_dir_needs_a_home_only_when_it_expands_tilde() {
+        assert_eq!(expand_home("/abs/dir", None), Ok(PathBuf::from("/abs/dir")));
+        assert_eq!(expand_home("~other/x", None), Ok(PathBuf::from("~other/x")));
+        assert!(expand_home("~", None).unwrap_err().contains("no home directory"));
+        assert!(expand_home("~/x", None).is_err());
+    }
+
+    #[test]
+    fn token_banner_lines_all_have_the_same_width_and_show_the_token() {
+        let token = "A".repeat(43);
+        let banner = token_banner(&token);
+        let widths: Vec<usize> = banner.lines().map(|l| l.chars().count()).collect();
+        assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
+        assert!(banner.lines().any(|l| l.contains(&token) && l.starts_with('│') && l.ends_with('│')));
     }
 }

@@ -1,5 +1,6 @@
 //! Scheduler routes: list, start, stop.
 
+use aerini_engine::scheduler::SchedulerError;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
@@ -10,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read, require_workflow_acl, require_write};
+use super::state::{ApiError, ApiState, internal_error, require_read, require_workflow_acl, require_write};
 use super::workflows::PaginationParams;
 
 pub async fn list_scheduler(
@@ -25,10 +26,7 @@ pub async fn list_scheduler(
     // ACL rows).
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f)  => f,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-        ).into_response(),
+        Err(e) => return internal_error("list_scheduler: acl lookup", e).into_response(),
     };
 
     let limit  = p.limit.min(500);
@@ -59,8 +57,8 @@ pub async fn list_scheduler(
             let items: Vec<_> = items.iter().map(|row| row.redacted()).collect();
             (StatusCode::OK, Json(json!({"items": items, "total": total, "limit": limit, "offset": offset}))).into_response()
         },
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e)) => internal_error("list_scheduler", e).into_response(),
+        Err(e)     => internal_error("list_scheduler: task failed", e).into_response(),
     }
 }
 
@@ -75,10 +73,23 @@ pub async fn start_job(
 ) -> impl IntoResponse {
     if let Err(e) = require_write(&caller) { return e.into_response(); }
     if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
+    let workflow_id = id.clone();
     match tokio::task::spawn_blocking(move || s.scheduler.start_job(&id, b.port_override, Some(b.always_on))).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::BAD_REQUEST, Json(json!({"error":format!("{:?}",e)}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))  => start_rejection(&workflow_id, e).into_response(),
+        Err(e)      => internal_error("start_job: task failed", e).into_response(),
+    }
+}
+
+/// Known rejections are the caller's to fix and are returned as their display
+/// text. `Other` can carry a database or parser message, so it is logged and
+/// answered with the generic `500`.
+fn start_rejection(workflow_id: &str, e: SchedulerError) -> ApiError {
+    match e {
+        SchedulerError::Other { message } => {
+            internal_error(&format!("start_job {workflow_id}"), message)
+        }
+        known => (StatusCode::BAD_REQUEST, Json(json!({"error": known.to_string()}))),
     }
 }
 
@@ -91,7 +102,26 @@ pub async fn stop_job(
     if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     match tokio::task::spawn_blocking(move || s.scheduler.stop_job(&id)).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
-        Ok(Err(e))  => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))).into_response(),
-        Err(e)      => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
+        Ok(Err(e))  => internal_error("stop_job", e).into_response(),
+        Err(e)      => internal_error("stop_job: task failed", e).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_start_rejection_returns_readable_text() {
+        let (status, Json(body)) = start_rejection("wf", SchedulerError::WorkflowNotFound);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "workflow not found");
+    }
+
+    #[test]
+    fn other_start_rejection_hides_internal_text() {
+        let (status, Json(body)) = start_rejection("wf", SchedulerError::Other { message: "no such table: workflows".into() });
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "internal server error");
     }
 }

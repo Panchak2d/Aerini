@@ -22,7 +22,7 @@ use std::collections::HashSet;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 /// Caps applied while merging files across sources: `merged_files` must stay
 /// bounded since each entry typically embeds a file's full contents inline
@@ -179,7 +179,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             for source in sources {
                 let id    = source["id"].as_str().unwrap_or("input").to_string();
                 let label = source["name"].as_str().unwrap_or("Source").to_string();
-                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()) });
+                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()), arity: PortArity::Single });
             }
         }
     }
@@ -191,6 +191,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             label:     "Source".to_string(),
             position:  PortPosition::Left,
             port_type: Some("files".to_string()),
+            arity: PortArity::Single,
         });
     }
 
@@ -201,6 +202,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             label:     "Out".to_string(),
             position:  PortPosition::Right,
             port_type: None,
+            arity: PortArity::Single,
         }],
     }
 }

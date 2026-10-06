@@ -183,22 +183,32 @@ pub fn traverse_dotpath(data: &Value, path: &str) -> Value {
 /// executor) is appended afterward, sorted by node id, so the result is
 /// always fully deterministic and never silently drops an entry.
 pub fn ordered_node_outputs(context: &ExecutionContext) -> Vec<(String, Value)> {
-    let mut seen = std::collections::HashSet::with_capacity(context.node_outputs.len());
-    let mut out = Vec::with_capacity(context.node_outputs.len());
+    ordered_node_outputs_where(context, |_| true)
+}
+
+/// Same ordering as [`ordered_node_outputs`], restricted to the node ids `keep`
+/// accepts. Outputs that are filtered out are never cloned.
+pub fn ordered_node_outputs_where(
+    context: &ExecutionContext,
+    keep: impl Fn(&str) -> bool,
+) -> Vec<(String, Value)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
     for id in context.execution_order.iter() {
+        if !keep(id.as_str()) {
+            continue;
+        }
         if let Some(v) = context.node_outputs.get(id) {
             out.push((id.clone(), v.clone()));
             seen.insert(id.clone());
         }
     }
-    if out.len() < context.node_outputs.len() {
-        let mut rest: Vec<(&String, &Value)> = context.node_outputs
-            .iter()
-            .filter(|(k, _)| !seen.contains(*k))
-            .collect();
-        rest.sort_by(|a, b| a.0.cmp(b.0));
-        out.extend(rest.into_iter().map(|(k, v)| (k.clone(), v.clone())));
-    }
+    let mut rest: Vec<(&String, &Value)> = context.node_outputs
+        .iter()
+        .filter(|(k, _)| keep(k.as_str()) && !seen.contains(*k))
+        .collect();
+    rest.sort_by(|a, b| a.0.cmp(b.0));
+    out.extend(rest.into_iter().map(|(k, v)| (k.clone(), v.clone())));
     out
 }
 
@@ -254,6 +264,21 @@ mod ordered_node_outputs_tests {
     }
 
     #[test]
+    fn where_variant_keeps_only_accepted_ids_in_the_same_order() {
+        let mut outputs = HashMap::new();
+        outputs.insert("a".to_string(), json!(1));
+        outputs.insert("b".to_string(), json!(2));
+        outputs.insert("c".to_string(), json!(3));
+        outputs.insert("z_unordered".to_string(), json!(4));
+        let result = ordered_node_outputs_where(
+            &ctx(outputs, vec!["c", "b", "a"]),
+            |id| id != "b",
+        );
+        let ids: Vec<&str> = result.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "z_unordered"]);
+    }
+
+    #[test]
     fn stale_execution_order_entry_with_no_matching_output_is_skipped_not_panicking() {
         let mut outputs = HashMap::new();
         outputs.insert("a".to_string(), json!(1));
@@ -299,51 +324,74 @@ impl SsrfPolicy {
 /// Validate a resolved IP against the SSRF block list per `policy`.
 ///
 /// Rejects (always, both policies): link-local, broadcast, documentation,
-/// unspecified, multicast, RFC 6598 shared address space (100.64.0.0/10),
-/// IPv4-mapped IPv6 addresses, and the Azure IMDS endpoint (168.63.129.16).
+/// multicast, `0.0.0.0/8`, reserved `240.0.0.0/4`, RFC 6598 shared address
+/// space (100.64.0.0/10), and the Azure IMDS endpoint (168.63.129.16).
 /// Under `Strict`, also rejects loopback and RFC 1918 private addresses;
 /// `AllowLocal` permits those.
+///
+/// An IPv6 address that embeds an IPv4 address (IPv4-mapped, NAT64
+/// `64:ff9b::/96`, 6to4 `2002::/16`, IPv4-compatible `::a.b.c.d`) is judged
+/// by the same IPv4 rules applied to the embedded address, so a public IPv4
+/// target reached through NAT64 still passes. `198.18.0.0/15` is deliberately
+/// not blocked: fake-IP proxy tools resolve every domain into it.
 ///
 /// Called for both IP-literal URLs and post-DNS domain resolution.
 pub fn check_ssrf_ip(ip: std::net::IpAddr, policy: SsrfPolicy) -> Result<(), String> {
     check_ssrf_ip_impl(ip, policy.allow_local())
 }
 
+fn ipv4_blocked(v4: std::net::Ipv4Addr, allow_local: bool) -> bool {
+    let azure_imds = std::net::Ipv4Addr::new(168, 63, 129, 16);
+    let first = v4.octets()[0];
+    let always_blocked = v4 == azure_imds
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || first == 0
+        || first & 0xF0 == 0xF0
+        // RFC 6598 shared address space (100.64.0.0/10); is_private() only
+        // covers RFC 1918.
+        || u32::from(v4) & 0xFFC0_0000 == 0x6440_0000;
+    always_blocked || (!allow_local && (v4.is_loopback() || v4.is_private()))
+}
+
+/// The IPv4 address carried inside an IPv6 address, if its form embeds one.
+/// `::` and `::1` return `None` so the IPv6 checks judge them as themselves.
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    let from = |hi: u16, lo: u16| {
+        std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+    };
+    let upper_zero = s[..5].iter().all(|&x| x == 0);
+    if upper_zero && s[5] == 0xffff {
+        return Some(from(s[6], s[7]));
+    }
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+        return Some(from(s[6], s[7]));
+    }
+    if s[0] == 0x2002 {
+        return Some(from(s[1], s[2]));
+    }
+    if upper_zero && s[5] == 0 && ((u32::from(s[6]) << 16) | u32::from(s[7])) > 1 {
+        return Some(from(s[6], s[7]));
+    }
+    None
+}
+
 fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), String> {
-    use std::net::{IpAddr, Ipv4Addr};
-    let azure_imds = Ipv4Addr::new(168, 63, 129, 16);
+    use std::net::IpAddr;
     match ip {
         IpAddr::V4(v4) => {
-            let always_blocked = v4 == azure_imds
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-                // RFC 6598 — Shared Address Space (100.64.0.0/10).
-                // Used by carrier-grade NAT and some cloud providers for internal
-                // routing. Not covered by is_private() (which only checks RFC 1918).
-                // Reachable on AWS and similar environments; must be explicitly blocked.
-                || u32::from(v4) & 0xFFC0_0000 == 0x6440_0000;
-            let local_only_blocked = !allow_local && (v4.is_loopback() || v4.is_private());
-            if always_blocked || local_only_blocked {
+            if ipv4_blocked(v4, allow_local) {
                 return Err(format!(
                     "Requests to private/internal IP addresses are not permitted ({})", v4
                 ));
             }
         }
         IpAddr::V6(v6) => {
-            // IPv4-mapped IPv6 (::ffff:x.x.x.x) must be checked as IPv4.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                let always_blocked = v4 == azure_imds
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_documentation()
-                    || v4.is_unspecified()
-                    || v4.is_multicast()
-                    || u32::from(v4) & 0xFFC0_0000 == 0x6440_0000;
-                let local_only_blocked = !allow_local && (v4.is_loopback() || v4.is_private());
-                if always_blocked || local_only_blocked {
+            if let Some(v4) = embedded_ipv4(v6) {
+                if ipv4_blocked(v4, allow_local) {
                     return Err(format!(
                         "Requests to private/internal IP addresses are not permitted ({})", v6
                     ));
@@ -494,14 +542,51 @@ pub async fn check_db_url_ssrf(raw_url: &str, policy: SsrfPolicy) -> Result<(), 
     check_host_ssrf_impl(host, port, policy.allow_local()).await
 }
 
+/// Renders a `reqwest::Error` as a message that is safe to store and show.
+///
+/// `reqwest::Error`'s `Display` appends ` for url (<full request URL>)`, and
+/// many APIs carry secrets in the URL (a Telegram bot token in the path, a
+/// Discord webhook token, a `?key=` query parameter), so `e.to_string()` must
+/// never reach a node error, run history or log. This drops that suffix,
+/// appends the underlying cause chain (so "connection refused" or a DNS
+/// failure is still visible), then removes any remaining occurrence of the
+/// URL and any `user:password@` credentials a cause may echo.
+pub fn reqwest_err_msg(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+
+    let mut msg = e.to_string();
+    if let Some(url) = e.url() {
+        let suffix = format!(" for url ({url})");
+        if let Some(head) = msg.strip_suffix(&suffix) {
+            msg = head.to_string();
+        }
+    }
+
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !msg.ends_with(&text) {
+            msg.push_str(": ");
+            msg.push_str(&text);
+        }
+        source = cause.source();
+    }
+
+    if let Some(url) = e.url() {
+        msg = msg.replace(url.as_str(), "[url]");
+    }
+    scrub_url_in_error(&msg)
+}
+
 /// Maps a reqwest network error to a `NodeOutput`, classifying timeout and
 /// connection errors as recoverable (eligible for scheduler retry).
 /// All other errors are unrecoverable.
 pub fn http_err_output(e: &reqwest::Error) -> NodeOutput {
+    let msg = reqwest_err_msg(e);
     if e.is_timeout() || e.is_connect() {
-        NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", e.to_string()))
+        NodeOutput::failure(NodeError::recoverable("HTTP_ERROR", msg))
     } else {
-        NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", e.to_string()))
+        NodeOutput::failure(NodeError::unrecoverable("HTTP_ERROR", msg))
     }
 }
 
@@ -555,12 +640,104 @@ pub async fn read_json_response_capped(mut response: reqwest::Response) -> Resul
                 body_buf.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(e) => return Err(format!("Failed to read response body: {}", e)),
+            Err(e) => return Err(format!("Failed to read response body: {}", reqwest_err_msg(&e))),
         }
     }
 
     serde_json::from_slice::<Value>(&body_buf)
         .map_err(|e| format!("Failed to parse response as JSON: {}", e))
+}
+
+/// Builds the error for a failed provider call: a `429` is recoverable so the
+/// scheduler retries it; every other status is unrecoverable under `code`.
+pub fn provider_error(status: u16, code: &str, message: impl Into<String>) -> NodeError {
+    if status == 429 {
+        NodeError::recoverable("RATE_LIMITED", message)
+    } else {
+        NodeError::unrecoverable(code, message)
+    }
+}
+
+/// Maximum bytes of a provider's error body included in a node error.
+pub const MAX_ERROR_BODY_BYTES: usize = 1024;
+
+fn truncate_lossy(mut buf: Vec<u8>, max: usize) -> String {
+    let truncated = buf.len() > max;
+    buf.truncate(max);
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        text.push_str("… [truncated]");
+    }
+    text
+}
+
+/// Reads at most `max` bytes of a response body as text, stopping the read as
+/// soon as the limit is passed. A read failure yields what was read so far.
+pub async fn read_text_capped(mut response: reqwest::Response, max: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() <= max {
+        match response.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    truncate_lossy(buf, max)
+}
+
+#[cfg(test)]
+mod provider_error_tests {
+    use super::*;
+
+    #[test]
+    fn status_429_is_recoverable_others_are_not() {
+        let e = provider_error(429, "X_ERROR", "slow down");
+        assert!(e.recoverable);
+        assert_eq!(e.code, "RATE_LIMITED");
+        let e = provider_error(400, "X_ERROR", "bad");
+        assert!(!e.recoverable);
+        assert_eq!(e.code, "X_ERROR");
+    }
+
+    #[test]
+    fn error_body_is_cut_at_the_limit() {
+        let out = truncate_lossy(vec![b'a'; 2000], MAX_ERROR_BODY_BYTES);
+        assert!(out.starts_with(&"a".repeat(1024)));
+        assert!(out.ends_with("[truncated]"));
+        assert_eq!(truncate_lossy(b"short".to_vec(), MAX_ERROR_BODY_BYTES), "short");
+    }
+}
+
+#[cfg(test)]
+mod reqwest_err_msg_tests {
+    use super::reqwest_err_msg;
+
+    #[tokio::test]
+    async fn omits_request_url_but_keeps_cause() {
+        // Port 1 on loopback refuses connections immediately.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/bot123456:SECRET-TOKEN/sendMessage?key=QSECRET")
+            .send()
+            .await
+            .expect_err("connection to port 1 must fail");
+
+        let msg = reqwest_err_msg(&err);
+        assert!(!msg.contains("SECRET-TOKEN"), "token leaked: {msg}");
+        assert!(!msg.contains("QSECRET"), "query secret leaked: {msg}");
+        assert!(msg.starts_with("error sending request"), "unexpected message: {msg}");
+        assert!(msg.len() > "error sending request".len(), "cause chain missing: {msg}");
+    }
+
+    #[tokio::test]
+    async fn builder_error_omits_url() {
+        let err = reqwest::Client::new()
+            .get("ftp://user:hunter2@example.invalid/SECRET-PATH")
+            .send()
+            .await
+            .expect_err("unsupported scheme must fail");
+        let msg = reqwest_err_msg(&err);
+        assert!(!msg.contains("SECRET-PATH"), "path leaked: {msg}");
+        assert!(!msg.contains("hunter2"), "password leaked: {msg}");
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +823,76 @@ mod ssrf_allow_local_tests {
     // Public IPs remain allowed, same as the strict variant.
     #[test]
     fn public_ip_allowed() { assert!(check_ssrf_ip(v4(8, 8, 8, 8), SsrfPolicy::AllowLocal).is_ok()); }
+}
+
+#[cfg(test)]
+mod ssrf_embedded_ipv4_tests {
+    use super::{check_ssrf_ip, SsrfPolicy};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
+    fn v6(s: &str) -> IpAddr { IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()) }
+    fn strict(ip: IpAddr) -> bool { check_ssrf_ip(ip, SsrfPolicy::Strict).is_ok() }
+    fn local(ip: IpAddr) -> bool { check_ssrf_ip(ip, SsrfPolicy::AllowLocal).is_ok() }
+
+    #[test]
+    fn nat64_public_address_allowed() {
+        assert!(strict(v6("64:ff9b::808:808")));
+        assert!(local(v6("64:ff9b::808:808")));
+    }
+
+    #[test]
+    fn nat64_internal_addresses_blocked_under_strict() {
+        assert!(!strict(v6("64:ff9b::a00:1")));
+        assert!(!strict(v6("64:ff9b::7f00:1")));
+        assert!(!strict(v6("64:ff9b::a9fe:a9fe")));
+    }
+
+    #[test]
+    fn nat64_allow_local_permits_private_but_not_metadata() {
+        assert!(local(v6("64:ff9b::a00:1")));
+        assert!(local(v6("64:ff9b::7f00:1")));
+        assert!(!local(v6("64:ff9b::a9fe:a9fe")));
+    }
+
+    #[test]
+    fn six_to_four_embedding_private_blocked() {
+        assert!(!strict(v6("2002:a00:1::1")));
+        assert!(local(v6("2002:a00:1::1")));
+        assert!(!local(v6("2002:a9fe:a9fe::1")));
+        assert!(strict(v6("2002:808:808::1")));
+    }
+
+    #[test]
+    fn ipv4_compatible_loopback_blocked_under_strict() {
+        assert!(!strict(v6("::127.0.0.1")));
+        assert!(local(v6("::127.0.0.1")));
+        assert!(!local(v6("::169.254.169.254")));
+        assert!(strict(v6("::8.8.8.8")));
+    }
+
+    #[test]
+    fn plain_ipv6_loopback_and_unspecified_keep_their_own_rules() {
+        assert!(!strict(v6("::1")));
+        assert!(local(v6("::1")));
+        assert!(!local(v6("::")));
+    }
+
+    #[test]
+    fn zero_and_reserved_ipv4_blocked_under_both_policies() {
+        for ip in [v4(0, 0, 0, 0), v4(0, 1, 2, 3), v4(240, 0, 0, 1), v4(255, 255, 255, 254)] {
+            assert!(!strict(ip), "{ip}");
+            assert!(!local(ip), "{ip}");
+        }
+        assert!(!local(v6("::ffff:240.0.0.1")));
+        assert!(!local(v6("64:ff9b::f000:1")));
+    }
+
+    #[test]
+    fn fake_ip_range_198_18_stays_allowed() {
+        assert!(strict(v4(198, 18, 0, 1)));
+        assert!(strict(v4(198, 19, 255, 254)));
+    }
 }
 
 #[cfg(test)]

@@ -50,6 +50,21 @@ impl Node for EmailNode {
     }
 }
 
+/// Missing or null means the default (587). Otherwise the port must be a
+/// whole number from 1 to 65535, given as a number or as digits in a string.
+fn parse_smtp_port(v: &Value) -> Result<u16, NodeError> {
+    let parsed = match v {
+        Value::Null => return Ok(587),
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) => s.parse::<u64>().ok(),
+        _ => None,
+    };
+    parsed
+        .filter(|p| (1..=65535).contains(p))
+        .map(|p| p as u16)
+        .ok_or_else(|| NodeError::unrecoverable("INVALID_PORT", "smtp_port must be a whole number from 1 to 65535"))
+}
+
 async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
     use lettre::message::header::ContentType;
@@ -58,7 +73,7 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     let smtp_host = cfg["smtp_host"].as_str().filter(|s| !s.is_empty())
         .ok_or_else(|| NodeError::unrecoverable("MISSING_SMTP_HOST", "smtp_host is required"))?
         .to_string();
-    let smtp_port = cfg["smtp_port"].as_u64().unwrap_or(587) as u16;
+    let smtp_port = parse_smtp_port(&cfg["smtp_port"])?;
 
     let ssrf_host = url::Host::parse(&smtp_host)
         .map_err(|_| NodeError::unrecoverable("INVALID_HOST", "Invalid smtp_host"))?;
@@ -118,7 +133,13 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
 
     builder = builder.port(smtp_port);
 
-    if !username.is_empty() && !password.is_empty() {
+    if username.is_empty() != password.is_empty() {
+        return Err(NodeError::unrecoverable(
+            "INCOMPLETE_CREDENTIALS",
+            "username and password must be set together (one is missing)",
+        ));
+    }
+    if !username.is_empty() {
         builder = builder.credentials(Credentials::new(username, password));
     }
 
@@ -130,3 +151,18 @@ async fn send_email(cfg: &Value) -> Result<String, NodeError> {
     Ok(format!("Email sent to {to_str} via {smtp_host}:{smtp_port}"))
 }
 
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn smtp_port_is_validated_not_wrapped() {
+        assert_eq!(parse_smtp_port(&Value::Null).unwrap(), 587);
+        assert_eq!(parse_smtp_port(&json!(465)).unwrap(), 465);
+        assert_eq!(parse_smtp_port(&json!("2525")).unwrap(), 2525);
+        for bad in [json!(65536), json!(66587), json!(0), json!(-1), json!(25.5), json!("abc"), json!(true)] {
+            assert_eq!(parse_smtp_port(&bad).unwrap_err().code, "INVALID_PORT", "{bad}");
+        }
+    }
+}

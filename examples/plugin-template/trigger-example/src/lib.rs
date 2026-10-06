@@ -1,7 +1,8 @@
 // Trigger-plugin example: emits one heartbeat event on a configurable
-// interval. Implements both interfaces the `aerini-node-with-trigger` world
-// requires -- `node` (describe/execute, same as any plugin) and `trigger`
-// (events, the async stream). See docs/plugin-authoring.md's "Trigger
+// interval and reports when the next beat is due. Implements both interfaces
+// the `aerini-node-with-trigger-and-next-fire` world exports -- `node`
+// (describe/execute, same as any plugin) and `trigger` (events, the async
+// stream) -- and calls the `trigger-schedule` import it adds. See docs/development/plugin-authoring.md's "Trigger
 // plugins" section for the concepts this demonstrates, including that
 // section's status note: this compiles and traces correctly but cannot yet
 // be run end-to-end inside Aerini (host-side event pump has open bugs).
@@ -10,10 +11,18 @@
 // `wit-bindgen` dependency), same reasoning as
 // spike/wasi-p3-trigger-poc/guest/src/lib.rs: one shared copy of the async
 // runtime-support types wasip3's stream/clock bindings use.
-wasip3::wit_bindgen::generate!({ world: "aerini-node-with-trigger" });
+// `runtime_path` points the macro at wasip3's copy of the runtime (this crate
+// has no direct `wit-bindgen` dependency), so the generated `wit_stream` is the
+// one that accepts `TriggerEvent`.
+wasip3::wit_bindgen::generate!({
+    world: "aerini-node-with-trigger-and-next-fire",
+    runtime_path: "wasip3::wit_bindgen::rt",
+});
 
 use exports::aerini::plugin::node::{Guest as NodeGuest, NodeDescriptor, NodeInput, NodeOutput};
 use exports::aerini::plugin::trigger::{Guest as TriggerGuest, TriggerEvent};
+use std::time::{SystemTime, UNIX_EPOCH};
+use aerini::plugin::trigger_schedule;
 use wasip3::clocks::monotonic_clock;
 use wasip3::wit_bindgen::StreamReader;
 
@@ -52,7 +61,7 @@ impl NodeGuest for HeartbeatTrigger {
     // that same graph position. Returns trivial success immediately,
     // matching Aerini's built-in Schedule node's own convention for the same
     // "the real work already happened elsewhere" situation. See
-    // docs/plugin-authoring.md's "Trigger plugins" section.
+    // docs/development/plugin-authoring.md's "Trigger plugins" section.
     fn execute(_input: NodeInput) -> NodeOutput {
         NodeOutput {
             success: true,
@@ -67,7 +76,7 @@ impl NodeGuest for HeartbeatTrigger {
 impl TriggerGuest for HeartbeatTrigger {
     async fn events(config: String) -> StreamReader<TriggerEvent> {
         let interval_secs = parse_interval_secs(&config);
-        let (mut tx, rx) = wasip3::wit_stream::new::<TriggerEvent>();
+        let (mut tx, rx) = wit_stream::new::<TriggerEvent>();
 
         // Detached from this call's own task, same shape as
         // spike/wasi-p3-trigger-poc/guest/src/lib.rs's own stream-writing
@@ -89,6 +98,7 @@ impl TriggerGuest for HeartbeatTrigger {
         // do not treat this loop's shutdown behavior as verified.
         wasip3::spawn(async move {
             let mut tick: u64 = 0;
+            report_next_beat(interval_secs);
             loop {
                 monotonic_clock::wait_for(interval_secs.saturating_mul(NS_PER_SEC)).await;
                 tick += 1;
@@ -100,11 +110,23 @@ impl TriggerGuest for HeartbeatTrigger {
                     ),
                 };
                 tx.write_all(vec![event]).await;
+                report_next_beat(interval_secs);
             }
         });
 
         rx
     }
+}
+
+/// Tells the host when the next beat is due so the Background Runs panel can
+/// show a countdown. The report is display-only, so a rejected one (for
+/// example a clock that is far off) is ignored and never delays a beat.
+fn report_next_beat(interval_secs: u64) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let next_ms = now_ms.saturating_add(interval_secs.saturating_mul(1000));
+    let _ = trigger_schedule::report_next_fire(next_ms);
 }
 
 /// Parses `interval_secs` out of the trigger's JSON-object config string

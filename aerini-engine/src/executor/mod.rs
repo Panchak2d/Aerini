@@ -22,12 +22,13 @@ use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{LogLevel, SharedExecutionState};
+use crate::context::{LogLevel, NodeStatus, SharedExecutionState};
 use crate::error::{EngineError, NodeError};
 use crate::graph::ExecutionGraph;
 use petgraph::Direction;
 use crate::model::{NodeInput, NodeOutput, Workflow};
 use crate::node::{Node, NodeRegistry};
+use crate::nodes::merge::MERGE_UPSTREAM_IDS_KEY;
 use crate::EventSink;
 
 mod config;
@@ -447,18 +448,46 @@ impl WorkflowExecutor {
     }
 
     pub(super) fn resolve_taken_port(output: &NodeOutput) -> String {
-        if let Some(ref val) = output.output {
-            if let Some(branch) = val.get("branch").and_then(|b| b.as_str()) {
-                return branch.to_string();
-            }
-            if let Some(done) = val.get("done").and_then(|d| d.as_bool()) {
-                return if done { "done".to_string() } else { "loop_body".to_string() };
-            }
-            if let Some(port) = val.get("port").and_then(|p| p.as_str()) {
-                return port.to_string();
-            }
+        output.output.as_ref().map_or_else(|| "output".to_string(), Self::taken_port_of_value)
+    }
+
+    fn taken_port_of_value(val: &Value) -> String {
+        if let Some(branch) = val.get("branch").and_then(|b| b.as_str()) {
+            return branch.to_string();
+        }
+        if let Some(done) = val.get("done").and_then(|d| d.as_bool()) {
+            return if done { "done".to_string() } else { "loop_body".to_string() };
+        }
+        if let Some(port) = val.get("port").and_then(|p| p.as_str()) {
+            return port.to_string();
         }
         "output".to_string()
+    }
+
+    /// Ids of the nodes that fed `node_id` in this run: each has an edge into
+    /// `node_id` on the port it left through (with the same fall-back to
+    /// `output` that `activate_successors` applies) and produced an output.
+    fn taken_upstream_ids(
+        node_id:      &str,
+        workflow:     &Workflow,
+        node_outputs: &HashMap<String, Value>,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for edge in workflow.edges.iter().filter(|e| e.to_node == node_id) {
+            if ids.contains(&edge.from_node) {
+                continue;
+            }
+            let Some(output) = node_outputs.get(&edge.from_node) else { continue };
+            let taken = Self::taken_port_of_value(output);
+            let on_taken_port = edge.from_port == taken
+                || (edge.from_port == "output"
+                    && !workflow.edges.iter()
+                        .any(|e| e.from_node == edge.from_node && e.from_port == taken));
+            if on_taken_port {
+                ids.push(edge.from_node.clone());
+            }
+        }
+        ids
     }
 
     pub(super) fn activate_successors(
@@ -650,6 +679,20 @@ impl WorkflowExecutor {
                     .find_map(|e| ctx.node_outputs.get(&e.from_node).cloned())
                 {
                     ctx.metadata.insert("__direct_input".to_string(), upstream_output);
+                }
+
+                if node_def.node_type_id == "merge" {
+                    let mut ids = Self::taken_upstream_ids(&node_def.id, workflow, &ctx.node_outputs);
+                    // A loop-body node keeps its previous iteration's output while it is
+                    // skipped or failed in this one; only a node that succeeded counts.
+                    {
+                        let s = state.read().await;
+                        ids.retain(|id| matches!(s.node_status(id), Some(NodeStatus::Succeeded)));
+                    }
+                    ctx.metadata.insert(
+                        MERGE_UPSTREAM_IDS_KEY.to_string(),
+                        Value::Array(ids.into_iter().map(Value::String).collect()),
+                    );
                 }
 
                 ctx
@@ -2005,5 +2048,92 @@ mod tests {
         let graph = ExecutionGraph::build(&workflow).expect("graph should build");
         // No outgoing edges at all — must return None, not panic.
         assert_eq!(executor.find_failure_route("n1", &graph), None);
+    }
+
+    fn plain_node(id: &str, type_id: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.to_string(),
+            node_type_id: type_id.to_string(),
+            node_type: NodeType::Utility,
+            name: id.to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        }
+    }
+
+    fn plain_edge(from: &str, port: &str, to: &str) -> WorkflowEdge {
+        WorkflowEdge {
+            id: format!("e_{}_{}_to_{}", from, port, to),
+            from_node: from.to_string(),
+            from_port: port.to_string(),
+            to_node: to.to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        }
+    }
+
+    // A source counts for a Merge only if it succeeded in its latest run and its
+    // connection into the Merge is on the port it left through (falling back to
+    // `output` when nothing is wired to that port, as routing does).
+    #[tokio::test]
+    async fn merge_upstream_ids_follow_taken_ports_and_current_status() {
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_merge_ids".to_string(),
+            name: "Merge ids".to_string(),
+            description: String::new(),
+            nodes: vec![
+                plain_node("n_if", "instant_test"),
+                plain_node("n_a", "instant_test"),
+                plain_node("n_stale", "instant_test"),
+                plain_node("n_sw", "instant_test"),
+                plain_node("n_m", "merge"),
+            ],
+            edges: vec![
+                plain_edge("n_if", "on_false", "n_m"),
+                plain_edge("n_a", "output", "n_m"),
+                plain_edge("n_stale", "output", "n_m"),
+                plain_edge("n_sw", "output", "n_m"),
+            ],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+        let executor = WorkflowExecutor::new(Arc::new(NodeRegistry::new()), Arc::new(NoopCredentials));
+        let state = crate::context::new_shared_state(workflow.id.clone(), HashMap::new());
+        {
+            let mut s = state.write().await;
+            for (id, out) in [
+                ("n_if",    serde_json::json!({ "branch": "on_true" })),
+                ("n_a",     serde_json::json!({ "v": 1 })),
+                ("n_stale", serde_json::json!({ "v": 2 })),
+                ("n_sw",    serde_json::json!({ "port": "case_9" })),
+            ] {
+                s.mark_running(id);
+                s.mark_succeeded(id, NodeOutput::success(out));
+            }
+            s.mark_skipped("n_stale");
+        }
+
+        let input = executor
+            .build_input(&workflow, &workflow.nodes[4], &state, None)
+            .await
+            .expect("build_input must succeed for a Merge node");
+
+        assert_eq!(
+            input.context.metadata.get(MERGE_UPSTREAM_IDS_KEY),
+            Some(&serde_json::json!(["n_a", "n_sw"])),
+        );
     }
 }

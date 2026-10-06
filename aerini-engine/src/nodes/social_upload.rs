@@ -332,13 +332,13 @@ async fn upload_to_youtube(
         .await
         .map_err(|e| upload_err(
             "NETWORK_ERROR",
-            e.to_string(),
+            crate::nodes::util::reqwest_err_msg(&e),
             "Failed to reach YouTube's servers.",
             "Check your internet connection and retry.",
         ))?;
 
     let status = resp.status().as_u16();
-    let body_val: Value = resp.json().await.unwrap_or(Value::Null);
+    let body_val: Value = crate::nodes::util::read_json_response_capped(resp).await.unwrap_or(Value::Null);
 
     if status == 200 || status == 201 {
         let video_id = body_val["id"].as_str().unwrap_or("unknown");
@@ -493,7 +493,7 @@ async fn upload_to_tiktok(
         .await
         .map_err(|e| upload_err(
             "NETWORK_ERROR",
-            e.to_string(),
+            crate::nodes::util::reqwest_err_msg(&e),
             "Failed to reach TikTok's servers.",
             "Check your internet connection and retry.",
         ))?;
@@ -503,7 +503,7 @@ async fn upload_to_tiktok(
         return Err(map_http_error(init_status, "TikTok"));
     }
 
-    let init_body_val: Value = init_resp.json().await.map_err(|_| upload_err(
+    let init_body_val: Value = crate::nodes::util::read_json_response_capped(init_resp).await.map_err(|_| upload_err(
         "PARSE_ERROR",
         "Failed to parse TikTok init response",
         "TikTok's init response was not valid JSON.",
@@ -573,7 +573,7 @@ async fn upload_to_tiktok(
                 Err(e) => {
                     last_error = Some(upload_err(
                         "NETWORK_ERROR",
-                        e.to_string(),
+                        crate::nodes::util::reqwest_err_msg(&e),
                         format!("Network error uploading chunk {} of {} to TikTok.", chunk_idx + 1, total_chunks),
                         "Check your connection and retry.",
                     ));

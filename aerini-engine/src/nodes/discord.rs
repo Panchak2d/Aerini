@@ -79,8 +79,9 @@ impl Node for DiscordNode {
                         vec!["Discord message sent via webhook".to_string()],
                     )
                 } else {
-                    let body_text = resp.text().await.unwrap_or_default();
-                    NodeOutput::failure(NodeError::unrecoverable(
+                    let body_text = super::util::read_text_capped(resp, super::util::MAX_ERROR_BODY_BYTES).await;
+                    NodeOutput::failure(super::util::provider_error(
+                        status,
                         "DISCORD_ERROR",
                         format!("HTTP {}: {}", status, body_text),
                     ))

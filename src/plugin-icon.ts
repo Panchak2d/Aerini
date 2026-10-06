@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { wrapIconSvg } from "./icon-cache";
 
-// The documented, public shape-element allowlist (see docs/plugin-authoring.md,
+// The documented, public shape-element allowlist (see docs/development/plugin-authoring.md,
 // "Icon and identity metadata"). Deliberately excludes "svg" itself -- an
 // icon is inner shape markup only, no wrapper of its own.
 const SHAPE_TAGS = ["path", "circle", "rect", "line", "ellipse", "polygon", "polyline", "g"];

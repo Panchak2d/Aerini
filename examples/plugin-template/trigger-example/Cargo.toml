@@ -11,7 +11,7 @@
 name = "aerini-plugin-heartbeat-trigger"
 version = "0.1.0"
 edition = "2021"
-description = "Aerini trigger-plugin example -- emits a heartbeat event on a configurable interval. See ./README.md and docs/plugin-authoring.md's \"Trigger plugins\" section."
+description = "Aerini trigger-plugin example -- emits a heartbeat event on a configurable interval. See ./README.md and docs/development/plugin-authoring.md's \"Trigger plugins\" section."
 publish = false
 
 [lib]

@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 use aerini_engine::db::WorkflowDb;
 
-use crate::util::extract_client_ip;
+use crate::util::{extract_client_ip, parse_bearer};
 
 use crate::event_bridge::SharedRunState;
 use crate::log_buffer::LogBuffer;
@@ -349,7 +349,7 @@ async fn check_run_secret(
     let provided = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(parse_bearer)
         .unwrap_or("")
         .to_string();
 

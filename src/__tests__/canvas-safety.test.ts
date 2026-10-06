@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InputHandler } from "../canvas/InputHandler";
 import { Canvas } from "../canvas/Canvas";
-import { Connector, PendingConnector } from "../canvas/Connector";
+import { Connector } from "../canvas/Connector";
 import { CanvasNode } from "../canvas/Node";
 import type { UndoAction } from "../canvas/UndoManager";
 import { serialize, deserialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
@@ -42,57 +42,6 @@ function makeConnector(id: string, fromNode: string, toNode: string): Connector 
     condition: null, on_success: null, on_failure: null,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Escape while repositioning/detaching a wire must restore it, not
-// permanently delete it.
-// ---------------------------------------------------------------------------
-
-describe("InputHandler — Escape during wire reconnect", () => {
-  function makeFakeCanvas() {
-    const connectors = new Map<string, Connector>();
-    const injectCalls: string[] = [];
-    const canvas = {
-      el: { classList: { add: vi.fn(), remove: vi.fn() }, style: { cursor: "" } },
-      connectors,
-      pendingInsert: null,
-      insertGhost: null,
-      _pendingInputWireDrop: null,
-      clearSelection: vi.fn(),
-      injectDynamicPortExpr: vi.fn((c: Connector) => injectCalls.push(c.data.id)),
-    };
-    return { canvas, injectCalls };
-  }
-
-  it("restores the grabbed connector and re-injects its dynamic-port expression", () => {
-    const { canvas, injectCalls } = makeFakeCanvas();
-    const input = new InputHandler(canvas as unknown as Canvas);
-    const conn = makeConnector("e1", "n1", "n2");
-
-    // Simulate onDown having grabbed an existing wire's endpoint: removed
-    // from connectors, tracked as reconnEdge, mid-drag.
-    input.reconnEdge = { conn };
-    input.pendingConn = new PendingConnector("n1", "output", 0, 0);
-
-    input.onKey(new KeyboardEvent("keydown", { key: "Escape" }));
-
-    expect(canvas.connectors.get("e1")).toBe(conn);
-    expect(injectCalls).toEqual(["e1"]);
-    expect(input.reconnEdge).toBeNull();
-    expect(input.pendingConn).toBeNull();
-  });
-
-  it("is a no-op when no reconnect was in progress (plain Escape)", () => {
-    const { canvas, injectCalls } = makeFakeCanvas();
-    const input = new InputHandler(canvas as unknown as Canvas);
-
-    input.onKey(new KeyboardEvent("keydown", { key: "Escape" }));
-
-    expect(injectCalls).toEqual([]);
-    expect(input.reconnEdge).toBeNull();
-    expect(canvas.clearSelection).toHaveBeenCalled();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // deleteSelected must partition connectors per node, so

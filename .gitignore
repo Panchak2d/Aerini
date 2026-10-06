@@ -76,3 +76,6 @@ coverage/
 out/
 
 patch_staging/
+
+# Patch manifests written by fix batches; not part of the project.
+MANIFEST.txt

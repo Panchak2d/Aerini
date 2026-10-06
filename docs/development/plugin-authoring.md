@@ -115,7 +115,39 @@ interface trigger {
 
 The host keeps one instance of a trigger-capable plugin alive per placement and reads events from the stream `events()` returns; each event starts a new workflow run with that event's `data` as input. This is genuinely a different build, not just a different function: `events` is async, which requires the WASI Preview 3 / component-model-async ABI instead of the synchronous one `describe`/`execute` use, so a trigger plugin needs the `wasip3` crate (which re-exports its own `wit_bindgen::generate!`) rather than plain `wit-bindgen`. The host detects trigger capability by actually compiling and link-checking your file against a second, async-only engine at load time, not by anything you declare in `describe()`; there's no `"trigger"` category, and `category` in `describe()` stays one of the four normal values regardless. `examples/plugin-template/trigger-example/` is a complete reference implementation of a fixed-interval heartbeat trigger, built the same way (`cargo build --target wasm32-wasip2 --release` from inside that directory).
 
-The 30-second deadline described below still bounds the initial `events(config)` call itself, the same figure and same reason: the host has to know the call started, not just handed back an inert stream. Once that stream is returned, though, it stays open indefinitely with no further deadline, since a trigger is meant to keep running rather than return; the 64 MiB memory cap and SSRF-filtered outbound HTTP still apply throughout. As of this page, the host-side event pump that drains a trigger plugin's stream has open bugs: the example above builds and traces correctly as a reference for the guest-side pattern, but isn't yet runnable end to end inside a live Aerini instance. Don't ship a trigger plugin expecting it to fire until that's resolved.
+The 30-second deadline described below still bounds the initial `events(config)` call itself, the same figure and same reason: the host has to know the call started, not just handed back an inert stream. Once that stream is returned, it stays open indefinitely: a trigger is meant to keep running, so waiting between events is never timed out, and the 64 MiB memory cap and SSRF-filtered outbound HTTP still apply throughout. What is stopped is a trigger that keeps *executing* without doing anything the host can see: if the guest runs for 30 seconds without calling an import (WASI, `wasi:http`, `storage` or `fs-watch`) and without delivering an event, the host stops it and reports a trigger error. A trigger parked in a host call such as a sleep, or waiting for its next event, is not affected, so a long computation between events needs an occasional host call (reading the clock is enough).
+
+When a trigger fails to start, stops, or its stream ends, the host starts it again after a pause that begins at 5 seconds and doubles up to 5 minutes. A run that delivers an event or lasts at least a minute resets the pause, and an identical error is reported at most once every 5 minutes. The host looks for the plugin in the plugin directory: the one set in the desktop app's Settings (a change applies to the next workflow started in the background; a running one keeps the directory it started with) or the one passed to `aerini-server` with `--plugin-dir`.
+
+A trigger plugin can also set its icon, author, and version. Export `metadata`, described in [Icon and identity metadata](#icon-and-identity-metadata), next to `node` and `trigger` by targeting the `aerini-node-with-trigger-and-metadata` world. Plugins built against `aerini-node-with-trigger` load unchanged and get the same defaults as any plugin without `metadata`.
+
+In the editor, a trigger-capable plugin is listed under **Triggers** in the node palette with its **Plugin** badge, whatever category it declares, and is accepted as a workflow's entry node: it has no input port, Run no longer stops with "No trigger node found", and the Monitor and Background Runs panels treat the workflow as one with a trigger. **Run** executes the plugin node once as an ordinary step, without starting `events()`; only starting the workflow in the background starts the event stream. The Monitor shows **Listening** for a running trigger-plugin workflow while it waits for an event. A plugin that reports its next event keeps a countdown instead; see [Showing a countdown to the next event](#showing-a-countdown-to-the-next-event).
+
+## Showing a countdown to the next event
+
+By default the Background Runs panel shows a running trigger plugin as "running", because the host cannot know when your plugin will emit next. A plugin that does know can say so by importing `trigger-schedule`:
+
+```wit
+interface trigger-schedule {
+    enum schedule-error {
+        in-past,
+        unavailable,
+    }
+    report-next-fire: func(unix-millis: u64) -> result<_, schedule-error>;
+}
+```
+
+Target the `aerini-node-with-trigger-and-next-fire` world, which exports `node` and `trigger` and imports `trigger-schedule`. Call `report-next-fire` with the time of the next expected event, in milliseconds since the Unix epoch, once when `events` starts and again after each event. The panel then shows "next in Ns" and counts down. `examples/plugin-template/trigger-example/` does exactly this.
+
+The report is for display only. It never starts, delays, or skips a run: an event starts a run only when your plugin writes it to the stream, whatever time you reported. The host checks each report:
+
+- A time up to 5 seconds in the past is accepted and shown as now. An earlier time returns `in-past` and is ignored.
+- A time more than 30 days ahead is shown as 30 days ahead and still returns success.
+- Calling it where no trigger instance is running, such as from `describe` or `execute`, returns `unavailable`.
+
+Treat any error as harmless and carry on. The host keeps only the latest accepted time for each running trigger and clears it when the workflow is stopped or the plugin restarts, so report again after a restart. If the reported time passes and no new report arrives, the panel shows "running…" until one does. Reports are published at most about once a second.
+
+A plugin that never calls `report-next-fire`, and every plugin built against an earlier world, keeps showing "running". A plugin that wants `metadata` as well declares its own world with both exports and the import, the same way [Storage](#storage) describes for combining optional capabilities; the host links `trigger-schedule` for every trigger plugin.
 
 ## Storage
 
@@ -134,7 +166,7 @@ This is an import, not an export: the host links it into every plugin's linker u
 
 ## Filesystem watching
 
-A plugin can also import a filesystem-watching capability, distinct from `trigger`'s async event stream and unaffected by that stream's current limitations:
+A plugin can also import a filesystem-watching capability, distinct from `trigger`'s async event stream:
 
 ```wit
 interface fs-watch {
@@ -169,7 +201,7 @@ interface fs-watch {
 }
 ```
 
-Like `storage`, this is an import the host links into every plugin's linker unconditionally, so a plugin built before this interface existed is unaffected, and one that wants it just declares the import in its own hand-written world (or targets `aerini-node-with-fs-watch`, the convenience world that pairs it with `node`). Unlike `trigger`, `poll` is fully synchronous and callable from a normal `execute()` — call it once per run, typically driven by a Schedule node on whatever interval you want, rather than depending on `trigger.events()`'s host-side pump, which doesn't run any plugin's stream end to end yet (see "Trigger plugins" above).
+Like `storage`, this is an import the host links into every plugin's linker unconditionally, so a plugin built before this interface existed is unaffected, and one that wants it just declares the import in its own hand-written world (or targets `aerini-node-with-fs-watch`, the convenience world that pairs it with `node`). Unlike `trigger`, `poll` is fully synchronous and callable from a normal `execute()` — call it once per run, typically driven by a Schedule node on whatever interval you want, rather than from a trigger plugin's event stream (see "Trigger plugins" above).
 
 `path` must be absolute — the host has no concept of a plugin's working directory to resolve a relative one against — and `events` must be a non-empty list drawn from `"created"`, `"modified"`, `"deleted"`, `"renamed"`; either mistake fails with `invalid-config` before any watch starts. Two `poll` calls are "the same target," sharing one continuously-running watch and one event buffer, when `path` (after canonicalizing), `recursive`, and `events` all match exactly; changing any of them starts a distinct watch. Watches are scoped per plugin `type_id`, the same way `storage` is: every execution of your plugin, across every workflow and placement, that polls an equivalent target shares one buffer. `unwatch` stops a watch early and is not an error if none is running; a target nobody polls for long enough is reaped automatically either way.
 
@@ -177,7 +209,7 @@ The host applies its own limits before any of this reaches your plugin: at most 
 
 ## The plugin sandbox
 
-Each `execute()` call gets a fresh Wasmtime instance, never reused between calls, capped at 64 MiB of linear memory and a 30-second wall-clock deadline; a trigger plugin's `events()` call is bound by the same 30 seconds to start its stream, but the stream itself has no further deadline once returned (more on this above). Filesystem access is fully denied; there are no preopened directories, so any file operation your plugin attempts fails. Outbound HTTP is the only network access available, and every request goes through the same SSRF policy the built-in HTTP Request and Database nodes enforce, with no per-plugin opt-out. [Security](../guide/security.md) covers this sandbox boundary as part of Aerini's overall security model, including how it compares to the Code (JS) node's much looser default; this page only restates the parts that change what you can build against.
+Each `execute()` call gets a fresh Wasmtime instance, never reused between calls, capped at 64 MiB of linear memory and a 30-second wall-clock deadline; a trigger plugin's `events()` call is bound by the same 30 seconds to start its stream, but the returned stream has no deadline beyond the stall limit described under "Trigger plugins". When a trigger starts, the host tries each `.wasm` file in the plugin directory for up to 30 seconds to instantiate and `describe()`, starts no further file once the scan has run for 90 seconds, and skips any file whose signature sidecar is invalid without compiling or running it; a file that does not finish is named in the start error. Filesystem access is fully denied; there are no preopened directories, so any file operation your plugin attempts fails. Outbound HTTP is the only network access available, and every request goes through the same SSRF policy the built-in HTTP Request and Database nodes enforce, with no per-plugin opt-out. [Security](../guide/security.md) covers this sandbox boundary as part of Aerini's overall security model, including how it compares to the Code (JS) node's much looser default; this page only restates the parts that change what you can build against.
 
 ## What happens to a bad plugin
 

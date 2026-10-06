@@ -4,11 +4,17 @@ import type { Connector } from "./Connector";
 
 export type MoveEntry = { nodeId: string; from: { x: number; y: number }; to: { x: number; y: number } };
 
+export type ConfigPatch = { nodeId: string; keys: Record<string, { before: string | null; after: string | null }> };
+type WirePort = { node: string; port: string };
+
 export type UndoAction =
   | { type: "add_node";    node: CanvasNode }
   | { type: "delete_node"; node: CanvasNode; connectors: Connector[] }
   | { type: "add_edge";    connector: Connector }
   | { type: "delete_edge"; connector: Connector }
+  | { type: "reroute_edge"; connector: Connector; from: WirePort; to: WirePort; configs: ConfigPatch[]; replaced?: Connector[] }
+  | { type: "move_sources"; connectors: Connector[]; from: WirePort; to: WirePort; configs: ConfigPatch[] }
+  | { type: "batch";       actions: UndoAction[] }
   | { type: "split_edge";  removed: Connector; added1: Connector; added2: Connector; node: CanvasNode }
   | { type: "move_node";   nodeId: string; from: { x: number; y: number }; to: { x: number; y: number } }
   | { type: "move_nodes";  moves: MoveEntry[] }
@@ -33,6 +39,19 @@ export class UndoManager {
     const a = this.stack.pop();
     if (!a) return;
     this.redos.push(a);
+    this.revert(a);
+    this.canvas.onCanvasChanged?.();
+  }
+
+  redo(): void {
+    const a = this.redos.pop();
+    if (!a) return;
+    this.stack.push(a);
+    this.reapply(a);
+    this.canvas.onCanvasChanged?.();
+  }
+
+  private revert(a: UndoAction): void {
     const c = this.canvas;
     switch (a.type) {
       case "add_node":
@@ -52,6 +71,19 @@ export class UndoManager {
       case "delete_edge":
         c.connectors.set(a.connector.data.id, a.connector);
         c.injectDynamicPortExpr(a.connector);
+        break;
+      case "reroute_edge":
+        a.connector.data.to_node = a.from.node;
+        a.connector.data.to_port = a.from.port;
+        for (const r of a.replaced ?? []) c.connectors.set(r.data.id, r);
+        c.applyConfigPatches(a.configs, "before");
+        break;
+      case "move_sources":
+        for (const conn of a.connectors) {
+          conn.data.from_node = a.from.node;
+          conn.data.from_port = a.from.port;
+        }
+        c.applyConfigPatches(a.configs, "before");
         break;
       case "move_node": {
         const n = c.nodes.get(a.nodeId);
@@ -78,14 +110,13 @@ export class UndoManager {
         c.connectors.set(a.removed.data.id, a.removed);
         c.injectDynamicPortExpr(a.removed);
         break;
+      case "batch":
+        for (let i = a.actions.length - 1; i >= 0; i--) this.revert(a.actions[i]);
+        break;
     }
-    c.onCanvasChanged?.();
   }
 
-  redo(): void {
-    const a = this.redos.pop();
-    if (!a) return;
-    this.stack.push(a);
+  private reapply(a: UndoAction): void {
     const c = this.canvas;
     switch (a.type) {
       case "add_node":
@@ -105,6 +136,19 @@ export class UndoManager {
       case "delete_edge":
         c.connectors.delete(a.connector.data.id);
         c.clearDynamicPortExpr(a.connector);
+        break;
+      case "reroute_edge":
+        a.connector.data.to_node = a.to.node;
+        a.connector.data.to_port = a.to.port;
+        for (const r of a.replaced ?? []) c.connectors.delete(r.data.id);
+        c.applyConfigPatches(a.configs, "after");
+        break;
+      case "move_sources":
+        for (const conn of a.connectors) {
+          conn.data.from_node = a.to.node;
+          conn.data.from_port = a.to.port;
+        }
+        c.applyConfigPatches(a.configs, "after");
         break;
       case "move_node": {
         const n = c.nodes.get(a.nodeId);
@@ -131,7 +175,9 @@ export class UndoManager {
         c.connectors.set(a.added2.data.id, a.added2);
         c.injectDynamicPortExpr(a.added2);
         break;
+      case "batch":
+        for (const sub of a.actions) this.reapply(sub);
+        break;
     }
-    c.onCanvasChanged?.();
   }
 }

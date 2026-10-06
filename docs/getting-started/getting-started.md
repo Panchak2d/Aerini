@@ -23,7 +23,7 @@ Connect the two: drag from the small dot on the right edge of Manual Trigger to 
 ![Dragging a connection off Manual Trigger's output dot](../public/images/getting-started-02-connect-drag.png)
 
 > [!TIP]
-> If you drag a connection out and release it over empty canvas instead of an existing node, Aerini opens a small search popover so you can pick a new node and place it, already connected, in one motion. Handy once you're adding nodes faster than you're arranging them.
+> If you drag a connection out and release it over empty canvas instead of an existing node, Aerini opens a small search popover so you can pick a new node and place it, already connected, in one motion. Handy once you're adding nodes faster than you're arranging them. Dragging from an empty input toward an output works the same way in reverse.
 >
 > ![The node search popover that appears when a dragged connection is dropped on empty canvas](../public/images/node-search-popover.png)
 

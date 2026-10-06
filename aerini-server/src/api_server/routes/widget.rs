@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use super::state::ApiState;
+use super::state::{internal_error, ApiState};
 
 /// `aerini-server/src/static/aerini-widget.js`, embedded at compile time —
 /// matches the `include_str!` convention `status_server.rs` uses for
@@ -127,16 +127,12 @@ async fn load_webhook_trigger(
             }
             Ok(Err(e)) => {
                 return Err(Box::new(
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+                    internal_error("load_webhook_trigger", e).into_response(),
                 ));
             }
             Err(e) => {
                 return Err(Box::new(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": e.to_string()})),
-                    )
-                        .into_response(),
+                    internal_error("load_webhook_trigger: task failed", e).into_response(),
                 ));
             }
         }
@@ -158,13 +154,7 @@ async fn load_webhook_trigger(
         Ok(t) => t,
         Err(e) => {
             return Err(Box::new(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": format!("corrupt trigger_kind in scheduler row: {}", e)
-                    })),
-                )
-                    .into_response(),
+                internal_error("load_webhook_trigger: corrupt trigger_kind", e).into_response(),
             ));
         }
     };
@@ -257,15 +247,10 @@ pub async fn trigger_widget(
                     .into_response();
             }
             Ok(Err(e)) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e})))
-                    .into_response();
+                return internal_error("trigger_widget", e).into_response();
             }
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-                    .into_response();
+                return internal_error("trigger_widget: task failed", e).into_response();
             }
         }
     };
@@ -289,13 +274,11 @@ pub async fn trigger_widget(
     let upstream = match relay_result {
         Ok(r) => r,
         Err(e) => {
+            tracing::error!(workflow_id = %workflow_id, error = %e, "widget relay could not reach the webhook listener");
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
-                    "error": format!(
-                        "could not reach the workflow's webhook listener — it may have just stopped: {}",
-                        e
-                    )
+                    "error": "could not reach the workflow's webhook listener — it may have just stopped"
                 })),
             )
                 .into_response();

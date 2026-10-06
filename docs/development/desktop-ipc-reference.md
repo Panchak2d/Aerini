@@ -2,7 +2,7 @@
 
 The desktop app's frontend never touches the filesystem, a database, or the Rust engine directly. Every one of those operations crosses through Tauri's IPC bridge as a named command, registered once in `src-tauri/src/lib.rs`'s `invoke_handler!` list. This page is the exhaustive list: every registered command, its parameters, what it returns, and where in the frontend it's actually called from. It assumes you've read [Architecture](architecture.md), specifically the [Tauri shell](architecture.md#the-tauri-shell-src-tauri) section this page is the detail behind.
 
-74 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 14 commands declared directly in `lib.rs` that don't belong to any one domain.
+77 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 14 commands declared directly in `lib.rs` that don't belong to any one domain.
 
 ## Conventions
 
@@ -14,7 +14,7 @@ The desktop app's frontend never touches the filesystem, a database, or the Rust
 
 - `scheduler::start_scheduled_workflow` serializes its underlying `SchedulerError` enum to a JSON string (`serde_json::to_string`, falling back to `format!("{:?}", e)` if that itself fails) instead of a human message. `src/ipc/workflow.ts`'s `parseSchedulerError()` parses it back into a typed union (`port_conflict`, `workflow_not_found`, `not_schedulable`, `already_running`, or `other`), falling back to `{ error_kind: "other", message: raw }` if parsing fails. Every other scheduler command (`stop_scheduled_workflow`, `set_always_on`, `stop_all_jobs`, `request_scheduler_state`) returns a plain string like everything else; only this one command is JSON-structured.
 - `plugins::install_plugin_from_path` and `install_plugin_pack_from_path` embed a machine-readable, colon-terminated prefix in an otherwise plain error string, for example `plugin_already_installed: 'x' is already installed as 'x.wasm'`. Seven distinct prefixes exist (`plugin_already_installed`, `plugin_integrity_failed`, `plugin_signature_invalid`, `plugin_key_mismatch`, `plugin_signature_downgrade`, `pack_already_installed`, `pack_member_conflict`), but `src/plugin-settings.ts` only pattern-matches two of them, `plugin_already_installed:` and `pack_already_installed:`, to offer an update-and-retry-with-`overwrite`-confirmation. The other five prefixes still get returned this way but are shown to the user as plain error text with no special handling.
-- A handful of read-only commands with nothing that can fail return their value directly with no `Result` at all: `memory::get_memory_breakdown` (`Vec<RunBreakdown>`), `memory::get_process_memory` and `performance::get_live_performance`/`get_recent_performance` (`Option<T>`, `None` meaning "nothing to report" rather than an error).
+- A handful of read-only commands with nothing that can fail return their value directly with no `Result` at all: `memory::get_memory_breakdown` (`Vec<RunBreakdown>`), `memory::get_process_memory` and `performance::get_live_performance`/`get_recent_performance` and `update::take_update_notice` (`Option<T>`, `None` meaning "nothing to report" rather than an error).
 
 **Async commands and blocking work.** Most commands that touch the workflow database are `async fn` that immediately hand the actual work to `tokio::task::spawn_blocking`, since `WorkflowDb`'s own methods are synchronous SQLite calls. The `.await` only resolves once that blocking work finishes; a failure to join the spawned task at all (for example, a panic inside it) is converted to a plain string and returned the same way as any other error, indistinguishable to the frontend from a normal `Result::Err`.
 
@@ -74,7 +74,7 @@ None of these six are wrapped in `src/ipc/workflow.ts`; `src/run-history.ts` cal
 | `set_setting` | `key: String`, `value: String` | `Result<(), String>` | `setSetting` (`ipc/workflow.ts`) |
 | `clear_chat_session` | `session_id: String` | `Result<(), String>` | `clearChatSession` (`ipc/workflow.ts`) |
 
-`clear_chat_session` clears AI Memory rows for a chat session by looking up the registered `ai_memory` node type and invoking its `execute` directly with a synthetic `NodeInput`, rather than opening a second database connection to reimplement the delete. This is the one command in the whole surface that runs a node outside an actual workflow run.
+`clear_chat_session` clears AI Memory rows for a chat session by looking up the registered `ai_memory` node type and invoking its `execute` directly with a synthetic `NodeInput`, rather than opening a second database connection to reimplement the delete. This is the one command in the whole surface that runs a node outside an actual workflow run. The `clear` operation deletes the session's remembered files together with its messages, in one transaction.
 
 ## Chat
 
@@ -144,7 +144,7 @@ Reports the port an OAuth callback listener would actually bind if a flow starte
 | `generate_docker_package` | `request: ExportRequest` | `Result<ExportResult, String>` | `export-server-panel.ts` |
 | `export_all_workflows` | none | `Result<ExportAllResult, String>` | `exportAllWorkflows` (`ipc/workflow.ts`), called from `toolbar.ts` |
 
-`validate_workflow_for_export` and both `generate_*_package` commands reject a workflow whose only trigger is a Manual Trigger, since nothing would ever start it once exported; a Schedule or Webhook trigger is required. Both package commands build their zip in the system temp directory and return its path; the frontend then calls the separate top-level `save_export_zip` command (below) to move it to a user-chosen location via a save dialog. `ExportResult.run_secret_plaintext` is the one and only time the generated run secret is available in plaintext; the exported config file stores only its argon2id hash, and the UI has no other way to retrieve it later. `export_all_workflows` bundles every saved workflow into one zip of individual `.aerini` files, the same per-workflow JSON shape a single-workflow export produces, with each workflow's `metadata.collection_id` nulled out the same way a single export already does.
+`validate_workflow_for_export` and both `generate_*_package` commands reject a workflow whose only trigger is a Manual Trigger, since nothing would ever start it once exported; a Schedule, Webhook, or trigger-plugin trigger is required (a trigger plugin must also be installed on the server that runs the export). Both package commands build their zip in the system temp directory and return its path; the frontend then calls the separate top-level `save_export_zip` command (below) to move it to a user-chosen location via a save dialog. `ExportResult.run_secret_plaintext` is the one and only time the generated run secret is available in plaintext; the exported config file stores only its argon2id hash, and the UI has no other way to retrieve it later. `export_all_workflows` bundles every saved workflow into one zip of individual `.aerini` files, the same per-workflow JSON shape a single-workflow export produces, with each workflow's `metadata.collection_id` nulled out the same way a single export already does.
 
 ## Plugins
 
@@ -195,13 +195,26 @@ Two more commands the Plugins settings panel depends on, `pick_folder_dialog` an
 
 ## Update
 
-`update.rs` (79 lines), one command, wrapped in `src/ipc/update.ts`.
+`update.rs` (762 lines), four commands. All four are wrapped in `src/ipc/update.ts` and driven by `src/update-ui.ts`, which owns the Settings → About → Updates row.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
-| `check_for_update` | none | `Result<UpdateCheckResult, String>` | `checkForUpdate`, called from `src/toolbar.ts` |
+| `check_for_update` | none | `Result<UpdateCheckResult, String>` | `checkForUpdate`, called from `src/update-ui.ts` |
+| `install_update` | `force: Option<bool>` | `Result<InstallOutcome, String>` | `installUpdate`, called from `src/update-ui.ts` |
+| `cancel_update_download` | none | `Result<(), String>` | `cancelUpdateDownload`, called from `src/update-ui.ts` |
+| `take_update_notice` | none | `Option<UpdateNotice>` | `takeUpdateNotice`, called from `src/update-ui.ts` at startup |
 
-User-triggered only; nothing polls or schedules this automatically. Calls the GitHub Releases API directly, validates that the release URL it gets back actually points at `github.com` over `https` before returning it, and compares semantic versions to compute `is_newer`.
+User-triggered only; nothing polls or schedules any of these. The updater is `tauri-plugin-updater`, registered Rust-side only: no `updater:*` permission is granted to the webview, and the webview never supplies a URL or version. It can only ask to check, install what the last check found, or cancel.
+
+**`check_for_update`** reads the manifest at the endpoint in `tauri.conf.json` (`plugins.updater.endpoints`) with a 15 second timeout. `UpdateCheckResult` is `{ current_version, available, latest_version, install_support, release_url }`. `latest_version` is `null` unless an update is available. `release_url` is built from constants plus the version, never taken from the manifest. `install_support` is `{ kind: "supported", admin_prompt }` or `{ kind: "manual", reason, message }`; `manual` means the UI should offer the release page instead of an install button. The reasons are `unknown_install` (no installer type was stamped into the binary), `appimage_missing`, `appimage_not_writable`, `macos_translocated`, `macos_disk_image`, and `no_release_for_platform` (the manifest announces a newer version but has no entry for this platform and installer type). The update handle from a successful check is kept in managed state and replaced by every later check.
+
+**`install_update`** takes no update details. It requires a prior successful check and re-verifies `install_support`. It downloads the package (signature and, because `requireSignedVersion` is on, the signed version are verified inside the download), emitting `update-progress` events shaped `{ stage: "downloading" | "installing", downloaded, total }` (`total` may be `null`). A download that makes no progress for 45 seconds fails. Only one check or install runs at a time. After the download it counts running workflows (scheduler runs plus manual runs). If any are running and `force` is not `true`, it returns `{ status: "active_runs", scheduled, manual }` without installing, and keeps the verified download so confirming does not download again. Re-invoking with `force: true` cancels manual runs, stops background jobs the same way the tray's Quit does, writes the restart marker, installs, and restarts. On success the process exits or restarts and the promise never resolves. `{ status: "cancelled" }` is returned if `cancel_update_download` interrupted the download. Failures reject with a plain message; the verified download is kept for a retry.
+
+**`cancel_update_download`** cancels a running download; when nothing is downloading it discards a kept download. It rejects once installation has started.
+
+**`take_update_notice`** returns the outcome of the previous install attempt exactly once: `{ kind: "installed" | "incomplete", version }`. The install writes `.update-pending` in the app data directory just before handing over to the installer; the next startup reads and deletes it, ignoring a marker older than 24 hours. It is a pulled command rather than an event because an event emitted during startup can fire before the page has registered a listener.
+
+The endpoint serves a static manifest, so which platforms can update in-app depends on which platform entries that manifest lists.
 
 ## Providers
 
@@ -240,7 +253,7 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 
 [Architecture](architecture.md#the-tauri-shell-src-tauri) covers what `run()` does before any command can be called at all: opening the database, building the initial node registry, starting the scheduler daemon. That startup sequence isn't repeated here. [Adding a Built-in Node](node-authoring.md) and [Writing a Plugin Node](plugin-authoring.md) each mention the specific commands their own subject matter calls into (a node's config panel opening a file picker or starting an OAuth flow; the plugin install commands) in their own context; this page is the place for the exact parameter and return shape, not a restatement of when or why a node or plugin would call one.
 
-`src/ipc/events.ts` and the event listeners embedded directly in `ipc/memory.ts` and `ipc/performance.ts` are deliberately not catalogued as a command surface here. Every table above documents a Tauri command: a named, invoked, request/response call the frontend initiates. Events run the other direction, they're pushed by the engine through `TauriEventSink`'s `tauri::Emitter::emit` calls (`node-status`, `scheduler-status`, `scheduler-skip`, `memory-breakdown`, `performance-live`) and picked up by a `win.listen()` call wherever the frontend needs that data, with no parameters, no return value, and no caller-initiated request to document. That channel already has its own explanation in [Architecture](architecture.md#the-tauri-shell-src-tauri); repeating it here would misfile a one-way notification stream under a page about two-way command calls.
+`src/ipc/events.ts` and the event listeners embedded directly in `ipc/memory.ts` and `ipc/performance.ts` are deliberately not catalogued as a command surface here. Every table above documents a Tauri command: a named, invoked, request/response call the frontend initiates. Events run the other direction, they're pushed by the engine through `TauriEventSink`'s `tauri::Emitter::emit` calls (`node-status`, `scheduler-status`, `scheduler-skip`, `memory-breakdown`, `performance-live`) and picked up by a `win.listen()` call wherever the frontend needs that data, with no parameters, no return value, and no caller-initiated request to document. The one exception to the sink is `update-progress`, which `install_update` emits itself and `ipc/update.ts` listens for. That channel already has its own explanation in [Architecture](architecture.md#the-tauri-shell-src-tauri); repeating it here would misfile a one-way notification stream under a page about two-way command calls.
 
 ## What's next
 

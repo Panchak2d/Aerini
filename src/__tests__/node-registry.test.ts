@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { registerNodeDescriptors, getAllNodeDescriptors } from "../canvas/node-registry";
+import { registerNodeDescriptors, getAllNodeDescriptors, isTriggerNodeType, findTriggerNodeTypeId } from "../canvas/node-registry";
 import type { NodeDescriptor } from "../ipc/workflow";
 
 function desc(type_id: string): NodeDescriptor {
@@ -20,5 +20,31 @@ describe("getAllNodeDescriptors", () => {
     registerNodeDescriptors([desc("a"), desc("b")]);
     registerNodeDescriptors([desc("x")]);
     expect(getAllNodeDescriptors().map(d => d.type_id)).toEqual(["x"]);
+  });
+});
+
+describe("isTriggerNodeType", () => {
+  it("is true for built-in trigger ids without any registration", () => {
+    registerNodeDescriptors([]);
+    expect(isTriggerNodeType("schedule")).toBe(true);
+    expect(isTriggerNodeType("webhook")).toBe(true);
+    expect(isTriggerNodeType("manual_trigger")).toBe(true);
+    expect(isTriggerNodeType("http_request")).toBe(false);
+  });
+
+  it("is true for a registered trigger_capable plugin and false for a plain plugin", () => {
+    registerNodeDescriptors([
+      { ...desc("hb"), is_plugin: true, trigger_capable: true },
+      { ...desc("plain"), is_plugin: true },
+    ]);
+    expect(isTriggerNodeType("hb")).toBe(true);
+    expect(isTriggerNodeType("plain")).toBe(false);
+    expect(isTriggerNodeType("unknown")).toBe(false);
+  });
+
+  it("findTriggerNodeTypeId returns a plugin trigger as the entry type", () => {
+    registerNodeDescriptors([{ ...desc("hb"), is_plugin: true, trigger_capable: true }]);
+    const nodes = [{ data: { node_type_id: "http_request" } }, { data: { node_type_id: "hb" } }];
+    expect(findTriggerNodeTypeId(nodes)).toBe("hb");
   });
 });

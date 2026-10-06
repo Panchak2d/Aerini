@@ -56,7 +56,7 @@ export function renderBgJobs(
     empty.className = "bg-jobs-empty";
     empty.innerHTML = filterStatus !== "all" || filterQuery
       ? "<span>No runs match the filter</span>"
-      : "<svg width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' opacity='0.35'><circle cx='12' cy='12' r='9'/><polygon points='10 8 16 12 10 16 10 8' fill='currentColor' stroke='none'/></svg><span>No scheduled workflows running</span><small>Use <strong>Schedule Run</strong> in the toolbar to run a workflow with a Schedule or Webhook trigger in the background.</small>";
+      : "<svg width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' opacity='0.35'><circle cx='12' cy='12' r='9'/><polygon points='10 8 16 12 10 16 10 8' fill='currentColor' stroke='none'/></svg><span>No scheduled workflows running</span><small>Use <strong>Schedule Run</strong> in the toolbar to run a workflow with a Schedule, Webhook, or trigger-plugin trigger in the background.</small>";
     list.appendChild(empty);
     return;
   }

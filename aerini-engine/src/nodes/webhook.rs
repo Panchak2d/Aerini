@@ -18,7 +18,7 @@ use dashmap::DashSet;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 /// Global registry of ports currently held by active Webhook nodes.
 /// Prevents two concurrent workflows from binding the same port and producing
@@ -195,15 +195,18 @@ impl Node for WebhookNode {
         NodePorts {
             inputs: vec![],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),   label: "Triggered".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(),     position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "output".to_string(),   label: "Triggered".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(),     position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        let port = input.input["port"].as_u64().unwrap_or(3456) as u16;
-        let path = input.input["path"].as_str().unwrap_or("/webhook").to_string();
+        let port = match parse_port(&input.input["port"]) {
+            Ok(p)  => p,
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let path = normalize_path(input.input["path"].as_str());
 
         // Scheduler-driven run (TriggerKind::Webhook): the daemon's accept loop
         // already validated and parsed a real request for the entry trigger,
@@ -253,7 +256,7 @@ impl Node for WebhookNode {
         }
         // Release the port registration on all exit paths (normal return, error, or panic).
         let _port_guard = scopeguard::guard((), |_| { ACTIVE_PORTS.remove(&port); });
-        let method             = input.input["method"].as_str().unwrap_or("ANY").to_uppercase();
+        let method             = normalize_method(input.input["method"].as_str());
         let secret             = input.input["secret"].as_str().unwrap_or("").to_string();
         let validate_timestamp = input.input["validate_timestamp"].as_bool().unwrap_or(false);
         let timeout_secs       = clamp_timeout_secs(input.input["timeout_secs"].as_u64().unwrap_or(60));
@@ -312,6 +315,56 @@ impl Node for WebhookNode {
                 vec![format!("Webhook received on :{}{}", port_for_log, path_for_log)],
             ),
         }
+    }
+}
+
+/// Reads the `port` input. Absent or `null` means the default (3456). A
+/// numeric string such as `"8080"` (what an `{{expression}}` field resolves
+/// to) is accepted; anything else present but unusable is an error rather
+/// than silently falling back to the default port.
+pub(crate) fn parse_port(raw: &Value) -> Result<u16, NodeError> {
+    let invalid = |shown: String| NodeError::unrecoverable(
+        "INVALID_PORT",
+        format!("Webhook port {shown} is not a whole number between 1024 and 65535"),
+    );
+    let n = match raw {
+        Value::Null      => return Ok(3456),
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0 && *f >= 0.0).map(|f| f as u64))
+            .ok_or_else(|| invalid(n.to_string()))?,
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(3456);
+            }
+            t.parse::<u64>().map_err(|_| invalid(format!("'{t}'")))?
+        }
+        other => return Err(invalid(other.to_string())),
+    };
+    u16::try_from(n).map_err(|_| invalid(n.to_string()))
+}
+
+/// Request methods arrive upper-case, so a configured `post` would answer
+/// every request with 405. Blank or absent means any method.
+pub(crate) fn normalize_method(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m.to_uppercase(),
+        None    => "ANY".to_string(),
+    }
+}
+
+/// Request paths always start with `/`, so a configured `webhook` or `hooks/in`
+/// could never match and the node would just time out. Blank or absent falls
+/// back to the default.
+pub(crate) fn normalize_path(raw: Option<&str>) -> String {
+    let t = raw.map(str::trim).unwrap_or("");
+    if t.is_empty() {
+        "/webhook".to_string()
+    } else if t.starts_with('/') {
+        t.to_string()
+    } else {
+        format!("/{t}")
     }
 }
 
@@ -711,6 +764,16 @@ mod tests {
         assert_eq!(out.error.unwrap().code, "INVALID_PORT");
     }
 
+    /// A port above 65535 is rejected, not truncated to a different (here
+    /// bindable) port.
+    #[tokio::test]
+    async fn port_above_u16_range_is_rejected() {
+        let input = make_input("n1", 66_560, "/hook", HashMap::new());
+        let out = WebhookNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_PORT");
+    }
+
     /// A port already held by another Webhook node in ACTIVE_PORTS must return
     /// PORT_IN_USE immediately — no bind attempt, no hang, no panic.
     ///
@@ -911,5 +974,37 @@ mod tests {
         let rest_expired = signed_token_mac("s3cr3t", "/hook", past);
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rest_expired.as_bytes());
         assert!(!validate_signed_token("s3cr3t", "/hook", &format!("{past}.{sig_b64}")));
+    }
+
+    #[test]
+    fn parse_port_defaults_and_accepts_numeric_strings() {
+        assert_eq!(parse_port(&Value::Null).unwrap(), 3456);
+        assert_eq!(parse_port(&json!("")).unwrap(), 3456);
+        assert_eq!(parse_port(&json!(8080)).unwrap(), 8080);
+        assert_eq!(parse_port(&json!(8080.0)).unwrap(), 8080);
+        assert_eq!(parse_port(&json!(" 8080 ")).unwrap(), 8080);
+    }
+
+    #[test]
+    fn parse_port_rejects_unusable_values_instead_of_defaulting() {
+        for bad in [json!("abc"), json!(-1), json!(80.5), json!(true), json!(70_000)] {
+            let err = parse_port(&bad).unwrap_err();
+            assert_eq!(err.code, "INVALID_PORT", "input: {bad}");
+        }
+    }
+
+    #[test]
+    fn normalize_path_adds_leading_slash_and_defaults_blank() {
+        assert_eq!(normalize_path(Some("hooks/in")), "/hooks/in");
+        assert_eq!(normalize_path(Some("/hooks/in")), "/hooks/in");
+        assert_eq!(normalize_path(Some("  ")), "/webhook");
+        assert_eq!(normalize_path(None), "/webhook");
+    }
+
+    #[test]
+    fn normalize_method_uppercases_and_defaults_blank_to_any() {
+        assert_eq!(normalize_method(Some("post")), "POST");
+        assert_eq!(normalize_method(Some("")), "ANY");
+        assert_eq!(normalize_method(None), "ANY");
     }
 }

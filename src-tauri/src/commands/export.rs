@@ -63,7 +63,7 @@ pub async fn validate_workflow_for_export(
     if matches!(trigger, TriggerKind::Manual) {
         return Err(
             "Workflows with a Manual Trigger cannot be exported for server. \
-             Add a Schedule or Webhook trigger node first.".to_string()
+             Add a Schedule, Webhook, or trigger-plugin node first.".to_string()
         );
     }
 

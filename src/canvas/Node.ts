@@ -1,8 +1,8 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
-import { NODE_IDS, DANGEROUS_NODE_IDS, TRIGGER_NODE_IDS } from "../node-ids";
+import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
 import { getCanvasColors, headerTint, resolveNoteColors } from "./theme-colors";
-import { isPluginNodeType, isUnregisteredNodeType } from "./node-registry";
+import { isPluginNodeType, isUnregisteredNodeType, isTriggerNodeType } from "./node-registry";
 
 export interface CanvasNodeData {
   id: string;
@@ -82,7 +82,7 @@ export class CanvasNode {
   hovered   = false;
   status: "idle" | "running" | "success" | "error" = "idle";
   // True when this node has a required config field left empty after its
-  // popover was closed. Cleared on a successful run (UX-7).
+  // popover was closed. Cleared on a successful run.
   missingRequired = false;
 
   // Output preview (set after execution)
@@ -196,7 +196,7 @@ export class CanvasNode {
     return null;
   }
 
-  draw(ctx: CanvasRenderingContext2D, dt = 0, connectedPorts: Set<string> = new Set()): void {
+  draw(ctx: CanvasRenderingContext2D, dt = 0, connectedPorts: Set<string> = new Set(), overfedPorts: Set<string> = new Set()): void {
     // Note node gets its own minimal sticky-note rendering
     if (this.data.node_type_id === NODE_IDS.NOTE) {
       this.drawNote(ctx);
@@ -218,7 +218,7 @@ export class CanvasNode {
     const accent = statusAccent(this.status, colors) ?? meta.accent;
 
     // ── Trigger identity overlay (independent of NodeType/TYPE_META) ────────
-    // TRIGGER_NODE_IDS is a plain id set, unrelated to the 4-value NodeType
+    // The trigger check (built-in ids plus trigger-capable plugins) is unrelated to the 4-value NodeType
     // union — schedule/webhook/manual_trigger are node_type "action" same as
     // everything else (verified against aerini-engine/src/nodes/{schedule,
     // webhook,manual_trigger}.rs and onboarding.ts's own fixture). This only
@@ -230,9 +230,8 @@ export class CanvasNode {
     // type signatures; (2) icon-cache.ts's bitmap cache is keyed by exact
     // color string and only preloads the 4 category colors + error red —
     // feeding it a 5th, unpreloaded color would silently degrade trigger
-    // icons to the letter-fallback glyph, and icon-cache.ts is out of this
-    // batch's file scope.
-    const isTrigger      = TRIGGER_NODE_IDS.has(this.data.node_type_id);
+    // icons to the letter-fallback glyph.
+    const isTrigger      = isTriggerNodeType(this.data.node_type_id);
     const identityAccent = isTrigger ? colors.catTrigger : meta.accent;
     const identityLabel  = isTrigger ? "TRIGGER" : meta.label;
 
@@ -393,7 +392,7 @@ export class CanvasNode {
     // ── Danger badge (top right, immediately left of the category label) ────
     // Measures identityLabel (not meta.label) so the badge stays correctly
     // positioned if a node is ever both trigger and dangerous — no overlap
-    // exists today (TRIGGER_NODE_IDS and DANGEROUS_NODE_IDS are disjoint,
+    // exists today (the built-in trigger ids and DANGEROUS_NODE_IDS are disjoint,
     // verified against node-ids.ts), but the two sets are independently
     // maintained elsewhere, so this shouldn't rely on them staying that way.
     if (DANGEROUS_NODE_IDS.has(this.data.node_type_id)) {
@@ -415,6 +414,14 @@ export class CanvasNode {
 
     for (const port of this.ports) {
       const isConnected = connectedPorts.has(`${this.data.id}:${port.id}`);
+
+      if (port.isInput && overfedPorts.has(`${this.data.id}:${port.id}`)) {
+        ctx.beginPath();
+        ctx.arc(port.x, port.y, PORT_RADIUS + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = colors.error;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+      }
 
       // Port outer ring — matches the node body it's cut out of
       ctx.beginPath();

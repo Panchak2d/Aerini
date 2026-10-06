@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -62,6 +62,25 @@ async fn check_ssrf(raw_url: &str) -> Result<(), String> {
     crate::nodes::util::check_host_ssrf(host, port, crate::nodes::util::SsrfPolicy::Strict).await
 }
 
+/// Collects response headers into a JSON object, joining repeated headers
+/// (such as `Set-Cookie`) with `, ` in the order received.
+fn join_response_headers(map: &reqwest::header::HeaderMap) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in map.iter() {
+        let val = v.to_str().unwrap_or("");
+        match out.get_mut(k.as_str()) {
+            Some(Value::String(existing)) => {
+                existing.push_str(", ");
+                existing.push_str(val);
+            }
+            _ => {
+                out.insert(k.as_str().to_string(), Value::String(val.to_string()));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 fn redact_url_for_log(raw_url: &str) -> String {
     match reqwest::Url::parse(raw_url) {
         Ok(mut u) => {
@@ -116,6 +135,7 @@ impl Node for HttpRequestNode {
                 label: "In".to_string(),
                 position: PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![
                 PortDefinition {
@@ -123,12 +143,14 @@ impl Node for HttpRequestNode {
                     label: "Success".to_string(),
                     position: PortPosition::Right,
                     port_type: None,
+                    arity: PortArity::Single,
                 },
                 PortDefinition {
                     id: "on_error".to_string(),
                     label: "Error".to_string(),
                     position: PortPosition::Right,
                     port_type: None,
+                    arity: PortArity::Single,
                 },
             ],
         }
@@ -163,7 +185,13 @@ impl Node for HttpRequestNode {
 
         if let Some(headers_obj) = input.input["headers"].as_object() {
             for (k, v) in headers_obj {
-                if let Some(v_str) = v.as_str() {
+                let v_str = match v {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                };
+                if let Some(v_str) = v_str {
                     req = req.header(k.as_str(), v_str);
                 }
             }
@@ -205,13 +233,7 @@ impl Node for HttpRequestNode {
         match req.send().await {
             Ok(mut response) => {
                 let status = response.status().as_u16();
-                let headers: Value = response.headers().iter()
-                    .map(|(k, v)| (
-                        k.as_str().to_string(),
-                        Value::String(v.to_str().unwrap_or("").to_string()),
-                    ))
-                    .collect::<serde_json::Map<_, _>>()
-                    .into();
+                let headers = join_response_headers(response.headers());
 
                 // Reject before reading if Content-Length already exceeds the cap.
                 // This prevents reqwest from pre-allocating a buffer sized to the
@@ -253,7 +275,7 @@ impl Node for HttpRequestNode {
                         }
                         Ok(None) => break,
                         Err(e) => return NodeOutput::failure(
-                            NodeError::unrecoverable("RESPONSE_READ_ERROR", e.to_string())
+                            NodeError::unrecoverable("RESPONSE_READ_ERROR", super::util::reqwest_err_msg(&e))
                         ),
                     }
                 }
@@ -285,6 +307,17 @@ impl Node for HttpRequestNode {
 mod tests {
     use super::*;
     use crate::model::ExecutionContext;
+
+    #[test]
+    fn repeated_response_headers_are_joined() {
+        let mut map = reqwest::header::HeaderMap::new();
+        map.append("set-cookie", "a=1".parse().unwrap());
+        map.append("set-cookie", "b=2".parse().unwrap());
+        map.append("x-one", "v".parse().unwrap());
+        let out = join_response_headers(&map);
+        assert_eq!(out["set-cookie"], "a=1, b=2");
+        assert_eq!(out["x-one"], "v");
+    }
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {

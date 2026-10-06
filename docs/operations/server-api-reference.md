@@ -10,7 +10,7 @@ Each token carries one or more scopes: `read`, `write`, `admin`. A route's requi
 
 ## Per-token workflow ACL
 
-Beyond scope, a token can be restricted to a specific set of workflow IDs. `GET /api/tokens/:id/workflows` lists a token's current grants; `POST` and `DELETE` on `/api/tokens/:id/workflows/:workflow_id` add or remove one. `POST /api/tokens` can also set the grants at creation with `workflow_ids`. A token with zero grants is unrestricted, not blocked: the ACL only starts filtering once at least one workflow is explicitly granted, so revoking a token's last grant makes it unrestricted again (the response says so). Admin tokens are always unrestricted. To cut a token off entirely, revoke the token itself.
+Beyond scope, a token can be restricted to a specific set of workflow IDs. `GET /api/tokens/:id/workflows` lists a token's current grants; `POST` and `DELETE` on `/api/tokens/:id/workflows/:workflow_id` add or remove one. `POST /api/tokens` can also set the grants at creation with `workflow_ids`. A token with zero grants is unrestricted, not blocked: the ACL only starts filtering once at least one workflow is explicitly granted. Because removing a token's only grant would silently make it unrestricted, that request is refused with `409`. Admin tokens are always unrestricted, so granting a workflow to one is refused with `400`. To cut a token off entirely, revoke the token itself.
 
 A restricted token is confined to its granted workflows on every route that addresses workflows:
 
@@ -21,13 +21,13 @@ A restricted token is confined to its granted workflows on every route that addr
 
 ## Conventions
 
-**Errors.** Failures return a JSON body of the form `{"error": "<message>"}` (some also add extra fields, noted per route). Success on a mutation is usually `{"ok": true}` plus any fields specific to that route.
+**Errors.** Failures return a JSON body of the form `{"error": "<message>"}` (some also add extra fields, noted per route). Success on a mutation is usually `{"ok": true}` plus any fields specific to that route. A failed store, database or background-task call returns `500` with `{"error": "internal server error"}`; the cause is written to the server log, not the response.
 
 **Pagination.** `GET /api/workflows` and `GET /api/scheduler` share one shape: `limit` (default `100`, capped at `500`) and `offset` (default `0`) as query parameters, and a response body of `{"items": [...], "total": <n>, "limit": <n>, "offset": <n>}`. `GET /api/performance/reports` uses a similar but distinct shape: `limit` (default `100`, clamped to `1..=1000` server-side) and `offset`, with a response of `{"items": [...], "limit": <n>, "offset": <n>, "has_more": <bool>}` (no `total`).
 
-**Concurrency and limits.** Requests are capped at 300 per client IP per 60-second window; over that returns `429 Too Many Requests` with `{"error": "rate limit exceeded"}` and a `Retry-After: 60` header. The widget routes' own stricter limits return the same response. Both carry the usual CORS headers for an allowed origin, so a browser client can read the `429` status and body; preflight (`OPTIONS`) requests are answered by the CORS layer before the limiter and don't count toward it; browsers cache a preflight answer for an hour. The client IP is the socket's own address unless `--trusted-proxy-count` is set, in which case that many hops are trusted out of `X-Forwarded-For`. Request bodies are capped at 5 MiB. `GET /api/events` connections are capped at 64 concurrent, server-wide; a connection past that limit gets `429` with `{"error": "too many active SSE connections"}`. `POST /api/workflows/:id/run` draws from a global run semaphore sized by `--max-concurrent-runs` (default `10`); a request that can't get a slot within `--max-queue-wait-secs` (default `30`) gets `503 Service Unavailable` with a `Retry-After` header, and a request for a workflow that's already running waits up to 5 seconds for that workflow's own lock before returning `429` with `{"error": "workflow already running"}`.
+**Concurrency and limits.** Requests are capped at 300 per client IP per 60-second window; over that returns `429 Too Many Requests` with `{"error": "rate limit exceeded"}` and a `Retry-After: 60` header. The widget routes' own stricter limits return the same response. Both carry the usual CORS headers for an allowed origin, so a browser client can read the `429` status and body; preflight (`OPTIONS`) requests are answered by the CORS layer before the limiter and don't count toward it; browsers cache a preflight answer for an hour. The client IP is the socket's own address unless `--trusted-proxy-count` is set, in which case that many hops are trusted out of `X-Forwarded-For`, counted from the right across all of its header lines. Each limiter tracks at most 50,000 client IPs (or widget workflow IDs) at once: past that, an unseen one isn't limited until stale entries expire, and tracked ones stay limited. Request bodies are capped at 5 MiB. `GET /api/events` connections are capped at 64 concurrent, server-wide; a connection past that limit gets `429` with `{"error": "too many active SSE connections"}`. `POST /api/workflows/:id/run` draws from a global run semaphore sized by `--max-concurrent-runs` (default `10`); a request that can't get a slot within `--max-queue-wait-secs` (default `30`) gets `503 Service Unavailable` with a `Retry-After` header, and a request for a workflow that's already running waits up to 5 seconds for that workflow's own lock before returning `429` with `{"error": "workflow already running"}`.
 
-**CORS.** Cross-origin requests are allowed from `localhost`/`127.0.0.1` on any port plus any origin passed via `--allow-origin`, for `GET`, `POST`, and `DELETE`, with `Authorization`, `Content-Type`, and `If-Match` as allowed request headers and `ETag` and `Retry-After` exposed to the browser. `POST /api/widget/:workflow_id/mint-token` is the one exception: no origin is ever allowed on it, `--allow-origin` included, because it is meant to be called from your own server, not a browser (see [Embeddable Chat Widget](../guide/widget-embedding.md)).
+**CORS.** Cross-origin requests are allowed from `localhost`/`127.0.0.1`/`[::1]` on any port plus any origin passed via `--allow-origin`, for `GET`, `POST`, and `DELETE`, with `Authorization`, `Content-Type`, and `If-Match` as allowed request headers and `ETag` and `Retry-After` exposed to the browser. `POST /api/widget/:workflow_id/mint-token` is the one exception: no origin is ever allowed on it, `--allow-origin` included, because it is meant to be called from your own server, not a browser (see [Embeddable Chat Widget](../guide/widget-embedding.md)).
 
 **Response headers.** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and `Strict-Transport-Security`. JSON responses also get `Content-Security-Policy: default-src 'none'` and a no-store `Cache-Control`; `GET /aerini-widget.js` gets a 5-minute `Cache-Control` instead, since it's a static asset with no content hash to bust on deploy.
 
@@ -37,7 +37,7 @@ A restricted token is confined to its granted workflows on every route that addr
 |---|---|---|
 | `GET` | `/api/health` | none |
 
-Unauthenticated. Response: `{"status": "ok", "version": "<engine version>", "node_bundled": {"status": "ok", "version": "<node version>"}}`, or `node_bundled: {"status": "error", "message": "<detail>"}` if the bundled Node.js runtime failed its own check. The outer `status` is always `"ok"` if the server is up enough to answer at all.
+Unauthenticated. Response: `{"status": "ok", "version": "<engine version>", "node_bundled": {"status": "ok", "version": "<node version>"}}`, or `node_bundled: {"status": "error", "message": "bundled Node.js check failed; see the server log"}` if the bundled Node.js runtime failed its own check (the cause is logged once per failure streak, not per request). The outer `status` is always `"ok"` if the server is up enough to answer at all.
 
 ## Widget trigger
 
@@ -89,7 +89,7 @@ All five enforce the [per-token workflow ACL](#per-token-workflow-acl): a token 
 
 **`GET /api/scheduler`** takes the shared pagination params. For an ACL-restricted token, filtering happens before pagination, so `total` and the returned page only ever reflect workflows that token can see. Each item is a `ScheduledJobRow`: `{"workflow_id", "workflow_name", "trigger_kind": "<JSON-encoded trigger, itself a string>", "status": "active"|"paused"|"done"|"error"|"stopped", "always_on", "run_count", "last_run_at", "next_run_at", "last_error", "created_at"}`. `trigger_kind` is JSON-encoded twice the same way a workflow body is on `GET /api/workflows/:id`; a Webhook trigger's `secret` field inside it is always replaced with the literal string `<redacted>`, never the real value.
 
-**`POST /api/scheduler/:id/start`** body: `{"always_on": false, "port_override": <u16 or omitted>}` (`always_on` defaults to `false`). `200` with `{"ok": true}` on success, `400` with a debug-formatted error (e.g. a port conflict, or a workflow with no schedulable trigger) if the scheduler rejects the start.
+**`POST /api/scheduler/:id/start`** body: `{"always_on": false, "port_override": <u16 or omitted>}` (`always_on` defaults to `false`). `200` with `{"ok": true}` on success, `400` with a readable message (e.g. `workflow not found`, a port conflict, or `workflow is not schedulable (no Schedule, Webhook, or trigger-plugin trigger)`) if the scheduler rejects the start. Any other start failure returns `500` with `{"error": "internal server error"}`.
 
 **`POST /api/scheduler/:id/stop`** no body. `200` with `{"ok": true}`.
 
@@ -131,7 +131,7 @@ A token restricted to specific workflows gets `403` on all three routes (see [Pe
 
 **`GET /api/credentials`** returns a flat array of `{"id", "name", "cred_type"}`. Never includes the secret value, and never includes the optional `provider`/`model`/`base_url` metadata a credential can carry, since the desktop-side `list` response type this route reuses doesn't have those fields.
 
-**`POST /api/credentials`** body: `{"id", "name", "value", "cred_type"}` (`cred_type` defaults to `"api_key"` if omitted). `provider`, `model`, and `base_url` are not accepted by this route: it always stores a credential with those three set to none, even though the underlying store supports them (the desktop app's own credential UI can set them; this REST route currently can't). `200` with `{"ok": true}` on success.
+**`POST /api/credentials`** body: `{"id", "name", "value", "cred_type"}` (`cred_type` defaults to `"api_key"` if omitted). `provider`, `model`, and `base_url` are not accepted by this route: it always stores a credential with those three set to none, even though the underlying store supports them (the desktop app's own credential UI can set them; this REST route currently can't). `200` with `{"ok": true}` on success. `400` for a blank `id` or `name`, an empty `value`, or an `id` or `name` over 256 characters.
 
 **`DELETE /api/credentials/:id`** `200` with `{"ok": true}`.
 
@@ -163,15 +163,15 @@ All six require `admin`; this is the REST equivalent of the CLI's `tokens` subco
 
 **`GET /api/tokens`** returns a flat array of `{"token_id", "label", "scopes": [...], "created_at", "revoked_at", "expires_at"}`. Never includes the token's own secret value; that only exists at creation time.
 
-**`POST /api/tokens`** body: `{"label": "<1-256 chars>", "scopes": [...], "expires_in_secs": <u64 or omitted>, "workflow_ids": [...]}` (`scopes` defaults to `["read", "write"]` if omitted; each entry must be `read`, `write`, or `admin`, anything else is `400`; an `expires_in_secs` too large to represent as a date is also `400`; `workflow_ids`, if non-empty, restricts the token to those workflows in the same call, see [Per-token workflow ACL](#per-token-workflow-acl)). On success, `201 Created` with `{"token": "<raw token, shown once>", "token_id", "label", "scopes", "expires_in_secs", "workflow_ids", "note": "Save this token — it will not be shown again."}`.
+**`POST /api/tokens`** body: `{"label": "<1-256 chars>", "scopes": [...], "expires_in_secs": <u64 or omitted>, "workflow_ids": [...]}` (`scopes` defaults to `["read", "write"]` if omitted; it must not be empty, and each entry must be `read`, `write`, or `admin`, anything else is `400`; a blank `label` is `400`; `expires_in_secs` of `0`, or too large to represent as a date, is `400`; `admin` together with a non-empty `workflow_ids` is `400`, because admin tokens ignore the ACL; `workflow_ids` allows at most 500 entries, each 1–256 characters, otherwise `400`; `workflow_ids`, if non-empty, restricts the token to those workflows in the same call, see [Per-token workflow ACL](#per-token-workflow-acl)). On success, `201 Created` with `{"token": "<raw token, shown once>", "token_id", "label", "scopes", "expires_in_secs", "workflow_ids", "note": "Save this token — it will not be shown again."}`.
 
-**`DELETE /api/tokens/:id`** `200` with `{"ok": true}`, except a token cannot revoke itself: revoking the same token ID present in the caller's own `Authorization` header returns `400` with `{"error": "Cannot revoke the token you are currently using"}`.
+**`DELETE /api/tokens/:id`** `200` with `{"ok": true}`; revoking an already-revoked token is also `200`, an unknown token ID is `404`. A token cannot revoke itself: revoking the same token ID present in the caller's own `Authorization` header returns `400` with `{"error": "Cannot revoke the token you are currently using"}`.
 
 **`GET /api/tokens/:id/workflows`** lists the target token's ACL grants: `{"token_id", "workflow_ids": [...], "note": "<one of two fixed strings depending on whether the list is empty>"}`. An empty list means that token is unrestricted everywhere the ACL applies (see [Per-token workflow ACL](#per-token-workflow-acl)), not that it has no access.
 
-**`POST /api/tokens/:id/workflows/:workflow_id`** grants the target token access to one workflow. `201` with `{"ok": true, "token_id", "workflow_id", "note": "..."}`.
+**`POST /api/tokens/:id/workflows/:workflow_id`** grants the target token access to one workflow. `201` with `{"ok": true, "token_id", "workflow_id", "note": "..."}`. `404` for an unknown or revoked token; `400` when the target token has the `admin` scope or the workflow ID is blank or over 256 characters.
 
-**`DELETE /api/tokens/:id/workflows/:workflow_id`** revokes that grant. `200` with `{"ok": true}`; when it was the token's last grant, the body also carries a `note` saying the token is now unrestricted.
+**`DELETE /api/tokens/:id/workflows/:workflow_id`** revokes that grant. `200` with `{"ok": true}`, including when the token does not hold that grant. When it is the token's only grant the request is refused with `409` and nothing is removed, since the token would become unrestricted; revoke the token to cut it off, or create a new token without `workflow_ids` for an unrestricted one.
 
 ## Events (SSE)
 
@@ -188,7 +188,7 @@ Six event types are emitted:
 | Event | Payload fields |
 |---|---|
 | `node-status` | `workflow_id`, `node_id`, `status` (`running`, `success`, `error`, or `skipped`) |
-| `scheduler-status` | `workflow_id`, `workflow_name`, `status` (`running`, `waiting`, `done`, `error`, or `stopped`), `run_count`, `last_run_at`, `next_run_at`, `last_error`, `last_result` |
+| `scheduler-status` | `workflow_id`, `workflow_name`, `status` (`running`, `waiting`, `done`, `error`, or `stopped`), `run_count`, `last_run_at`, `next_run_at`, `last_error`, `trigger_type` (`interval`, `cron`, `once`, `webhook`, `manual`, or `plugin`; `null` if unknown), `last_result` |
 | `scheduler-error` | `workflow_id`, `message` |
 | `scheduler-warning` | `workflow_id`, `message` |
 | `scheduler-skip` | `workflow_id`, `reason` |

@@ -596,7 +596,7 @@ function renderList(rows: MonitorRow[], memData: RunBreakdown[]): void {
   const list = document.getElementById("monitor-list");
   if (!list) return;
 
-  const sig = rows.map(r => `${r.id}:${r.status}:${r.name}:${r.nextRunAt ?? ""}`).join("|");
+  const sig = rows.map(r => `${r.id}:${r.status}:${r.name}:${r.nextRunAt ?? ""}:${r.triggerType ?? ""}`).join("|");
   if (sig !== _lastSignature) {
     _lastSignature = sig;
     rebuildList(list, rows);
@@ -743,7 +743,7 @@ function handleOpen(row: MonitorRow): void {
 function describeSchedulerError(err: unknown): string {
   const parsed = parseSchedulerError(String(err));
   switch (parsed.error_kind) {
-    case "not_schedulable":   return "no Schedule/Webhook trigger on this workflow";
+    case "not_schedulable":   return "no Schedule, Webhook, or trigger-plugin trigger on this workflow";
     case "workflow_not_found": return "workflow was deleted";
     case "already_running":   return "already running";
     case "port_conflict":     return `port ${parsed.port} is in use by "${parsed.held_by_workflow_name}"`;

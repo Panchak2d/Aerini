@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// `Instant` is measured from an arbitrary origin (boot time on Windows and
@@ -18,36 +18,70 @@ fn evict_stale<K: Eq + Hash>(map: &DashMap<K, VecDeque<Instant>>, window: Durati
     });
 }
 
+/// Most keys a limiter tracks at once.
+const MAX_TRACKED_KEYS: usize = 50_000;
+
+/// Shortest gap between two inline sweeps of one limiter's table.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Lets a full-table sweep run at most once per [`SWEEP_INTERVAL`], so a flood
+/// of distinct keys cannot make every request scan the whole table.
+#[derive(Default)]
+struct SweepGate {
+    last: Mutex<Option<Instant>>,
+}
+
+impl SweepGate {
+    /// True for exactly one caller per interval; the first call is always due.
+    fn due(&self, now: Instant) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        match *last {
+            Some(prev) if now.saturating_duration_since(prev) < SWEEP_INTERVAL => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
+}
+
+/// Records a hit for `key`. At `max_keys` tracked keys, an unseen key is
+/// allowed without being tracked, so a flood of distinct keys cannot grow the
+/// table or lock legitimate callers out; keys already tracked stay limited.
+/// The cap is checked before the insert, so concurrent callers can overshoot
+/// it by a few keys.
 fn record_hit<K: Eq + Hash>(
     map:          &DashMap<K, VecDeque<Instant>>,
+    gate:         &SweepGate,
     key:          K,
     max_requests: usize,
     window:       Duration,
+    max_keys:     usize,
 ) -> bool {
     let now    = Instant::now();
     let cutoff = now.checked_sub(window);
 
-    let allowed = {
-        let mut entry = map.entry(key).or_default();
-        if let Some(cutoff) = cutoff {
-            while entry.front().is_some_and(|&ts| ts <= cutoff) {
-                entry.pop_front();
-            }
+    if map.len() >= max_keys && !map.contains_key(&key) {
+        if gate.due(now) {
+            evict_stale(map, window);
         }
-        if entry.len() < max_requests {
-            entry.push_back(now);
-            true
-        } else {
-            false
+        if map.len() >= max_keys {
+            return true;
         }
-    };
-
-    // Best-effort memory bound between background eviction cycles.
-    if map.len() > 10_000 {
-        evict_stale(map, window);
     }
 
-    allowed
+    let mut entry = map.entry(key).or_default();
+    if let Some(cutoff) = cutoff {
+        while entry.front().is_some_and(|&ts| ts <= cutoff) {
+            entry.pop_front();
+        }
+    }
+    if entry.len() < max_requests {
+        entry.push_back(now);
+        true
+    } else {
+        false
+    }
 }
 
 /// Per-IP sliding-window rate limiter backed by a `DashMap`.
@@ -63,11 +97,14 @@ fn record_hit<K: Eq + Hash>(
 /// the window boundary because the window is measured from each individual
 /// request's timestamp, not from an epoch boundary.
 ///
-/// Memory: each entry holds at most `max_requests` timestamps. The map is
-/// bounded to 10 000 active IPs, with stale entries evicted via a background
-/// task (see `spawn_eviction_task`).
+/// Memory: each entry holds at most `max_requests` timestamps. The map tracks
+/// at most 50 000 IPs; stale entries are evicted by a background task (see
+/// `spawn_eviction_task`) and, when the map is full, by a sweep that runs at
+/// most once per second. Past the cap, unseen IPs are allowed untracked until
+/// stale entries expire.
 pub struct RateLimiter {
     map:          DashMap<IpAddr, VecDeque<Instant>>,
+    gate:         SweepGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -76,6 +113,7 @@ impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
+            gate:         SweepGate::default(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -102,11 +140,9 @@ impl RateLimiter {
     }
 
     /// Returns `true` if the request from `ip` is within the rate limit.
-    ///
-    /// Inline eviction fires when the map exceeds 10 000 entries to bound
-    /// memory usage between background eviction cycles.
+    /// An IP not yet tracked is always allowed while the table is full.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        record_hit(&self.map, ip, self.max_requests, self.window)
+        record_hit(&self.map, &self.gate, ip, self.max_requests, self.window, MAX_TRACKED_KEYS)
     }
 }
 
@@ -134,6 +170,7 @@ fn truncate_key(key: &str) -> &str {
 /// an unbounded-memory footgun.
 pub struct KeyedRateLimiter {
     map:          DashMap<String, VecDeque<Instant>>,
+    gate:         SweepGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -142,6 +179,7 @@ impl KeyedRateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
+            gate:         SweepGate::default(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -166,7 +204,10 @@ impl KeyedRateLimiter {
     /// Returns `true` if a request keyed by `key` is within the rate limit.
     /// `key` is truncated to 128 bytes first (see struct doc).
     pub fn is_allowed(&self, key: &str) -> bool {
-        record_hit(&self.map, truncate_key(key).to_owned(), self.max_requests, self.window)
+        record_hit(
+            &self.map, &self.gate, truncate_key(key).to_owned(),
+            self.max_requests, self.window, MAX_TRACKED_KEYS,
+        )
     }
 }
 
@@ -295,8 +336,14 @@ pub async fn status_security_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::{too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter};
+    use super::{
+        record_hit, too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter, SweepGate,
+        SWEEP_INTERVAL,
+    };
+    use dashmap::DashMap;
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn too_many_requests_sets_status_and_retry_after() {
@@ -335,5 +382,45 @@ mod tests {
         assert_eq!(truncate_key(&"a".repeat(200)).len(), 128);
         assert_eq!(truncate_key(&"\u{e9}".repeat(100)).len(), 128);
         assert_eq!(truncate_key(&"\u{20ac}".repeat(50)).len(), 126);
+    }
+
+    #[test]
+    fn sweep_gate_opens_once_per_interval() {
+        let gate = SweepGate::default();
+        let t0 = Instant::now();
+        assert!(gate.due(t0));
+        assert!(!gate.due(t0));
+        assert!(!gate.due(t0 + SWEEP_INTERVAL - Duration::from_millis(1)));
+        assert!(gate.due(t0 + SWEEP_INTERVAL));
+        assert!(!gate.due(t0 + SWEEP_INTERVAL));
+    }
+
+    #[test]
+    fn full_table_lets_unseen_keys_through_untracked_and_keeps_tracked_keys_limited() {
+        let map: DashMap<u32, VecDeque<Instant>> = DashMap::new();
+        let gate = SweepGate::default();
+        let window = Duration::from_secs(60);
+        for k in 0..3 {
+            assert!(record_hit(&map, &gate, k, 1, window, 3));
+        }
+        for _ in 0..5 {
+            assert!(record_hit(&map, &gate, 99, 1, window, 3));
+        }
+        assert_eq!(map.len(), 3);
+        assert!(!record_hit(&map, &gate, 0, 1, window, 3));
+    }
+
+    #[test]
+    fn full_table_sweeps_stale_keys_to_make_room() {
+        let map: DashMap<u32, VecDeque<Instant>> = DashMap::new();
+        let gate = SweepGate::default();
+        let window = Duration::from_millis(1);
+        for k in 0..3 {
+            assert!(record_hit(&map, &gate, k, 1, window, 3));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(record_hit(&map, &gate, 99, 1, window, 3));
+        assert!(map.contains_key(&99));
+        assert_eq!(map.len(), 1);
     }
 }

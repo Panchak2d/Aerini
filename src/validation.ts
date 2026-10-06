@@ -1,7 +1,7 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
-import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
-import { isDangerousNodeType } from "./canvas/node-registry";
+import { NODE_IDS } from "./node-ids";
+import { isDangerousNodeType, isTriggerNodeType } from "./canvas/node-registry";
 
 // `database` is deliberately absent here — its required fields depend on
 // `db_type` (sqlite needs db_path+query; postgres/mysql need
@@ -29,10 +29,10 @@ export function validateWorkflow(canvas: Canvas): string[] {
   }
 
   const hasTrigger = [...nodes.values()].some(n =>
-    TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
+    isTriggerNodeType(n.data.node_type_id as string)
   );
   if (!hasTrigger) {
-    errors.push("No trigger node found. Add a Manual Trigger, Webhook, or Schedule.");
+    errors.push("No trigger node found. Add a Manual Trigger, Webhook, Schedule, or a trigger plugin.");
   }
 
   for (const node of nodes.values()) {

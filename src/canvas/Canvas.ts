@@ -1,15 +1,16 @@
 import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, PORT_RADIUS, roundedRect } from "./Node";
-import { Connector, newConnectorId } from "./Connector";
+import { Connector, newConnectorId, type PendingConnector } from "./Connector";
 import { serialize } from "./CanvasSerializer";
 import { NODE_IDS } from "../node-ids";
 import type { NodeDescriptor } from "../ipc/workflow";
 import { UndoManager } from "./UndoManager";
-import type { UndoAction } from "./UndoManager";
+import type { UndoAction, ConfigPatch } from "./UndoManager";
 import { Minimap } from "./Minimap";
 import { SnapEngine } from "./SnapEngine";
 import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
 import { getCanvasColors } from "./theme-colors";
+import { getNodeDescriptor } from "./node-registry";
 
 /** #output-drawer is a `position: fixed` overlay (workspace.css) — it sits on
  * top of #canvas without shrinking #canvas's own box, so a canvas element's
@@ -135,10 +136,14 @@ export class Canvas {
     ctx.clearRect(0, 0, W, H);
     ctx.setTransform(dpr * this.zoom, 0, 0, dpr * this.zoom, this.panX * dpr, this.panY * dpr);
 
-    // Draw connectors
+    // Draw connectors (wires being moved stay visible but dimmed)
+    const moving = ih.reconnEdge?.conn;
+    const movingGroup = ih.moveGroup;
     for (const c of this.connectors.values()) {
       c.highlighted = ih.isCutting && this.edgeCrossesPath(c);
+      if (c === moving || movingGroup?.includes(c)) ctx.globalAlpha = 0.25;
       c.draw(ctx, this.nodes, dt);
+      ctx.globalAlpha = 1;
     }
     if (ih.pendingConn) ih.pendingConn.draw(ctx);
 
@@ -146,7 +151,7 @@ export class Canvas {
 
     // Port snap ring
     if (ih.pendingConn) {
-      const snap = this.nearestIn(ih.pendingConn.toX, ih.pendingConn.toY, ih.pendingConn.fromNode);
+      const snap = this.snapTarget(ih.pendingConn, ih.pendingConn.toX, ih.pendingConn.toY);
       if (snap) {
         ctx.save();
         ctx.beginPath();
@@ -163,7 +168,8 @@ export class Canvas {
 
       // Source port glow
       const srcNode = this.nodes.get(ih.pendingConn.fromNode);
-      const srcPort = srcNode?.ports.find(p => p.id === ih.pendingConn!.fromPort);
+      const srcIsInput = ih.pendingConn.direction === "reverse";
+      const srcPort = srcNode?.ports.find(p => p.id === ih.pendingConn!.fromPort && p.isInput === srcIsInput);
       if (srcPort) {
         ctx.save();
         ctx.beginPath();
@@ -175,24 +181,40 @@ export class Canvas {
       }
     }
 
-    // Build connected-port lookup for live port fill state (UX-4) and the
-    // per-output-port connection count for badges (G12) in a single pass —
-    // both are derived from the same connector list, which is unchanged
-    // frame-to-frame outside an edit; this loop still runs every frame, but
-    // now walks `this.connectors` once instead of twice.
+    // Drag handle on the selected wire's target end
+    if (this.selectedConn && !moving) {
+      const tp = this.nodes.get(this.selectedConn.data.to_node)?.ports
+        .find(p => p.id === this.selectedConn!.data.to_port && p.isInput);
+      if (tp) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(tp.x, tp.y, PORT_RADIUS + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = colors.actionNav;
+        ctx.lineWidth   = 2 / this.zoom;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // One pass over the connectors builds the connected-port lookup (port
+    // fill state) and the per-port wire counts (output badges, overfed inputs).
     const connectedPorts = new Set<string>();
     const outCount = new Map<string, number>();
+    const inCount = new Map<string, number>();
     for (const c of this.connectors.values()) {
       const fromKey = `${c.data.from_node}:${c.data.from_port}`;
+      const toKey   = `${c.data.to_node}:${c.data.to_port}`;
       connectedPorts.add(fromKey);
-      connectedPorts.add(`${c.data.to_node}:${c.data.to_port}`);
+      connectedPorts.add(toKey);
       outCount.set(fromKey, (outCount.get(fromKey) ?? 0) + 1);
+      inCount.set(toKey, (inCount.get(toKey) ?? 0) + 1);
     }
 
     // Draw nodes
-    for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts);
+    const overfedPorts = this.overfedFromCounts(inCount);
+    for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts, overfedPorts);
 
-    // ── G12: output port connection-count badges ───────────────────────────
+    // ── Output port connection-count badges ───────────────────────────
     for (const [key, cnt] of outCount) {
       if (cnt < 2) continue;
       const colonIdx = key.indexOf(":");
@@ -224,7 +246,7 @@ export class Canvas {
       ctx.restore();
     }
 
-    // Hover tooltip for nodes with truncated names (UX-1)
+    // Hover tooltip for nodes with truncated names
     this.drawNodeTooltips();
 
     // Draw ghost
@@ -289,7 +311,7 @@ export class Canvas {
     this.minimap.draw(W, H);
   }
 
-  // Screen-space tooltip for a hovered node whose name is truncated (UX-1).
+  // Screen-space tooltip for a hovered node whose name is truncated.
   private drawNodeTooltips(): void {
     const ctx = this.ctx;
     const dpr = this.dpr;
@@ -384,6 +406,68 @@ export class Canvas {
       }
     }
     return best;
+  }
+
+  /**
+   * Nearest output port within snap range. Skips every port of `excludeNodeId`,
+   * or only `excludePortId` on that node when one is given.
+   */
+  nearestOut(wx: number, wy: number, excludeNodeId?: string, excludePortId?: string) {
+    const SNAP = 56; let best: { x: number; y: number; nodeId: string; portId: string } | null = null; let bestD = SNAP;
+    for (const n of this.nodes.values()) {
+      for (const p of n.ports) {
+        if (p.isInput) continue;
+        if (n.data.id === excludeNodeId && (excludePortId === undefined || p.id === excludePortId)) continue;
+        const d = Math.hypot(wx - p.x, wy - p.y);
+        if (d < bestD) { bestD = d; best = { x: p.x, y: p.y, nodeId: n.data.id, portId: p.id }; }
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The port a pending wire would land on at (wx, wy): an input for a forward
+   * wire, an output on another node for a reverse wire, and an output other
+   * than the start port for a move.
+   */
+  snapTarget(pending: PendingConnector, wx: number, wy: number) {
+    switch (pending.direction) {
+      case "forward": return this.nearestIn(wx, wy, pending.fromNode);
+      case "reverse": return this.nearestOut(wx, wy, pending.fromNode);
+      case "move":    return this.nearestOut(wx, wy, pending.fromNode, pending.fromPort);
+    }
+  }
+
+  /** The selected wire, when (wx, wy) is on its target-end drag handle. */
+  wireHandleAt(wx: number, wy: number): Connector | null {
+    const conn = this.selectedConn;
+    if (!conn) return null;
+    const tp = this.nodes.get(conn.data.to_node)?.ports.find(p => p.id === conn.data.to_port && p.isInput);
+    return tp && Math.hypot(wx - tp.x, wy - tp.y) < PORT_RADIUS + 8 ? conn : null;
+  }
+
+  /** Every wire feeding an input port. */
+  wiresIntoPort(nodeId: string, portId: string): Connector[] {
+    return Array.from(this.connectors.values()).filter(c => c.data.to_node === nodeId && c.data.to_port === portId);
+  }
+
+  /** Every wire leaving an output port. */
+  wiresFromPort(nodeId: string, portId: string): Connector[] {
+    return Array.from(this.connectors.values()).filter(c => c.data.from_node === nodeId && c.data.from_port === portId);
+  }
+
+  /**
+   * True when an input port accepts any number of wires. The live node
+   * descriptor decides; the node's own port list is the fallback for ports a
+   * descriptor does not list (config-driven ports). Saved workflows can carry
+   * stale ports without `arity`, so the default is single.
+   */
+  isMultiInput(nodeId: string, portId: string): boolean {
+    const node = this.nodes.get(nodeId);
+    if (!node) return false;
+    const listed = getNodeDescriptor(node.data.node_type_id)?.ports.inputs.find(p => p.id === portId);
+    const def = listed ?? node.data.ports.inputs.find(p => p.id === portId);
+    return def?.arity === "multi";
   }
 
   // ── Wire-drop insert ──────────────────────────────────────────────────────
@@ -535,15 +619,219 @@ export class Canvas {
   }
 
   finishConn(nodeId: string, portId: string) {
-    if (!this.input.pendingConn) return;
-    if (Array.from(this.connectors.values()).some(c => c.data.to_node === nodeId && c.data.to_port === portId)) return;
-    const conn = new Connector({ id: newConnectorId(), from_node: this.input.pendingConn.fromNode, from_port: this.input.pendingConn.fromPort, to_node: nodeId, to_port: portId, condition: null, on_success: null, on_failure: null });
-    this.connectors.set(conn.data.id, conn);
-    this.pushUndo({ type: "add_edge", connector: conn });
+    const pending = this.input.pendingConn;
+    if (!pending) return;
+    this.connectOrReplace(pending.fromNode, pending.fromPort, nodeId, portId);
+  }
 
+  /**
+   * Wires an output to an input as one undoable step, with the side effects of
+   * dropping a wire (expression injection, change notification). On a
+   * single-arity input any wire already there is replaced and a toast names the
+   * source it displaced; a multi-arity input just gains the wire. Returns true,
+   * changing nothing, when the identical wire exists. Returns false, changing
+   * nothing, when either port does not exist or the wire would loop a node back
+   * into itself.
+   */
+  connectOrReplace(srcNode: string, srcPort: string, toNode: string, toPort: string): boolean {
+    if (srcNode === toNode) return false;
+    if (!this.nodes.get(srcNode)?.ports.some(p => p.id === srcPort && !p.isInput)) return false;
+    if (!this.nodes.get(toNode)?.ports.some(p => p.id === toPort && p.isInput)) return false;
+
+    const existing = this.wiresIntoPort(toNode, toPort);
+    if (existing.some(c => c.data.from_node === srcNode && c.data.from_port === srcPort)) return true;
+
+    const displaced = this.isMultiInput(toNode, toPort) ? [] : existing;
+    const steps: UndoAction[] = [];
+    for (const old of displaced) {
+      this.connectors.delete(old.data.id);
+      this.clearDynamicPortExpr(old);
+      steps.push({ type: "delete_edge", connector: old });
+    }
+    const conn = new Connector({ id: newConnectorId(), from_node: srcNode, from_port: srcPort, to_node: toNode, to_port: toPort, condition: null, on_success: null, on_failure: null });
+    this.connectors.set(conn.data.id, conn);
+    steps.push({ type: "add_edge", connector: conn });
+    if (displaced.length) this.onWarn?.(this.replacedNotice(displaced, toNode, toPort));
+    this.applyConnectionDefaults(srcNode, toNode, toPort);
+    this.pushUndo(steps.length === 1 ? steps[0] : { type: "batch", actions: steps });
+    this.onCanvasChanged?.();
+    return true;
+  }
+
+  private replacedNotice(displaced: Connector[], toNode: string, toPort: string): string {
+    const sources = [...new Set(displaced.map(c => `"${this.nodes.get(c.data.from_node)?.data.name ?? c.data.from_node}"`))];
+    const target  = this.nodes.get(toNode);
+    const label   = target?.ports.find(p => p.id === toPort && p.isInput)?.label ?? toPort;
+    return `Replaced the wire from ${sources.join(", ")} into "${target?.data.name ?? toNode}" (${label}).`;
+  }
+
+  /**
+   * Wires `fromPort` of one node to `toPort` of another without a drag, exactly
+   * as a drop would (see connectOrReplace). Returns false, changing nothing,
+   * when either port does not exist.
+   */
+  connectPorts(fromNode: string, fromPort: string, toNode: string, toPort: string): boolean {
+    return this.connectOrReplace(fromNode, fromPort, toNode, toPort);
+  }
+
+  /**
+   * Moves the target end of an existing wire to `target` as one undoable step.
+   * On a single-arity target any other wire there is replaced (recorded on the
+   * undo step, with a toast naming its source); a multi-arity target keeps its
+   * wires. Nothing is changed (returns false) when there is no target, the
+   * target is the wire's current port or its own source node, or the target
+   * already has an identical wire.
+   */
+  rerouteConn(conn: Connector, target: { nodeId: string; portId: string } | null): boolean {
+    if (!target) return false;
+    const { nodeId, portId } = target;
+    const prev = { node: conn.data.to_node, port: conn.data.to_port };
+    if (nodeId === prev.node && portId === prev.port) return false;
+    if (nodeId === conn.data.from_node) return false;
+    const others = this.wiresIntoPort(nodeId, portId).filter(w => w !== conn);
+    if (others.some(w => w.data.from_node === conn.data.from_node && w.data.from_port === conn.data.from_port)) {
+      this.onWarn?.("That input already has this connection.");
+      return false;
+    }
+    const displaced = this.isMultiInput(nodeId, portId) ? [] : others;
+    const touched = [prev.node, nodeId];
+    const before = this.configKeys(touched);
+    this.clearDynamicPortExpr(conn);
+    for (const old of displaced) {
+      this.connectors.delete(old.data.id);
+      this.clearDynamicPortExpr(old);
+    }
+    conn.data.to_node = nodeId;
+    conn.data.to_port = portId;
+    if (displaced.length) this.onWarn?.(this.replacedNotice(displaced, nodeId, portId));
+    this.applyConnectionDefaults(conn.data.from_node, nodeId, portId);
+    this.pushUndo({
+      type: "reroute_edge", connector: conn,
+      from: prev, to: { node: nodeId, port: portId },
+      configs: this.diffConfigKeys(before, this.configKeys(touched)),
+      ...(displaced.length ? { replaced: displaced } : {}),
+    });
+    this.onCanvasChanged?.();
+    return true;
+  }
+
+  /**
+   * Re-sources every live wire in `group` onto output `to` as one undoable
+   * step. Refused with a warning, changing nothing, when a wire would loop a
+   * node back into itself or duplicate a wire that already leaves `to`.
+   */
+  moveSources(group: Connector[], to: { nodeId: string; portId: string }): boolean {
+    const wires = group.filter(c => this.connectors.get(c.data.id) === c);
+    if (!wires.length) return false;
+    if (!this.nodes.get(to.nodeId)?.ports.some(p => p.id === to.portId && !p.isInput)) return false;
+    const from = { node: wires[0].data.from_node, port: wires[0].data.from_port };
+    if (from.node === to.nodeId && from.port === to.portId) return false;
+    if (wires.some(w => w.data.to_node === to.nodeId)) {
+      this.onWarn?.("Can't move the wires there: one of them would loop back into its own node.");
+      return false;
+    }
+    const taken = this.wiresFromPort(to.nodeId, to.portId);
+    if (taken.some(t => wires.some(w => w.data.to_node === t.data.to_node && w.data.to_port === t.data.to_port))) {
+      this.onWarn?.("Can't move the wires there: that output already feeds one of the same inputs.");
+      return false;
+    }
+    const touched = [from.node, to.nodeId, ...wires.map(w => w.data.to_node)];
+    const before = this.configKeys(touched);
+    for (const w of wires) {
+      this.clearDynamicPortExpr(w);
+      w.data.from_node = to.nodeId;
+      w.data.from_port = to.portId;
+      this.applyConnectionDefaults(to.nodeId, w.data.to_node, w.data.to_port);
+    }
+    this.pushUndo({
+      type: "move_sources", connectors: wires,
+      from, to: { node: to.nodeId, port: to.portId },
+      configs: this.diffConfigKeys(before, this.configKeys(touched)),
+    });
+    this.onCanvasChanged?.();
+    return true;
+  }
+
+  private countInputWires(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const c of this.connectors.values()) {
+      const key = `${c.data.to_node}:${c.data.to_port}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  /** "nodeId:portId" of every single-arity input that more than one wire feeds. */
+  private overfedFromCounts(counts: Map<string, number>): Set<string> {
+    const out = new Set<string>();
+    for (const [key, count] of counts) {
+      if (count < 2) continue;
+      const i = key.indexOf(":");
+      if (!this.isMultiInput(key.slice(0, i), key.slice(i + 1))) out.add(key);
+    }
+    return out;
+  }
+
+  /** Warning text when a single-arity input is fed by more than one wire, else null. */
+  arityWarning(): string | null {
+    const n = this.overfedFromCounts(this.countInputWires()).size;
+    if (!n) return null;
+    return `${n === 1 ? "One input has" : `${n} inputs have`} more than one wire (marked in red). The workflow will not run until you remove the extras or route them through a Merge node.`;
+  }
+
+  /** Raises arityWarning() through onWarn, once, for a freshly loaded workflow. */
+  warnArityViolations(): void {
+    const message = this.arityWarning();
+    if (message) this.onWarn?.(message);
+  }
+
+  private configKeys(nodeIds: string[]): Map<string, Map<string, string>> {
+    const out = new Map<string, Map<string, string>>();
+    for (const id of new Set(nodeIds)) {
+      const n = this.nodes.get(id);
+      if (!n) continue;
+      const keys = new Map<string, string>();
+      for (const [k, v] of Object.entries(n.data.config)) {
+        const json = JSON.stringify(v);
+        if (json !== undefined) keys.set(k, json);
+      }
+      out.set(id, keys);
+    }
+    return out;
+  }
+
+  private diffConfigKeys(before: Map<string, Map<string, string>>, after: Map<string, Map<string, string>>): ConfigPatch[] {
+    const patches: ConfigPatch[] = [];
+    for (const [nodeId, b] of before) {
+      const a = after.get(nodeId) ?? new Map<string, string>();
+      const keys: ConfigPatch["keys"] = {};
+      for (const k of new Set([...b.keys(), ...a.keys()])) {
+        const bv = b.get(k) ?? null, av = a.get(k) ?? null;
+        if (bv !== av) keys[k] = { before: bv, after: av };
+      }
+      if (Object.keys(keys).length) patches.push({ nodeId, keys });
+    }
+    return patches;
+  }
+
+  applyConfigPatches(patches: ConfigPatch[], side: "before" | "after"): void {
+    for (const patch of patches) {
+      const n = this.nodes.get(patch.nodeId);
+      if (!n) continue;
+      const cfg = n.data.config as Record<string, unknown>;
+      for (const [k, v] of Object.entries(patch.keys)) {
+        const json = v[side];
+        if (json === null) delete cfg[k]; else cfg[k] = JSON.parse(json);
+      }
+      n.derivePorts(cfg);
+      n.rebuildPorts();
+    }
+  }
+
+  private applyConnectionDefaults(srcId: string, nodeId: string, portId: string) {
     const target = this.nodes.get(nodeId);
     if (target?.data.node_type_id === "text_to_file") {
-      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      const fromNode = this.nodes.get(srcId);
       if (fromNode) {
         const cfg = target.data.config as Record<string, unknown>;
         if (!cfg.content) {
@@ -553,7 +841,7 @@ export class Canvas {
     }
 
     if (target?.data.node_type_id === NODE_IDS.AI_PROMPT && portId === "attachments") {
-      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      const fromNode = this.nodes.get(srcId);
       if (fromNode) {
         const hasFiles = this.sourceHasFilesOutput(fromNode.data.output_schema);
         const expr = hasFiles
@@ -569,7 +857,7 @@ export class Canvas {
     }
 
     if (target?.data.node_type_id === NODE_IDS.IMAGE_GEN && portId === "reference_images") {
-      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
+      const fromNode = this.nodes.get(srcId);
       if (fromNode) {
         const hasFiles = this.sourceHasFilesOutput(fromNode.data.output_schema);
         const expr = hasFiles
@@ -585,8 +873,8 @@ export class Canvas {
     }
 
     if (target?.data.dynamic_ports) {
-      const fromNode = this.nodes.get(this.input.pendingConn.fromNode);
-      const nodeName = fromNode?.data.name ?? this.input.pendingConn.fromNode;
+      const fromNode = this.nodes.get(srcId);
+      const nodeName = fromNode?.data.name ?? srcId;
       const hasFiles = fromNode != null && this.sourceHasFilesOutput(fromNode.data.output_schema);
       const expr     = hasFiles ? `{{${nodeName}.output.files}}` : `{{${nodeName}.output}}`;
       const toPortDef = target.data.ports.inputs.find(p => p.id === portId);
@@ -610,8 +898,6 @@ export class Canvas {
       target.derivePorts(target.data.config as Record<string, unknown>);
       target.rebuildPorts();
     }
-
-    this.onCanvasChanged?.();
   }
 
   // ── Selection ─────────────────────────────────────────────────────────────
@@ -782,16 +1068,7 @@ export class Canvas {
     this.pushUndo({ type: "add_node", node });
     this.onCanvasChanged?.();
 
-    const inputPortId = desc.ports.inputs[0].id;
-    const conn = new Connector({
-      id: newConnectorId(),
-      from_node: drop.fromNode, from_port: drop.fromPort,
-      to_node: node.data.id, to_port: inputPortId,
-      condition: null, on_success: null, on_failure: null,
-    });
-    this.connectors.set(conn.data.id, conn);
-    this.pushUndo({ type: "add_edge", connector: conn });
-    this.onCanvasChanged?.();
+    this.connectOrReplace(drop.fromNode, drop.fromPort, node.data.id, desc.ports.inputs[0].id);
   }
 
   completeInputWireDrop(desc: NodeDescriptor): void {
@@ -810,16 +1087,7 @@ export class Canvas {
     this.pushUndo({ type: "add_node", node });
     this.onCanvasChanged?.();
 
-    const outputPortId = desc.ports.outputs[0].id;
-    const conn = new Connector({
-      id: newConnectorId(),
-      from_node: node.data.id, from_port: outputPortId,
-      to_node: drop.toNode, to_port: drop.toPort,
-      condition: null, on_success: null, on_failure: null,
-    });
-    this.connectors.set(conn.data.id, conn);
-    this.pushUndo({ type: "add_edge", connector: conn });
-    this.onCanvasChanged?.();
+    this.connectOrReplace(node.data.id, desc.ports.outputs[0].id, drop.toNode, drop.toPort);
   }
 }
 

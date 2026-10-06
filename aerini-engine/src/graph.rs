@@ -13,6 +13,10 @@
 //! - [`crate::error::EngineError::NoEntryNodes`] — every node has at least one incoming
 //!   edge; the executor would have no starting point.
 //!
+//! [`validate_port_arity`] is separate from `build()` because arity belongs to a node
+//! type's ports, and dynamic-port nodes derive theirs from config, so it needs the node
+//! registry that `build()` does not receive. The executors call it before `build()`.
+//!
 //! `reachable_from()` runs BFS to determine which nodes are reachable from a given start.
 //! The executor uses this to skip nodes that are downstream of a disabled or failing node
 //! when fallback routing is not configured.
@@ -23,7 +27,8 @@ use petgraph::visit::Bfs;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::EngineError;
-use crate::model::Workflow;
+use crate::model::{Workflow, WorkflowNode};
+use crate::node::{NodeRegistry, PortArity};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -199,6 +204,50 @@ impl ExecutionGraph {
     }
 }
 
+/// Rejects any input port fed by more than one edge unless its node type declares
+/// that port [`PortArity::Multi`].
+///
+/// Edges into nodes whose type is not registered, or that reference a node that does
+/// not exist, are skipped here; the executor and [`ExecutionGraph::build`] report
+/// those. The first violation in edge order is returned, so the error is stable.
+pub fn validate_port_arity(workflow: &Workflow, registry: &NodeRegistry) -> Result<(), EngineError> {
+    let mut counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for edge in &workflow.edges {
+        *counts.entry((edge.to_node.as_str(), edge.to_port.as_str())).or_insert(0) += 1;
+    }
+
+    let nodes: HashMap<&str, &WorkflowNode> =
+        workflow.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut checked: HashSet<(&str, &str)> = HashSet::new();
+
+    for edge in &workflow.edges {
+        let key = (edge.to_node.as_str(), edge.to_port.as_str());
+        let count = counts[&key];
+        if count < 2 || !checked.insert(key) {
+            continue;
+        }
+        let Some(node_def) = nodes.get(key.0) else { continue };
+        let Some(node) = registry.get(&node_def.node_type_id) else { continue };
+        let ports = if node.is_dynamic_ports() {
+            node.ports_from_config(&node_def.config).unwrap_or_else(|| node.ports())
+        } else {
+            node.ports()
+        };
+        let is_multi = ports
+            .inputs
+            .iter()
+            .any(|p| p.id == key.1 && p.arity == PortArity::Multi);
+        if !is_multi {
+            return Err(EngineError::PortArityViolation {
+                node_id: key.0.to_string(),
+                port_id: key.1.to_string(),
+                count,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +345,114 @@ mod tests {
             .collect();
         assert!(failures.contains("rec1"));
         assert!(failures.contains("rec2"));
+    }
+
+    struct ArityTestNode {
+        type_id: &'static str,
+        multi: bool,
+        dynamic: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for ArityTestNode {
+        fn type_id(&self) -> &'static str { self.type_id }
+        fn display_name(&self) -> &'static str { "Arity Test" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "1.0.0" }
+        fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn ports(&self) -> crate::node::NodePorts {
+            let mut ports = crate::node::NodePorts::default();
+            if self.multi {
+                ports.inputs[0].arity = PortArity::Multi;
+            }
+            ports
+        }
+        fn is_dynamic_ports(&self) -> bool { self.dynamic }
+        fn ports_from_config(&self, config: &serde_json::Value) -> Option<crate::node::NodePorts> {
+            let mut ports = crate::node::NodePorts::default();
+            if config["multi"].as_bool() == Some(true) {
+                ports.inputs[0].arity = PortArity::Multi;
+            }
+            Some(ports)
+        }
+        async fn execute(&self, _: crate::model::NodeInput) -> crate::model::NodeOutput {
+            crate::model::NodeOutput::success(serde_json::json!({}))
+        }
+    }
+
+    fn arity_registry() -> NodeRegistry {
+        let mut registry = NodeRegistry::new();
+        registry.register(std::sync::Arc::new(ArityTestNode { type_id: "single_in", multi: false, dynamic: false }));
+        registry.register(std::sync::Arc::new(ArityTestNode { type_id: "multi_in", multi: true, dynamic: false }));
+        registry.register(std::sync::Arc::new(ArityTestNode { type_id: "dynamic_in", multi: false, dynamic: true }));
+        registry
+    }
+
+    fn typed_node(id: &str, type_id: &str, config: serde_json::Value) -> WorkflowNode {
+        let mut node = test_node(id);
+        node.node_type_id = type_id.to_string();
+        node.config = config;
+        node
+    }
+
+    fn two_sources_into(target: WorkflowNode) -> Workflow {
+        test_workflow(
+            vec![
+                typed_node("a", "single_in", serde_json::json!({})),
+                typed_node("b", "single_in", serde_json::json!({})),
+                target,
+            ],
+            vec![test_edge("e1", "a", "c", None), test_edge("e2", "b", "c", None)],
+        )
+    }
+
+    #[test]
+    fn arity_two_wires_into_single_port_is_rejected() {
+        let wf = two_sources_into(typed_node("c", "single_in", serde_json::json!({})));
+        match validate_port_arity(&wf, &arity_registry()) {
+            Err(EngineError::PortArityViolation { node_id, port_id, count }) => {
+                assert_eq!((node_id.as_str(), port_id.as_str(), count), ("c", "input", 2));
+            }
+            other => panic!("expected PortArityViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arity_multi_port_accepts_many_wires() {
+        let wf = two_sources_into(typed_node("c", "multi_in", serde_json::json!({})));
+        assert!(validate_port_arity(&wf, &arity_registry()).is_ok());
+    }
+
+    #[test]
+    fn arity_fan_out_from_one_output_is_accepted() {
+        let wf = test_workflow(
+            vec![
+                typed_node("a", "single_in", serde_json::json!({})),
+                typed_node("b", "single_in", serde_json::json!({})),
+                typed_node("c", "single_in", serde_json::json!({})),
+            ],
+            vec![test_edge("e1", "a", "b", None), test_edge("e2", "a", "c", None)],
+        );
+        assert!(validate_port_arity(&wf, &arity_registry()).is_ok());
+    }
+
+    #[test]
+    fn arity_dynamic_port_node_follows_its_config() {
+        let registry = arity_registry();
+        let multi = two_sources_into(typed_node("c", "dynamic_in", serde_json::json!({ "multi": true })));
+        assert!(validate_port_arity(&multi, &registry).is_ok());
+
+        let single = two_sources_into(typed_node("c", "dynamic_in", serde_json::json!({ "multi": false })));
+        assert!(matches!(
+            validate_port_arity(&single, &registry),
+            Err(EngineError::PortArityViolation { count: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn arity_check_skips_unregistered_node_types() {
+        let wf = two_sources_into(typed_node("c", "not_registered", serde_json::json!({})));
+        assert!(validate_port_arity(&wf, &arity_registry()).is_ok());
     }
 }

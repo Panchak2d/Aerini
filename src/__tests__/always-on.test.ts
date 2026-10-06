@@ -12,7 +12,7 @@ import { updateAlwaysOnBtn } from "../always-on";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
 
-const TOOLTIP = "Add a Schedule or Webhook trigger to enable Run on launch";
+const TOOLTIP = "Add a Schedule, Webhook, or trigger-plugin trigger to enable Run on launch";
 
 function stubCanvas(nodeTypeIds: string[]): Canvas {
   const nodes = new Map(

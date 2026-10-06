@@ -42,7 +42,7 @@ Yes. The toolbar's Export menu can save the current workflow as a `.aerini` file
 
 ## How do I update Aerini?
 
-Open Settings and click Check for Updates. Aerini checks for a newer release and, if one exists, gives you a link to it; it never downloads or installs anything on its own, and that check only happens when you click the button. Getting the new version means downloading and installing it the same way you installed Aerini the first time. See [Installation](getting-started/installation.md) for the steps for your OS.
+Open Settings, find Updates under About, and click Check for Updates. If a newer release exists, click Install and restart: Aerini downloads it, verifies its signature, installs it, and restarts, with your workflows, credentials, and settings kept. Nothing is checked or downloaded unless you click, and Aerini asks first if a workflow is running. If Aerini can't update itself (for example when it's running from a macOS disk image), it links you to the release page instead. Aerini 0.4.1 and earlier have no in-app updater, so install the first release that has one by hand; see [Installation](getting-started/installation.md) for the steps for your OS. Details are in [Updating](operations/updating.md).
 
 ## Is Aerini free to use?
 

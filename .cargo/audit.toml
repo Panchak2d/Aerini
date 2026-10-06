@@ -27,7 +27,7 @@ ignore = [
 
     # RUSTSEC-2024-0429: glib 0.18.5 VariantStrIter unsoundness.
     # Patched only in glib >=0.20.0. Transitive via Tauri 2 → tao/wry/webkit2gtk → gtk 0.18 → glib ^0.18;
-    # the newest tauri (2.12.0), tao (0.37.1), wry (0.57.0) and webkit2gtk (2.0.2) all still pin gtk ^0.18,
+    # the newest tauri (2.12.1), tao (0.37.1), wry (0.57.0) and webkit2gtk (2.0.2) all still pin gtk ^0.18,
     # so no upgrade reaches a patched glib. Not reachable from this app: the only entry point is
     # `glib::Variant::array_iter_str`, and no glib-dependent crate in Cargo.lock calls it (Linux desktop
     # build only). Re-check when Tauri moves off gtk 0.18. Track: https://github.com/tauri-apps/tauri
@@ -36,16 +36,4 @@ ignore = [
     # RUSTSEC-2024-0370: proc-macro-error unmaintained.
     # Transitive build dep. No prod impact. Track replacement upstream.
     "RUSTSEC-2024-0370",
-
-    # unic-* crate family (all "unmaintained", no vulnerability, no fix available):
-    # Transitive via Tauri: tauri-utils -> urlpattern 0.3.0 -> unic-ucd-ident ->
-    # unic-char-range / unic-char-property, and unic-ucd-ident -> unic-ucd-version
-    # -> unic-common. All of open-i18n/rust-unic is archived; there is no drop-in
-    # replacement upstream can swap to without urlpattern itself moving off it.
-    # Cannot fix without Tauri bumping tauri-utils past this urlpattern pin.
-    "RUSTSEC-2025-0075", # unic-char-range
-    "RUSTSEC-2025-0080", # unic-common
-    "RUSTSEC-2025-0081", # unic-char-property
-    "RUSTSEC-2025-0098", # unic-ucd-version
-    "RUSTSEC-2025-0100", # unic-ucd-ident
 ]
