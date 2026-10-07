@@ -40,14 +40,18 @@ async function openPopover(node: CanvasNode): Promise<void> {
   await p;
 }
 
+const runCalls = (): number =>
+  vi.mocked(invoke).mock.calls.filter(c => c[0] === "run_workflow").length;
+
 async function clickTest(): Promise<void> {
+  const before = vi.mocked(showConfirm).mock.calls.length + runCalls();
   document.querySelector<HTMLButtonElement>(".popover-test-btn")!.click();
+  // Approval keys are hashed with WebCrypto, which settles on a real event-loop
+  // tick that fake-timer advances don't wait for, so wait for the click's effect.
+  await vi.waitFor(() => expect(vi.mocked(showConfirm).mock.calls.length + runCalls()).toBeGreaterThan(before));
   await vi.advanceTimersByTimeAsync(0);
   await vi.advanceTimersByTimeAsync(0);
 }
-
-const runCalls = (): number =>
-  vi.mocked(invoke).mock.calls.filter(c => c[0] === "run_workflow").length;
 
 describe("popover Test button -- dangerous-node confirmation", () => {
   beforeEach(() => {

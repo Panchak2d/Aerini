@@ -92,7 +92,7 @@ Two extra things worth knowing:
 
 ## Unattended execution and dangerous nodes
 
-A manual Run on a workflow containing Shell Command, Code, or Database shows a one-time confirmation dialog before it executes. A scheduled or webhook-triggered background fire skips that dialog entirely; it only logs a warning. If a workflow with one of those nodes is set to run unattended, it will keep executing that node unattended, on every single fire, with nobody watching to catch a problem before it happens. See [Security](security.md) for the full model around these nodes and what else it's worth locking down before exposing a webhook to the outside world.
+A manual Run on a workflow containing Shell Command, Code, or Database shows a confirmation dialog before it executes. A scheduled or webhook-triggered background fire skips that dialog entirely; it only logs a warning. If a workflow with one of those nodes is set to run unattended, it will keep executing that node unattended, on every single fire, with nobody watching to catch a problem before it happens. See [Security](security.md) for the full model around these nodes and what else it's worth locking down before exposing a webhook to the outside world.
 
 ## Stopping background runs for good
 

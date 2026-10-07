@@ -1,9 +1,12 @@
 /* @vitest-environment jsdom */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Canvas } from "../canvas/Canvas";
 import type { RunRecord } from "../run-history";
 import { RunManager } from "../run-manager";
 import { REPLAY_NODE_OUTPUT_KEY } from "../ipc/workflow";
+import { showConfirm } from "../confirm";
+
+vi.mock("../confirm", () => ({ showConfirm: vi.fn() }));
 
 function triggerCanvas(): Map<string, unknown> {
   return new Map([["n1", { data: { id: "n1", node_type_id: "manual_trigger" } }]]);
@@ -58,5 +61,37 @@ describe("RunManager.replayRun", () => {
 
     expect(handleRun).not.toHaveBeenCalled();
     expect(onToast).toHaveBeenCalledWith(expect.stringContaining("no recorded trigger output"), "error");
+  });
+});
+
+describe("RunManager.replayRun — dangerous-node confirmation", () => {
+  const shellCanvas = () => new Map<string, unknown>([
+    ["n1", { data: { id: "n1", node_type_id: "manual_trigger" } }],
+    ["n2", { data: { id: "n2", node_type_id: "shell_exec", name: "Shell", config: { command: "echo hi" }, credentials: {} } }],
+  ]);
+
+  beforeEach(() => vi.mocked(showConfirm).mockReset());
+
+  it("declined: nothing is replayed", async () => {
+    vi.mocked(showConfirm).mockResolvedValue(false);
+    const rm = makeManager(shellCanvas());
+    const handleRun = vi.spyOn(rm, "handleRun").mockResolvedValue(undefined);
+
+    await rm.replayRun(recordWith({ n1: { body: {} } }));
+
+    expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(handleRun).not.toHaveBeenCalled();
+  });
+
+  it("approved: replays, and replaying the same nodes again is not asked again", async () => {
+    vi.mocked(showConfirm).mockResolvedValue(true);
+    const rm = makeManager(shellCanvas());
+    const handleRun = vi.spyOn(rm, "handleRun").mockResolvedValue(undefined);
+
+    await rm.replayRun(recordWith({ n1: { body: {} } }));
+    await rm.replayRun(recordWith({ n1: { body: {} } }));
+
+    expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(handleRun).toHaveBeenCalledTimes(2);
   });
 });

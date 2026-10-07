@@ -1,7 +1,8 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import { NODE_IDS } from "./node-ids";
-import { isDangerousNodeType, isTriggerNodeType } from "./canvas/node-registry";
+import { getNodeDescriptor, isDangerousNodeType, isTriggerNodeType } from "./canvas/node-registry";
+import { canonicalJson } from "./canonical-json";
 
 // `database` is deliberately absent here — its required fields depend on
 // `db_type` (sqlite needs db_path+query; postgres/mysql need
@@ -64,6 +65,31 @@ export function validateWorkflow(canvas: Canvas): string[] {
   return errors;
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// An approval covers each dangerous node's id, type, enabled state, config
+// and credential references: they decide what runs, so any change to one
+// yields a different key and the user is asked again. Config can hold
+// secrets (connection URLs, API keys), so only a digest is kept as the key,
+// never the values. SHA-256 because a workflow file's author controls the
+// new config and must not be able to craft one that collides with an
+// approved one.
+async function approvalKeyFor(workflowId: string, dangerousNodes: CanvasNode[]): Promise<string> {
+  const entries = dangerousNodes
+    .map(n => canonicalJson({
+      id:          n.data.id,
+      type:        n.data.node_type_id,
+      disabled:    n.data.disabled ?? false,
+      config:      n.data.config,
+      credentials: n.data.credentials,
+    }))
+    .sort();
+  return `${workflowId}::${await sha256Hex(JSON.stringify(entries))}`;
+}
+
 // approvedForExecution is session-scoped and owned by the caller (app.ts /
 // RunManager). Passing it in avoids hidden module-level state while keeping
 // the Set encapsulated per-caller.
@@ -83,12 +109,17 @@ export async function checkDangerousNodes(
     .filter(n => isDangerousNodeType(n.data.node_type_id as string));
   if (!dangerousNodes.length) return true;
 
-  const dangerousIds  = dangerousNodes.map(n => n.data.id).sort().join(",");
-  const approvalKey   = `${workflowId}::${dangerousIds}`;
+  const approvalKey = await approvalKeyFor(workflowId, dangerousNodes);
   if (approvedForExecution.has(approvalKey)) return true;
 
+  // A node's name is user- or import-controlled, so the type is always shown
+  // alongside it; a name alone could disguise a Shell node as "Weather lookup".
   const nodeTypes = dangerousNodes
-    .map(n => n.data.name || n.data.node_type_id)
+    .map(n => {
+      const typeId = n.data.node_type_id as string;
+      const kind   = getNodeDescriptor(typeId)?.display_name ?? typeId;
+      return n.data.name && n.data.name !== kind ? `${n.data.name} (${kind})` : kind;
+    })
     .join(", ");
   const confirmed = await confirm(
     `This workflow contains nodes that execute code on your computer:\n\n${nodeTypes}\n\nOnly run workflows from sources you trust. Continue?`,

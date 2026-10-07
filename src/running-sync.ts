@@ -1,14 +1,8 @@
 import { NODE_IDS } from "./node-ids";
+import { canonicalJson } from "./canonical-json";
 
 interface GraphNode { id: string; node_type_id: string; config: unknown }
 interface GraphEdge { from_node: string; to_node: string }
-
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(",")}}`;
-}
 
 /**
  * Identity of the part of a workflow the scheduler freezes when it starts a
@@ -23,7 +17,7 @@ export function triggerFingerprint(nodes: Iterable<GraphNode>, edges: Iterable<G
   const hasIncoming = new Set<string>();
   for (const e of edges) if (ids.has(e.from_node) && ids.has(e.to_node)) hasIncoming.add(e.to_node);
   const entry = real.find(n => !hasIncoming.has(n.id));
-  return entry ? `${entry.node_type_id}:${canonical(entry.config ?? {})}` : null;
+  return entry ? `${entry.node_type_id}:${canonicalJson(entry.config ?? {})}` : null;
 }
 
 interface GraphSource {

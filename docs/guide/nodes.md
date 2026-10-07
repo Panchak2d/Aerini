@@ -90,7 +90,7 @@ Run a shell command on the machine Aerini is on, and capture its stdout, stderr,
 
 **Output:** `stdout`, `stderr`, `exit_code`, `success`.
 
-**Gotcha:** this runs a real command on the host machine. Aerini treats Shell Command, Code (JS), and Database as "dangerous" nodes: any workflow containing one shows a one-time confirmation dialog before its first run in a session ("This workflow contains nodes that execute code on your computer... Only run workflows from sources you trust"), and the node gets a small warning badge on the canvas.
+**Gotcha:** this runs a real command on the host machine. Aerini treats Shell Command, Code (JS), and Database as "dangerous" nodes: any workflow containing one shows a confirmation dialog before its first run in a session ("This workflow contains nodes that execute code on your computer... Only run workflows from sources you trust"), and the node gets a small warning badge on the canvas. Run, Run this node, a node's Test button, and Replay in run history all ask. Your answer holds for the session only while those nodes stay as they were: changing one's settings, saved credential, type, or enabled state, or loading, importing, or restoring a version of the workflow where they differ, asks again. Moving or renaming a node does not.
 
 ### Code (JS)
 

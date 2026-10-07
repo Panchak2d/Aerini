@@ -42,7 +42,7 @@ Click the **×** next to a standalone plugin, or **Remove pack** on a pack's hea
 
 ## What sandboxing a plugin actually means
 
-Every plugin call runs in its own fresh sandbox: no filesystem access at all, a capped memory ceiling, and outbound HTTP filtered by the same rules built-in nodes follow. A plugin node is flagged as a dangerous node in the UI, the same category as Shell Command, Code, and Database, and shows the same one-time confirmation before it runs. That's a summary; the exact limits, what the sandbox doesn't protect against, and what a verified signature does and doesn't mean are covered in full in [Security](security.md#the-plugin-wasm-sandbox-boundary).
+Every plugin call runs in its own fresh sandbox: no filesystem access at all, a capped memory ceiling, and outbound HTTP filtered by the same rules built-in nodes follow. A plugin node is flagged as a dangerous node in the UI, the same category as Shell Command, Code, and Database, and shows the same confirmation before it runs. That's a summary; the exact limits, what the sandbox doesn't protect against, and what a verified signature does and doesn't mean are covered in full in [Security](security.md#the-plugin-wasm-sandbox-boundary).
 
 ## See also
 

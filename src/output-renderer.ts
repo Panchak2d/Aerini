@@ -58,7 +58,7 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
         <div class="sum-node-row">
           <span class="sum-node-mark sum-node-mark--${markClass}">${mark}</span>
           <span class="sum-node-name">${escapeHtml(name)}</span>
-          <span class="sum-node-type">${typeLabel(typeId)}</span>
+          <span class="sum-node-type">${escapeHtml(typeLabel(typeId))}</span>
           <span class="sum-node-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>
         </div>`;
     }
@@ -343,7 +343,7 @@ function renderHttpOutput(out: unknown, name: string): string {
 
   const statusNum   = typeof status === "string" ? parseInt(status, 10) : (status ?? 0);
   const statusClass = statusNum && statusNum < 400 ? "success" : statusNum >= 400 ? "error" : "muted";
-  const statusText  = status ? `HTTP ${status}` : "Response";
+  const statusText  = status ? `HTTP ${escapeHtml(String(status))}` : "Response";
 
   let bodyHtml = "";
   if (body !== undefined) {
@@ -386,7 +386,7 @@ function renderAiOutput(out: unknown, name: string): string {
 
   const text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
   const usageHtml = usage
-    ? `<div class="res-ai-meta">${Object.entries(usage).map(([k, v]) => `${k}: ${v}`).join(" · ")}</div>`
+    ? `<div class="res-ai-meta">${Object.entries(usage).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join(" · ")}</div>`
     : "";
   const modelHtml = model ? `<div class="res-ai-meta">Model: ${escapeHtml(model)}</div>` : "";
 

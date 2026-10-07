@@ -12,7 +12,7 @@ name = "aerini_engine"
 # Async
 tokio       = { version = "1.0", features = ["full"] }
 tokio-util  = { version = "0.7", features = ["rt"] }
-async-trait = "0.1"
+async-trait = "0.1.92"
 
 # Serde
 serde      = { version = "1.0", features = ["derive"] }
@@ -70,7 +70,7 @@ tracing = "0.1"
 # Utils
 uuid      = { version = "1.8", features = ["v4"] }
 chrono    = { version = "0.4", features = ["serde"] }
-thiserror = "1.0"
+thiserror = "2.0"
 once_cell = "1"
 
 # Code node sandbox
@@ -155,7 +155,9 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # `wasmtime-wasi`'s "p3" feature gates `wasmtime_wasi::p3` (WASI 0.3 /
 # component-model-async), used by the second, dedicated async Engine that
 # hosts trigger-plugin components (`aerini-node-with-trigger` world). The
-# default (p2, sync) plugin engine is unaffected by this feature.
+# default (p2, sync) plugin engine is unaffected by this feature. "p2" is
+# listed explicitly because "p3" does not imply it and both linkers register
+# `wasmtime_wasi::p2`.
 #
 # All three pinned to an EXACT version (`=49.0.2`) rather than a caret range:
 # both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as
@@ -169,7 +171,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # Wasmtime only patches its two most recent releases (plus periodic LTS
 # lines), so an exact pin also has to be moved forward when the next major ships.
 wasmtime           = { version = "=49.0.2", features = ["component-model"] }
-wasmtime-wasi      = { version = "=49.0.2", features = ["p3"] }
+wasmtime-wasi      = { version = "=49.0.2", features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "=49.0.2", features = ["p2", "p3"] }
 
 # Filesystem watching (WIT `fs-watch` import backing, plugin_loader.rs's

@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::hash::Hash;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,21 @@ fn evict_stale<K: Eq + Hash>(map: &DashMap<K, VecDeque<Instant>>, window: Durati
         timestamps.retain(|&ts| ts > cutoff);
         !timestamps.is_empty()
     });
+}
+
+/// The key a client IP is limited under. An IPv6 subscriber is normally
+/// handed a whole /64, so one client can send from 2^64 addresses; limiting
+/// per address would give it a fresh budget on every request. IPv6 addresses
+/// are therefore limited per /64, and an IPv4-mapped IPv6 address shares its
+/// IPv4 address's budget.
+fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (!0u128 << 64))),
+        },
+    }
 }
 
 /// Most keys a limiter tracks at once.
@@ -84,7 +99,8 @@ fn record_hit<K: Eq + Hash>(
     }
 }
 
-/// Per-IP sliding-window rate limiter backed by a `DashMap`.
+/// Per-client sliding-window rate limiter backed by a `DashMap`. A client is
+/// an IPv4 address or an IPv6 /64 (see [`limiter_key`]).
 ///
 /// Each IP address entry holds a `VecDeque<Instant>` of accepted request
 /// timestamps within the current window. On each call to `is_allowed`:
@@ -140,9 +156,12 @@ impl RateLimiter {
     }
 
     /// Returns `true` if the request from `ip` is within the rate limit.
-    /// An IP not yet tracked is always allowed while the table is full.
+    /// A client not yet tracked is always allowed while the table is full.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        record_hit(&self.map, &self.gate, ip, self.max_requests, self.window, MAX_TRACKED_KEYS)
+        record_hit(
+            &self.map, &self.gate, limiter_key(ip),
+            self.max_requests, self.window, MAX_TRACKED_KEYS,
+        )
     }
 }
 
@@ -337,8 +356,8 @@ pub async fn status_security_headers(
 #[cfg(test)]
 mod tests {
     use super::{
-        record_hit, too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter, SweepGate,
-        SWEEP_INTERVAL,
+        limiter_key, record_hit, too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter,
+        SweepGate, SWEEP_INTERVAL,
     };
     use dashmap::DashMap;
     use std::collections::VecDeque;
@@ -362,6 +381,26 @@ mod tests {
         assert!(rl.is_allowed(ip));
         assert!(rl.is_allowed(ip));
         assert!(!rl.is_allowed(ip));
+    }
+
+    #[test]
+    fn ipv6_addresses_share_one_budget_per_slash_64() {
+        let rl = RateLimiter::new(2, 60);
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other_64: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert!(rl.is_allowed(a));
+        assert!(rl.is_allowed(same_64));
+        assert!(!rl.is_allowed(a));
+        assert!(rl.is_allowed(other_64));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_limited_as_its_ipv4_address() {
+        let v4: IpAddr = "1.2.3.4".parse().unwrap();
+        let mapped: IpAddr = "::ffff:1.2.3.4".parse().unwrap();
+        assert_eq!(limiter_key(mapped), v4);
+        assert_eq!(limiter_key(v4), v4);
     }
 
     #[test]

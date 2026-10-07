@@ -31,10 +31,10 @@ export class RunManager {
   private onToast:  (msg: string, type: "success" | "error" | "info") => void;
   private state = new RunStateMachine();
   private _activeHistoryPanel: HistoryPanel | null = null;
-  // Own approval memory for the per-node "Run this node" path —
-  // deliberately separate from toolbar.ts's Set for the main Run button:
-  // the two check different node sets (ancestor subgraph vs. whole canvas),
-  // so approving one must not silently approve the other.
+  // Approval memory for the paths RunManager gates itself: "Run this node"
+  // and Replay. Separate from toolbar.ts's Set for the main Run button.
+  // Keys are derived from the dangerous nodes' content, so an approval can
+  // only match the same nodes with the same settings.
   private approvedForExecution = new Set<string>();
 
   onRunStateChange: ((running: boolean) => void) | null = null;
@@ -479,6 +479,10 @@ export class RunManager {
     const recordedOutput = result.node_outputs[triggerNode.data.id];
     if (recordedOutput === undefined) {
       this.onToast("This run has no recorded trigger output to replay — the workflow may have changed since.", "error");
+      return;
+    }
+    if (!await checkDangerousNodes(this.state.currentWorkflowId, this.canvas.nodes.values(), this.approvedForExecution, showConfirm)) {
+      this.onStatus("Run cancelled");
       return;
     }
     this.onToast(`Replaying with "${record.workflow_name}"'s recorded trigger input…`, "info");

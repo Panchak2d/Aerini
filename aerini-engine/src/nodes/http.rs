@@ -379,11 +379,6 @@ mod tests {
     // cannot be inspected via execute() without making a real network call.
     // These tests verify the encoding logic that execute() applies before send.
     // All assertions are against the same encoding the production code uses.
-    //
-    // PLAN NOTE — "timeout config field read correctly":
-    // http.rs has no configurable timeout input field. The shared client is
-    // initialised with a hardcoded 30 s timeout (see shared_http_client()).
-    // There is nothing to read from input. Test below verifies the constant.
 
     #[test]
     fn bearer_token_format_is_bearer_space_token() {
