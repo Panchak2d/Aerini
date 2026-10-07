@@ -210,7 +210,11 @@ fn redact_command_log(cmd: &str) -> String {
     let s = redact_after_prefix(&s, "-p ");
     let s = redact_env_assignments(&s);
     if s.len() > 500 {
-        format!("{}... [truncated]", &s[..500])
+        let mut end = 500;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &s[..end])
     } else {
         s
     }
@@ -600,6 +604,14 @@ mod tests {
         let out = redact_command_log(&long_cmd);
         assert!(out.ends_with("[truncated]"));
         assert!(out.len() <= 520); // "... [truncated]" = 15 chars, 500 + 15
+    }
+
+    #[test]
+    fn truncation_does_not_split_multibyte_char() {
+        // Byte 500 falls inside the 2-byte 'é' that starts at byte 499.
+        let long_cmd = format!("a{}", "é".repeat(400));
+        let out = redact_command_log(&long_cmd);
+        assert!(out.ends_with("[truncated]"));
     }
 }
 

@@ -64,6 +64,8 @@ export interface SchedulerStatusEvent {
   last_run_at:   string | null;
   next_run_at:   string | null;
   last_error:    string | null;
+  /** "interval" | "cron" | "once" | "webhook" | "manual" | "plugin"; null if the job's trigger is unknown. */
+  trigger_type?: string | null;
   /** Full WorkflowResult — only present on "waiting" (after success) or "error" status. */
   last_result:   import("./workflow").WorkflowResult | null;
 }

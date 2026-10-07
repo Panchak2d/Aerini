@@ -24,7 +24,10 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Undo | `Ctrl+Z` |
 | Redo | `Ctrl+Y` or `Ctrl+Shift+Z` |
 | Cut connector | Alt-drag across it |
-| Disconnect a wire, by dragging away from a port dot | Drag |
+| Move where a wire ends — drag from the wired input, or click the wire and drag the ring on its input end; dropping anywhere else cancels, and `Esc` cancels mid-drag. On an input that takes many wires, such as Merge's, click the wire first | Drag |
+| Wire backwards — drag from an empty input to an output, or release over empty canvas to pick a node to connect into it | Drag |
+| Move every wire leaving an output to another output — drag from the output, then drop on a different output; one `Ctrl+Z` undoes it | `Ctrl`/`Cmd`-drag |
+| Disconnect a wire — click it and press `Del`, or right-click it | `Del` |
 
 ## Workflow
 

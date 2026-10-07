@@ -1,20 +1,48 @@
 # Updating
 
-This page covers three separate things: checking for and installing a new desktop release, updating a self-hosted `aerini-server` deployment, and what happens when a workflow file's schema version doesn't match the app or server opening it. For why the desktop check works the way it does instead of updating automatically, see [Security §The update check exception](../guide/security.md#the-update-check-exception).
+This page covers three separate things: updating the desktop app, updating a self-hosted `aerini-server` deployment, and what happens when a workflow file's schema version doesn't match the app or server opening it. For why the desktop update only happens when you click, and how it's verified, see [Security §Updates and the network](../guide/security.md#updates-and-the-network).
 
 ## Desktop app
 
-Aerini never checks for updates on its own. Open **Settings**, find **Updates** under **About**, and click **Check for Updates**. There's no startup check, no background poller, and no scheduled interval; it only runs when you click the button.
+Open **Settings**, find **Updates** under **About**, and click **Check for Updates**. Aerini never checks on its own: there's no startup check, no background poller, and no scheduled interval. It contacts GitHub for an update only when you click the button.
 
-The check asks GitHub's Releases API for the latest tagged release and compares it to your installed version. One of two things happens:
+The check reads a small manifest from the latest published release on GitHub and compares it to your installed version. One of three things happens:
 
-- **You're up to date.** The status line shows your current version and nothing else happens.
-- **A newer version exists.** The status line shows the new version number next to a **View release** link, which opens that release's page on GitHub in your browser.
+- **You're up to date.** The status line shows your current version.
+- **A newer version exists.** The status line shows the new version next to a **View release notes** link and an **Install and restart** button.
+- **A newer version exists, but Aerini can't install it itself.** The status line says why and offers **Download from GitHub** instead. See [When Aerini can't update itself](#when-aerini-cant-update-itself).
 
-**View release** is as far as the button goes. Aerini doesn't download or install anything itself, there's no auto-updater built into the app. Getting the new version means installing it the same way you installed Aerini the first time: download the file for your OS from that release page and run it, the same steps as [Installation §Download the installer](../getting-started/installation.md#download-the-installer). Installing over an existing copy doesn't touch your workflows, credentials, or settings; those live in a separate per-OS data folder that the app bundle itself never touches (see [Installation §Uninstalling](../getting-started/installation.md#uninstalling) for exactly where).
+Click **Install and restart** to update. Aerini downloads the installer for your platform from the release, shows a progress bar (with **Cancel** while it downloads), verifies its signature, installs it, and restarts. Your workflows, credentials, and settings aren't touched; they live in a separate per-OS data folder that the app bundle never overwrites (see [Installation §Uninstalling](../getting-started/installation.md#uninstalling) for exactly where). After the restart, a short message confirms the version you're now on.
+
+Aerini only installs a package whose signature checks out against a public key built into the app. A download that fails verification is discarded and nothing is installed. How this is protected is covered in [Security §Updates and the network](../guide/security.md#updates-and-the-network).
+
+### Before it installs
+
+- **Unsaved changes.** Installing restarts Aerini. If you have changes that may not be saved yet, Aerini asks before it starts.
+- **Running workflows.** If any workflow is running, including background and scheduled runs, Aerini tells you how many and asks before going further. Confirming stops them and then installs; declining leaves everything running and the update waiting.
+- **Administrator password.** Installing the `.msi` on Windows, or a `.deb` or `.rpm` package on Linux, can make your system ask for an administrator password. The status line tells you when that's expected. The Windows `.exe` installer and the macOS and AppImage builds don't normally need one.
+
+### When Aerini can't update itself
+
+In some setups the in-app install isn't possible. Aerini then shows the new version with a **Download from GitHub** link, and you update by hand as described in [Installation](../getting-started/installation.md#download-the-installer). The usual causes:
+
+| Situation | What to do |
+|---|---|
+| macOS: running from the disk image or from a temporary location | Move Aerini into Applications, then reopen it |
+| Linux AppImage: the folder holding the file is read-only, or the AppImage was started in a way that hides its location | Move it to a writable folder, or install the new one by hand |
+| An installer type Aerini doesn't recognize, such as a build you compiled yourself | Install the new version by hand |
+| The release has no package for your platform yet | Install by hand |
+
+If a check or an install fails (no connection, a stalled download, a failed signature check), the status line says what happened and keeps the **Download from GitHub** link as a fallback. Checking again starts clean.
 
 > [!NOTE]
-> New releases are published as GitHub draft releases before a maintainer manually publishes them. If a version was just tagged, Check for Updates may not show it yet; GitHub's "latest release" API only returns published releases, not drafts.
+> **Aerini 0.4.1 and earlier can't update themselves.** Install the first release that includes in-app updates by hand, as described in [Installation](../getting-started/installation.md#download-the-installer). From then on, updates install from Settings.
+
+> [!NOTE]
+> Releases are published as GitHub drafts first, and a maintainer publishes them manually. Only published releases are offered, so a version that was just tagged may not show up in Check for Updates until it's published. Prereleases, such as release candidates, are never offered. A prerelease build has to be installed by hand.
+
+> [!NOTE]
+> On macOS, Aerini isn't signed with an Apple Developer certificate, so macOS can ask for Keychain access again after an update. Choose **Always Allow**; see [Known Issues](../known-issues.md#macos-asks-for-keychain-access-again-after-an-update).
 
 ## Server (`aerini-server`)
 
@@ -83,5 +111,5 @@ There's no downgrade path either way: opening a workflow saved by a newer Aerini
 ## What's next
 
 - [Server Deployment](server-deploy.md), for getting `aerini-server` running the first time
-- [Security §The update check exception](../guide/security.md#the-update-check-exception), for why the desktop check is a single manual action instead of an automatic updater
+- [Security §Updates and the network](../guide/security.md#updates-and-the-network), for why updating is click-only and how a downloaded update is verified
 - [Installation](../getting-started/installation.md), for the platform-specific install steps an update reuses

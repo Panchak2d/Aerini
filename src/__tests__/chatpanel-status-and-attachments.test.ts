@@ -232,30 +232,36 @@ describe("ChatPanel — input autosize", () => {
   });
 });
 
-describe("ChatPanel — unread attachments warning", () => {
-  const send = async (nodes: Map<string, unknown>) => {
+describe("ChatPanel — unread attachments banner", () => {
+  const send = async (nodes: Map<string, unknown>, toPort: string, connectPorts = vi.fn().mockReturnValue(true)) => {
     vi.useFakeTimers(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
-    const toast = vi.fn();
     try {
       document.body.innerHTML = CHAT_PANEL_HTML;
-      const canvas = { nodes } as unknown as Canvas;
-      const wf = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
+      const connectors = new Map([["e1", { data: { from_node: "n1", to_node: "n2", to_port: toPort } }]]);
+      const canvas = { nodes, connectors, connectPorts } as unknown as Canvas;
+      const wf = { currentId: "wf1", chatSettings: {}, flushAutoSave: vi.fn().mockResolvedValue(true) } as unknown as WorkflowManager;
       const rm = { addRunStateListener: vi.fn() } as unknown as RunManager;
-      const p = new ChatPanel(canvas, wf, toast, rm) as unknown as PanelInternals;
+      const p = new ChatPanel(canvas, wf, vi.fn(), rm) as unknown as PanelInternals;
       p.onSchedulerStatus(waitingEvent());
       await p.handleSend("", [IMG]);
     } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
-    return toast;
+    return { banner: document.querySelector(".chat-readiness") as HTMLElement, connectPorts };
   };
   const hook = { data: { node_type_id: "webhook", name: "Webhook", config: { port: 3456, path: "/webhook" } } };
+  const ai   = (config: Record<string, unknown>) => ({ data: { node_type_id: "ai_prompt", name: "AI", config } });
 
-  it("warns when no node references the Webhook's files output", async () => {
-    const toast = await send(new Map<string, unknown>([["n1", hook], ["n2", { data: { node_type_id: "ai_prompt", name: "AI", config: { prompt: "hi" } } }]]));
-    expect(toast).toHaveBeenCalledWith(expect.stringContaining("no node reads them"), "info");
+  it("normal case: stays visible with a one-click fix when no node reads the Webhook's files, and the fix wires Webhook to Files", async () => {
+    const { banner, connectPorts } = await send(new Map<string, unknown>([["n1", hook], ["n2", ai({ prompt: "hi" })]]), "input");
+    expect(banner.classList.contains("hidden")).toBe(false);
+    expect(banner.textContent).toContain("won't reach the AI");
+    const btn = banner.querySelector("button") as HTMLButtonElement;
+    expect(btn.textContent).toBe('Connect to "AI"');
+    btn.click();
+    expect(connectPorts).toHaveBeenCalledWith("n1", "output", "n2", "attachments");
   });
 
-  it("stays silent when a node's Files port is wired to the Webhook", async () => {
-    const toast = await send(new Map<string, unknown>([["n1", hook], ["n2", { data: { node_type_id: "ai_prompt", name: "AI", config: { attachments_expr: "{{Webhook.output.files}}" } } }]]));
-    expect(toast).not.toHaveBeenCalledWith(expect.stringContaining("no node reads them"), "info");
+  it("edge case: hidden when a node's Files port is wired to the Webhook", async () => {
+    const { banner } = await send(new Map<string, unknown>([["n1", hook], ["n2", ai({ attachments_expr: "{{Webhook.output.files}}" })]]), "attachments");
+    expect(banner.classList.contains("hidden")).toBe(true);
   });
 });

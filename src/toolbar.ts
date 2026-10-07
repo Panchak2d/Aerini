@@ -5,7 +5,7 @@ import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow, parseSchedulerError, exportAllWorkflows } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
-import { checkForUpdate } from "./ipc/update";
+import { bindUpdateUi } from "./update-ui";
 import { invoke } from "@tauri-apps/api/core";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
 import { showConfirm } from "./confirm";
@@ -15,7 +15,8 @@ import { activateZone } from "./sidebar-sections";
 import { isMonitorModeActive } from "./monitor-mode";
 import { bindDrawerResize } from "./resize";
 import { loadBgPanel } from "./bg-panel-loader";
-import { NODE_IDS, findTriggerNodeTypeId } from "./node-ids";
+import { NODE_IDS } from "./node-ids";
+import { findTriggerNodeTypeId } from "./canvas/node-registry";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
@@ -342,37 +343,7 @@ export function bindToolbar(
       }
     });
 
-  $("btn-check-updates")?.addEventListener("click", async () => {
-    if (!isTauri()) return;
-    const btn = $("btn-check-updates") as HTMLButtonElement;
-    const statusEl = document.getElementById("update-check-status");
-    btn.disabled = true;
-    if (statusEl) statusEl.textContent = "Checking…";
-    try {
-      const result = await checkForUpdate();
-      if (!statusEl) return;
-      statusEl.textContent = "";
-      if (result.is_newer) {
-        const msg = document.createElement("span");
-        msg.textContent = `Update available: v${result.latest_version} — `;
-        const link = document.createElement("a");
-        link.textContent = "View release";
-        link.href = result.release_url;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.className = "settings-support-link";
-        statusEl.appendChild(msg);
-        statusEl.appendChild(link);
-      } else {
-        statusEl.textContent = `You're up to date (v${result.current_version}).`;
-      }
-    } catch (err) {
-      if (statusEl) statusEl.textContent = "Could not check for updates.";
-      toast(`Update check failed: ${err}`, "error");
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  bindUpdateUi({ toast, hasUnsaved: () => wfManager.hasUnsaved });
 
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;
   if (gridSnapEl) {

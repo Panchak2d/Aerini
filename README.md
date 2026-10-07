@@ -67,7 +67,7 @@ Start with [Plugin Authoring](docs/development/plugin-authoring.md), or copy `ex
 
 ## Background runs and keeping an eye on things
 
-A workflow with a Schedule or Webhook trigger keeps running while you work on something else. You don't need the canvas open. The Background Runs panel lists everything currently running, idle, or stopped; the Monitor panel next to it tracks memory use and lets you start or stop everything at once.
+A workflow with a Schedule, Webhook, or trigger-plugin trigger keeps running while you work on something else. You don't need the canvas open. The Background Runs panel lists everything currently running, idle, or stopped; the Monitor panel next to it tracks memory use and lets you start or stop everything at once.
 
 ![Monitor panel showing memory use and each workflow's run status](.github/readme/monitor.png)
 
@@ -127,7 +127,7 @@ npm run dev
 
 `fetch-node-binaries.sh` downloads and checksum-verifies the Node.js runtime Aerini bundles for the Code (JS) node. It's a one-time step per clone and the build fails without it. Needs `curl`, `tar`, `unzip` (or `powershell.exe` on Windows), and `sha256sum`/`shasum` on your PATH.
 
-The first build takes a few minutes while Rust compiles. After that, changes rebuild in seconds. `npm run build` produces a standalone installer under `src-tauri/target/release/bundle/`.
+The first build takes a few minutes while Rust compiles. After that, changes rebuild in seconds. `npm run build:unsigned` produces a standalone installer under `src-tauri/target/release/bundle/`.
 
 > `dist/` is committed on purpose, Tauri reads frontend assets from it at build time. Don't add it to `.gitignore`. Details in [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -85,7 +85,7 @@ Pick whichever one matches the API you're calling. If you're not sure, check tha
 
 AI Prompt, AI Agent, and Image Generation all read a `provider`, `model`, and `base_url` alongside `api_key`. When you pick a saved credential that has Advanced metadata filled in (see [Adding a credential](#adding-a-credential) above), Aerini copies that provider, model, and base URL into the node automatically, but only into fields that are still blank. It never overwrites something you already typed.
 
-On these three node types, the **Use Saved Credential** dropdown is also filtered to match: it only lists credentials whose Advanced Provider is the same as the Provider currently selected on the node, plus any credential with no Provider set at all (those are always shown, since Advanced metadata is optional). Each matched credential shows its provider next to its name, e.g. "My Key — Anthropic", so you can tell them apart at a glance. If nothing matches, the dropdown is empty and the warning below it names the provider it's short a credential for — use **Or enter a key directly** below, or add a matching credential from the Credentials panel. Changing the node's Provider re-filters the list immediately.
+On these three node types, the **Use Saved Credential** dropdown is also filtered to match: it only lists credentials whose Advanced Provider is the same as the Provider currently selected on the node, plus any credential with no Provider set at all (those are always shown, since Advanced metadata is optional). While the node's Provider is `auto`, nothing is filtered, because the provider isn't decided until the node runs. Each matched credential shows its provider next to its name, e.g. "My Key — Anthropic", so you can tell them apart at a glance. If nothing matches, the dropdown is empty and the warning below it names the provider it's short a credential for — use **Or enter a key directly** below, or add a matching credential from the Credentials panel. Changing the node's Provider re-filters the list immediately.
 
 These three node types also offer **Or enter a key directly**, an inline field for a one-off API key. It's stored in the workflow file unencrypted and is ignored the moment you pick a saved credential instead. Use it for quick testing, not for anything you'd mind someone else seeing if they opened the workflow file.
 
@@ -133,6 +133,16 @@ Full deployment steps (starting the server, the status page, ports, and the rest
 Every credential is encrypted with one AES-256 key, normally stored in your OS keychain. If that keychain entry is ever lost (OS reset, migrating to a new machine, a Linux setup with no keychain running), there's no way to decrypt your saved credentials again, unless you've backed up the key yourself beforehand.
 
 In the Credentials panel, click **Backup Encryption Key**. Aerini asks you to confirm, since anyone holding this value can decrypt everything in your credential store, then shows it once. Copy it into a password manager, not a plain text file on the same machine. If you ever do lose the keychain entry, restoring from this backup is what lets Aerini decrypt your existing credentials again instead of starting from a blank store.
+
+### If Aerini can't read the key
+
+When credentials are saved and Aerini can't get the key (you clicked **Deny** on the macOS Keychain prompt, the keychain is locked, or its entry is gone), Aerini shows an error and closes instead of starting. It never creates a replacement key while saved credentials exist, because a new key can't decrypt them, and new credentials would then be encrypted with a different key than the old ones. Nothing is deleted or changed.
+
+- **macOS, access denied or prompt dismissed:** open Aerini again and choose **Always Allow** when macOS asks for Keychain access.
+- **Keychain locked or not running:** unlock or start it, then open Aerini again.
+- **Keychain entry lost:** save the key from your backup, exactly as it was shown, into a file named `.cred.key` in Aerini's [data folder](../getting-started/installation.md#uninstalling), then open Aerini. It moves the key back into the keychain and deletes the file.
+
+A fresh install, or a store with no saved credentials, isn't affected: Aerini creates its key the first time it runs.
 
 ## See also
 

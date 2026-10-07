@@ -1,7 +1,7 @@
 import type { NodeDescriptor } from "./ipc/workflow";
 import type { Canvas } from "./canvas/Canvas";
-import { getAllNodeDescriptors } from "./canvas/node-registry";
-import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
+import { getAllNodeDescriptors, isTriggerNodeType } from "./canvas/node-registry";
+import { NODE_IDS } from "./node-ids";
 import { escapeHtml } from "./utils";
 import { getIconSvg } from "./icon-cache";
 import { getPluginIconSvg } from "./plugin-icon";
@@ -38,9 +38,9 @@ function togglePaletteCategory(header: HTMLElement): void {
 const CATEGORY_ORDER = ["trigger", "action", "ai", "logic", "utility", "other"];
 
 // Frontend-only sub-grouping of the backend's single "action" node_type,
-// mirroring TRIGGER_NODE_IDS below: node.node_type stays "action" for every
+// mirroring the trigger check below: node.node_type stays "action" for every
 // node here, only the palette's section header changes. Any action node not
-// listed in INTEGRATION_NODE_IDS/FILES_STORAGE_NODE_IDS/TRIGGER_NODE_IDS
+// listed in INTEGRATION_NODE_IDS/FILES_STORAGE_NODE_IDS/the trigger check
 // falls into "Core Actions" by default, so a new action node with no entry
 // here still gets a home instead of silently disappearing from the palette.
 const INTEGRATION_NODE_IDS = new Set([
@@ -49,8 +49,14 @@ const INTEGRATION_NODE_IDS = new Set([
 const FILES_STORAGE_NODE_IDS = new Set(["file", "save_to_folder", "s3_storage", "social_upload"]);
 const ACTION_SUBHEADER_ORDER = ["Triggers", "Core Actions", "Files & Storage", "Integrations"];
 
+// A descriptor can say it is trigger-capable before the registry holds it
+// (the palette is built from the list it is given), so check both.
+function isTriggerDescriptor(d: NodeDescriptor): boolean {
+  return isTriggerNodeType(d.type_id) || d.trigger_capable === true;
+}
+
 function actionSubheader(typeId: string): string {
-  if (TRIGGER_NODE_IDS.has(typeId)) return "Triggers";
+  if (isTriggerNodeType(typeId)) return "Triggers";
   if (INTEGRATION_NODE_IDS.has(typeId)) return "Integrations";
   if (FILES_STORAGE_NODE_IDS.has(typeId)) return "Files & Storage";
   return "Core Actions";
@@ -59,7 +65,8 @@ function actionSubheader(typeId: string): string {
 function buildCategories(nodes: NodeDescriptor[]): Category[] {
   const groups = new Map<string, NodeDescriptor[]>();
   for (const node of nodes) {
-    const cat = node.node_type ?? "other";
+    // A trigger plugin is listed under Triggers whatever node_type it declares.
+    const cat = node.trigger_capable === true ? "action" : (node.node_type ?? "other");
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat)!.push(node);
   }
@@ -74,7 +81,7 @@ function buildCategories(nodes: NodeDescriptor[]): Category[] {
     }
     const buckets = new Map<string, NodeDescriptor[]>();
     for (const n of nodesInCat) {
-      const label = actionSubheader(n.type_id);
+      const label = isTriggerDescriptor(n) ? "Triggers" : actionSubheader(n.type_id);
       if (!buckets.has(label)) buckets.set(label, []);
       buckets.get(label)!.push(n);
     }
@@ -217,12 +224,12 @@ export function buildSidebarPalette(
       item.className = "palette-item";
       item.dataset.search = `${desc.display_name} ${desc.node_type} ${desc.type_id}`.toLowerCase();
       // Trigger identity overlay (filter-facing only) — mirrors Node.ts's
-      // canvas draw() overlay exactly: TRIGGER_NODE_IDS is a plain id set,
+      // canvas draw() overlay exactly: the trigger check is a plain id set plus the plugin flag,
       // unrelated to the 4-value NodeType union, so desc.node_type (and
       // therefore this item's palette-category header) stays untouched —
       // schedule/webhook/manual_trigger still group under "Actions". Only
       // the chip-filter attribute and dot color swap to "trigger".
-      const isTrigger = TRIGGER_NODE_IDS.has(desc.type_id);
+      const isTrigger = isTriggerDescriptor(desc);
       const catKey = isTrigger ? "trigger" : desc.node_type;
       item.dataset.cat = catKey;
       // Plugins are never in NODE_SVG_INNER (icon-cache.ts is a static,

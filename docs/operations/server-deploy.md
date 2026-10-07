@@ -149,7 +149,7 @@ Either works for `serve` mode's systemd service (`.env` is loaded via `Environme
 
 `serve` mode never touches the encrypted credential store the desktop app uses. It reads environment variables instead, one per credential, named and generated automatically at export time; see [Credentials §Running headless](../guide/credentials.md#running-headless-aerini-server-and-environment-variables) for the exact naming rule and the generated `.env.example`.
 
-`api` mode is different: it has its own encrypted credential store (`POST`/`GET`/`DELETE /api/credentials`, gated by `write`/`read` scope), separate from both the desktop app's store and `serve` mode's environment variables. Pass `--keychain` to back its encryption key with the OS keyring (falls back to a file automatically, with a warning, if the keyring isn't available); without it, the key lives in a file under `--data-dir`.
+`api` mode is different: it has its own encrypted credential store (`POST`/`GET`/`DELETE /api/credentials`, gated by `write`/`read` scope), separate from both the desktop app's store and `serve` mode's environment variables. Pass `--keychain` to back its encryption key with the OS keyring (falls back to a file automatically, with a warning, if the keyring isn't available); without it, the key lives in a file under `--data-dir`. If credentials are already saved and the key can't be found (the key file was deleted, or the keyring entry is gone with no fallback file), the server exits with an error instead of creating a new key that can't decrypt them. Restore the original key file; deleting `credentials.db` as well starts an empty store.
 
 ## Verifying the deployment
 

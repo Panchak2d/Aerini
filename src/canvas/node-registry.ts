@@ -1,5 +1,5 @@
 import type { NodeDescriptor } from "../ipc/workflow";
-import { DANGEROUS_NODE_IDS } from "../node-ids";
+import { DANGEROUS_NODE_IDS, TRIGGER_NODE_IDS } from "../node-ids";
 
 // Leaf module: imports only a type. Node.ts and CanvasSerializer.ts both read
 // the registry, and CanvasSerializer.ts imports Node.ts, so the registry can't
@@ -45,4 +45,22 @@ export function isUnregisteredNodeType(typeId: string): boolean {
  */
 export function isDangerousNodeType(typeId: string): boolean {
   return DANGEROUS_NODE_IDS.has(typeId) || isPluginNodeType(typeId);
+}
+
+/**
+ * True for a built-in trigger (Schedule, Webhook, Manual Trigger) or a plugin
+ * whose descriptor says it exports the trigger interface. Use this instead of
+ * testing TRIGGER_NODE_IDS directly so plugin triggers count as entry nodes.
+ */
+export function isTriggerNodeType(typeId: string): boolean {
+  return TRIGGER_NODE_IDS.has(typeId) || _registry.get(typeId)?.trigger_capable === true;
+}
+
+/** Node objects only need this shape: callers pass canvas.nodes.values()
+ *  without this file taking a dependency on the Canvas type. */
+export function findTriggerNodeTypeId(nodes: Iterable<{ data: { node_type_id: string } }>): string | null {
+  for (const n of nodes) {
+    if (isTriggerNodeType(n.data.node_type_id)) return n.data.node_type_id;
+  }
+  return null;
 }

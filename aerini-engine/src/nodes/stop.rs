@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 pub struct StopNode;
 
@@ -34,6 +34,7 @@ impl Node for StopNode {
                 label: "In".to_string(),
                 position: PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![], // Stop has no outputs — it ends the branch
         }

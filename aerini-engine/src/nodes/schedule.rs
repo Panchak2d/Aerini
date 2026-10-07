@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 pub struct ScheduleNode;
 
@@ -46,6 +46,7 @@ impl Node for ScheduleNode {
                 label: "Triggered".to_string(),
                 position: PortPosition::Right,
                 port_type: None,
+                arity: PortArity::Single,
             }],
         }
     }

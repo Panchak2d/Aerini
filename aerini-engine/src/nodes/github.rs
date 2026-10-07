@@ -7,6 +7,31 @@ use crate::node::Node;
 
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
+fn is_valid_owner(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 39
+        && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+fn is_valid_repo(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s != "."
+        && s != ".."
+        && s.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// Accepts a positive whole number, either as a JSON number or as digits in
+/// a string (the form an expression produces).
+fn parse_issue_number(v: &Value) -> Option<u64> {
+    let n = match v {
+        Value::Number(n) => n.as_u64()?,
+        Value::String(s) if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) => s.parse().ok()?,
+        _ => return None,
+    };
+    (n > 0).then_some(n)
+}
+
 pub struct GitHubNode;
 
 #[async_trait]
@@ -64,6 +89,19 @@ impl Node for GitHubNode {
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_REPO", "repo field is required")),
         };
 
+        if !is_valid_owner(&owner) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_OWNER",
+                "owner must be 1-39 characters: letters, digits, '-' or '_'",
+            ));
+        }
+        if !is_valid_repo(&repo) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_REPO",
+                "repo must be 1-100 characters: letters, digits, '-', '_' or '.', and not '.' or '..'",
+            ));
+        }
+
         let (url, request_body) = match action {
             "create_issue" => {
                 let title = match input.input["title"].as_str().filter(|s| !s.is_empty()) {
@@ -80,7 +118,7 @@ impl Node for GitHubNode {
                 )
             }
             "add_comment" => {
-                let issue_number = match input.input["issue_number"].as_u64() {
+                let issue_number = match parse_issue_number(&input.input["issue_number"]) {
                     Some(n) => n,
                     None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ISSUE_NUMBER", "issue_number is required for add_comment")),
                 };
@@ -110,7 +148,7 @@ impl Node for GitHubNode {
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.json::<Value>().await {
+                match super::util::read_json_response_capped(resp).await {
                     Ok(v) => {
                         // GitHub returns 201 Created on success.
                         if status == 201 || status == 200 {
@@ -121,7 +159,8 @@ impl Node for GitHubNode {
                             NodeOutput::success_with_logs(v, vec![log])
                         } else {
                             let msg = v["message"].as_str().unwrap_or("unknown error").to_string();
-                            NodeOutput::failure(NodeError::unrecoverable(
+                            NodeOutput::failure(super::util::provider_error(
+                                status,
                                 "GITHUB_ERROR",
                                 format!("HTTP {}: {}", status, msg),
                             ))
@@ -140,3 +179,30 @@ impl Node for GitHubNode {
     }
 }
 
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn owner_and_repo_reject_path_characters() {
+        assert!(is_valid_owner("octo-cat_1"));
+        assert!(!is_valid_owner("../user"));
+        assert!(!is_valid_owner("a/b"));
+        assert!(!is_valid_owner(&"a".repeat(40)));
+        assert!(is_valid_repo(".github"));
+        assert!(is_valid_repo("my.repo-1_x"));
+        assert!(!is_valid_repo(".."));
+        assert!(!is_valid_repo("a/../b"));
+        assert!(!is_valid_repo("a?b"));
+    }
+
+    #[test]
+    fn issue_number_accepts_number_or_digit_string() {
+        assert_eq!(parse_issue_number(&json!(12)), Some(12));
+        assert_eq!(parse_issue_number(&json!("12")), Some(12));
+        assert_eq!(parse_issue_number(&json!(0)), None);
+        assert_eq!(parse_issue_number(&json!("1/../2")), None);
+        assert_eq!(parse_issue_number(&json!(-3)), None);
+    }
+}

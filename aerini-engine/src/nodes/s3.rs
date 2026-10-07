@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 use crate::nodes::util::{check_host_ssrf_from_url, SsrfPolicy};
 
 /// Hard cap on an S3 object's size when downloading it into memory as base64.
@@ -116,10 +116,11 @@ impl Node for S3Node {
         NodePorts {
             inputs: vec![PortDefinition {
                 id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),   label: "Out".to_string(),   position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "output".to_string(),   label: "Out".to_string(),   position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "on_error".to_string(), label: "Error".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }

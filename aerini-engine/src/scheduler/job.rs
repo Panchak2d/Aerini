@@ -111,6 +111,20 @@ pub struct ScheduledJobRow {
 const REDACTED_WEBHOOK_SECRET: &str = "<redacted>";
 
 impl ScheduledJobRow {
+    /// Discriminant of the stored trigger, matching `TriggerKind`'s serde tag.
+    /// `None` if `trigger_kind` isn't valid `TriggerKind` JSON.
+    pub fn trigger_type(&self) -> Option<String> {
+        let kind = serde_json::from_str::<TriggerKind>(&self.trigger_kind).ok()?;
+        Some(match kind {
+            TriggerKind::Interval { .. } => "interval",
+            TriggerKind::Cron { .. }     => "cron",
+            TriggerKind::Once { .. }     => "once",
+            TriggerKind::Webhook { .. }  => "webhook",
+            TriggerKind::Manual          => "manual",
+            TriggerKind::Plugin { .. }   => "plugin",
+        }.to_string())
+    }
+
     /// Returns a copy with any `Webhook` trigger's `secret` replaced by
     /// [`REDACTED_WEBHOOK_SECRET`]. Every other field, and every other
     /// trigger kind, is unchanged.
@@ -152,6 +166,9 @@ pub struct SchedulerStatusEvent {
     pub last_run_at:   Option<String>,
     pub next_run_at:   Option<String>,
     pub last_error:    Option<String>,
+    /// `"interval" | "cron" | "once" | "webhook" | "manual" | "plugin"`.
+    /// `None` when the job row is missing or its stored trigger can't be parsed.
+    pub trigger_type:  Option<String>,
     /// Full `WorkflowResult`. Populated **only** on the post-run emission inside
     /// `fire_once_with_vars` (status `"waiting"` on workflow success, `"error"`
     /// on workflow failure). `None` everywhere else this event is constructed —
@@ -180,7 +197,7 @@ pub enum SchedulerError {
     PortConflict(PortConflict),
     #[error("workflow not found")]
     WorkflowNotFound,
-    #[error("workflow is not schedulable (no Schedule or Webhook trigger)")]
+    #[error("workflow is not schedulable (no Schedule, Webhook, or trigger-plugin trigger)")]
     NotSchedulable,
     #[error("workflow is already running")]
     AlreadyRunning,
@@ -211,6 +228,17 @@ mod tests {
             last_error:    None,
             created_at:    "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn trigger_type_names_each_kind_and_is_none_for_unparseable_json() {
+        assert_eq!(row_with_trigger(&TriggerKind::Interval { secs: 5 }).trigger_type().as_deref(), Some("interval"));
+        assert_eq!(row_with_trigger(&TriggerKind::Manual).trigger_type().as_deref(), Some("manual"));
+        let plugin = TriggerKind::Plugin { type_id: "p".to_string(), config: "{}".to_string() };
+        assert_eq!(row_with_trigger(&plugin).trigger_type().as_deref(), Some("plugin"));
+        let mut bad = row_with_trigger(&TriggerKind::Manual);
+        bad.trigger_kind = "not json".to_string();
+        assert_eq!(bad.trigger_type(), None);
     }
 
     #[test]

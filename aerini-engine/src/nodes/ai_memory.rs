@@ -1,13 +1,34 @@
 use async_trait::async_trait;
+use base64::Engine as _;
 use once_cell::sync::OnceCell;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+
+use super::ai_prompt::{extract_port_attachments, SUPPORTED_ATTACHMENT_MIMES};
+
+// Sizes are decoded bytes and sit under the smallest provider request ceilings
+// (base64 adds a third): Anthropic rejects an image over 5 MB encoded, and
+// Gemini's documented inline request limit is 20 MB in total.
+const MAX_FILE_BYTES: usize = 3 * 1024 * 1024;
+const RECALL_BYTE_BUDGET: usize = 12 * 1024 * 1024;
+const MAX_SESSION_FILE_BYTES: i64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_STORED_FILES: u64 = 20;
+const DEFAULT_RECALL_FILES: u64 = 5;
+const MAX_RECALL_FILES: u64 = 20;
+
+struct StoredFile {
+    filename:  String,
+    mime_type: String,
+    data:      String,
+    size:      usize,
+    hash:      String,
+}
 
 /// AI Memory node — stores and retrieves conversation history in a local SQLite database.
 /// Enables multi-turn AI conversations where context is preserved across workflow runs.
@@ -59,7 +80,20 @@ impl AiMemoryNode {
                         seq        INTEGER NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS ai_memory_session
-                        ON ai_memory(session_id, seq);"
+                        ON ai_memory(session_id, seq);
+                    CREATE TABLE IF NOT EXISTS ai_memory_files (
+                        session_id TEXT    NOT NULL,
+                        seq        INTEGER NOT NULL,
+                        ord        INTEGER NOT NULL,
+                        filename   TEXT    NOT NULL,
+                        mime_type  TEXT    NOT NULL,
+                        data       TEXT    NOT NULL,
+                        size       INTEGER NOT NULL,
+                        hash       TEXT    NOT NULL,
+                        created_at TEXT    NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS ai_memory_files_session
+                        ON ai_memory_files(session_id, seq);"
                 ).map_err(|e| e.to_string())?;
             }
             Ok(pool)
@@ -73,7 +107,7 @@ impl Node for AiMemoryNode {
     fn display_name(&self) -> &'static str { "AI Memory" }
     fn node_type(&self) -> NodeType { NodeType::Ai }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Read from or write to persistent AI memory scoped per session, so the AI can remember past conversations." }
+    fn description(&self) -> &'static str { "Read from or write to persistent AI memory scoped per session, so the AI can remember past conversations — and, optionally, the files shared in them." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -82,8 +116,8 @@ impl Node for AiMemoryNode {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["read", "write", "append", "clear"],
-                    "description": "read: get history as messages array. write: replace history. append: add a message. clear: delete all."
+                    "enum": ["read", "write", "append", "clear", "forget_files"],
+                    "description": "read: get history as messages array. write: replace history. append: add a message. clear: delete all messages and files. forget_files: delete the session's remembered files but keep its messages."
                 },
                 "session_id": {
                     "type": "string",
@@ -98,6 +132,18 @@ impl Node for AiMemoryNode {
                     "type": "string",
                     "description": "Message content (required for write/append)"
                 },
+                "files": {
+                    "type": "string",
+                    "description": "Files to remember with this message (write/append only). An expression that resolves to a files array, e.g. {{Webhook.output.files}}. Leave blank to store no files. Stored files stay on this device until the session is cleared, they are pruned, or you use forget_files."
+                },
+                "include_files": {
+                    "type": "boolean",
+                    "description": "Return the session's remembered files in the output's 'files' array (read/append/write). Wire it to an AI node's Files port to show the model those files again. Off by default. The AI provider receives them again on every run that uses them."
+                },
+                "max_files": {
+                    "type": "number",
+                    "description": "Most files returned when include_files is on, newest first (default: 5, maximum: 20). Only files attached to messages inside the max_messages window come back, up to 12 MiB in total."
+                },
                 "max_messages": {
                     "type": "number",
                     "description": "Maximum messages to return on read (default: 20, newest first)"
@@ -105,6 +151,10 @@ impl Node for AiMemoryNode {
                 "max_stored": {
                     "type": "number",
                     "description": "Maximum messages to retain in storage per session. Oldest rows are pruned after append if exceeded (default: 1000, minimum: 1)."
+                },
+                "max_stored_files": {
+                    "type": "number",
+                    "description": "Maximum files to retain per session. Oldest files are pruned after append if exceeded (default: 20, minimum: 1). A session never keeps more than 32 MiB of files, and each file is limited to 3 MiB."
                 }
             }
         })
@@ -114,17 +164,20 @@ impl Node for AiMemoryNode {
         json!({
             "type": "object",
             "properties": {
-                "messages":   { "type": "array",  "description": "Conversation history as [{role, content}] array" },
-                "count":      { "type": "number", "description": "Number of messages in this session" },
-                "session_id": { "type": "string" }
+                "messages":      { "type": "array",  "description": "Conversation history as [{role, content}] array" },
+                "count":         { "type": "number", "description": "Number of messages in this session" },
+                "session_id":    { "type": "string" },
+                "files":         { "type": "array",  "description": "Remembered files as [{filename, mime_type, data}] — present only when include_files is on; wire it to a Files port" },
+                "files_omitted": { "type": "number", "description": "Remembered files in the message window that did not fit max_files or the size limit — present only when include_files is on" },
+                "files_removed": { "type": "number", "description": "Files deleted — forget_files only" }
             }
         })
     }
 
     fn ports(&self) -> NodePorts {
         NodePorts {
-            inputs:  vec![PortDefinition { id: "input".to_string(),  label: "In".to_string(),  position: PortPosition::Left , port_type: None }],
-            outputs: vec![PortDefinition { id: "output".to_string(), label: "Out".to_string(), position: PortPosition::Right, port_type: None }],
+            inputs:  vec![PortDefinition { id: "input".to_string(),  label: "In".to_string(),  position: PortPosition::Left , port_type: None, arity: PortArity::Single }],
+            outputs: vec![PortDefinition { id: "output".to_string(), label: "Out".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single }],
         }
     }
 
@@ -137,14 +190,17 @@ impl Node for AiMemoryNode {
             Some(s) if !s.is_empty() => s,
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_SESSION", "session_id is required")),
         };
-        let max_messages = input.input["max_messages"].as_u64().unwrap_or(20) as usize;
-        let max_stored   = input.input["max_stored"].as_u64().unwrap_or(1000).max(1) as i64;
+        let max_messages     = input.input["max_messages"].as_u64().unwrap_or(20) as usize;
+        let max_stored       = input.input["max_stored"].as_u64().unwrap_or(1000).max(1) as i64;
+        let max_stored_files = input.input["max_stored_files"].as_u64().unwrap_or(DEFAULT_MAX_STORED_FILES).clamp(1, 1000) as i64;
+        let max_files        = input.input["max_files"].as_u64().unwrap_or(DEFAULT_RECALL_FILES).clamp(1, MAX_RECALL_FILES) as usize;
+        let include_files    = input.input["include_files"].as_bool().unwrap_or(false);
 
         let pool = match self.get_pool() {
             Ok(p)  => p,
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e)),
         };
-        let conn = match pool.get() {
+        let mut conn = match pool.get() {
             Ok(c)  => c,
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e.to_string())),
         };
@@ -154,10 +210,14 @@ impl Node for AiMemoryNode {
                 match read_messages(&conn, session_id, max_messages) {
                     Ok(msgs) => {
                         let count = msgs.len();
-                        NodeOutput::success_with_logs(
-                            json!({ "messages": msgs, "count": count, "session_id": session_id }),
-                            vec![format!("Read {} messages from session '{}'", count, session_id)],
-                        )
+                        let mut out  = json!({ "messages": msgs, "count": count, "session_id": session_id });
+                        let mut logs = vec![format!("Read {} messages from session '{}'", count, session_id)];
+                        if include_files {
+                            if let Err(e) = recall_into(&conn, session_id, max_messages, max_files, &mut out, &mut logs) {
+                                return NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e));
+                            }
+                        }
+                        NodeOutput::success_with_logs(out, logs)
                     }
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e)),
                 }
@@ -172,38 +232,21 @@ impl Node for AiMemoryNode {
                     Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for append")),
                 };
-                let seq = match get_next_seq(&conn, session_id) {
-                    Ok(s) => s,
-                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "WRITE_ERROR", format!("failed to determine next sequence number: {}", e),
-                    )),
-                };
-                let now = chrono::Utc::now().to_rfc3339();
-                match conn.execute(
-                    "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![session_id, role, content, now, seq],
-                ) {
-                    Ok(_) => {
-                        // Prune oldest rows if session exceeds max_stored cap.
-                        let _ = conn.execute(
-                            "DELETE FROM ai_memory \
-                             WHERE session_id = ?1 \
-                               AND seq NOT IN ( \
-                                 SELECT seq FROM ai_memory \
-                                 WHERE session_id = ?1 \
-                                 ORDER BY seq DESC LIMIT ?2 \
-                               )",
-                            params![session_id, max_stored],
-                        );
-                        let msgs  = read_messages(&conn, session_id, max_messages).unwrap_or_default();
-                        let count = msgs.len();
-                        NodeOutput::success_with_logs(
-                            json!({ "messages": msgs, "count": count, "session_id": session_id }),
-                            vec![format!("Appended {} message to session '{}'", role, session_id)],
-                        )
-                    }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e.to_string())),
+                let (files, mut logs) = prepare_files(&extract_port_attachments(&input.input["files"]));
+                if let Err(e) = append_message(&mut conn, session_id, role, content, &files, max_stored, max_stored_files) {
+                    return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
                 }
+                let msgs  = read_messages(&conn, session_id, max_messages).unwrap_or_default();
+                let count = msgs.len();
+                let mut out = json!({ "messages": msgs, "count": count, "session_id": session_id });
+                logs.push(format!("Appended {} message to session '{}'", role, session_id));
+                if !files.is_empty() {
+                    logs.push(format!("Stored {} file(s) with the message", files.len()));
+                }
+                if include_files {
+                    recall_after_commit(&conn, session_id, max_messages, max_files, &mut out, &mut logs);
+                }
+                NodeOutput::success_with_logs(out, logs)
             }
 
             "write" => {
@@ -215,41 +258,44 @@ impl Node for AiMemoryNode {
                     Some(c) if !c.is_empty() => c,
                     _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for write")),
                 };
-                // This DELETE's error must propagate like the INSERT error below does —
-                // discarding it would let a DB failure (lock contention, I/O error) fall
-                // through to the INSERT, leaving old row(s) in place alongside the new one
-                // while reporting success, silently breaking "write replaces this session's history".
-                if let Err(e) = conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]) {
-                    return NodeOutput::failure(NodeError::unrecoverable(
-                        "WRITE_ERROR", format!("failed to clear previous messages: {}", e),
-                    ));
+                let (files, mut logs) = prepare_files(&extract_port_attachments(&input.input["files"]));
+                if let Err(e) = replace_history(&mut conn, session_id, role, content, &files, max_stored_files) {
+                    return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
                 }
-                let now = chrono::Utc::now().to_rfc3339();
-                match conn.execute(
-                    "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, 0)",
-                    params![session_id, role, content, now],
-                ) {
-                    Ok(_) => NodeOutput::success_with_logs(
-                        json!({ "messages": [{"role": role, "content": content}], "count": 1, "session_id": session_id }),
-                        vec![format!("Wrote 1 message to session '{}'", session_id)],
-                    ),
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e.to_string())),
+                let mut out = json!({ "messages": [{"role": role, "content": content}], "count": 1, "session_id": session_id });
+                logs.push(format!("Wrote 1 message to session '{}'", session_id));
+                if !files.is_empty() {
+                    logs.push(format!("Stored {} file(s) with the message", files.len()));
                 }
+                if include_files {
+                    recall_after_commit(&conn, session_id, max_messages, max_files, &mut out, &mut logs);
+                }
+                NodeOutput::success_with_logs(out, logs)
             }
 
             "clear" => {
-                match conn.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id]) {
-                    Ok(n) => NodeOutput::success_with_logs(
+                match clear_session(&mut conn, session_id) {
+                    Ok((messages, files)) => NodeOutput::success_with_logs(
                         json!({ "messages": [], "count": 0, "session_id": session_id }),
-                        vec![format!("Cleared {} messages from session '{}'", n, session_id)],
+                        vec![format!("Cleared {} messages and {} files from session '{}'", messages, files, session_id)],
                     ),
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("CLEAR_ERROR", e.to_string())),
+                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("CLEAR_ERROR", e)),
+                }
+            }
+
+            "forget_files" => {
+                match conn.execute("DELETE FROM ai_memory_files WHERE session_id = ?1", params![session_id]) {
+                    Ok(n) => NodeOutput::success_with_logs(
+                        json!({ "session_id": session_id, "files_removed": n }),
+                        vec![format!("Removed {} files from session '{}'", n, session_id)],
+                    ),
+                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("FORGET_ERROR", e.to_string())),
                 }
             }
 
             other => NodeOutput::failure(NodeError::unrecoverable(
                 "INVALID_OP",
-                format!("Unknown operation '{}'. Use: read, write, append, clear", other),
+                format!("Unknown operation '{}'. Use: read, write, append, clear, forget_files", other),
             )),
         }
     }
@@ -279,6 +325,283 @@ fn get_next_seq(conn: &Connection, session_id: &str) -> Result<i64, String> {
     ).map_err(|e| e.to_string())
 }
 
+/// Validates the raw `files` items the same way `process_attachments` will
+/// read them back. A bad item is skipped with a log line and never blocks the
+/// message itself, so a conversation turn is not lost over one attachment.
+fn prepare_files(raw: &[Value]) -> (Vec<StoredFile>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut logs  = Vec::new();
+    for att in raw {
+        let filename = att["filename"].as_str().unwrap_or("file").to_string();
+        let mime     = att["mime_type"].as_str().unwrap_or("");
+        let data     = att["data"].as_str().unwrap_or("");
+
+        if data.is_empty() {
+            logs.push(format!("Skipped file '{}': missing data", filename));
+            continue;
+        }
+        if mime.is_empty() {
+            logs.push(format!("Skipped file '{}': missing mime_type", filename));
+            continue;
+        }
+        if !SUPPORTED_ATTACHMENT_MIMES.contains(&mime) {
+            logs.push(format!("Skipped file '{}': unsupported type '{}'", filename, mime));
+            continue;
+        }
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+            Ok(b)  => b,
+            Err(_) => {
+                logs.push(format!("Skipped file '{}': invalid base64 data", filename));
+                continue;
+            }
+        };
+        if bytes.len() > MAX_FILE_BYTES {
+            logs.push(format!("Skipped file '{}': larger than {} MiB", filename, MAX_FILE_BYTES / (1024 * 1024)));
+            continue;
+        }
+        if mime.starts_with("text/") && std::str::from_utf8(&bytes).is_err() {
+            logs.push(format!("Skipped file '{}': not valid UTF-8 text", filename));
+            continue;
+        }
+        files.push(StoredFile {
+            filename,
+            mime_type: mime.to_string(),
+            data:      data.to_string(),
+            size:      bytes.len(),
+            hash:      blake3::hash(&bytes).to_hex().to_string(),
+        });
+    }
+    (files, logs)
+}
+
+/// The message and its files are written in one write transaction so a
+/// concurrent append cannot take the same `seq`, which would attach files to
+/// the wrong message.
+fn append_message(
+    conn: &mut Connection,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    files: &[StoredFile],
+    max_stored: i64,
+    max_stored_files: i64,
+) -> Result<(), String> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let seq = get_next_seq(&tx, session_id)
+        .map_err(|e| format!("failed to determine next sequence number: {}", e))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_id, role, content, now, seq],
+    ).map_err(|e| e.to_string())?;
+    store_files(&tx, session_id, seq, files, max_stored_files)?;
+    // Prune oldest rows if session exceeds max_stored cap.
+    let _ = tx.execute(
+        "DELETE FROM ai_memory \
+         WHERE session_id = ?1 \
+           AND seq NOT IN ( \
+             SELECT seq FROM ai_memory \
+             WHERE session_id = ?1 \
+             ORDER BY seq DESC LIMIT ?2 \
+           )",
+        params![session_id, max_stored],
+    );
+    tx.execute(
+        "DELETE FROM ai_memory_files \
+         WHERE session_id = ?1 \
+           AND seq NOT IN (SELECT seq FROM ai_memory WHERE session_id = ?1)",
+        params![session_id],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn replace_history(
+    conn: &mut Connection,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    files: &[StoredFile],
+    max_stored_files: i64,
+) -> Result<(), String> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    // These DELETEs' errors must propagate: discarding one would let a DB failure
+    // (lock contention, I/O error) fall through to the INSERT, leaving old rows in
+    // place alongside the new one while reporting success, silently breaking
+    // "write replaces this session's history".
+    tx.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id])
+        .map_err(|e| format!("failed to clear previous messages: {}", e))?;
+    tx.execute("DELETE FROM ai_memory_files WHERE session_id = ?1", params![session_id])
+        .map_err(|e| format!("failed to clear previous files: {}", e))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO ai_memory (session_id, role, content, created_at, seq) VALUES (?1, ?2, ?3, ?4, 0)",
+        params![session_id, role, content, now],
+    ).map_err(|e| e.to_string())?;
+    store_files(&tx, session_id, 0, files, max_stored_files)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Messages and files go together: a half-cleared session would keep re-sending
+/// files the user believes are gone.
+fn clear_session(conn: &mut Connection, session_id: &str) -> Result<(usize, usize), String> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let messages = tx.execute("DELETE FROM ai_memory WHERE session_id = ?1", params![session_id])
+        .map_err(|e| e.to_string())?;
+    let files = tx.execute("DELETE FROM ai_memory_files WHERE session_id = ?1", params![session_id])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((messages, files))
+}
+
+/// A file whose bytes the session already holds moves to its newest message
+/// instead of being stored twice, so re-attaching a file each turn costs no
+/// extra space and an older message's pruning cannot take it away.
+fn store_files(
+    conn: &Connection,
+    session_id: &str,
+    seq: i64,
+    files: &[StoredFile],
+    max_stored_files: i64,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for (ord, f) in files.iter().enumerate() {
+        conn.execute(
+            "DELETE FROM ai_memory_files WHERE session_id = ?1 AND hash = ?2",
+            params![session_id, f.hash],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO ai_memory_files (session_id, seq, ord, filename, mime_type, data, size, hash, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![session_id, seq, ord as i64, f.filename, f.mime_type, f.data, f.size as i64, f.hash, now],
+        ).map_err(|e| e.to_string())?;
+    }
+    prune_files(conn, session_id, max_stored_files)
+}
+
+/// Keeps the newest files within the count and byte caps. Once one file is
+/// over a cap, every older file goes too, so what survives is always a
+/// contiguous run of the most recent files.
+fn prune_files(conn: &Connection, session_id: &str, max_stored_files: i64) -> Result<(), String> {
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT rowid, size FROM ai_memory_files WHERE session_id = ?1 ORDER BY seq DESC, ord DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![session_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let mut kept  = 0_i64;
+    let mut total = 0_i64;
+    let mut full  = false;
+    for (rowid, size) in rows {
+        if !full && kept < max_stored_files && total + size <= MAX_SESSION_FILE_BYTES {
+            kept  += 1;
+            total += size;
+        } else {
+            full = true;
+            conn.execute("DELETE FROM ai_memory_files WHERE rowid = ?1", params![rowid])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Adds `files` and `files_omitted` to `out`. Only files attached to messages
+/// inside the returned message window are considered, so a model never sees a
+/// file whose conversation turn has dropped out of view. Selection runs over
+/// metadata first, so file data is read only for the files actually returned.
+fn recall_into(
+    conn: &Connection,
+    session_id: &str,
+    max_messages: usize,
+    max_files: usize,
+    out: &mut Value,
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let floor: Option<i64> = tx.query_row(
+        "SELECT MIN(seq) FROM (SELECT seq FROM ai_memory WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2)",
+        params![session_id, max_messages as i64],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    let mut chosen:  Vec<i64> = Vec::new();
+    let mut omitted: usize    = 0;
+    let mut bytes:   usize    = 0;
+    if let Some(floor) = floor {
+        let mut stmt = tx.prepare(
+            "SELECT rowid, size FROM ai_memory_files \
+             WHERE session_id = ?1 AND seq >= ?2 ORDER BY seq DESC, ord DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![session_id, floor], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as usize))
+        }).map_err(|e| e.to_string())?
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(|e| e.to_string())?;
+        let mut full = false;
+        for (rowid, size) in rows {
+            if !full && chosen.len() < max_files && bytes + size <= RECALL_BYTE_BUDGET {
+                chosen.push(rowid);
+                bytes += size;
+            } else {
+                full = true;
+                omitted += 1;
+            }
+        }
+    }
+
+    chosen.reverse();
+    let mut files = Vec::with_capacity(chosen.len());
+    for rowid in &chosen {
+        let file = tx.query_row(
+            "SELECT filename, mime_type, data FROM ai_memory_files WHERE rowid = ?1",
+            params![rowid],
+            |row| Ok(json!({
+                "filename":  row.get::<_, String>(0)?,
+                "mime_type": row.get::<_, String>(1)?,
+                "data":      row.get::<_, String>(2)?,
+            })),
+        ).map_err(|e| e.to_string())?;
+        files.push(file);
+    }
+
+    if !files.is_empty() {
+        logs.push(format!(
+            "Recalled {} file(s), {} KiB, from session '{}'; the AI provider receives them each time a node sends them",
+            files.len(), bytes / 1024, session_id,
+        ));
+    }
+    if omitted > 0 {
+        logs.push(format!("{} older file(s) did not fit the file limits and were left out", omitted));
+    }
+    out["files"]         = Value::Array(files);
+    out["files_omitted"] = json!(omitted);
+    Ok(())
+}
+
+/// After append or write has committed, a failed recall must not fail the
+/// operation: the message is already stored, so a retry would duplicate it.
+/// The output then carries no files and the log says why.
+fn recall_after_commit(
+    conn: &Connection,
+    session_id: &str,
+    max_messages: usize,
+    max_files: usize,
+    out: &mut Value,
+    logs: &mut Vec<String>,
+) {
+    if let Err(e) = recall_into(conn, session_id, max_messages, max_files, out, logs) {
+        out["files"]         = json!([]);
+        out["files_omitted"] = json!(0);
+        logs.push(format!("Could not recall files from session '{}': {}", session_id, e));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +627,10 @@ mod tests {
         let mut body = json!({ "operation": operation, "session_id": session_id });
         if let Some(r) = role    { body["role"]    = json!(r); }
         if let Some(c) = content { body["content"] = json!(c); }
+        input_from_body(body)
+    }
+
+    fn input_from_body(body: Value) -> NodeInput {
         NodeInput {
             resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
@@ -593,5 +920,376 @@ mod tests {
 
         cleanup(&path);
     }
-}
 
+    fn input_with(operation: &str, session_id: &str, extra: Value) -> NodeInput {
+        let mut body = json!({ "operation": operation, "session_id": session_id });
+        for (k, v) in extra.as_object().expect("extra must be a JSON object") {
+            body[k.as_str()] = v.clone();
+        }
+        input_from_body(body)
+    }
+
+    fn file_obj(name: &str, mime: &str, bytes: &[u8]) -> Value {
+        use base64::Engine as _;
+        json!({
+            "filename":  name,
+            "mime_type": mime,
+            "data":      base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    async fn append_with_files(node: &AiMemoryNode, session_id: &str, content: &str, files: Vec<Value>, extra: Value) -> NodeOutput {
+        let mut body = json!({ "role": "user", "content": content, "files": files });
+        for (k, v) in extra.as_object().expect("extra must be a JSON object") {
+            body[k.as_str()] = v.clone();
+        }
+        let out = node.execute(input_with("append", session_id, body)).await;
+        assert!(out.success, "append '{}' failed: {:?}", content, out.error);
+        out
+    }
+
+    async fn read_with_files(node: &AiMemoryNode, session_id: &str, extra: Value) -> Value {
+        let mut body = json!({ "include_files": true });
+        for (k, v) in extra.as_object().expect("extra must be a JSON object") {
+            body[k.as_str()] = v.clone();
+        }
+        let out = node.execute(input_with("read", session_id, body)).await;
+        assert!(out.success, "read failed: {:?}", out.error);
+        out.output.unwrap()
+    }
+
+    fn file_names(out: &Value) -> Vec<String> {
+        out["files"].as_array().expect("files must be an array")
+            .iter().map(|f| f["filename"].as_str().unwrap_or("").to_string()).collect()
+    }
+
+    fn file_count(node: &AiMemoryNode, session_id: &str) -> i64 {
+        let conn = node.get_pool().expect("pool init failed").get().expect("get conn failed");
+        conn.query_row(
+            "SELECT COUNT(*) FROM ai_memory_files WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        ).expect("count query failed")
+    }
+
+    #[tokio::test]
+    async fn remembered_files_come_back_in_chronological_order_when_included() {
+        let path = temp_db_path("files_roundtrip");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "here is a", vec![file_obj("a.txt", "text/plain", b"alpha")], json!({})).await;
+        // The executor hands a resolved expression to the node as a JSON string.
+        let second = node.execute(input_with("append", "s", json!({
+            "role": "user", "content": "here is b", "include_files": true,
+            "files": json!([file_obj("b.txt", "text/plain", b"beta")]).to_string(),
+        }))).await;
+        assert!(second.success, "append with a string-form files value failed: {:?}", second.error);
+        assert_eq!(
+            file_names(&second.output.unwrap()), vec!["a.txt", "b.txt"],
+            "append must return the files it just stored alongside the earlier ones"
+        );
+
+        let out = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(file_names(&out), vec!["a.txt", "b.txt"]);
+        assert_eq!(out["files"][0]["mime_type"], "text/plain");
+        assert_eq!(out["files"][0]["data"], file_obj("a.txt", "text/plain", b"alpha")["data"]);
+        assert_eq!(out["files_omitted"], 0);
+        assert_eq!(
+            out["messages"][0], json!({ "role": "user", "content": "here is a" }),
+            "messages must stay plain {{role, content}} pairs"
+        );
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn text_only_session_stores_no_files_and_default_read_shape_is_unchanged() {
+        let path = temp_db_path("files_opt_in");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let out = node.execute(make_input("append", "s", Some("user"), Some("hi"))).await;
+        assert!(out.success, "append failed: {:?}", out.error);
+        assert_eq!(file_count(&node, "s"), 0, "nothing is stored unless the files input is given");
+
+        let plain = node.execute(make_input("read", "s", None, None)).await.output.unwrap();
+        assert!(plain.get("files").is_none() && plain.get("files_omitted").is_none(),
+            "files keys appear only when include_files is on, got: {}", plain);
+
+        let with = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(with["files"], json!([]));
+        assert_eq!(with["files_omitted"], 0);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn invalid_files_are_skipped_and_the_message_is_still_stored() {
+        let path = temp_db_path("files_invalid");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let too_big = vec![1u8; 3 * 1024 * 1024 + 1];
+        let out = append_with_files(&node, "s", "turn", vec![
+            file_obj("x.exe", "application/octet-stream", b"zz"),
+            json!({ "filename": "bad.txt", "mime_type": "text/plain", "data": "not-valid-base64!!!" }),
+            file_obj("big.png", "image/png", &too_big),
+            file_obj("latin.txt", "text/plain", &[0xff, 0xfe, 0xfd]),
+            json!({ "filename": "nodata.png", "mime_type": "image/png" }),
+            file_obj("ok.txt", "text/plain", b"fine"),
+        ], json!({})).await;
+
+        assert_eq!(out.output.unwrap()["count"], 1, "the message must be stored");
+        assert_eq!(file_count(&node, "s"), 1, "only the valid file is stored");
+        assert_eq!(out.logs.iter().filter(|l| l.starts_with("Skipped file")).count(), 5);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn re_attaching_the_same_file_keeps_one_copy_at_its_newest_position() {
+        let path = temp_db_path("files_dedupe");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "m1", vec![file_obj("a.txt", "text/plain", b"alpha")], json!({})).await;
+        append_with_files(&node, "s", "m2", vec![file_obj("b.txt", "text/plain", b"beta")], json!({})).await;
+        append_with_files(&node, "s", "m3", vec![file_obj("a-again.txt", "text/plain", b"alpha")], json!({})).await;
+
+        assert_eq!(file_count(&node, "s"), 2, "identical bytes must not be stored twice");
+        let out = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(file_names(&out), vec!["b.txt", "a-again.txt"]);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn recall_returns_the_newest_max_files_and_reports_the_rest_as_omitted() {
+        let path = temp_db_path("files_recall_count");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        for i in 0..7 {
+            append_with_files(
+                &node, "s", &format!("m{}", i),
+                vec![file_obj(&format!("f{}.txt", i), "text/plain", format!("body-{}", i).as_bytes())],
+                json!({}),
+            ).await;
+        }
+
+        let default = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(file_names(&default), vec!["f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt"], "default max_files is 5");
+        assert_eq!(default["files_omitted"], 2);
+
+        let two = read_with_files(&node, "s", json!({ "max_files": 2 })).await;
+        assert_eq!(file_names(&two), vec!["f5.txt", "f6.txt"]);
+        assert_eq!(two["files_omitted"], 5);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn recall_stops_at_the_byte_budget_without_skipping_a_newer_file_for_an_older_one() {
+        let path = temp_db_path("files_recall_bytes");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        for i in 0..5u8 {
+            let bytes = vec![i; 3 * 1024 * 1024];
+            append_with_files(&node, "s", &format!("m{}", i), vec![file_obj(&format!("f{}.png", i), "image/png", &bytes)], json!({})).await;
+        }
+
+        let out = read_with_files(&node, "s", json!({ "max_files": 20 })).await;
+        assert_eq!(
+            file_names(&out), vec!["f1.png", "f2.png", "f3.png", "f4.png"],
+            "five 3 MiB files exceed the 12 MiB recall budget, so the oldest is left out"
+        );
+        assert_eq!(out["files_omitted"], 1);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn session_file_storage_never_exceeds_the_byte_cap() {
+        let path = temp_db_path("files_session_cap");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        for i in 0..12u8 {
+            let bytes = vec![i; 3 * 1024 * 1024];
+            append_with_files(
+                &node, "s", &format!("m{}", i),
+                vec![file_obj(&format!("f{}.png", i), "image/png", &bytes)],
+                json!({ "max_stored_files": 100 }),
+            ).await;
+        }
+
+        assert_eq!(file_count(&node, "s"), 10, "twelve 3 MiB files exceed the 32 MiB cap, leaving the newest ten");
+        let conn = node.get_pool().expect("pool init failed").get().expect("get conn failed");
+        let oldest: String = conn.query_row(
+            "SELECT filename FROM ai_memory_files WHERE session_id = 's' ORDER BY seq ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ).expect("oldest query failed");
+        assert_eq!(oldest, "f2.png", "the cap drops the oldest files first");
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn max_stored_files_prunes_the_oldest_files() {
+        let path = temp_db_path("files_max_stored");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        for i in 0..3 {
+            append_with_files(
+                &node, "s", &format!("m{}", i),
+                vec![file_obj(&format!("f{}.txt", i), "text/plain", format!("body-{}", i).as_bytes())],
+                json!({ "max_stored_files": 2 }),
+            ).await;
+        }
+
+        assert_eq!(file_count(&node, "s"), 2);
+        let out = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(file_names(&out), vec!["f1.txt", "f2.txt"]);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn files_outside_the_message_window_are_not_returned() {
+        let path = temp_db_path("files_window");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "m0", vec![file_obj("old.txt", "text/plain", b"old")], json!({})).await;
+        for i in 1..4 {
+            let out = node.execute(make_input("append", "s", Some("user"), Some(&format!("m{}", i)))).await;
+            assert!(out.success, "append failed: {:?}", out.error);
+        }
+
+        let narrow = read_with_files(&node, "s", json!({ "max_messages": 2 })).await;
+        assert_eq!(narrow["files"], json!([]), "the file's message is outside the 2-message window");
+        assert_eq!(narrow["files_omitted"], 0);
+
+        let wide = read_with_files(&node, "s", json!({ "max_messages": 10 })).await;
+        assert_eq!(file_names(&wide), vec!["old.txt"]);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn pruning_old_messages_removes_their_files() {
+        let path = temp_db_path("files_message_prune");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "m0", vec![file_obj("gone.txt", "text/plain", b"gone")], json!({ "max_stored": 2 })).await;
+        append_with_files(&node, "s", "m1", vec![], json!({ "max_stored": 2 })).await;
+        append_with_files(&node, "s", "m2", vec![file_obj("kept.txt", "text/plain", b"kept")], json!({ "max_stored": 2 })).await;
+
+        assert_eq!(file_count(&node, "s"), 1);
+        let out = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(out["count"], 2, "m0 was pruned");
+        assert_eq!(file_names(&out), vec!["kept.txt"], "the pruned message's file goes with it");
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn clear_removes_the_sessions_files_and_leaves_other_sessions_alone() {
+        let path = temp_db_path("files_clear_scoped");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "session-a", "hi", vec![file_obj("a.txt", "text/plain", b"alpha")], json!({})).await;
+        append_with_files(&node, "session-b", "hi", vec![file_obj("b.txt", "text/plain", b"beta")], json!({})).await;
+
+        let cleared = node.execute(make_input("clear", "session-a", None, None)).await;
+        assert!(cleared.success, "clear failed: {:?}", cleared.error);
+
+        assert_eq!(file_count(&node, "session-a"), 0);
+        let b = read_with_files(&node, "session-b", json!({})).await;
+        assert_eq!(file_names(&b), vec!["b.txt"], "session-b's files must survive session-a's clear");
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn clear_that_fails_on_files_leaves_the_messages_in_place() {
+        let path = temp_db_path("files_clear_atomic");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "hi", vec![file_obj("a.txt", "text/plain", b"alpha")], json!({})).await;
+        {
+            let conn = node.get_pool().expect("pool init failed").get().expect("get conn failed");
+            conn.execute_batch(
+                "CREATE TRIGGER block_file_delete BEFORE DELETE ON ai_memory_files
+                 BEGIN SELECT RAISE(ABORT, 'file delete blocked for test'); END;"
+            ).expect("trigger install failed");
+        }
+
+        let out = node.execute(make_input("clear", "s", None, None)).await;
+        assert!(!out.success, "clear must fail when the file delete fails");
+        assert_eq!(out.error.unwrap().code, "CLEAR_ERROR");
+
+        let read = node.execute(make_input("read", "s", None, None)).await.output.unwrap();
+        assert_eq!(read["count"], 1, "messages and files are cleared together or not at all");
+        assert_eq!(file_count(&node, "s"), 1);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn write_replaces_files_along_with_history() {
+        let path = temp_db_path("files_write_replaces");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "old turn", vec![file_obj("old.txt", "text/plain", b"old")], json!({})).await;
+        let written = node.execute(input_with("write", "s", json!({
+            "role": "system", "content": "fresh start", "include_files": true,
+            "files": [file_obj("new.txt", "text/plain", b"new")],
+        }))).await;
+        assert!(written.success, "write failed: {:?}", written.error);
+        assert_eq!(file_names(&written.output.unwrap()), vec!["new.txt"]);
+
+        let out = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(out["count"], 1);
+        assert_eq!(file_names(&out), vec!["new.txt"], "write must drop the previous history's files");
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn forget_files_removes_files_but_keeps_messages() {
+        let path = temp_db_path("files_forget");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        append_with_files(&node, "s", "hi", vec![file_obj("a.txt", "text/plain", b"alpha")], json!({})).await;
+
+        let out = node.execute(make_input("forget_files", "s", None, None)).await;
+        assert!(out.success, "forget_files failed: {:?}", out.error);
+        assert_eq!(out.output.unwrap()["files_removed"], 1);
+
+        assert_eq!(file_count(&node, "s"), 0);
+        let read = read_with_files(&node, "s", json!({})).await;
+        assert_eq!(read["count"], 1, "the conversation itself must remain");
+        assert_eq!(read["files"], json!([]));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn output_schema_declares_files_so_the_canvas_wires_them_to_a_files_port() {
+        let node = AiMemoryNode::new(temp_db_path("files_schema"));
+        assert!(
+            node.output_schema()["properties"].get("files").is_some(),
+            "Canvas injects {{{{Node.output.files}}}} for a Files port only when the source declares a files output"
+        );
+    }
+}

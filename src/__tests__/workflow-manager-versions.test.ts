@@ -32,12 +32,12 @@ function makeManager() {
   const confirm   = vi.fn().mockResolvedValue(true);
   const canvas = {
     nodes: new Map(), connectors: new Map(),
-    clearSelection: vi.fn(), fitToScreen: vi.fn(),
+    clearSelection: vi.fn(), fitToScreen: vi.fn(), warnArityViolations: vi.fn(),
   } as unknown as Canvas;
   const mgr = new WorkflowManager(canvas, { onUnsaved, onTitle, onStatus, onToast, confirm });
   mgr.currentId = "wf-1";
   mgr.currentName = "Test Workflow";
-  return { mgr, onToast, onTitle, onUnsaved };
+  return { mgr, onToast, onTitle, onUnsaved, canvas };
 }
 
 function setTauri(on: boolean): void {
@@ -127,9 +127,10 @@ describe("restoreVersion", () => {
     ipcMocks.saveVersion.mockResolvedValue(undefined);
     const snapshot = serialize("wf-old", "Restored Name", new Map(), new Map(), undefined, undefined, undefined, ["archived"]);
     ipcMocks.getVersion.mockResolvedValue(snapshot);
-    const { mgr, onTitle, onUnsaved } = makeManager();
+    const { mgr, onTitle, onUnsaved, canvas } = makeManager();
 
     const result = await mgr.restoreVersion("v1");
+    expect(canvas.warnArityViolations).toHaveBeenCalledOnce();
 
     expect(ipcMocks.saveVersion).toHaveBeenCalledWith("wf-1", '{"id":"wf-1","name":"Before"}', "Before restore");
     expect(result).toEqual({ id: "wf-old", name: "Restored Name" });

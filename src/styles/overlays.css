@@ -212,6 +212,17 @@
 .btn-sm { padding: 4px 10px; background: var(--bg4); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 12px; font-family: inherit; cursor: pointer; transition: background var(--trans), border-color var(--trans); white-space: nowrap; }
 .btn-sm:hover { background: var(--bg3); border-color: var(--t3); }
 .btn-sm:disabled { opacity: .4; cursor: not-allowed; }
+.btn-sm-primary { background: var(--color-action-nav); border-color: transparent; color: var(--color-on-action); font-weight: 600; }
+.btn-sm-primary:hover { background: var(--color-action-nav); border-color: transparent; opacity: .88; }
+
+.update-row-body { flex: 1; min-width: 0; }
+.update-progress-wrap { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.update-progress-wrap[hidden] { display: none; }
+.update-progress { flex: 1; min-width: 0; height: 6px; appearance: none; -webkit-appearance: none; border: none; border-radius: 3px; background: var(--bg4); overflow: hidden; }
+.update-progress::-webkit-progress-bar { background: var(--bg4); border-radius: 3px; }
+.update-progress::-webkit-progress-value { background: var(--blue); border-radius: 3px; transition: width 120ms linear; }
+.update-progress::-moz-progress-bar { background: var(--blue); border-radius: 3px; }
+.update-percent { font-size: 11px; color: var(--t2); min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
 
 .settings-warn { color: var(--amber); }
 .settings-path-display { font-size: 11px; color: var(--t2); margin-top: 1px; font-family: monospace; word-break: break-all; }

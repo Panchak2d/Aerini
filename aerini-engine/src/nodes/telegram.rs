@@ -70,7 +70,7 @@ impl Node for TelegramNode {
         match super::shared_http_client().post(&url).json(&body).send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.json::<Value>().await {
+                match super::util::read_json_response_capped(resp).await {
                     Ok(v) => {
                         if v["ok"].as_bool() == Some(true) {
                             let result = v["result"].clone();
@@ -81,10 +81,11 @@ impl Node for TelegramNode {
                             )
                         } else {
                             let description = v["description"].as_str().unwrap_or("unknown error").to_string();
-                            NodeOutput::failure(NodeError::unrecoverable("TELEGRAM_ERROR", description))
+                            NodeOutput::failure(super::util::provider_error(status, "TELEGRAM_ERROR", description))
                         }
                     }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable(
+                    Err(e) => NodeOutput::failure(super::util::provider_error(
+                        status,
                         "PARSE_ERROR",
                         format!("HTTP {}: {}", status, e),
                     )),

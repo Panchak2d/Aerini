@@ -17,13 +17,14 @@ path = "src/main.rs"
 aerini-engine = { path = "../aerini-engine" }
 
 # Tauri
-tauri              = { version = "2.0", features = ["tray-icon"] }
-tauri-plugin-dialog   = "2.0"
+tauri              = { version = "2.12", features = ["tray-icon"] }
+tauri-plugin-dialog   = "2.8"
+tauri-plugin-opener   = "2.7"
 # tauri-plugin-fs is used Rust-side only (std::fs in lib.rs commands).
 # No fs:allow-* capabilities are granted in capabilities/default.json — the webview
 # has no filesystem access. Do not add webview fs capabilities without security review.
-tauri-plugin-fs       = "2.0"
-tauri-plugin-autostart = "2.0"
+tauri-plugin-fs       = "2.6"
+tauri-plugin-autostart = "2.7"
 
 # Async (needed for spawn_blocking wrappers in tauri commands)
 tokio      = { version = "1.0", features = ["full"] }
@@ -61,10 +62,6 @@ ed25519-dalek = { version = "3.0.0", default-features = false }
 # Structured logging — used for plugin_dir warnings in setup
 tracing = "0.1"
 
-# HTTP client for the manual "Check for Updates" GitHub Releases lookup (About section)
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
-url     = "2"
-
 # Process-wide RSS for the Monitor panel's primary Memory stat — see
 # commands/memory.rs::get_process_memory. default-features = false + only
 # "system": trims the "component"/"disk"/"network"/"user" families that
@@ -84,4 +81,10 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 tempfile = "3"
 
 [build-dependencies]
-tauri-build = { version = "2.0", features = [] }
+tauri-build = { version = "2.7", features = [] }
+
+# The updater is desktop-only. It is registered Rust-side only: no updater permission is
+# granted in capabilities/default.json and there is no @tauri-apps/plugin-updater npm
+# dependency, so the webview cannot reach the plugin directly.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2.13"

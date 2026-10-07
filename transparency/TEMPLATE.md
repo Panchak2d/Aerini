@@ -32,7 +32,7 @@ Activation threshold ($500/month): [MET / NOT YET MET]
 
 ## Allocation
 
-Based on the percentages in [REWARDS.md](REWARDS.md):
+Based on the percentages in [REWARDS.md](../REWARDS.md):
 
 | Category | % | Amount |
 |----------|---|--------|

@@ -51,7 +51,10 @@ impl Node for FileNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_PATH", "path is required")),
         };
 
-        if raw_path.contains("..") {
+        if std::path::Path::new(&raw_path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "INVALID_PATH",
                 "Path traversal sequences (..) are not permitted",
@@ -169,7 +172,12 @@ impl Node for FileNode {
                     )),
                 };
                 if let Some(parent) = std::path::Path::new(&path).parent() {
-                    let _ = fs::create_dir_all(parent).await;
+                    if let Err(e) = fs::create_dir_all(parent).await {
+                        return NodeOutput::failure(NodeError::unrecoverable(
+                            "WRITE_ERR",
+                            format!("Cannot create directory '{}': {}", parent.display(), e),
+                        ));
+                    }
                 }
                 match fs::write(&path, &bytes).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("WRITE_ERR", e.to_string())),
@@ -189,7 +197,12 @@ impl Node for FileNode {
                 };
                 // Append must create missing parent directories too, matching "write" above.
                 if let Some(parent) = std::path::Path::new(&path).parent() {
-                    let _ = fs::create_dir_all(parent).await;
+                    if let Err(e) = fs::create_dir_all(parent).await {
+                        return NodeOutput::failure(NodeError::unrecoverable(
+                            "APPEND_ERR",
+                            format!("Cannot create directory '{}': {}", parent.display(), e),
+                        ));
+                    }
                 }
                 match tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
@@ -214,7 +227,7 @@ impl Node for FileNode {
                 }
             }
             "exists" => {
-                let exists = std::path::Path::new(&path).exists();
+                let exists = fs::try_exists(&path).await.unwrap_or(false);
                 NodeOutput::success(json!({ "exists": exists, "path": path }))
             }
             _ => NodeOutput::failure(NodeError::unrecoverable("INVALID_OP", format!("Unknown operation: {}", operation))),
@@ -550,5 +563,41 @@ mod tests {
         assert!(result.success, "expected success, got: {:?}", result.error);
         assert_eq!(result.output.as_ref().unwrap()["exists"], false);
     }
-}
 
+    #[tokio::test]
+    async fn dots_inside_a_filename_are_allowed_but_parent_components_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok_path = dir.path().join("report..final.txt");
+        let ok = FileNode.execute(no_sandbox_input(json!({
+            "operation": "write",
+            "path": ok_path.to_str().unwrap(),
+            "content": "x"
+        }))).await;
+        assert!(ok.success, "a filename containing '..' is not traversal: {:?}", ok.error);
+
+        let bad_path = format!("{}/sub/../escape.txt", dir.path().to_str().unwrap());
+        let bad = FileNode.execute(no_sandbox_input(json!({
+            "operation": "write",
+            "path": bad_path,
+            "content": "x"
+        }))).await;
+        assert_eq!(bad.error.unwrap().code, "INVALID_PATH");
+    }
+
+    #[tokio::test]
+    async fn write_reports_directory_creation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "a file, not a directory").unwrap();
+        let target = blocker.join("child").join("out.txt");
+
+        let out = FileNode.execute(no_sandbox_input(json!({
+            "operation": "write",
+            "path": target.to_str().unwrap(),
+            "content": "x"
+        }))).await;
+        let err = out.error.expect("write under a regular file must fail");
+        assert_eq!(err.code, "WRITE_ERR");
+        assert!(err.message.contains("Cannot create directory"), "got: {}", err.message);
+    }
+}

@@ -16,6 +16,8 @@ A few things that apply across every node on this page, so they're not repeated 
 
 Every workflow needs exactly one of these to start it. A trigger has no input port; it's always the first node in the chain.
 
+A plugin that supplies its own trigger (see [Trigger plugins](../development/plugin-authoring.md#trigger-plugins)) is listed here too, with its **Plugin** badge, and counts as a trigger on the canvas and in the editor's checks. It starts its own events only when the workflow runs in the background; **Run** executes it once as an ordinary step.
+
 ### Manual Trigger
 
 Run a workflow yourself, by pressing Run in the app or calling the server API. No config required to use it.
@@ -32,9 +34,9 @@ Starts a workflow when an HTTP request hits a local address. Outputs the request
 
 | Field | Label | Notes |
 |---|---|---|
-| `port` | Port | Port to listen on. Default 3456. In server/API mode, outside traffic can't reach `127.0.0.1` directly, so you'll need a reverse proxy in front of it. |
-| `path` | Path | URL path to listen on. Default `/webhook`. |
-| `method` | Method | `GET`, `POST`, `PUT`, or `ANY`. |
+| `port` | Port | Port to listen on, 1024-65535. Default 3456. A value that isn't a whole number in that range fails with `INVALID_PORT` instead of falling back to the default. In server/API mode, outside traffic can't reach `127.0.0.1` directly, so you'll need a reverse proxy in front of it. |
+| `path` | Path | URL path to listen on. Default `/webhook`. A leading `/` is added if you leave it out. |
+| `method` | Method | `GET`, `POST`, `PUT`, or `ANY`. Not case-sensitive; blank means `ANY`. |
 | `secret` | Secret | Optional shared secret, checked against an `x-webhook-secret` header. This confirms the caller knows the secret, but it does not sign the body, so a captured request can be replayed as-is. For providers that send their own body signature (Stripe, GitHub), verify their native signature header in a Code node right after this one instead of relying on this field alone. |
 | `timeout_secs` | Timeout (seconds) | How long to wait for the workflow to finish before responding. Default 60. |
 | `dedup_window_secs` | Dedup Window Secs | Above 0, a request with a body already seen in this many seconds won't re-run the workflow (the caller still gets a 200 OK). Catches providers like Stripe or GitHub that resend the same event on a timeout or non-2xx response. Only applies to requests with a body: GET requests and empty POSTs are never deduped. Only takes effect for a workflow set to run in the background; an ad-hoc Run press always runs once. Default 0 (off). |
@@ -50,7 +52,7 @@ Runs a workflow automatically: on a fixed interval, a cron expression, or once a
 |---|---|---|
 | `mode` | Mode | `interval`, `cron`, or `once`. |
 | `interval_secs` | Interval (seconds) | Interval mode. The app enforces a 10-second minimum; anything lower is reset to 10. |
-| `cron_expr` | Cron Expression | Cron mode. Five-part format: `minute hour day month weekday`, e.g. `0 9 * * 1-5` for weekdays at 9 AM. The app offers a few common presets as quick-fill buttons. |
+| `cron_expr` | Cron Expression | Cron mode. Five-part format: `minute hour day month weekday`, e.g. `0 9 * * 1-5` for weekdays at 9 AM. Supports `*`, ranges, lists and steps, month names (`JAN`) and weekday names (`MON`) in their own fields, `0` or `7` for Sunday, and macros such as `@daily`. The month must always match. If both day and weekday are restricted (neither starts with `*`), a day matches when either does, so `0 9 1 * MON` runs on the 1st and on every Monday; if either starts with `*` (including `*/2`), both must match. A value outside its field's range is rejected with an error naming the field. The app offers a few common presets as quick-fill buttons. |
 | `run_at` | Run At (ISO timestamp) | Once mode. Picked in your local time in the app, stored and sent to the engine as UTC. |
 
 **Ports:** no input. Output: Triggered.
@@ -65,13 +67,13 @@ Make an HTTP request to any URL. Supports GET, POST, PUT, PATCH, DELETE, custom 
 |---|---|---|
 | `url` | URL | Required. |
 | `method` | Method | Required. `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
-| `headers` | Headers | Request headers, as an object. Edited as JSON in **Advanced: full config**. |
+| `headers` | Headers | Request headers, as an object; text, number, and boolean values are sent. Edited as JSON in **Advanced: full config**. |
 | `body` | Body | Request body, for POST/PUT/PATCH. Plain text or an expression edits normally; a JSON object/array value is edited in **Advanced: full config** instead. |
 | `api_key` | API Key | Resolved from Connections. |
 
 **Ports:** In → Success, Error.
 
-**Output:** `status`, `body`, `headers`.
+**Output:** `status`, `body`, `headers`. A response header sent more than once (such as `Set-Cookie`) appears once, with its values joined by `, `.
 
 ### Shell Command
 
@@ -88,7 +90,7 @@ Run a shell command on the machine Aerini is on, and capture its stdout, stderr,
 
 **Output:** `stdout`, `stderr`, `exit_code`, `success`.
 
-**Gotcha:** this runs a real command on the host machine. Aerini treats Shell Command, Code (JS), and Database as "dangerous" nodes: any workflow containing one shows a one-time confirmation dialog before its first run in a session ("This workflow contains nodes that execute code on your computer... Only run workflows from sources you trust"), and the node gets a small warning badge on the canvas.
+**Gotcha:** this runs a real command on the host machine. Aerini treats Shell Command, Code (JS), and Database as "dangerous" nodes: any workflow containing one shows a confirmation dialog before its first run in a session ("This workflow contains nodes that execute code on your computer... Only run workflows from sources you trust"), and the node gets a small warning badge on the canvas. Run, Run this node, a node's Test button, and Replay in run history all ask. Your answer holds for the session only while those nodes stay as they were: changing one's settings, saved credential, type, or enabled state, or loading, importing, or restoring a version of the workflow where they differ, asks again. Moving or renaming a node does not.
 
 ### Code (JS)
 
@@ -112,13 +114,13 @@ Send an email over SMTP, plain text or HTML, to one or more recipients.
 | Field | Label | Notes |
 |---|---|---|
 | `smtp_host` | SMTP Host | Required, e.g. `smtp.gmail.com`. |
-| `smtp_port` | SMTP Port | 587 (STARTTLS, recommended) or 465 (SSL). Default 587. |
+| `smtp_port` | SMTP Port | 587 (STARTTLS, recommended) or 465 (SSL). Default 587. A value outside 1-65535 fails with `INVALID_PORT`. |
 | `from` | From | Required. Sender address. |
 | `to` | To | Required. Comma-separated; 50 recipients max. |
 | `subject` | Subject | Required. |
 | `body` | Body | Required. |
 | `html` | HTML | Send as HTML instead of plain text. Default off. |
-| `username` | Username | SMTP username, usually your email address. |
+| `username` | Username | SMTP username, usually your email address. Set together with Password, or leave both empty for an unauthenticated relay. |
 | `password` | Password | Resolved from Connections. |
 
 **Ports:** default (In → Out).
@@ -133,7 +135,7 @@ Show a desktop notification on the machine running the workflow, while it runs.
 |---|---|---|
 | `title` | Title | Required. |
 | `body` | Body | Notification body text. |
-| `urgency` | Urgency | `low`, `normal`, or `critical`. Linux only. Default `normal`. |
+| `urgency` | Urgency | `low`, `normal`, or `critical`. Applied on Linux only, but any other value fails with `INVALID_URGENCY` on every platform. Default `normal`. |
 
 **Ports:** default (In → Out).
 
@@ -244,6 +246,8 @@ Upload video or image content to YouTube, Instagram, or TikTok.
 
 ## Integrations
 
+A `429 Too Many Requests` from a provider fails the node with the retryable code `RATE_LIMITED` instead of the node's own error code, so a retry policy can try again. Provider response bodies are read up to 10 MB, and a Discord or SendGrid error shows at most the first 1 KiB of the provider's reply.
+
 ### Slack
 
 Post a message to a Slack channel via `chat.postMessage`, using a bot token.
@@ -279,18 +283,18 @@ Create an issue or add a comment via the GitHub API.
 | Field | Label | Notes |
 |---|---|---|
 | `action` | Action | Required. `create_issue` or `add_comment`. |
-| `owner` | Owner | Required. Repository owner, user or org. |
-| `repo` | Repo | Required. |
+| `owner` | Owner | Required. Repository owner, user or org: up to 39 letters, digits, hyphens or underscores. Anything else fails with `INVALID_OWNER`. |
+| `repo` | Repo | Required. Up to 100 letters, digits, `-`, `_` or `.`, and not `.` or `..`. Anything else fails with `INVALID_REPO`. |
 | `title` | Title | Required for `create_issue`. |
 | `body` | Body | Issue body or comment text. |
-| `issue_number` | Issue Number | Required for `add_comment`. |
+| `issue_number` | Issue Number | Required for `add_comment`. A positive integer. |
 | `api_key` | API Key | GitHub personal access token. Resolved from Connections. |
 
 **Ports:** default (In → Out).
 
 **Output:** `number`, `html_url`, `id`, `state`.
 
-**Gotcha:** only `create_issue` and `add_comment` are implemented. Pull requests and repository file edits aren't available through this node yet, even though they're a natural fit for "interact with GitHub."
+**Gotcha:** only `create_issue` and `add_comment` are implemented. Pull requests and repository file edits aren't available through this node yet.
 
 ### Google Sheets
 
@@ -318,7 +322,7 @@ Create or update pages and database entries.
 |---|---|---|
 | `action` | Action | Required. `create_page` or `update_page`. |
 | `database_id` | Database ID | Required for `create_page`. |
-| `page_id` | Page ID | Required for `update_page`. |
+| `page_id` | Page ID | Required for `update_page`. A 32-character Notion ID, with or without dashes. Anything else fails with `INVALID_PAGE_ID`. |
 | `title` | Title | Page title, used in the title property. |
 | `properties` | Properties | Additional Notion page properties, as a JSON object. |
 | `api_key` | API Key | Notion integration token (`secret_...`). Resolved from Connections. |
@@ -393,7 +397,7 @@ Send a prompt to an AI model, Claude, GPT, Gemini, or a local Ollama model, and 
 | `max_tokens` | Max Tokens | Default 2048. The real ceiling is whatever the provider/model you picked allows, not this field. |
 | `rate_limit_rpm` | Rate Limit (RPM) | Max requests per minute. 0 = unlimited. |
 
-**Ports:** In → Success, Error. A second, "Files" input port accepts a files array wired from an upstream node (Image Generation, Collect Files, Text to File), merged with any static attachments configured on the node itself.
+**Ports:** In → Success, Error. A second, "Files" input port accepts a files array wired from an upstream node (Image Generation, Collect Files, Text to File, or AI Memory's remembered files), merged with any static attachments configured on the node itself.
 
 **Output:** `content`, `model`, `provider`, `input_tokens`, `output_tokens`.
 
@@ -421,22 +425,54 @@ Give an AI model a set of tools it can call to work toward a goal across multipl
 
 ### AI Memory
 
-Read or write persistent AI conversation history, scoped per session, so an AI node can remember earlier turns.
+Read or write persistent AI conversation history, scoped per session, so an AI node can remember earlier turns and, if you opt in, the files shared in them.
 
 | Field | Label | Notes |
 |---|---|---|
-| `operation` | Operation | Required. `read` (get history as a messages array), `write` (replace history), `append` (add one message), or `clear` (delete all). |
+| `operation` | Operation | Required. `read` (get history as a messages array), `write` (replace history), `append` (add one message), `clear` (delete all messages and files), or `forget_files` (delete the session's remembered files and keep its messages). |
 | `session_id` | Session ID | Required. Unique ID for the conversation thread, e.g. `user_123`. |
 | `role` | Role | `user`, `assistant`, or `system`. Required for write/append. |
 | `content` | Content | Message content. Required for write/append. |
+| `files` | Files | `write`/`append` only. An expression that resolves to a files array, e.g. `{{Webhook.output.files}}`; those files are stored with the message. Blank stores none. |
+| `include_files` | Include Files | `read`/`append`/`write`. Off by default. Adds the session's remembered files to the output's `files` array. |
+| `max_files` | Max Files | Most files returned when Include Files is on, newest first. Default 5, maximum 20. |
 | `max_messages` | Max Messages | Max messages returned on read, newest first. Default 20. |
 | `max_stored` | Max Stored | Max messages retained per session; oldest are pruned after an append past this. Default 1000, minimum 1. |
+| `max_stored_files` | Max Stored Files | Max files retained per session; oldest are pruned after an append past this. Default 20, minimum 1. |
 
 **Ports:** default (In → Out).
 
-**Output:** `messages` (array of `{role, content}`), `count`, `session_id`.
+**Output:** `messages` (array of `{role, content}`), `count`, `session_id`. With Include Files on, also `files` (array of `{filename, mime_type, data}`, oldest first) and `files_omitted` (remembered files that didn't fit the limits below). `forget_files` returns `session_id` and `files_removed`.
 
-The [Chat Panel](chat-panel.md)'s Clear button and session delete call this node's `clear` operation directly, using the Chat Panel's own session ID — if a workflow uses that same ID for its AI Memory calls, clearing a chat session clears its memory too.
+The [Chat Panel](chat-panel.md)'s Clear button and session delete call this node's `clear` operation directly, using the Chat Panel's own session ID — if a workflow uses that same ID for its AI Memory calls, clearing a chat session clears its memory too, files included.
+
+#### Remembering files
+
+An AI node sees a file only in the run that carries it. To let the model keep seeing a file on later messages, store it with the message and recall it each turn:
+
+1. Set **Files** to `{{Webhook.output.files}}` on the AI Memory node that appends the user's message, and turn on **Include Files**.
+2. Wire that node's output to the AI node's **Files** port. `append` returns the recent messages and the remembered files, current message included, so no separate `read` is needed. Put `{{AI Memory (append user).output.messages}}` in the prompt, and append the assistant's reply afterwards as usual.
+
+`append` still requires text `content`, so a Chat message that is only a file needs a fallback in that field. Both steps are opt-in. Nothing is stored unless **Files** is set, and nothing comes back unless **Include Files** is on, so existing workflows behave exactly as before.
+
+| Limit | Value | When it's exceeded |
+|---|---|---|
+| Types | `png`, `jpeg`, `webp`, `gif`, `pdf`, `txt`, `md` (the types AI Prompt reads) | The file is skipped and the run log says why; the message is still stored. |
+| One file | 3 MiB | Skipped, same as above. |
+| Per session | **Max Stored Files** (default 20) and 32 MiB | The oldest files are deleted. |
+| Per recall | **Max Files** (default 5, maximum 20) and 12 MiB | The oldest files are left out and counted in `files_omitted`. |
+| Message window | Only files attached to messages inside **Max Messages** come back | A file whose message has scrolled out of the window is not sent. |
+
+Files are never cut short: a file is kept whole or dropped whole, oldest first. A file whose content the session already holds is stored once, moved to the message that attached it most recently. The limits sit under the smallest request ceilings among the providers (Anthropic rejects an image over 5 MB encoded; Gemini's inline request limit is 20 MB in total; OpenAI allows 50 MB in total).
+
+Deleting: **Clear**, **Write**, pruning an old message past **Max Stored**, and the Chat Panel's Clear and session delete all remove the files with their messages. `forget_files` removes only the files and leaves the conversation.
+
+What to know before turning it on:
+
+- Remembered files are stored in `ai_memory.db` in the app's data folder, unencrypted, like the message history, and stay until one of the deletions above.
+- Each run that wires them to an AI node sends them to the provider again, and a recalled PDF costs its input tokens again every turn. With a `local` provider they stay on your machine.
+- The recalled files are part of this node's output, so run history keeps a copy for each of the last 500 runs. Keep **Max Files** low, and turn **Include Files** on only for the node that feeds the AI node.
+- PDFs reach OpenAI-compatible endpoints as `file` blocks, which only OpenAI itself is known to accept; a `local` or third-party endpoint may reject a conversation that carries a PDF. Text and markdown files are decoded into the system prompt for every provider.
 
 ### Text Splitter
 
@@ -541,15 +577,17 @@ End this branch of the workflow. Downstream nodes on this path don't run; other 
 
 ### Merge
 
-Wait for all incoming parallel branches to finish, then continue as one execution path.
+Wait for every incoming branch that runs to finish, then continue as one execution path.
 
 | Field | Label | Notes |
 |---|---|---|
 | `mode` | Mode | `object` (combine inputs keyed by node ID) or `array` (values only, no keys). |
 
-**Ports:** default (In → Out). In practice this node has multiple incoming connections, one per branch it's merging.
+**Ports:** In → Out. In accepts any number of incoming connections, one per branch it's merging; every other node's input accepts only one, and a workflow that wires several sources into one fails before running. Route them through a Merge node instead.
 
-**Output:** all upstream node outputs merged into one value, shaped per Mode.
+**Output:** the outputs of the nodes wired into this one, merged into one value and shaped per Mode. Only a node whose connection into the Merge actually fired contributes: a node on a branch that was not taken, a disabled or failed node, and any node that is not connected to the Merge are left out. In `array` mode the values follow the order the nodes finished. If nothing contributes, the output is `{}` (`object`) or `[]` (`array`).
+
+**Skipped branches:** a branch that is not taken doesn't hold the Merge up. Send an If's two outputs through different nodes into one Merge and it runs with whichever branch ran. It still waits for any branch that is running or has yet to start. This is the same whether or not parallel execution is on.
 
 ### Collect Files
 
@@ -580,22 +618,22 @@ Pause the workflow for a fixed duration before continuing to the next node.
 
 ### Wait
 
-Pause the workflow for a fixed duration, or poll a field until it matches an expected value.
+Pause the workflow for a fixed duration, or check a field once and route to Done (match) or Timed out (no match).
 
 | Field | Label | Notes |
 |---|---|---|
-| `mode` | Mode | Required. `duration` (wait a fixed time) or `condition` (poll until a value matches). |
+| `mode` | Mode | Required. `duration` (wait a fixed time) or `condition` (check once whether a value matches; no waiting). |
 | `duration_secs` | Duration (seconds) | Duration mode. Default 5. |
-| `field` | Field | Condition mode. Dot-path to check, e.g. `node_http.status`. |
-| `expected` | Expected | Condition mode. The value Field must equal to stop waiting. |
-| `poll_interval_secs` | Poll Interval (seconds) | How often to recheck Field. Default 2. |
-| `timeout_secs` | Timeout (seconds) | Max time to wait before routing to Timed Out instead. Default 60. |
+| `field` | Field | Condition mode. Dot-path into upstream node outputs, e.g. `node_http.status`. |
+| `expected` | Expected | Condition mode. The value Field must equal to leave through Done. |
+| `poll_interval_secs` | Poll Interval (seconds) | No longer used. Still accepted so saved workflows load. |
+| `timeout_secs` | Timeout (seconds) | No longer used. Still accepted so saved workflows load. |
 
-**Ports:** In → Done, Timed out.
+**Ports:** In → Done, Timed out. A condition that does not match leaves through Timed out straight away; if nothing is connected there, the workflow continues from Done.
 
 **Output:** `waited_ms`, `timed_out`, `mode`.
 
-**Gotcha:** this is a separate node from Delay, with a separate purpose. Delay is a plain fixed pause with one output port. Wait adds condition-polling and a dedicated Timed Out branch for when the condition never matches in time.
+**Gotcha:** this is a separate node from Delay, with a separate purpose. Delay is a plain fixed pause with one output port. Wait adds a one-time condition check and a dedicated Timed Out branch for when the value does not match. The check runs once, because node outputs are fixed when the node starts and waiting could not change them; to wait on a result, connect the node that produces it upstream.
 
 ### Transform Data
 

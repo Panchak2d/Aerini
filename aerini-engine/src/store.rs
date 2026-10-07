@@ -68,6 +68,11 @@ pub struct CreateCredentialRequest {
 ///   file at `fallback`. When `fallback` already contains a key and the
 ///   keychain has no entry, the key is automatically migrated into the keychain
 ///   and the file is deleted.
+///
+/// A new key is only ever generated when the credential database holds no
+/// saved credentials. If credentials exist and no key can be found,
+/// `open` returns `EngineError::KeyUnavailable` instead of silently starting
+/// over with a key that cannot decrypt them.
 pub enum KeySource {
     File(PathBuf),
     OsKeychain { fallback: PathBuf },
@@ -94,15 +99,6 @@ impl Drop for RawKey {
 
 impl CredentialStore {
     pub fn open(db_path: &Path, key_source: KeySource) -> Result<Self, EngineError> {
-        let key_bytes = Self::load_key(key_source)?;
-        let key = Key::<Aes256Gcm>::try_from(key_bytes.as_slice())
-            .map_err(|_| EngineError::Encryption(format!(
-                "credential store key is corrupt: expected 32 bytes, got {}",
-                key_bytes.len()
-            )))?;
-        let cipher = Aes256Gcm::new(&key);
-        let raw_key = RawKey(key_bytes);
-
         let conn = Connection::open(db_path)
             .map_err(|e| EngineError::Database(e.to_string()))?;
 
@@ -131,6 +127,20 @@ impl CredentialStore {
             "ALTER TABLE credentials ADD COLUMN metadata TEXT",
             [],
         );
+
+        let has_credentials = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM credentials)", [], |row| row.get::<_, i64>(0))
+            .map_err(|e| EngineError::Database(e.to_string()))?
+            != 0;
+
+        let key_bytes = Self::load_key(key_source, has_credentials)?;
+        let key = Key::<Aes256Gcm>::try_from(key_bytes.as_slice())
+            .map_err(|_| EngineError::Encryption(format!(
+                "credential store key is corrupt: expected 32 bytes, got {}",
+                key_bytes.len()
+            )))?;
+        let cipher = Aes256Gcm::new(&key);
+        let raw_key = RawKey(key_bytes);
 
         Ok(Self { conn: Mutex::new(conn), cipher, raw_key })
     }
@@ -271,11 +281,11 @@ impl CredentialStore {
 
     // ── Key loading ───────────────────────────────────────────────────────────
 
-    fn load_key(source: KeySource) -> Result<Vec<u8>, EngineError> {
+    fn load_key(source: KeySource, has_credentials: bool) -> Result<Vec<u8>, EngineError> {
         match source {
-            KeySource::File(path) => Self::key_from_file(&path),
+            KeySource::File(path) => Self::key_from_file(&path, has_credentials),
             KeySource::OsKeychain { fallback } => {
-                Self::key_from_keychain(&fallback)
+                Self::key_from_keychain(&fallback, has_credentials)
             }
         }
     }
@@ -286,10 +296,14 @@ impl CredentialStore {
     /// 1. Keychain has entry → decode + return.
     /// 2. No entry, fallback file exists → read file, write to keychain,
     ///    delete file (migration), return key.
-    /// 3. No entry, no file → generate, write to keychain, return.
-    /// 4. Any keychain error except NoEntry, or keychain write fails in step 3
-    ///    → warn + fall back to file.
-    fn key_from_keychain(fallback: &Path) -> Result<Vec<u8>, EngineError> {
+    /// 3. No entry, no file, no saved credentials → generate, write to
+    ///    keychain, return.
+    /// 4. No entry, no file, saved credentials exist → `KeyUnavailable`.
+    /// 5. Any other keychain failure (access denied, locked, backend down,
+    ///    or a failed write in step 3) → use the fallback file if present,
+    ///    generate one only when there are no saved credentials, otherwise
+    ///    `KeyUnavailable`.
+    fn key_from_keychain(fallback: &Path, has_credentials: bool) -> Result<Vec<u8>, EngineError> {
         use keyring::{Entry, Error as KeyringError};
 
         const SERVICE: &str = "aerini";
@@ -297,14 +311,9 @@ impl CredentialStore {
 
         let entry = match Entry::new(SERVICE, USER) {
             Ok(e) => e,
-            Err(e) => {
-                eprintln!(
-                    "[store] OS keychain init failed: {e}. \
-                     Falling back to file at {}.",
-                    fallback.display()
-                );
-                return Self::key_from_file(fallback);
-            }
+            Err(e) => return Self::key_from_file_after_keychain_failure(
+                fallback, has_credentials, &format!("OS keychain init failed: {e}"),
+            ),
         };
 
         match entry.get_password() {
@@ -326,7 +335,7 @@ impl CredentialStore {
             Err(KeyringError::NoEntry) => {
                 if fallback.exists() {
                     // Migrate key from legacy file into the keychain.
-                    let key_bytes = Self::key_from_file(fallback)?;
+                    let key_bytes = Self::key_from_file(fallback, has_credentials)?;
                     let encoded = B64.encode(&key_bytes);
                     match entry.set_password(&encoded) {
                         Ok(()) => {
@@ -343,38 +352,49 @@ impl CredentialStore {
                         }
                     }
                     Ok(key_bytes)
+                } else if has_credentials {
+                    Err(EngineError::KeyUnavailable(
+                        "saved credentials exist but the OS keychain has no encryption key \
+                         and no backup key file was found"
+                            .to_string(),
+                    ))
                 } else {
-                    // No existing key — generate a new one and store in keychain.
                     let mut key = [0u8; 32];
                     OsRng.fill_bytes(&mut key);
                     let encoded = B64.encode(key);
                     match entry.set_password(&encoded) {
                         Ok(()) => Ok(key.to_vec()),
-                        Err(e) => {
-                            eprintln!(
-                                "[store] OS keychain unavailable: {e}. \
-                                 Falling back to file at {}.",
-                                fallback.display()
-                            );
-                            // key_from_file creates the key file if absent.
-                            Self::key_from_file(fallback)
-                        }
+                        Err(e) => Self::key_from_file_after_keychain_failure(
+                            fallback, has_credentials, &format!("OS keychain unavailable: {e}"),
+                        ),
                     }
                 }
             }
 
-            Err(e) => {
-                eprintln!(
-                    "[store] OS keychain read failed: {e}. \
-                     Falling back to file at {}.",
-                    fallback.display()
-                );
-                Self::key_from_file(fallback)
-            }
+            Err(e) => Self::key_from_file_after_keychain_failure(
+                fallback, has_credentials, &format!("OS keychain read failed: {e}"),
+            ),
         }
     }
 
-    fn key_from_file(key_path: &Path) -> Result<Vec<u8>, EngineError> {
+    fn key_from_file_after_keychain_failure(
+        fallback: &Path,
+        has_credentials: bool,
+        reason: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        eprintln!(
+            "[store] {reason}. Falling back to file at {}.",
+            fallback.display()
+        );
+        Self::key_from_file(fallback, has_credentials).map_err(|e| match e {
+            EngineError::KeyUnavailable(_) => EngineError::KeyUnavailable(format!(
+                "{reason}, and no backup key file was found"
+            )),
+            other => other,
+        })
+    }
+
+    fn key_from_file(key_path: &Path, has_credentials: bool) -> Result<Vec<u8>, EngineError> {
         if key_path.exists() {
             let encoded = std::fs::read_to_string(key_path)
                 .map_err(|e| EngineError::Encryption(e.to_string()))?;
@@ -387,6 +407,11 @@ impl CredentialStore {
                 )));
             }
             Ok(key_bytes)
+        } else if has_credentials {
+            Err(EngineError::KeyUnavailable(format!(
+                "saved credentials exist but the key file {} is missing",
+                key_path.display()
+            )))
         } else {
             let mut key = [0u8; 32];
             OsRng.fill_bytes(&mut key);
@@ -397,33 +422,32 @@ impl CredentialStore {
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
             }
 
-            // Create the key file with owner-only (0o600) permissions atomically
-            // on Unix, via the file-creation mode itself rather than a separate
-            // fs::write + set_permissions pair. The two-call version left a
-            // window — however brief — where this file (holding the AES-256 key
-            // that decrypts every stored credential) existed on disk at the
-            // default create mode (typically 0o644 after umask, world/group
-            // readable) before the follow-up chmod call landed.
+            // Created exclusively (O_EXCL) with owner-only (0o600) permissions on
+            // Unix via the creation mode itself, so the AES-256 key never exists
+            // on disk at a looser mode, and a second process (e.g. desktop app and
+            // server sharing a data dir) that passed the exists() check above
+            // cannot truncate and replace a key the first just wrote — that would
+            // make every credential already encrypted with it undecryptable.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::io::Write;
                 use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(key_path)
-                    .map_err(|e| EngineError::Encryption(e.to_string()))?;
+                opts.mode(0o600);
+            }
+            let mut f = match opts.open(key_path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Self::key_from_file(key_path, has_credentials);
+                }
+                Err(e) => return Err(EngineError::Encryption(e.to_string())),
+            };
+            {
+                use std::io::Write;
                 f.write_all(encoded.as_bytes())
                     .map_err(|e| EngineError::Encryption(e.to_string()))?;
             }
-
-            #[cfg(not(unix))]
-            {
-                std::fs::write(key_path, &encoded)
-                    .map_err(|e| EngineError::Encryption(e.to_string()))?;
-            }
+            drop(f);
 
             // On Windows, set a DACL that grants access only to the current user,
             // mirroring the Unix 0o600 intent.
@@ -577,14 +601,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("key.b64");
 
-        let generated = CredentialStore::key_from_file(&key_path).unwrap();
+        let generated = CredentialStore::key_from_file(&key_path, false).unwrap();
         assert_eq!(generated.len(), 32, "generated key must be 32 bytes");
 
-        let reloaded = CredentialStore::key_from_file(&key_path).unwrap();
+        let reloaded = CredentialStore::key_from_file(&key_path, false).unwrap();
         assert_eq!(
             generated, reloaded,
             "a second call against the same path must return the same key, not regenerate"
         );
+    }
+
+    #[test]
+    fn key_from_file_refuses_to_generate_when_credentials_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.b64");
+
+        let result = CredentialStore::key_from_file(&key_path, true);
+
+        assert!(matches!(result, Err(EngineError::KeyUnavailable(_))));
+        assert!(!key_path.exists(), "no key file may be created on refusal");
+    }
+
+    #[test]
+    fn key_from_file_reuses_existing_key_when_credentials_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.b64");
+        let original = CredentialStore::key_from_file(&key_path, false).unwrap();
+
+        let reused = CredentialStore::key_from_file(&key_path, true).unwrap();
+
+        assert_eq!(original, reused);
     }
 
     // The file holding this key must never be readable by anyone but the
@@ -604,7 +650,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("key.b64");
 
-        CredentialStore::key_from_file(&key_path).unwrap();
+        CredentialStore::key_from_file(&key_path, false).unwrap();
 
         let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
         // Mask to the permission bits only (mode() also carries file-type bits).
@@ -667,7 +713,7 @@ mod tests {
         );
     }
 
-    /// This is the actual #7 recovery scenario, reproduced end-to-end: a
+    /// The key-backup recovery scenario, reproduced end-to-end: a
     /// credential is stored, its key is exported, the original key file is
     /// deleted (simulating a lost keychain entry with no surviving fallback
     /// file), the exported value is written back to that same path, and a
@@ -697,14 +743,15 @@ mod tests {
         // Simulate total key loss: the key file (and, in the real desktop
         // path, the OS keychain entry) is gone.
         std::fs::remove_file(&key_path).unwrap();
+        let refused = CredentialStore::open(&db_path, KeySource::File(key_path.clone()));
         assert!(
-            CredentialStore::open(&db_path, KeySource::File(key_path.clone()))
-                .unwrap()
-                .retrieve("cred1")
-                .is_err(),
-            "sanity check: losing the key file must actually break decryption \
-             (a fresh key was silently generated and now can't read the old rows), \
-             otherwise this test would pass without the backup doing anything"
+            matches!(refused.err(), Some(EngineError::KeyUnavailable(_))),
+            "opening a store that holds credentials without its key must be refused, \
+             not answered with a freshly generated key"
+        );
+        assert!(
+            !key_path.exists(),
+            "a refused open must not leave a replacement key file behind"
         );
 
         // Restore: write the backed-up key back to the expected path.

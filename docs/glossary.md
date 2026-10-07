@@ -54,7 +54,7 @@ An opt-in workflow setting. Off by default, which runs nodes one at a time in a 
 A trigger that fires a workflow automatically: at a fixed interval, on a [cron expression](#cron-expression), or once at a specific time.
 
 ### Cron expression
-A five-part pattern describing a recurring time (`minute hour day month weekday`), e.g. `0 9 * * 1-5` for 9 AM on weekdays. Used by the Schedule node when you want a recurring, non-fixed-interval schedule.
+A five-part pattern describing a recurring time (`minute hour day month weekday`), e.g. `0 9 * * 1-5` for 9 AM on weekdays. Used by the Schedule node when you want a recurring, non-fixed-interval schedule. When both day and weekday are restricted, either one matching is enough (`0 9 1 * MON` is the 1st or any Monday).
 
 ### Webhook
 A trigger that starts a workflow when an HTTP request hits a specific local address, for example when GitHub or Stripe sends a notification to a URL you gave them.

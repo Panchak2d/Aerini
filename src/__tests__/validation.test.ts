@@ -123,3 +123,25 @@ describe("validateWorkflow — ai_agent required fields", () => {
     expect(validateWorkflow(canvasOf(node))).toEqual([]);
   });
 });
+
+describe("validateWorkflow — plugin trigger as entry", () => {
+  it("accepts a trigger_capable plugin as the workflow's trigger", async () => {
+    const { registerNodeDescriptors } = await import("../canvas/node-registry");
+    registerNodeDescriptors([{
+      type_id: "hb", display_name: "hb", node_type: "action", version: "1",
+      input_schema: {}, output_schema: {}, ports: { inputs: [], outputs: [] },
+      is_plugin: true, trigger_capable: true,
+    }]);
+    const plugin = makeNode("p1", "hb");
+    const canvas = { nodes: new Map([[plugin.data.id, plugin]]) } as unknown as Canvas;
+    expect(validateWorkflow(canvas).some(e => e.includes("No trigger node found"))).toBe(false);
+    registerNodeDescriptors([]);
+  });
+
+  it("names plugin triggers in the missing-trigger message", () => {
+    const n = makeNode("n1", "http_request");
+    const canvas = { nodes: new Map([[n.data.id, n]]) } as unknown as Canvas;
+    const msg = validateWorkflow(canvas).find(e => e.includes("No trigger node found"));
+    expect(msg).toContain("trigger plugin");
+  });
+});

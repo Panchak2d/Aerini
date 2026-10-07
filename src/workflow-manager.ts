@@ -244,6 +244,7 @@ export class WorkflowManager {
   private _refreshQueued = false;
 
   private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoSaveInFlight: Promise<void> | null = null;
   private onUnsavedChange: (u: boolean) => void;
   private onTitleChange:   (n: string)  => void;
   private onStatusChange:  (m: string)  => void;
@@ -282,28 +283,57 @@ export class WorkflowManager {
   }
 
   markUnsaved(on: boolean): void {
+    if (!on) this.setAutoSaveFailed(false);
     this.hasUnsaved = on;
     this.onUnsavedChange(on);
   }
 
+  /** Set while the last autosave failed; cleared by the next successful save. */
+  autoSaveFailed = false;
+  onAutoSaveStateChange: (() => void) | null = null;
+
   scheduleAutoSave(): void {
     if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
-    this.autoSaveTimer = setTimeout(async () => {
-      if (!this.hasUnsaved) return;
-      const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
-      if (isTauri()) {
-        try {
-          await saveWorkflow(json);
-        } catch (e) {
-          console.error("Aerini: autosave failed", e);
-          if (isWorkflowRunning(this.currentId)) {
-            this.onToast(`Autosave failed: ${e}`, "error");
-          }
+    this.autoSaveTimer = setTimeout(() => { void this.runAutoSave(); }, isWorkflowRunning(this.currentId) ? 500 : 30_000);
+  }
+
+  /** Runs a pending autosave now instead of waiting out its timer. Resolves true when nothing is left unsaved. */
+  async flushAutoSave(): Promise<boolean> {
+    if (this.autoSaveTimer || this.autoSaveFailed) await this.runAutoSave();
+    else if (this.autoSaveInFlight) await this.autoSaveInFlight;
+    return !this.autoSaveFailed;
+  }
+
+  private runAutoSave(): Promise<void> {
+    if (this.autoSaveTimer) { clearTimeout(this.autoSaveTimer); this.autoSaveTimer = null; }
+    if (!this.hasUnsaved && !this.autoSaveFailed) return Promise.resolve();
+    const p = this.persistAutoSave().finally(() => { if (this.autoSaveInFlight === p) this.autoSaveInFlight = null; });
+    this.autoSaveInFlight = p;
+    return p;
+  }
+
+  private async persistAutoSave(): Promise<void> {
+    const json = serialize(this.currentId, this.currentName, this.canvas.nodes, this.canvas.connectors, this.parallelExecution, this.maxConcurrentNodes, this.chatSettings, this.currentTags, this.unlimitedDuration, this.currentCollectionId, this.maxDurationSecs);
+    if (isTauri()) {
+      try {
+        await saveWorkflow(json);
+        this.setAutoSaveFailed(false);
+      } catch (e) {
+        console.error("Aerini: autosave failed", e);
+        this.setAutoSaveFailed(true);
+        if (isWorkflowRunning(this.currentId)) {
+          this.onToast(`Autosave failed: ${e}`, "error");
         }
-      } else {
-        lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json, this.currentTags, this.currentCollectionId);
       }
-    }, isWorkflowRunning(this.currentId) ? 500 : 30_000);
+    } else {
+      lsSave(`autosave_${this.currentId}`, `[autosave] ${this.currentName}`, json, this.currentTags, this.currentCollectionId);
+    }
+  }
+
+  private setAutoSaveFailed(failed: boolean): void {
+    if (this.autoSaveFailed === failed) return;
+    this.autoSaveFailed = failed;
+    this.onAutoSaveStateChange?.();
   }
 
   setSortMode(mode: string): void {
@@ -1365,6 +1395,7 @@ export class WorkflowManager {
       this.currentCollectionId = collectionId;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
+      this.canvas.warnArityViolations();
       if (localStorage.getItem("aerini_autofit") !== "false") {
         this.canvas.fitToScreen();
       } else {
@@ -1453,6 +1484,7 @@ export class WorkflowManager {
       this.currentCollectionId = collectionId;
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
+      this.canvas.warnArityViolations();
       this.canvas.fitToScreen();
       this.currentId = wfId; this.currentName = name;
       this.markUnsaved(true); this.onTitleChange(name);
@@ -1574,6 +1606,7 @@ export class WorkflowManager {
       this.canvas.nodes = nodes;
       this.canvas.connectors = connectors;
       this.canvas.clearSelection();
+      this.canvas.warnArityViolations();
       this.canvas.fitToScreen();
       this.currentId   = wfId;
       this.currentName = name;

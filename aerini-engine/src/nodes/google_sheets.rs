@@ -92,7 +92,7 @@ impl Node for GoogleSheetsNode {
                 {
                     Ok(resp) => {
                         let status = resp.status().as_u16();
-                        match resp.json::<Value>().await {
+                        match super::util::read_json_response_capped(resp).await {
                             Ok(v) if status == 200 => {
                                 let updated_range = v["updates"]["updatedRange"]
                                     .as_str()
@@ -106,9 +106,9 @@ impl Node for GoogleSheetsNode {
                             }
                             Ok(v) => {
                                 let msg = v["error"]["message"].as_str().unwrap_or("unknown error").to_string();
-                                NodeOutput::failure(NodeError::unrecoverable("SHEETS_ERROR", format!("HTTP {}: {}", status, msg)))
+                                NodeOutput::failure(super::util::provider_error(status, "SHEETS_ERROR", format!("HTTP {}: {}", status, msg)))
                             }
-                            Err(e) => NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e.to_string())),
+                            Err(e) => NodeOutput::failure(super::util::provider_error(status, "PARSE_ERROR", e)),
                         }
                     }
                     Err(e) => {
@@ -134,7 +134,7 @@ impl Node for GoogleSheetsNode {
                 {
                     Ok(resp) => {
                         let status = resp.status().as_u16();
-                        match resp.json::<Value>().await {
+                        match super::util::read_json_response_capped(resp).await {
                             Ok(v) if status == 200 => {
                                 let row_count = v["values"].as_array().map(|a| a.len()).unwrap_or(0);
                                 NodeOutput::success_with_logs(
@@ -144,9 +144,9 @@ impl Node for GoogleSheetsNode {
                             }
                             Ok(v) => {
                                 let msg = v["error"]["message"].as_str().unwrap_or("unknown error").to_string();
-                                NodeOutput::failure(NodeError::unrecoverable("SHEETS_ERROR", format!("HTTP {}: {}", status, msg)))
+                                NodeOutput::failure(super::util::provider_error(status, "SHEETS_ERROR", format!("HTTP {}: {}", status, msg)))
                             }
-                            Err(e) => NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e.to_string())),
+                            Err(e) => NodeOutput::failure(super::util::provider_error(status, "PARSE_ERROR", e)),
                         }
                     }
                     Err(e) => {

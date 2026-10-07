@@ -9,7 +9,7 @@ use axum::{
 use serde_json::json;
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_read};
+use super::state::{ApiState, internal_error, require_read};
 
 pub async fn get_memory(
     State(s):          State<ApiState>,
@@ -24,11 +24,7 @@ pub async fn get_memory(
     let acl_filter = match s.acl_filter(&caller).await {
         Ok(f) => f,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("ACL lookup failed: {}", e)})),
-            )
-                .into_response()
+            return internal_error("get_memory: acl lookup", e).into_response()
         }
     };
 

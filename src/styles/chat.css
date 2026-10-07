@@ -145,3 +145,7 @@ html[data-theme="paper"] #chat-panel { --chat-user-bg: var(--blue); }
   #chat-panel.chat-open { animation: none; }
   .chat-typing span { animation: none; opacity: .7; }
 }
+.chat-readiness { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--amber) 14%, var(--bg2)); border-bottom: 1px solid color-mix(in srgb, var(--amber) 60%, var(--bg2)); border-left: 3px solid var(--amber); flex-shrink: 0; }
+.chat-readiness-row { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; column-gap: 12px; row-gap: 8px; }
+.chat-readiness-text { flex: 1 1 180px; min-width: 0; margin: 0; color: var(--t1); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-readiness .chat-readiness-btn { width: auto; min-height: 36px; padding: 0 14px; font-size: 13px; flex: 0 0 auto; }

@@ -65,7 +65,7 @@ impl Node for SlackNode {
         {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                match resp.json::<Value>().await {
+                match super::util::read_json_response_capped(resp).await {
                     Ok(v) => {
                         // Slack returns HTTP 200 even on error — check the ok field.
                         if v["ok"].as_bool() == Some(true) {
@@ -75,12 +75,13 @@ impl Node for SlackNode {
                             )
                         } else {
                             let err = v["error"].as_str().unwrap_or("unknown_error").to_string();
-                            NodeOutput::failure(NodeError::unrecoverable("SLACK_ERROR", err))
+                            NodeOutput::failure(super::util::provider_error(status, "SLACK_ERROR", err))
                         }
                     }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable(
+                    Err(e) => NodeOutput::failure(super::util::provider_error(
+                        status,
                         "PARSE_ERROR",
-                        format!("HTTP {}: could not parse Slack response: {}", status, e),
+                        format!("HTTP {}: could not read Slack response: {}", status, e),
                     )),
                 }
             }

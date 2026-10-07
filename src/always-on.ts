@@ -4,19 +4,23 @@ import type { ScheduledJobRow } from "./ipc/workflow";
 import { getScheduledJobs, setAlwaysOn, startScheduledWorkflow } from "./ipc/workflow";
 import { isTauri } from "./utils";
 import { NODE_IDS } from "./node-ids";
+import { isTriggerNodeType } from "./canvas/node-registry";
 import { hideTooltipFor } from "./tooltip-manager";
 
 type Toast = (msg: string, type: "success" | "error" | "info") => void;
 
-const NO_TRIGGER_TOOLTIP = "Add a Schedule or Webhook trigger to enable Run on launch";
-const SCHEDULABLE_TRIGGER_IDS: Set<string> = new Set([NODE_IDS.SCHEDULE, NODE_IDS.WEBHOOK]);
+const NO_TRIGGER_TOOLTIP = "Add a Schedule, Webhook, or trigger-plugin trigger to enable Run on launch";
+/** Schedule, Webhook, or a trigger plugin: anything the scheduler can run, i.e. every trigger but Manual. */
+function isSchedulableTrigger(typeId: string): boolean {
+  return typeId !== NODE_IDS.MANUAL_TRIGGER && isTriggerNodeType(typeId);
+}
 
 export async function updateAlwaysOnBtn(canvas: Canvas, wfManager: WorkflowManager): Promise<void> {
   const btn = document.getElementById("btn-always-on") as HTMLButtonElement | null;
   if (!btn) return;
 
   const hasSchedulableTrigger = [...canvas.nodes.values()].some(n =>
-    SCHEDULABLE_TRIGGER_IDS.has(n.data.node_type_id)
+    isSchedulableTrigger(n.data.node_type_id)
   );
 
   const wrap = document.getElementById("always-on-wrap");

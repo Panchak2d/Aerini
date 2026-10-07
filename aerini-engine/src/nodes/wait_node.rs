@@ -1,18 +1,21 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, Duration};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 use super::util::traverse_dotpath;
 
-/// Wait node — pauses the workflow for a fixed duration or until a condition becomes true.
+/// Wait node — pauses the workflow for a fixed duration, or checks a field once.
 ///
 /// Modes:
-///   duration — simple delay (like Delay node but with a timeout output port)
-///   condition — polls a field value every `poll_interval_secs` until it matches `expected`,
-///               or until `timeout_secs` expires
+///   duration  — simple delay (like Delay node but with a timeout output port)
+///   condition — checks `field` against `expected` once, immediately. A match leaves
+///               through `output`; a mismatch leaves through `timed_out`.
+///               `poll_interval_secs` and `timeout_secs` are still accepted so saved
+///               workflows load, but have no effect: `context.node_outputs` is fixed
+///               when the node starts, so waiting could never change the result.
 pub struct WaitNode;
 
 #[async_trait]
@@ -21,7 +24,7 @@ impl Node for WaitNode {
     fn display_name(&self) -> &'static str { "Wait" }
     fn node_type(&self)    -> NodeType     { NodeType::Utility }
     fn version(&self)      -> &'static str { "1.0.0" }
-    fn description(&self)  -> &'static str { "Pause the workflow for a fixed duration, or poll a field until it matches an expected value." }
+    fn description(&self)  -> &'static str { "Pause the workflow for a fixed duration, or check a field once and route to Done (match) or Timed out (no match)." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -31,7 +34,7 @@ impl Node for WaitNode {
                 "mode": {
                     "type": "string",
                     "enum": ["duration", "condition"],
-                    "description": "duration: wait a fixed time. condition: poll until a value matches."
+                    "description": "duration: wait a fixed time. condition: check once whether a value matches; routes to Done if it does, Timed out if not (no waiting)."
                 },
                 "duration_secs": {
                     "type": "number",
@@ -39,18 +42,18 @@ impl Node for WaitNode {
                 },
                 "field": {
                     "type": "string",
-                    "description": "Dot-path into context to check, e.g. 'node_http.status' (condition mode)."
+                    "description": "Dot-path into upstream node outputs to check, e.g. 'node_http.status' (condition mode)."
                 },
                 "expected": {
-                    "description": "Value the field must equal to stop waiting (condition mode)."
+                    "description": "Value the field must equal to leave through Done (condition mode)."
                 },
                 "poll_interval_secs": {
                     "type": "number",
-                    "description": "How often to recheck the field, in seconds. Default 2."
+                    "description": "No longer used. Kept so saved workflows load; the condition is checked once."
                 },
                 "timeout_secs": {
                     "type": "number",
-                    "description": "Max time to wait before routing to the 'timed_out' port. Default 60."
+                    "description": "No longer used. Kept so saved workflows load; a condition that does not match routes to Timed out immediately."
                 }
             }
         })
@@ -70,11 +73,11 @@ impl Node for WaitNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![
-                PortDefinition { id: "input".to_string(),     label: "In".to_string(),       position: PortPosition::Left,  port_type: None },
+                PortDefinition { id: "input".to_string(),     label: "In".to_string(),       position: PortPosition::Left,  port_type: None, arity: PortArity::Single },
             ],
             outputs: vec![
-                PortDefinition { id: "output".to_string(),    label: "Done".to_string(),     position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "timed_out".to_string(), label: "Timed out".to_string(),position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "output".to_string(),    label: "Done".to_string(),     position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "timed_out".to_string(), label: "Timed out".to_string(),position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }
@@ -95,12 +98,8 @@ impl Node for WaitNode {
             }
 
             "condition" => {
-                let field          = input.input["field"].as_str().unwrap_or("").to_string();
-                let expected       = input.input["expected"].clone();
-                let poll_secs      = input.input["poll_interval_secs"].as_f64().unwrap_or(2.0).max(0.5);
-                // Upper-bounded to mirror duration_secs's existing 3600s hard cap
-                // (line ~88).
-                let timeout_secs   = input.input["timeout_secs"].as_f64().unwrap_or(60.0).clamp(1.0, 3600.0);
+                let field    = input.input["field"].as_str().unwrap_or("").to_string();
+                let expected = input.input["expected"].clone();
 
                 if field.is_empty() {
                     return NodeOutput::failure(NodeError::unrecoverable(
@@ -108,33 +107,23 @@ impl Node for WaitNode {
                     ));
                 }
 
-                let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
-                let poll_ms  = (poll_secs * 1000.0) as u64;
+                let context_val = json!(input.context.node_outputs);
+                let current = traverse_dotpath(&context_val, &field);
 
-                loop {
-                    // Check the field in context node_outputs
-                    let context_val = json!(input.context.node_outputs);
-                    let current = traverse_dotpath(&context_val, &field);
-
-                    if current == expected {
-                        let waited = Instant::now()
-                            .duration_since(deadline - Duration::from_secs_f64(timeout_secs))
-                            .as_millis() as u64;
-                        return NodeOutput::success_with_logs(
-                            json!({ "waited_ms": waited, "timed_out": false, "mode": "condition", "matched_value": current }),
-                            vec![format!("Condition met: {} == {:?}", field, expected)],
-                        );
-                    }
-
-                    if Instant::now() >= deadline {
-                        return NodeOutput::success_with_logs(
-                            json!({ "waited_ms": (timeout_secs * 1000.0) as u64, "timed_out": true, "mode": "condition" }),
-                            vec![format!("Condition timed out after {:.0}s — {} never matched {:?}", timeout_secs, field, expected)],
-                        );
-                    }
-
-                    sleep(Duration::from_millis(poll_ms)).await;
+                if current == expected {
+                    return NodeOutput::success_with_logs(
+                        json!({ "waited_ms": 0, "timed_out": false, "mode": "condition", "matched_value": current }),
+                        vec![format!("Condition met: {} == {:?}", field, expected)],
+                    );
                 }
+
+                NodeOutput::success_with_logs(
+                    json!({ "waited_ms": 0, "timed_out": true, "mode": "condition", "branch": "timed_out" }),
+                    vec![format!(
+                        "Condition not met: {} is {}, expected {}. Routing to Timed out without waiting; upstream outputs cannot change while this node runs",
+                        field, current, expected
+                    )],
+                )
             }
 
             other => NodeOutput::failure(NodeError::unrecoverable(
@@ -162,57 +151,66 @@ mod tests {
         }
     }
 
-    /// A `timeout_secs` far above the cap must time out at the clamped 3600s
-    /// ceiling, not the requested value — uses a paused clock (same pattern
-    /// as executor/mod.rs's timeout tests) so the test doesn't actually wait
-    /// an hour.
     #[tokio::test]
-    async fn condition_timeout_secs_clamped_to_3600s() {
+    async fn condition_mismatch_times_out_without_sleeping() {
         tokio::time::pause();
+        let started = tokio::time::Instant::now();
 
-        let input = make_input(json!({
+        let out = WaitNode.execute(make_input(json!({
             "mode": "condition",
             "field": "never.matches",
             "expected": "x",
             "poll_interval_secs": 100.0,
             "timeout_secs": 999_999.0
-        }));
+        }))).await;
 
-        let handle = tokio::spawn(async move { WaitNode.execute(input).await });
-
-        tokio::time::advance(Duration::from_secs(3601)).await;
-        tokio::task::yield_now().await;
-
-        let out = handle.await.expect("task panicked");
+        assert!(started.elapsed() < Duration::from_millis(1));
         assert!(out.success);
         let data = out.output.expect("expected output data");
         assert_eq!(data["timed_out"], json!(true));
-        assert_eq!(data["waited_ms"], json!(3600u64 * 1000));
+        assert_eq!(data["waited_ms"], json!(0));
+        assert_eq!(data["branch"], json!("timed_out"));
+        assert!(out.logs.iter().any(|l| l.contains("Condition not met")));
     }
 
-    /// A `timeout_secs` already within the cap is unaffected by the clamp.
     #[tokio::test]
-    async fn condition_timeout_secs_within_cap_unaffected() {
-        tokio::time::pause();
-
-        let input = make_input(json!({
+    async fn condition_mismatch_routes_to_timed_out_port() {
+        let out = WaitNode.execute(make_input(json!({
             "mode": "condition",
             "field": "never.matches",
-            "expected": "x",
-            "poll_interval_secs": 1.0,
-            "timeout_secs": 2.0
+            "expected": "x"
+        }))).await;
+
+        assert_eq!(
+            crate::executor::WorkflowExecutor::resolve_taken_port(&out),
+            "timed_out"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_requires_field() {
+        let out = WaitNode.execute(make_input(json!({ "mode": "condition", "expected": 1 }))).await;
+        assert!(!out.success);
+    }
+
+    #[tokio::test]
+    async fn condition_match_stays_on_done_port() {
+        let mut input = make_input(json!({
+            "mode": "condition",
+            "field": "n.v",
+            "expected": 1
         }));
+        input.context.node_outputs = std::sync::Arc::new(std::collections::HashMap::from([
+            ("n".to_string(), json!({ "v": 1 })),
+        ]));
 
-        let handle = tokio::spawn(async move { WaitNode.execute(input).await });
-
-        tokio::time::advance(Duration::from_secs(3)).await;
-        tokio::task::yield_now().await;
-
-        let out = handle.await.expect("task panicked");
+        let out = WaitNode.execute(input).await;
         assert!(out.success);
-        let data = out.output.expect("expected output data");
-        assert_eq!(data["timed_out"], json!(true));
-        assert_eq!(data["waited_ms"], json!(2000u64));
+        assert_eq!(out.output.as_ref().unwrap()["timed_out"], json!(false));
+        assert_eq!(
+            crate::executor::WorkflowExecutor::resolve_taken_port(&out),
+            "output"
+        );
     }
 }
 

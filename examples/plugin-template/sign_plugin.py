@@ -2,7 +2,7 @@
 """
 Generates and verifies the `<name>.wasm.sig` sidecar Aerini reads via
 `check_signature` (src-tauri/src/commands/plugins.rs). See "Signing your
-plugin" in docs/plugin-authoring.md for the full walkthrough.
+plugin" in docs/development/plugin-authoring.md for the full walkthrough.
 
 Usage:
     python sign_plugin.py keygen --out publisher.key
