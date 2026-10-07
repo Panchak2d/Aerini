@@ -251,10 +251,9 @@ async fn parse_google_token_response(
     resp: reqwest::Response,
 ) -> Result<StoredTokens, NodeError> {
     let status = resp.status();
-    let body: Value = resp
-        .json()
+    let body: Value = crate::nodes::util::read_json_response_capped(resp)
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
 
     if !status.is_success() {
         let err_desc = body["error_description"]
@@ -311,14 +310,13 @@ async fn exchange_code_instagram(
         .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !short_resp.status().is_success() {
-        let body: Value = short_resp.json().await.unwrap_or(Value::Null);
+        let body: Value = crate::nodes::util::read_json_response_capped(short_resp).await.unwrap_or(Value::Null);
         let msg = body["error_message"].as_str().unwrap_or("Token exchange failed");
         return Err(NodeError::unrecoverable("OAUTH_TOKEN_EXCHANGE_FAILED", format!("Instagram: {}", msg)));
     }
-    let short_body: Value = short_resp
-        .json()
+    let short_body: Value = crate::nodes::util::read_json_response_capped(short_resp)
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
     let short_token = short_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram response"))?;
@@ -336,14 +334,13 @@ async fn exchange_code_instagram(
         .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
     if !ll_resp.status().is_success() {
-        let body: Value = ll_resp.json().await.unwrap_or(Value::Null);
+        let body: Value = crate::nodes::util::read_json_response_capped(ll_resp).await.unwrap_or(Value::Null);
         let msg = body["error"]["message"].as_str().unwrap_or("Long-lived token exchange failed");
         return Err(NodeError::unrecoverable("OAUTH_TOKEN_EXCHANGE_FAILED", format!("Instagram: {}", msg)));
     }
-    let ll_body: Value = ll_resp
-        .json()
+    let ll_body: Value = crate::nodes::util::read_json_response_capped(ll_resp)
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
     let ll_token = ll_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No long-lived access_token from Instagram"))?
@@ -373,10 +370,9 @@ async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens,
             "Instagram token refresh failed — re-authenticate in node settings.",
         ));
     }
-    let body: Value = resp
-        .json()
+    let body: Value = crate::nodes::util::read_json_response_capped(resp)
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
     let new_token = body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram refresh response"))?
@@ -445,10 +441,9 @@ async fn parse_tiktok_token_response(
     resp: reqwest::Response,
 ) -> Result<StoredTokens, NodeError> {
     let status = resp.status();
-    let body: Value = resp
-        .json()
+    let body: Value = crate::nodes::util::read_json_response_capped(resp)
         .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
+        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
 
     if !status.is_success() {
         let msg = body["error_description"]

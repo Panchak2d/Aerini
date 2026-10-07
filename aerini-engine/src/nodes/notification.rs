@@ -52,13 +52,15 @@ impl Node for NotificationNode {
             )),
         };
         let body    = cfg["body"].as_str().unwrap_or("").to_string();
-        let urgency = cfg["urgency"].as_str().filter(|s| !s.is_empty()).unwrap_or("normal").to_string();
-        if !matches!(urgency.as_str(), "low" | "normal" | "critical") {
-            return NodeOutput::failure(NodeError::unrecoverable(
+        let urgency = match &cfg["urgency"] {
+            Value::Null => "normal",
+            Value::String(u) if matches!(u.as_str(), "low" | "normal" | "critical") => u.as_str(),
+            other => return NodeOutput::failure(NodeError::unrecoverable(
                 "INVALID_URGENCY",
-                format!("Unknown urgency '{urgency}'. Valid values: low, normal, critical"),
-            ));
+                format!("urgency must be one of low, normal, critical (got {other})"),
+            )),
         }
+        .to_string();
 
         match send_notification(&title, &body, &urgency).await {
             Ok(method) => NodeOutput::success_with_logs(
@@ -77,8 +79,6 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
     {
         let mut cmd = Command::new("notify-send");
         cmd.arg("--urgency").arg(urgency);
-        // "--" ends option parsing so a title or body starting with "-" is
-        // shown as text instead of being read as a notify-send flag.
         cmd.arg("--");
         cmd.arg(title);
         if !body.is_empty() {
@@ -184,3 +184,29 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
     Err("Desktop notifications not supported on this platform".to_string())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+
+    fn make_input(input: Value) -> NodeInput {
+        NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "n1".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_urgency_is_rejected() {
+        let out = NotificationNode
+            .execute(make_input(json!({ "title": "t", "urgency": "urgent" })))
+            .await;
+        assert_eq!(out.error.unwrap().code, "INVALID_URGENCY");
+    }
+}

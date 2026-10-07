@@ -32,6 +32,9 @@ pub enum EngineError {
     #[error("Node '{0}' referenced in edge does not exist")]
     UnknownNodeReference(String),
 
+    #[error("Input port '{port_id}' on node '{node_id}' accepts one connection but has {count}; remove the extra wires or route them through a Merge node")]
+    PortArityViolation { node_id: String, port_id: String, count: usize },
+
     #[error("Workflow has no entry nodes")]
     NoEntryNodes,
 
@@ -64,6 +67,9 @@ pub enum EngineError {
 
     #[error("Encryption error: {0}")]
     Encryption(String),
+
+    #[error("Credential encryption key unavailable: {0}")]
+    KeyUnavailable(String),
 
     #[error("Internal executor error: {0}")]
     Internal(String),

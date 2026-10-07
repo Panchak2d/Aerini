@@ -16,6 +16,8 @@
 //! [`NodePorts`] describes which connectors a node exposes. The default is one input
 //! (`"input"`, left) and one output (`"output"`, right). Nodes with conditional routing
 //! (e.g. `if_condition`, `switch`) override `ports()` to add named output ports.
+//! Each input port carries a [`PortArity`]: `Single` (the default) accepts one wire, `Multi`
+//! accepts many. The engine rejects a workflow that violates it before a run starts.
 //!
 //! # Dynamic ports
 //!
@@ -158,6 +160,31 @@ pub struct PortDefinition {
     /// saved workflows without this field deserialise cleanly via `default`.
     #[serde(default)]
     pub port_type: Option<String>,
+    /// How many wires may feed this port. Only meaningful on input ports.
+    ///
+    /// Defaults to [`PortArity::Single`] when absent, so saved workflows and
+    /// node descriptors written before this field existed deserialise
+    /// unchanged. `Single` is omitted from serialised output.
+    #[serde(default, skip_serializing_if = "PortArity::is_single")]
+    pub arity: PortArity,
+}
+
+/// Number of wires an input port accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortArity {
+    /// At most one wire. Wiring a second one replaces the first on the canvas
+    /// and is rejected by the engine before a run starts.
+    #[default]
+    Single,
+    /// Any number of wires, e.g. the Merge node's input.
+    Multi,
+}
+
+impl PortArity {
+    fn is_single(&self) -> bool {
+        matches!(self, PortArity::Single)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -183,12 +210,14 @@ impl Default for NodePorts {
                 label:     "In".to_string(),
                 position:  PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![PortDefinition {
                 id:        "output".to_string(),
                 label:     "Out".to_string(),
                 position:  PortPosition::Right,
                 port_type: None,
+                arity: PortArity::Single,
             }],
         }
     }
@@ -371,12 +400,6 @@ pub struct NodeDescriptor {
     pub dynamic_ports: bool,
     /// True when this node was loaded from a WASM plugin rather than built in.
     pub is_plugin: bool,
-    /// True when this node can start a workflow run (see
-    /// [`Node::is_trigger_capable`]). The frontend uses this to list a plugin
-    /// trigger under the palette's Triggers section; built-in triggers are
-    /// recognized by type id there.
-    #[serde(default)]
-    pub trigger_capable: bool,
     /// One or two sentence plain-text description of what this node does.
     /// Empty string when the node does not override `Node::description()`.
     #[serde(default)]
@@ -388,6 +411,11 @@ pub struct NodeDescriptor {
     /// Author or organization name declared by the plugin. Empty string when unset.
     #[serde(default)]
     pub author: String,
+    /// True when this node can start its own events as a workflow trigger
+    /// (a plugin exporting the `trigger` interface). The frontend treats such
+    /// a node as a legitimate entry point and lists it under Triggers.
+    #[serde(default)]
+    pub trigger_capable: bool,
 }
 
 impl NodeDescriptor {
@@ -402,10 +430,10 @@ impl NodeDescriptor {
             ports: node.ports(),
             dynamic_ports: node.is_dynamic_ports(),
             is_plugin: node.is_plugin(),
-            trigger_capable: node.is_trigger_capable(),
             description: node.description().to_string(),
             icon: node.icon().to_string(),
             author: node.author().to_string(),
+            trigger_capable: node.is_trigger_capable(),
         }
     }
 }
@@ -427,6 +455,36 @@ mod tests {
         async fn execute(&self, _input: NodeInput) -> NodeOutput {
             unimplemented!("not exercised by registry tests")
         }
+    }
+
+    struct TriggerStub;
+
+    #[async_trait]
+    impl Node for TriggerStub {
+        fn type_id(&self) -> &'static str { "trigger_stub" }
+        fn display_name(&self) -> &'static str { "trigger_stub" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "0.0.0" }
+        fn input_schema(&self) -> Value { Value::Null }
+        fn output_schema(&self) -> Value { Value::Null }
+        fn is_trigger_capable(&self) -> bool { true }
+        async fn execute(&self, _input: NodeInput) -> NodeOutput {
+            unimplemented!("not exercised by descriptor tests")
+        }
+    }
+
+    #[test]
+    fn descriptor_reports_trigger_capable_only_for_trigger_capable_nodes() {
+        assert!(NodeDescriptor::from_node(&TriggerStub).trigger_capable);
+        assert!(!NodeDescriptor::from_node(&StubNode("plain")).trigger_capable);
+    }
+
+    #[test]
+    fn descriptor_without_trigger_capable_field_deserializes_as_false() {
+        let mut v = serde_json::to_value(NodeDescriptor::from_node(&StubNode("plain"))).unwrap();
+        v.as_object_mut().unwrap().remove("trigger_capable");
+        let d: NodeDescriptor = serde_json::from_value(v).unwrap();
+        assert!(!d.trigger_capable);
     }
 
     fn sealed_registry_with_builtin(id: &'static str) -> NodeRegistry {
@@ -486,32 +544,35 @@ mod tests {
         }
     }
 
-    struct TriggerStubNode;
-
-    #[async_trait]
-    impl Node for TriggerStubNode {
-        fn type_id(&self) -> &'static str { "trigger_stub" }
-        fn display_name(&self) -> &'static str { "Trigger Stub" }
-        fn node_type(&self) -> NodeType { NodeType::Utility }
-        fn version(&self) -> &'static str { "1.0.0" }
-        fn input_schema(&self) -> Value { Value::Null }
-        fn output_schema(&self) -> Value { Value::Null }
-        fn is_trigger_capable(&self) -> bool { true }
-        async fn execute(&self, _input: NodeInput) -> NodeOutput {
-            unimplemented!("not exercised by descriptor tests")
-        }
-    }
-
-    #[test]
-    fn descriptor_reports_trigger_capability_only_when_node_declares_it() {
-        assert!(NodeDescriptor::from_node(&TriggerStubNode).trigger_capable);
-        assert!(!NodeDescriptor::from_node(&StubNode("plain_node")).trigger_capable);
-    }
-
     #[test]
     fn descriptor_carries_icon_and_author_when_node_overrides_them() {
         let descriptor = NodeDescriptor::from_node(&BrandedStubNode);
         assert_eq!(descriptor.icon, "<circle r=\"1\"/>");
         assert_eq!(descriptor.author, "Acme Co");
+    }
+}
+
+#[cfg(test)]
+mod port_arity_tests {
+    use super::{PortArity, PortDefinition};
+
+    #[test]
+    fn missing_arity_deserialises_as_single() {
+        let port: PortDefinition =
+            serde_json::from_str(r#"{"id":"input","label":"In","position":"left"}"#).unwrap();
+        assert_eq!(port.arity, PortArity::Single);
+    }
+
+    #[test]
+    fn multi_is_serialised_and_single_is_omitted() {
+        let multi: PortDefinition = serde_json::from_str(
+            r#"{"id":"input","label":"In","position":"left","arity":"multi"}"#,
+        )
+        .unwrap();
+        assert_eq!(multi.arity, PortArity::Multi);
+        assert_eq!(serde_json::to_value(&multi).unwrap()["arity"], "multi");
+
+        let single = PortDefinition { arity: PortArity::Single, ..multi };
+        assert!(serde_json::to_value(&single).unwrap().get("arity").is_none());
     }
 }

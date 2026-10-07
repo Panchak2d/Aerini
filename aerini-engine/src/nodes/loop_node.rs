@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 use super::util::traverse_dotpath;
 
 /// Loop node — iterates over an array, emitting one item at a time.
@@ -78,10 +78,11 @@ impl Node for LoopNode {
         NodePorts {
             inputs: vec![PortDefinition {
                 id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![
-                PortDefinition { id: "loop_body".to_string(), label: "Each Item".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "done".to_string(),      label: "Done".to_string(),      position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "loop_body".to_string(), label: "Each Item".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "done".to_string(),      label: "Done".to_string(),      position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }

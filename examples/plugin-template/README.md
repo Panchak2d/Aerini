@@ -41,4 +41,4 @@ No restart needed — Aerini reloads the plugin registry live after install or r
 3. Implement `execute()` with your node's logic.
 4. Rebuild and copy the `.wasm` file.
 
-See [docs/plugin-authoring.md](../../docs/plugin-authoring.md) for a complete guide.
+See [docs/development/plugin-authoring.md](../../docs/development/plugin-authoring.md) for a complete guide.

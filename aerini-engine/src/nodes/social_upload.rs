@@ -2,13 +2,13 @@
 //
 // Uploads media contract files to YouTube, Instagram, or TikTok.
 //
-// Gaps addressed:
-//   G2  Instagram always requires publicly accessible URL — base64 data returns
-//       INSTAGRAM_NEEDS_PUBLIC_URL immediately.
-//   G6  OAuth handled by oauth_listener, fixed port 42069.
-//   G7  TikTok: 10 MB chunks (5 MB min required by API — enforced per spec).
-//       Files < 5 MB uploaded as single chunk. Chunk retry: 3 attempts (G7).
-//   G8  File size checks: Instagram 100 MB, TikTok 4 GB.
+// Behavior:
+//   - Instagram always requires a publicly accessible URL; base64 data returns
+//     INSTAGRAM_NEEDS_PUBLIC_URL immediately.
+//   - OAuth is handled by oauth_listener on fixed port 42069.
+//   - TikTok uploads in 10 MB chunks (the API's minimum is 5 MB); files under
+//     5 MB go up as a single chunk. Each chunk is retried up to 3 times.
+//   - Size limits: Instagram 100 MB, TikTok 4 GB.
 //
 // VERIFIED endpoints (May 2026):
 //   YouTube upload:
@@ -36,9 +36,9 @@ use crate::nodes::oauth_listener;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const TIKTOK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB (G8)
-const TIKTOK_CHUNK_SIZE: usize = 10 * 1024 * 1024;    // 10 MB (G7)
-const TIKTOK_CHUNK_RETRIES: u32 = 3;                   // retries per chunk (G7)
+const TIKTOK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+const TIKTOK_CHUNK_SIZE: usize = 10 * 1024 * 1024;    // 10 MB
+const TIKTOK_CHUNK_RETRIES: u32 = 3;                   // retries per chunk
 
 // ── Shared HTTP client ────────────────────────────────────────────────────────
 
@@ -146,7 +146,7 @@ impl Node for SocialUploadNode {
         for file_val in files {
             let filename = file_val["filename"].as_str().unwrap_or("file");
             let data = file_val["data"].as_str().unwrap_or("");
-            let mime_type = file_val["mime_type"].as_str().unwrap_or("application/octet-stream");
+            let mime_type = safe_mime_type(file_val["mime_type"].as_str());
 
             let result = match platform {
                 "youtube" => {
@@ -193,6 +193,16 @@ impl Node for SocialUploadNode {
             "platform": platform,
             "errors": errors,
         }))
+    }
+}
+
+/// The multipart body interpolates the MIME type into a part header, so a
+/// value carrying CR/LF or other control bytes would inject extra headers.
+/// Anything that is not printable ASCII falls back to a generic type.
+fn safe_mime_type(raw: Option<&str>) -> &str {
+    match raw {
+        Some(m) if !m.is_empty() && m.bytes().all(|b| (0x20..0x7f).contains(&b)) => m,
+        _ => "application/octet-stream",
     }
 }
 
@@ -338,7 +348,7 @@ async fn upload_to_youtube(
         ))?;
 
     let status = resp.status().as_u16();
-    let body_val: Value = resp.json().await.unwrap_or(Value::Null);
+    let body_val: Value = crate::nodes::util::read_json_response_capped(resp).await.unwrap_or(Value::Null);
 
     if status == 200 || status == 201 {
         let video_id = body_val["id"].as_str().unwrap_or("unknown");
@@ -354,7 +364,7 @@ async fn upload_to_youtube(
 
 // ── Instagram ─────────────────────────────────────────────────────────────────
 
-/// Instagram requires media hosted at a publicly accessible URL (G2).
+/// Instagram requires media hosted at a publicly accessible URL.
 /// Base64-encoded local data cannot be uploaded directly — return a clear error.
 async fn upload_to_instagram(
     filename: &str,
@@ -434,7 +444,7 @@ async fn upload_to_tiktok(
 
     let total_size = file_bytes.len() as u64;
 
-    // File size check (G8): TikTok maximum 4 GB.
+    // TikTok maximum 4 GB.
     if total_size > TIKTOK_MAX_BYTES {
         return Err(upload_err(
             "FILE_TOO_LARGE",
@@ -444,7 +454,7 @@ async fn upload_to_tiktok(
         ));
     }
 
-    // Chunk calculation (G7).
+    // Chunk calculation.
     // TikTok API spec: total_chunk_count = floor(video_size / chunk_size).
     // The final chunk receives all remaining bytes (may exceed chunk_size).
     // Minimum chunk size: 5 MB. Files <= chunk_size are uploaded as a single chunk.
@@ -503,7 +513,7 @@ async fn upload_to_tiktok(
         return Err(map_http_error(init_status, "TikTok"));
     }
 
-    let init_body_val: Value = init_resp.json().await.map_err(|_| upload_err(
+    let init_body_val: Value = crate::nodes::util::read_json_response_capped(init_resp).await.map_err(|_| upload_err(
         "PARSE_ERROR",
         "Failed to parse TikTok init response",
         "TikTok's init response was not valid JSON.",
@@ -532,7 +542,7 @@ async fn upload_to_tiktok(
         ))?
         .to_string();
 
-    // Step 2: Upload chunks with retry (G7).
+    // Step 2: Upload chunks with retry.
     for chunk_idx in 0..total_chunks {
         let start = (chunk_idx as usize) * chunk_size;
         // Last chunk takes all remaining bytes (handles remainder from floor division).
@@ -610,6 +620,20 @@ mod tests {
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata};
+
+    #[test]
+    fn safe_mime_type_keeps_ordinary_values_and_defaults_when_absent() {
+        assert_eq!(safe_mime_type(Some("video/mp4")), "video/mp4");
+        assert_eq!(safe_mime_type(None), "application/octet-stream");
+    }
+
+    #[test]
+    fn safe_mime_type_rejects_header_injection() {
+        assert_eq!(
+            safe_mime_type(Some("video/mp4\r\nX-Injected: 1")),
+            "application/octet-stream"
+        );
+    }
 
     /// Minimal hand-rolled `Subscriber` that records every event's fields as
     /// one `"name=value "`-pair string per event. `aerini-engine` depends on

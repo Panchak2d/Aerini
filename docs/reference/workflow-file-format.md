@@ -90,10 +90,16 @@ A connection is the line drawn from one node's output to another's input; the JS
 | `from_node` | string | Yes | Source node's `id`. |
 | `from_port` | string | Yes | Output port name on the source node, e.g. `"output"`, or a branch name such as `"on_true"` for a node with more than one output. |
 | `to_node` | string | Yes | Target node's `id`. |
-| `to_port` | string | Yes | Input port name on the target node, e.g. `"input"`. |
+| `to_port` | string | Yes | Input port name on the target node, e.g. `"input"`. At most one connection may end on a given input port unless that port is multi-input; see [Input port arity](#input-port-arity). |
 | `condition` | string or `null` | No | Expression the canvas uses to decide whether to draw the line. Not evaluated by the executor: routing follows `from_port` alone. |
 | `on_success` | string or `null` | No | Alternate target node ID activated when the source node succeeds, used to register an extra reachability edge. |
 | `on_failure` | string or `null` | No | Target node ID the executor routes to when the source node fails after every retry attempt, instead of aborting the run. |
+
+### Input port arity
+
+An input port accepts one connection unless its node type declares it multi-input; Merge's input is the only built-in one. Any number of connections may leave an output port. A node type marks a multi-input port with `"arity": "multi"` on the port in its descriptor; ports without `arity` accept one connection. The desktop app copies descriptor ports into each saved node's `ports`, but the engine reads arity from the node type, not from the file.
+
+Before any node runs, the engine rejects a workflow that puts two or more connections on a single-input port and returns `PortArityViolation`: `Input port 'input' on node 'n_c' accepts one connection but has 2; remove the extra wires or route them through a Merge node`. Only the first violation, in `edges` order, is reported. The desktop app opens such a file with every connection intact, marks the port in red, and warns once; Run then fails with the error above.
 
 ## Schema version
 

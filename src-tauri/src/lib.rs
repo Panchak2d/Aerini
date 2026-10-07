@@ -13,6 +13,7 @@ use aerini_engine::{
     plugin_loader::{load_plugins, PluginLoadReport},
     scheduler::SchedulerDaemon,
     store::{CredentialStore, KeySource, StoreCredentialResolver},
+    error::EngineError,
     EventSink,
 };
 use tauri::Manager;
@@ -109,6 +110,23 @@ impl ActiveRunToken {
         }
     }
 
+    /// Number of runs currently registered, i.e. started and not yet finished.
+    pub fn active_count(&self) -> usize {
+        self.cancel_tokens
+            .lock().expect("ActiveRunToken cancel_tokens lock poisoned")
+            .len()
+    }
+
+    /// Cancel every registered run. Each run unregisters itself as it unwinds.
+    pub fn cancel_all(&self) {
+        for token in self.cancel_tokens
+            .lock().expect("ActiveRunToken cancel_tokens lock poisoned")
+            .values()
+        {
+            token.cancel();
+        }
+    }
+
     /// Acquire the exec-lock for `workflow_id`, waiting up to `timeout`.
     /// `Ok` holds the lock until the returned guard drops (i.e. for the
     /// caller's entire run). `Err(SchedulerError::AlreadyRunning)` if
@@ -162,6 +180,24 @@ mod active_run_token_tests {
 
         assert!(token_a.is_cancelled(), "cancel(\"run_a\") must cancel run_a's token");
         assert!(!token_b.is_cancelled(), "cancel(\"run_a\") must not touch run_b's token");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_reaches_every_registered_run_and_count_tracks_registration() {
+        let bookkeeping = ActiveRunToken::new();
+        let token_a = CancellationToken::new();
+        let token_b = CancellationToken::new();
+        assert_eq!(bookkeeping.active_count(), 0);
+        bookkeeping.register("run_a", token_a.clone());
+        bookkeeping.register("run_b", token_b.clone());
+        assert_eq!(bookkeeping.active_count(), 2);
+
+        bookkeeping.cancel_all();
+        assert!(token_a.is_cancelled() && token_b.is_cancelled());
+
+        bookkeeping.unregister("run_a");
+        bookkeeping.unregister("run_b");
+        assert_eq!(bookkeeping.active_count(), 0);
     }
 
     #[tokio::test]
@@ -367,6 +403,33 @@ async fn save_export_zip(
     }
 }
 
+/// Shows a startup error and exits once it is dismissed. Uses the non-blocking
+/// `show` because `setup` runs on the main thread, where `blocking_show` would
+/// freeze the app.
+fn exit_with_startup_error(app: &tauri::AppHandle, title: &str, message: String) {
+    eprintln!("[startup] {title}: {message}");
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| std::process::exit(1));
+}
+
+fn report_credential_store_failure(app: &tauri::AppHandle, err: &EngineError) {
+    let message = match err {
+        EngineError::KeyUnavailable(detail) => format!(
+            "Aerini could not read the encryption key for your saved credentials, so it did not start. \
+             Your credentials have not been changed.\n\n\
+             On macOS: quit Aerini, open it again, and choose \"Always Allow\" when macOS asks for Keychain access.\n\n\
+             Otherwise: unlock or start your system keychain and reopen Aerini, or restore the key from \
+             your Backup Encryption Key copy (see the Credentials guide).\n\n\
+             Details: {detail}"
+        ),
+        other => format!("Aerini could not open its credential store: {other}"),
+    };
+    exit_with_startup_error(app, "Aerini cannot unlock your credentials", message);
+}
+
 #[tauri::command]
 fn close_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -459,8 +522,7 @@ async fn pick_file_dialog(app: tauri::AppHandle) -> Option<String> {
 /// Write base64-encoded media bytes to a temp file and return the absolute path.
 ///
 /// Strips `/`, `\`, and `..` from the filename before constructing the path.
-/// The file is written to `{temp_dir}/aerini_media/{8 hex chars}-{safe_filename}`;
-/// the prefix keeps two files with the same name from overwriting each other.
+/// The file is written to `{temp_dir}/aerini_media/{safe_filename}`.
 #[tauri::command]
 async fn write_temp_file(filename: String, data: String) -> Result<String, String> {
     // Path traversal protection — strip separators and collapse ".."
@@ -482,14 +544,6 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     const MAX_TEMP_FILE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
-    let max_encoded_len = MAX_TEMP_FILE_BYTES.div_ceil(3) * 4;
-    if data.len() > max_encoded_len {
-        return Err(format!(
-            "File too large: {} encoded bytes (limit {} bytes decoded)",
-            data.len(),
-            MAX_TEMP_FILE_BYTES,
-        ));
-    }
     let bytes = BASE64.decode(&data)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
     if bytes.len() > MAX_TEMP_FILE_BYTES {
@@ -500,8 +554,7 @@ async fn write_temp_file(filename: String, data: String) -> Result<String, Strin
         ));
     }
 
-    let unique_prefix = uuid::Uuid::new_v4().simple().to_string();
-    let path = dir.join(format!("{}-{}", &unique_prefix[..8], safe_name));
+    let path = dir.join(&safe_name);
     tokio::fs::write(&path, &bytes)
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
@@ -539,40 +592,56 @@ pub fn run() {
     // allocations get reported to.
     aerini_engine::mem_tracking::install();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
-        ))
+        ));
+
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .setup(|app| {
             let data_dir: PathBuf = app.path().app_data_dir()
                 .expect("Failed to resolve app data directory");
             std::fs::create_dir_all(&data_dir)?;
 
-            let db = Arc::new(
-                WorkflowDb::open(&data_dir.join("workflows.db"), 8)
-                    .expect("Failed to open workflow database")
-            );
+            let db = match WorkflowDb::open(&data_dir.join("workflows.db"), 8) {
+                Ok(db) => Arc::new(db),
+                Err(e) => {
+                    exit_with_startup_error(
+                        app.handle(),
+                        "Aerini cannot open its database",
+                        format!("Aerini could not open its workflow database: {e}"),
+                    );
+                    return Ok(());
+                }
+            };
             let cred_db_path = data_dir.join("credentials.db");
             let cred_key_fallback = data_dir.join(".cred.key");
             // OsKeychain's Linux backend blocks the calling thread to reach the
             // secret service, and this hook runs on Tauri's own Tokio runtime —
             // do the open on a dedicated blocking thread, not here.
-            let cred_store = Arc::new(
-                tauri::async_runtime::block_on(async move {
-                    tokio::task::spawn_blocking(move || {
-                        CredentialStore::open(
-                            &cred_db_path,
-                            KeySource::OsKeychain { fallback: cred_key_fallback },
-                        )
-                    })
-                    .await
-                    .expect("Credential store init task panicked")
+            let cred_store = match tauri::async_runtime::block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    CredentialStore::open(
+                        &cred_db_path,
+                        KeySource::OsKeychain { fallback: cred_key_fallback },
+                    )
                 })
-                .expect("Failed to open credential store")
-            );
+                .await
+                .expect("Credential store init task panicked")
+            }) {
+                Ok(store) => Arc::new(store),
+                Err(e) => {
+                    report_credential_store_failure(app.handle(), &e);
+                    return Ok(());
+                }
+            };
             let mut registry = NodeRegistry::new();
             register_builtins(&mut registry, &data_dir, Some(Arc::clone(&db)));
             start_pool_eviction_task(tauri::async_runtime::handle().inner());
@@ -613,9 +682,7 @@ pub fn run() {
             // where a scheduled/webhook run has no per-caller token scope to
             // derive trust from.
             .with_caller_is_admin(true));
-            daemon.set_plugin_dir(
-                db.get_setting("plugin_dir").unwrap_or(None).map(std::path::PathBuf::from),
-            );
+            daemon.set_plugin_dir(commands::scheduler::configured_plugin_dir(&db));
             daemon.start(tauri::async_runtime::handle().inner());
 
             app.manage(Arc::clone(&db));
@@ -628,6 +695,14 @@ pub fn run() {
             app.manage(Arc::clone(&daemon));
             app.manage(Arc::clone(&event_sink));
             app.manage(Arc::new(ActiveRunToken::new()));
+            let update_notice = commands::update::consume_startup_marker(
+                &data_dir,
+                &app.package_info().version.to_string(),
+            );
+            app.manage(commands::update::UpdateState::new(
+                commands::update::marker_path(&data_dir),
+                update_notice,
+            ));
             app.manage(Arc::new(Reloadable::new(plugin_load_report)));
             app.manage(Arc::new(tokio::sync::Mutex::new(())));
 
@@ -834,6 +909,9 @@ pub fn run() {
             commands::performance::delete_performance_report,
             commands::performance::clear_performance_reports,
             commands::update::check_for_update,
+            commands::update::install_update,
+            commands::update::cancel_update_download,
+            commands::update::take_update_notice,
             commands::providers::list_provider_models,
             pick_folder_dialog,
             pick_plugin_file_dialog,

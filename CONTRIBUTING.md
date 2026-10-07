@@ -1,6 +1,6 @@
 # Contributing to Aerini
 
-Aerini is a Tauri 2.0 desktop app for building visual automation workflows.
+Aerini is a Tauri 2 desktop app for building visual automation workflows.
 The codebase is split into three Cargo crates and a TypeScript frontend.
 
 ---
@@ -49,8 +49,10 @@ The Code (JS) node runs on a Node.js runtime bundled into Aerini, not your syste
 npm install
 ./scripts/fetch-node-binaries.sh   # downloads + checksum-verifies bundled Node.js, one time per clone
 npm run dev       # Vite dev server + Tauri window
-npm run build     # production bundle → src-tauri/target/release/bundle/
+npm run build:unsigned   # installers → src-tauri/target/release/bundle/
 ```
+
+`npm run build` is the release form: it also signs the update artifacts and fails without the maintainers' `TAURI_SIGNING_PRIVATE_KEY`. Use `build:unsigned` for local builds.
 
 `fetch-node-binaries.sh` needs `curl`, `tar`, `unzip` (or `powershell.exe`), and `sha256sum`/`shasum` on PATH, plus network access to nodejs.org. Skipping it fails the Rust build with `resource path 'binaries/node-bundled-...' doesn't exist`. `strip` is optional: when present, the script uses it to remove the ~14% of each Linux/macOS binary that's just an embedded debug symbol table (Windows builds don't have one to remove); its absence is not an error, the binary is staged unstripped instead.
 
@@ -228,6 +230,8 @@ For new nodes, add at least one `#[cfg(test)]` block covering:
 
 `aerini-engine/tests/workflow_integration.rs` is an end-to-end harness: it builds a `Workflow` from scratch and runs it through the real executor, covering a full trigger-to-output chain, both branches of an If node, loop iteration counts, cycle detection, and a disconnected node. Manual verification steps for anything it doesn't cover still go in your PR description.
 
+The release scripts have their own tests: `python3 -m unittest discover -s scripts/tests`. Run them if you change anything under `scripts/`.
+
 See [Testing](docs/development/testing.md) for how all three Rust crates and the frontend suite fit together, and which of them CI runs for you automatically versus which need a manual `cargo test -p <crate>`.
 
 ---
@@ -285,7 +289,7 @@ npm run dev
 ### Building an installer
 
 ```bash
-npm run build
+npm run build:unsigned
 ```
 
 The installer appears in `src-tauri/target/release/bundle/`:
@@ -315,11 +319,38 @@ The Docker image (`Dockerfile`) stages its own bundled Node.js at build time. No
 
 ---
 
+## Releasing (maintainers)
+
+Desktop releases are built by `release.yml` when a `vX.Y.Z` tag is pushed. The update packages are signed with a private key that only the build jobs can read.
+
+### One-time setup
+
+1. Generate the key pair with a password, outside the repository: `npx tauri signer generate -w <path>`. Put the **public** key in `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. Back up the private key and its password in two separate places. If the key is lost, installed copies can never update again and users must reinstall by hand. If it leaks, anyone holding it can push malicious updates.
+2. In GitHub, create an environment named `release` (Settings → Environments). Require a reviewer, restrict deployments to tags matching `v*`, and add the secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+3. Add a tag ruleset for `v*` (Settings → Rules → Rulesets) that blocks deleting or moving release tags.
+
+### Cutting a release
+
+1. Set the new version in `package.json`, `src-tauri/tauri.conf.json` and the root `Cargo.toml` (`bash scripts/verify-release-tag.sh vX.Y.Z` checks all three), update `CHANGELOG.md`, and push the tag.
+2. Approve the pending `release` deployment. The `verify` job has already checked the updater configuration; the build jobs sign each installer.
+3. When the run finishes, open the summary of the **Publish updater manifest** job. It lists every platform in `latest.json`. Expect eight: AppImage, deb and rpm for x86_64 and aarch64, plus NSIS and MSI for Windows x86_64. macOS is built and signed but deliberately not listed, so macOS users update by downloading the release.
+4. Edit the draft's notes and publish it. Publishing is what releases the update: only a published release that is not a prerelease is served as "latest", so drafts and `-rc` tags are never offered. If the manifest job failed, do not publish. Fix the cause and re-run the failed jobs; re-running is safe.
+5. Smoke test: install the previous version and update to the new one through **Settings → About → Updates**.
+
+### Rules
+
+- **Never change `pubkey` directly.** Installed apps only trust the key compiled into them. To rotate: release N with the *new* `pubkey` in its config but signed with the *old* key; once users are on N, switch the two secrets and release N+1 signed with the new key.
+- Do not remove `bundle.createUpdaterArtifacts` or `plugins.updater.requireSignedVersion`. The `verify` job fails the release if either is gone, because a build without them can never self-update, or can be forced to an older version.
+- To list another platform in `latest.json`, add its key to `EXPECTED_KEYS` in `scripts/build-updater-manifest.py`. To enable macOS in-app updates, move `darwin-aarch64-app` from `HELD_BACK_KEYS` to `EXPECTED_KEYS`, but only after the macOS update path has been tested on a Mac.
+- The `verify` job requires the first `plugins.updater` endpoint to point at this repository's own `releases/latest/download/latest.json`. A fork that wants to test releases must set its own public key and endpoint in `tauri.conf.json`, its own `release` environment and its own test key.
+
+---
+
 ## Troubleshooting
 
 ### AppImage build fails: `failed to run linuxdeploy`
 
-Only affects `npm run build` on Linux (the Tauri step that produces an `.AppImage`). `npm run dev` and `npm run vite:build` are unaffected.
+Only affects `npm run build:unsigned` (and `npm run build`) on Linux (the Tauri step that produces an `.AppImage`). `npm run dev` and `npm run vite:build` are unaffected.
 
 **Cause:** Missing `libfuse2`. AppImages require FUSE to mount themselves, and Ubuntu 22.04+ / Fedora / Arch do not ship it by default.
 
@@ -333,4 +364,4 @@ sudo apt install libfuse2t64
 sudo apt install libfuse2
 ```
 
-Retry `npm run build` after installing. If the error persists, the full output just above the `failed to run linuxdeploy` line will contain a more specific message.
+Retry `npm run build:unsigned` after installing. If the error persists, the full output just above the `failed to run linuxdeploy` line will contain a more specific message.

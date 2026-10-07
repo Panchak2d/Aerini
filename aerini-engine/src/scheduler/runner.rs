@@ -11,106 +11,10 @@ use crate::executor::{CredentialResolver, WorkflowExecutor};
 use crate::model::Workflow;
 use crate::node::{NodeRegistry, Reloadable};
 use crate::cron::next_cron_delay_secs;
-use crate::plugin_loader::PluginLoader;
+use crate::plugin_loader::{NextFireWatch, PluginLoader};
 use crate::EventSink;
 
 use super::{ScheduledJobRow, SchedulerDb, SchedulerStatusEvent, TriggerKind};
-
-/// First restart delay for a plugin trigger that fails or ends.
-const PLUGIN_RESTART_DELAY_INITIAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Longest restart delay for a plugin trigger that keeps failing.
-const PLUGIN_RESTART_DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(300);
-/// A start that fails (plugin missing, scan timed out) never retries sooner
-/// than this, since each attempt rescans the plugin directory.
-const PLUGIN_START_ERROR_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-/// A plugin stream that stayed up this long, or delivered an event, ran healthily.
-const PLUGIN_HEALTHY_UPTIME: std::time::Duration = std::time::Duration::from_secs(60);
-/// The same error message is logged again at most this often.
-const PLUGIN_ERROR_REPEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// A plugin-reported next-fire time may be at most this far in the past
-/// (clock skew, a timer that is just due) and still be accepted.
-const PLUGIN_NEXT_FIRE_PAST_TOLERANCE_MS: i64 = 5_000;
-/// A plugin-reported next-fire time further ahead than this is rejected.
-const PLUGIN_NEXT_FIRE_MAX_AHEAD_MS: i64 = 366 * 24 * 60 * 60 * 1_000;
-/// Reported next-fire times are published to the UI and database at most this
-/// often, so a plugin reporting in a tight loop cannot flood either.
-const PLUGIN_NEXT_FIRE_PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Validates a next-fire time reported by a plugin (untrusted input).
-/// `floor_ms` is when the host last received an event from the plugin: the
-/// next event cannot precede one the host already has. `None` for a value
-/// that overflows, lies more than [`PLUGIN_NEXT_FIRE_PAST_TOLERANCE_MS`] in
-/// the past, is earlier than `floor_ms`, or is more than
-/// [`PLUGIN_NEXT_FIRE_MAX_AHEAD_MS`] ahead. Never panics.
-fn clamp_next_fire(raw_ms: u64, now_ms: i64, floor_ms: i64) -> Option<DateTime<Utc>> {
-    let ms    = i64::try_from(raw_ms).ok()?;
-    let lower = now_ms.saturating_sub(PLUGIN_NEXT_FIRE_PAST_TOLERANCE_MS).max(floor_ms);
-    let upper = now_ms.saturating_add(PLUGIN_NEXT_FIRE_MAX_AHEAD_MS);
-    if ms < lower || ms > upper {
-        return None;
-    }
-    DateTime::from_timestamp_millis(ms)
-}
-
-/// The time to publish for a plugin's latest report, or `None` when there is
-/// nothing to publish: no report, an invalid one, or one equal to what was
-/// last published.
-fn plugin_next_fire_to_publish(
-    raw:            Option<u64>,
-    now_ms:         i64,
-    floor_ms:       i64,
-    last_published: Option<DateTime<Utc>>,
-) -> Option<DateTime<Utc>> {
-    let next = clamp_next_fire(raw?, now_ms, floor_ms)?;
-    (last_published != Some(next)).then_some(next)
-}
-
-/// Delay before restarting a plugin trigger after `consecutive_failures`
-/// failed or unhealthy runs in a row: 5 s, doubling each time, capped at 5 min.
-/// Zero (the previous run was healthy) restarts after the initial delay.
-fn plugin_restart_delay(consecutive_failures: u32) -> std::time::Duration {
-    let doublings = consecutive_failures.saturating_sub(1);
-    let factor = 1u32.checked_shl(doublings).unwrap_or(u32::MAX);
-    PLUGIN_RESTART_DELAY_INITIAL.saturating_mul(factor).min(PLUGIN_RESTART_DELAY_MAX)
-}
-
-/// Whether a plugin run counts as healthy: it delivered an event or stayed up
-/// for at least [`PLUGIN_HEALTHY_UPTIME`].
-fn plugin_run_was_healthy(delivered_event: bool, uptime: std::time::Duration) -> bool {
-    delivered_event || uptime >= PLUGIN_HEALTHY_UPTIME
-}
-
-/// Consecutive-failure count after a run ends: reset by a healthy run.
-fn plugin_failures_after_run(previous: u32, healthy: bool) -> u32 {
-    if healthy { 0 } else { previous.saturating_add(1) }
-}
-
-/// Whether to log `message`: always when it differs from the last one logged,
-/// and for a repeat only once [`PLUGIN_ERROR_REPEAT_INTERVAL`] has passed.
-fn should_emit_plugin_error(last: Option<(&str, std::time::Duration)>, message: &str) -> bool {
-    match last {
-        Some((previous, since)) => previous != message || since >= PLUGIN_ERROR_REPEAT_INTERVAL,
-        None => true,
-    }
-}
-
-/// Emits a plugin-trigger error unless [`should_emit_plugin_error`] says it is
-/// a recent repeat; `last_error` records the last message actually emitted.
-async fn emit_plugin_error_throttled(
-    event_sink:  &Arc<dyn EventSink>,
-    db:          &Arc<dyn SchedulerDb>,
-    workflow_id: &str,
-    last_error:  &mut Option<(String, std::time::Instant)>,
-    message:     String,
-) {
-    let last = last_error.as_ref().map(|(m, at)| (m.as_str(), at.elapsed()));
-    if !should_emit_plugin_error(last, &message) {
-        return;
-    }
-    emit_error_async(event_sink, db, workflow_id, &message).await;
-    *last_error = Some((message, std::time::Instant::now()));
-}
 
 /// Decrements `active_runs` on drop, covering success, early return, and panic.
 struct ActiveRunGuard(Arc<AtomicUsize>);
@@ -527,11 +431,10 @@ pub(super) async fn run_job_loop(
             // instance every time the inner drain loop below falls through
             // -- whether that's the stream closing normally, a read error,
             // or the instance never producing a usable stream in the first
-            // place. The delay between attempts grows while the plugin keeps
-            // failing and resets after a healthy run, so a plugin that fails
-            // or spins is not restarted at a fixed rate forever.
-            let mut consecutive_failures: u32 = 0;
-            let mut last_error: Option<(String, std::time::Instant)> = None;
+            // place. Attempts are spaced by a growing pause so a plugin that
+            // keeps failing to resolve or start is not retried in a tight loop.
+            let mut backoff = RestartBackoff::new();
+            let mut error_gate = ErrorLogGate::new();
             loop {
                 if shutting_down.load(Ordering::SeqCst) { break; }
 
@@ -544,11 +447,13 @@ pub(super) async fn run_job_loop(
                     }
                 };
 
-                let (handle, mut rx, mut hint_rx) = match loader.start_trigger(&plugin_dir, &type_id, &config).await {
+                let (handle, mut rx, next_fire) = match loader.start_trigger(&plugin_dir, &type_id, &config).await {
                     Ok(v)  => v,
                     Err(e) => {
                         let msg = format!("Plugin trigger \"{}\": {}", type_id, e);
-                        emit_plugin_error_throttled(&event_sink, &db, &workflow_id, &mut last_error, msg).await;
+                        if error_gate.should_log(&msg, std::time::Instant::now()) {
+                            emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                        }
                         // Left running (not "error" status): a plugin can be
                         // (re)installed after this job is already armed, so
                         // a resolution failure retries rather than
@@ -556,25 +461,10 @@ pub(super) async fn run_job_loop(
                         // "log and keep trying" handling of a bad
                         // expression, not Webhook's "port bind failed, stop"
                         // one.
-                        consecutive_failures = plugin_failures_after_run(consecutive_failures, false);
-                        tokio::time::sleep(
-                            plugin_restart_delay(consecutive_failures).max(PLUGIN_START_ERROR_MIN_DELAY),
-                        )
-                        .await;
+                        tokio::time::sleep(backoff.next_delay()).await;
                         continue;
                     }
                 };
-                let started_at = std::time::Instant::now();
-                let mut delivered_event = false;
-                // Next-fire reporting (optional for a plugin): the latest raw
-                // report waits in `hint_rx`, `hint_dirty` marks one not yet
-                // published, and `hint_tick` spaces publishes out.
-                let mut hints_open = true;
-                let mut hint_dirty = false;
-                let mut last_event_ms: i64 = 0;
-                let mut last_published: Option<DateTime<Utc>> = None;
-                let mut hint_tick = tokio::time::interval(PLUGIN_NEXT_FIRE_PUBLISH_INTERVAL);
-                hint_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // Ties the event-pump task's lifetime to this iteration: a
                 // hard abort of this job's own task (stop_job/stop_all) or
                 // simply falling out of the inner loop below both drop this
@@ -585,31 +475,26 @@ pub(super) async fn run_job_loop(
                 // (`fire_once_with_vars`, below, still gets that handling,
                 // internally, regardless of trigger kind).
                 let _task_guard = AbortOnDropSingle(handle);
+                // Publishes each next-fire time the plugin reports. Display
+                // only: it never feeds back into when events are read or
+                // runs start. Tied to this iteration like the pump, and the
+                // watch is created fresh per instance, so a restarted plugin
+                // starts with no reported time.
+                let _next_fire_guard = AbortOnDropSingle(tokio::spawn(forward_next_fire(
+                    next_fire.clone(),
+                    Arc::clone(&event_sink),
+                    Arc::clone(&db),
+                    workflow_id.clone(),
+                )));
+                let run_started = std::time::Instant::now();
+                let mut delivered_event = false;
 
                 loop {
                     if shutting_down.load(Ordering::SeqCst) { break; }
 
-                    let received = tokio::select! {
-                        message = rx.recv() => message,
-                        changed = hint_rx.changed(), if hints_open => {
-                            match changed {
-                                Ok(())  => hint_dirty = true,
-                                Err(_)  => hints_open = false,
-                            }
-                            continue;
-                        }
-                        _ = hint_tick.tick(), if hint_dirty => {
-                            hint_dirty = false;
-                            let raw = *hint_rx.borrow();
-                            publish_plugin_next_fire(&event_sink, &db, &workflow_id, raw, last_event_ms, &mut last_published).await;
-                            continue;
-                        }
-                    };
-
-                    match received {
+                    match rx.recv().await {
                         Some(Ok(data)) => {
                             delivered_event = true;
-                            last_event_ms = Utc::now().timestamp_millis();
                             if shutting_down.load(Ordering::SeqCst) { break; }
                             if let Ok(_guard) = exec_lock.try_lock() {
                                 let payload = plugin_event_to_vars(&data);
@@ -624,20 +509,21 @@ pub(super) async fn run_job_loop(
                                     server_max_duration_secs, &file_sandbox_dir, &active_runs,
                                 ).await;
                                 // The run's own completion event carries no
-                                // next time, so publish the plugin's latest
-                                // report again; otherwise the UI keeps the
-                                // time of the event that just ran.
-                                hint_dirty     = false;
-                                last_published = None;
-                                let raw = *hint_rx.borrow();
-                                publish_plugin_next_fire(&event_sink, &db, &workflow_id, raw, last_event_ms, &mut last_published).await;
+                                // next-fire time; put the plugin's latest
+                                // report back so the countdown survives it.
+                                let reported = *next_fire.borrow();
+                                if reported.is_some() {
+                                    emit_waiting_async(&event_sink, &db, &workflow_id, reported).await;
+                                }
                             } else {
                                 log_skip(&event_sink, &workflow_id, "previous run still in progress");
                             }
                         }
                         Some(Err(e)) => {
                             let msg = format!("Plugin trigger \"{}\": {}", type_id, e);
-                            emit_plugin_error_throttled(&event_sink, &db, &workflow_id, &mut last_error, msg).await;
+                            if error_gate.should_log(&msg, std::time::Instant::now()) {
+                                emit_error_async(&event_sink, &db, &workflow_id, &msg).await;
+                            }
                             // The pump task always ends its own run right
                             // after sending an Err (see
                             // `PluginLoader::start_trigger`), so the next
@@ -655,12 +541,10 @@ pub(super) async fn run_job_loop(
 
                 drop(_task_guard);
                 if shutting_down.load(Ordering::SeqCst) { break; }
-                let healthy = plugin_run_was_healthy(delivered_event, started_at.elapsed());
-                if healthy {
-                    last_error = None;
+                if plugin_run_was_healthy(delivered_event, run_started.elapsed()) {
+                    backoff.reset();
                 }
-                consecutive_failures = plugin_failures_after_run(consecutive_failures, healthy);
-                tokio::time::sleep(plugin_restart_delay(consecutive_failures)).await;
+                tokio::time::sleep(backoff.next_delay()).await;
             }
         }
 
@@ -1190,31 +1074,97 @@ pub(super) async fn update_next_run_async(db: &Arc<dyn SchedulerDb>, workflow_id
     let _ = tokio::task::spawn_blocking(move || db.scheduler_update_next_run_at(&workflow_id, &next_str)).await;
 }
 
+/// Shortest gap between two next-fire status events for one plugin trigger, so
+/// a guest that reports in a tight loop cannot flood the event stream. Reports
+/// arriving inside the gap collapse into the latest one.
+const NEXT_FIRE_EVENT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Emits a `waiting` status event carrying each time a plugin trigger reports
+/// as its next event, until the plugin instance (the watch's sender) is gone.
+async fn forward_next_fire(
+    mut watch:   NextFireWatch,
+    event_sink:  Arc<dyn EventSink>,
+    db:          Arc<dyn SchedulerDb>,
+    workflow_id: String,
+) {
+    while watch.changed().await.is_ok() {
+        let next = *watch.borrow_and_update();
+        emit_waiting_async(&event_sink, &db, &workflow_id, next).await;
+        tokio::time::sleep(NEXT_FIRE_EVENT_MIN_GAP).await;
+    }
+}
+
+/// First pause before a plugin trigger is restarted; doubles per consecutive
+/// failure up to [`PLUGIN_RESTART_BACKOFF_MAX`].
+const PLUGIN_RESTART_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_secs(5);
+const PLUGIN_RESTART_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A run that lasts at least this long, or delivers an event, resets the
+/// restart pause.
+const PLUGIN_RUN_HEALTHY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The same error text is emitted at most once per this interval.
+const PLUGIN_ERROR_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Pause before restart attempt number `failures` (0-based): 5s, 10s, 20s, ...
+/// capped at 5 minutes.
+fn plugin_restart_delay(failures: u32) -> std::time::Duration {
+    PLUGIN_RESTART_BACKOFF_INITIAL
+        .saturating_mul(1u32 << failures.min(6))
+        .min(PLUGIN_RESTART_BACKOFF_MAX)
+}
+
+fn plugin_run_was_healthy(delivered_event: bool, lasted: std::time::Duration) -> bool {
+    delivered_event || lasted >= PLUGIN_RUN_HEALTHY_AFTER
+}
+
+struct RestartBackoff {
+    failures: u32,
+}
+
+impl RestartBackoff {
+    fn new() -> Self {
+        Self { failures: 0 }
+    }
+
+    fn next_delay(&mut self) -> std::time::Duration {
+        let delay = plugin_restart_delay(self.failures);
+        self.failures = self.failures.saturating_add(1);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+}
+
+/// Suppresses repeats of an identical error message within
+/// [`PLUGIN_ERROR_LOG_INTERVAL`].
+struct ErrorLogGate {
+    last_logged: std::collections::HashMap<String, std::time::Instant>,
+}
+
+impl ErrorLogGate {
+    fn new() -> Self {
+        Self { last_logged: std::collections::HashMap::new() }
+    }
+
+    fn should_log(&mut self, message: &str, now: std::time::Instant) -> bool {
+        self.last_logged
+            .retain(|_, at| now.saturating_duration_since(*at) < PLUGIN_ERROR_LOG_INTERVAL);
+        if self.last_logged.contains_key(message) {
+            return false;
+        }
+        self.last_logged.insert(message.to_string(), now);
+        true
+    }
+}
+
 fn log_skip(event_sink: &Arc<dyn EventSink>, workflow_id: &str, reason: &str) {
     event_sink.emit("scheduler-skip", serde_json::json!({
         "workflow_id": workflow_id,
         "reason": reason
     }));
-}
-
-/// Publishes a plugin's latest reported next-fire time (see
-/// [`plugin_next_fire_to_publish`]) to the database row and the UI, and
-/// records it in `last_published`. Does nothing when there is nothing valid
-/// to publish, leaving the job shown as plain "running".
-async fn publish_plugin_next_fire(
-    event_sink:     &Arc<dyn EventSink>,
-    db:             &Arc<dyn SchedulerDb>,
-    workflow_id:    &str,
-    raw:            Option<u64>,
-    floor_ms:       i64,
-    last_published: &mut Option<DateTime<Utc>>,
-) {
-    let Some(next) = plugin_next_fire_to_publish(raw, Utc::now().timestamp_millis(), floor_ms, *last_published) else {
-        return;
-    };
-    update_next_run_async(db, workflow_id, &next).await;
-    emit_waiting_async(event_sink, db, workflow_id, Some(next)).await;
-    *last_published = Some(next);
 }
 
 /// Converts a plugin trigger's `trigger-event.data` (an opaque JSON string,
@@ -2268,105 +2218,48 @@ mod integration_tests {
 }
 
 #[cfg(test)]
-mod plugin_backoff_tests {
+mod restart_backoff_tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    #[test]
-    fn restart_delay_doubles_from_five_seconds_and_caps_at_five_minutes() {
-        let secs: Vec<u64> = (0..9).map(|n| plugin_restart_delay(n).as_secs()).collect();
-        assert_eq!(secs, vec![5, 5, 10, 20, 40, 80, 160, 300, 300]);
-        assert_eq!(plugin_restart_delay(40), PLUGIN_RESTART_DELAY_MAX, "a huge count must not overflow");
-        assert_eq!(plugin_restart_delay(u32::MAX), PLUGIN_RESTART_DELAY_MAX);
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
     }
 
     #[test]
-    fn healthy_run_resets_failures_and_unhealthy_run_increments() {
-        assert!(plugin_run_was_healthy(true, Duration::ZERO));
-        assert!(plugin_run_was_healthy(false, PLUGIN_HEALTHY_UPTIME));
-        assert!(!plugin_run_was_healthy(false, PLUGIN_HEALTHY_UPTIME - Duration::from_millis(1)));
-        assert_eq!(plugin_failures_after_run(4, true), 0);
-        assert_eq!(plugin_failures_after_run(4, false), 5);
-        assert_eq!(plugin_failures_after_run(u32::MAX, false), u32::MAX);
-    }
-
-    const NOW: i64 = 1_800_000_000_000;
-
-    #[test]
-    fn next_fire_accepts_a_future_time_and_the_past_tolerance_edge() {
-        let ms = NOW + 60_000;
-        assert_eq!(clamp_next_fire(ms as u64, NOW, 0).map(|t| t.timestamp_millis()), Some(ms));
-        let edge = NOW - PLUGIN_NEXT_FIRE_PAST_TOLERANCE_MS;
-        assert!(clamp_next_fire(edge as u64, NOW, 0).is_some());
-        assert!(clamp_next_fire((edge - 1) as u64, NOW, 0).is_none(), "past by more than the tolerance");
+    fn restart_delay_doubles_from_five_seconds_to_a_five_minute_cap() {
+        let got: Vec<Duration> = (0..9).map(plugin_restart_delay).collect();
+        let want: Vec<Duration> = [5, 10, 20, 40, 80, 160, 300, 300, 300].into_iter().map(secs).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
-    fn next_fire_rejects_far_future_overflow_and_pre_event_times() {
-        assert!(clamp_next_fire((NOW + PLUGIN_NEXT_FIRE_MAX_AHEAD_MS) as u64, NOW, 0).is_some());
-        assert!(clamp_next_fire((NOW + PLUGIN_NEXT_FIRE_MAX_AHEAD_MS + 1) as u64, NOW, 0).is_none());
-        assert!(clamp_next_fire(u64::MAX, NOW, 0).is_none());
-        assert!(clamp_next_fire(0, NOW, 0).is_none());
-        // Not earlier than the last event the host received.
-        assert!(clamp_next_fire((NOW - 1_000) as u64, NOW, NOW).is_none());
-        assert!(clamp_next_fire(NOW as u64, NOW, NOW).is_some());
-        // Extreme `now` must saturate, not overflow.
-        assert!(clamp_next_fire(1, i64::MAX, 0).is_none());
-        assert!(clamp_next_fire(1, i64::MIN, 0).is_none());
+    fn restart_delay_does_not_overflow_for_huge_failure_counts() {
+        assert_eq!(plugin_restart_delay(u32::MAX), secs(300));
     }
 
     #[test]
-    fn next_fire_is_published_once_and_again_after_the_last_published_is_cleared() {
-        let ms = (NOW + 30_000) as u64;
-        let first = plugin_next_fire_to_publish(Some(ms), NOW, 0, None).expect("valid report publishes");
-        assert_eq!(plugin_next_fire_to_publish(Some(ms), NOW, 0, Some(first)), None, "unchanged report is not republished");
-        assert_eq!(plugin_next_fire_to_publish(Some(ms), NOW, 0, None), Some(first), "cleared last_published republishes");
-        assert_eq!(plugin_next_fire_to_publish(None, NOW, 0, None), None, "no report publishes nothing");
+    fn backoff_resets_to_the_initial_delay() {
+        let mut b = RestartBackoff::new();
+        assert_eq!((b.next_delay(), b.next_delay(), b.next_delay()), (secs(5), secs(10), secs(20)));
+        b.reset();
+        assert_eq!(b.next_delay(), secs(5));
     }
 
     #[test]
-    fn next_fire_that_just_fired_is_not_republished_after_its_run() {
-        let fired = NOW as u64;
-        assert_eq!(plugin_next_fire_to_publish(Some(fired), NOW + 2_000, NOW + 1_000, None), None);
+    fn run_is_healthy_after_an_event_or_sixty_seconds() {
+        assert!(plugin_run_was_healthy(true, secs(1)));
+        assert!(plugin_run_was_healthy(false, secs(60)));
+        assert!(!plugin_run_was_healthy(false, secs(59)));
     }
 
     #[test]
-    fn repeated_plugin_error_is_throttled_until_the_interval_passes() {
-        assert!(should_emit_plugin_error(None, "x"));
-        assert!(!should_emit_plugin_error(Some(("x", Duration::from_secs(10))), "x"));
-        assert!(should_emit_plugin_error(Some(("x", PLUGIN_ERROR_REPEAT_INTERVAL)), "x"));
-        assert!(should_emit_plugin_error(Some(("x", Duration::from_secs(1))), "y"), "a different message is always shown");
-    }
-}
-
-#[cfg(test)]
-mod trigger_type_event_tests {
-    use super::*;
-
-    fn row(trigger: &TriggerKind) -> ScheduledJobRow {
-        ScheduledJobRow {
-            workflow_id:   "wf-1".to_string(),
-            workflow_name: "Test Workflow".to_string(),
-            trigger_kind:  serde_json::to_string(trigger).unwrap(),
-            status:        "active".to_string(),
-            always_on:     false,
-            run_count:     0,
-            last_run_at:   None,
-            next_run_at:   None,
-            last_error:    None,
-            created_at:    "2026-01-01T00:00:00Z".to_string(),
-        }
-    }
-
-    #[test]
-    fn waiting_error_and_done_events_carry_the_trigger_type() {
-        let plugin = TriggerKind::Plugin { type_id: "heartbeat".to_string(), config: "{}".to_string() };
-        let waiting = waiting_event("wf-1", Some(row(&plugin)), None);
-        let failed  = error_event("wf-1", Some(row(&plugin)), "boom");
-        let done    = done_event("wf-1", Some(row(&TriggerKind::Interval { secs: 60 })));
-        assert_eq!(waiting.trigger_type.as_deref(), Some("plugin"));
-        assert_eq!(failed.trigger_type.as_deref(), Some("plugin"));
-        assert_eq!(done.trigger_type.as_deref(), Some("interval"));
-        assert_eq!(waiting_event("wf-1", None, None).trigger_type, None);
+    fn identical_error_is_logged_once_per_five_minutes() {
+        let t0 = Instant::now();
+        let mut gate = ErrorLogGate::new();
+        assert!(gate.should_log("boom", t0));
+        assert!(!gate.should_log("boom", t0 + secs(299)));
+        assert!(gate.should_log("other", t0 + secs(299)));
+        assert!(gate.should_log("boom", t0 + secs(300)));
     }
 }

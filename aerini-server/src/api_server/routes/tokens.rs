@@ -9,8 +9,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::token_store::{AclGrant, AclRevoke, TokenRecord};
-use super::state::{internal_error, ApiState, require_admin};
+use crate::token_store::{GrantOutcome, RevokeOutcome, TokenRecord, UngrantOutcome};
+use super::state::{ApiState, internal_error, require_admin};
 
 pub async fn list_tokens_handler(
     State(s):          State<ApiState>,
@@ -19,7 +19,7 @@ pub async fn list_tokens_handler(
     if let Err(e) = require_admin(&caller) { return e.into_response(); }
     match s.with_token_store(|store| store.list_tokens()).await {
         Ok(tokens) => (StatusCode::OK, Json(json!(tokens))).into_response(),
-        Err(e)     => internal_error("list tokens failed", e).into_response(),
+        Err(e)     => internal_error("list_tokens_handler", e).into_response(),
     }
 }
 
@@ -43,33 +43,47 @@ fn default_token_scopes() -> Vec<String> {
 
 const VALID_SCOPES: &[&str] = &["read", "write", "admin"];
 const MAX_LABEL_CHARS: usize = 256;
+const MAX_WORKFLOW_IDS: usize = 500;
 const MAX_WORKFLOW_ID_CHARS: usize = 256;
-const MAX_WORKFLOW_GRANTS: usize = 500;
 
-fn bad_request(msg: impl Into<String>) -> axum::response::Response {
-    (StatusCode::BAD_REQUEST, Json(json!({"error": msg.into()}))).into_response()
-}
-
-/// An `admin` token ignores the workflow ACL, so granting one workflows would
-/// report a restriction that is never enforced.
-fn admin_with_grants(scopes: &[String], workflow_ids: &[String]) -> bool {
-    !workflow_ids.is_empty() && scopes.iter().any(|sc| sc == "admin")
-}
-
-/// Why `secs` cannot be a token lifetime, if it cannot: zero expires the token
-/// before it can be used, and a huge value overflows the expiry date.
-fn expiry_error(secs: u64) -> Option<&'static str> {
-    if secs == 0 {
-        return Some("expires_in_secs must be at least 1");
+/// Validates a create-token request, returning the `400` message on failure.
+fn validate_create_token(b: &CreateTokenBody) -> Result<(), String> {
+    let label_chars = b.label.chars().count();
+    if b.label.trim().is_empty() || label_chars > MAX_LABEL_CHARS {
+        return Err(format!("label must be 1–{MAX_LABEL_CHARS} characters"));
     }
-    let representable = i64::try_from(secs).ok()
-        .and_then(chrono::TimeDelta::try_seconds)
-        .and_then(|d| chrono::Utc::now().checked_add_signed(d));
-    representable.is_none().then_some("expires_in_secs is too large")
-}
-
-fn valid_workflow_id(id: &str) -> bool {
-    !id.trim().is_empty() && id.chars().count() <= MAX_WORKFLOW_ID_CHARS
+    if b.scopes.is_empty() {
+        return Err("scopes must not be empty. Allowed: read, write, admin".to_string());
+    }
+    let invalid: Vec<&str> = b.scopes.iter()
+        .map(|s| s.as_str())
+        .filter(|s| !VALID_SCOPES.contains(s))
+        .collect();
+    if !invalid.is_empty() {
+        return Err(format!("Invalid scopes: {:?}. Allowed: read, write, admin", invalid));
+    }
+    if !b.workflow_ids.is_empty() && b.scopes.iter().any(|s| s == "admin") {
+        return Err("admin tokens ignore the workflow ACL; drop `admin` to restrict the token, or drop `workflow_ids`".to_string());
+    }
+    if b.workflow_ids.len() > MAX_WORKFLOW_IDS {
+        return Err(format!("workflow_ids must have at most {MAX_WORKFLOW_IDS} entries"));
+    }
+    if b.workflow_ids.iter().any(|w| w.trim().is_empty() || w.chars().count() > MAX_WORKFLOW_ID_CHARS) {
+        return Err(format!("each workflow id must be 1–{MAX_WORKFLOW_ID_CHARS} characters"));
+    }
+    match b.expires_in_secs {
+        Some(0) => return Err("expires_in_secs must be greater than 0".to_string()),
+        Some(secs) => {
+            let representable = i64::try_from(secs).ok()
+                .and_then(chrono::TimeDelta::try_seconds)
+                .and_then(|d| chrono::Utc::now().checked_add_signed(d));
+            if representable.is_none() {
+                return Err("expires_in_secs is too large".to_string());
+            }
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 pub async fn create_token_handler(
@@ -78,52 +92,26 @@ pub async fn create_token_handler(
     Json(b):           Json<CreateTokenBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin(&caller) { return e.into_response(); }
-    let label = b.label.trim().to_string();
-    if label.is_empty() || label.chars().count() > MAX_LABEL_CHARS {
-        return bad_request(format!("label must be 1–{MAX_LABEL_CHARS} characters"));
+    if let Err(msg) = validate_create_token(&b) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
     }
-    let invalid: Vec<&str> = b.scopes.iter()
-        .map(|s| s.as_str())
-        .filter(|s| !VALID_SCOPES.contains(s))
-        .collect();
-    if !invalid.is_empty() {
-        return bad_request(format!("Invalid scopes: {:?}. Allowed: read, write, admin", invalid));
-    }
-    let mut scopes: Vec<String> = Vec::with_capacity(VALID_SCOPES.len());
-    for sc in &b.scopes {
-        if !scopes.contains(sc) { scopes.push(sc.clone()); }
-    }
-    if scopes.is_empty() {
-        return bad_request("scopes must contain at least one of: read, write, admin");
-    }
-    if admin_with_grants(&scopes, &b.workflow_ids) {
-        return bad_request("admin tokens are never restricted to specific workflows; drop `admin` from scopes or clear `workflow_ids`");
-    }
-    if b.workflow_ids.len() > MAX_WORKFLOW_GRANTS {
-        return bad_request(format!("workflow_ids may contain at most {MAX_WORKFLOW_GRANTS} entries"));
-    }
-    if !b.workflow_ids.iter().all(|id| valid_workflow_id(id)) {
-        return bad_request(format!("each workflow id must be 1–{MAX_WORKFLOW_ID_CHARS} characters"));
-    }
-    if let Some(msg) = b.expires_in_secs.and_then(expiry_error) {
-        return bad_request(msg);
-    }
+    let label        = b.label.clone();
+    let scopes       = b.scopes.clone();
     let workflow_ids = b.workflow_ids.clone();
     let expires      = b.expires_in_secs;
-    let (label_in, scopes_in) = (label.clone(), scopes.clone());
     let created = s.with_token_store(move |store| {
-        let scopes_ref: Vec<&str> = scopes_in.iter().map(|sc| sc.as_str()).collect();
-        store.create_token_with_workflows(&label_in, &scopes_ref, expires, &workflow_ids)
+        let scopes_ref: Vec<&str> = scopes.iter().map(|sc| sc.as_str()).collect();
+        store.create_token_with_workflows(&label, &scopes_ref, expires, &workflow_ids)
     }).await;
     let (token_id, raw) = match created {
         Ok(pair) => pair,
-        Err(e)   => return internal_error("create token failed", e).into_response(),
+        Err(e)   => return internal_error("create_token_handler", e).into_response(),
     };
     (StatusCode::CREATED, Json(json!({
         "token":       raw,
         "token_id":    token_id,
-        "label":       label,
-        "scopes":      scopes,
+        "label":       b.label,
+        "scopes":      b.scopes,
         "expires_in_secs": b.expires_in_secs,
         "workflow_ids": b.workflow_ids,
         "note":        "Save this token — it will not be shown again."
@@ -141,9 +129,11 @@ pub async fn revoke_token_handler(
             Json(json!({"error": "Cannot revoke the token you are currently using"}))).into_response();
     }
     match s.with_token_store(move |store| store.revoke_token(&id)).await {
-        Ok(true)  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "token not found"}))).into_response(),
-        Err(e)    => internal_error("revoke token failed", e).into_response(),
+        Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked) =>
+            (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
+        Ok(RevokeOutcome::UnknownToken) =>
+            (StatusCode::NOT_FOUND, Json(json!({"error": "token not found"}))).into_response(),
+        Err(e) => internal_error("revoke_token_handler", e).into_response(),
     }
 }
 
@@ -171,83 +161,129 @@ pub async fn list_token_workflows_handler(
                 "note":         note
             }))).into_response()
         }
-        Err(e) => internal_error("list token workflows failed", e).into_response(),
+        Err(e) => internal_error("list_token_workflows_handler", e).into_response(),
     }
 }
 
 /// POST /api/tokens/:id/workflows/:wf_id — grant access to a workflow.
-/// `404` when no active token has that id, so a mistyped id is not mistaken
-/// for a token that is now restricted; `400` for an admin token, which the
-/// ACL never restricts.
 pub async fn grant_token_workflow_handler(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
     Path((token_id, workflow_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin(&caller) { return e.into_response(); }
-    if !valid_workflow_id(&workflow_id) {
-        return bad_request(format!("workflow id must be 1–{MAX_WORKFLOW_ID_CHARS} characters"));
-    }
     let target = token_id.clone();
     let wf     = workflow_id.clone();
-    match s.with_token_store(move |store| store.acl_grant(&target, &wf)).await {
-        Ok(AclGrant::Granted) => (StatusCode::CREATED, Json(json!({
+    if workflow_id.trim().is_empty() || workflow_id.chars().count() > MAX_WORKFLOW_ID_CHARS {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": format!("workflow id must be 1–{MAX_WORKFLOW_ID_CHARS} characters")
+        }))).into_response();
+    }
+    match s.with_token_store(move |store| store.acl_grant_checked(&target, &wf)).await {
+        Ok(GrantOutcome::Granted) => (StatusCode::CREATED, Json(json!({
             "ok":          true,
             "token_id":    token_id,
             "workflow_id": workflow_id,
             "note":        "Token is now restricted to its granted workflow(s)."
         }))).into_response(),
-        Ok(AclGrant::NoActiveToken) => (StatusCode::NOT_FOUND,
-            Json(json!({"error": "no active token with that id"}))).into_response(),
-        Ok(AclGrant::AdminToken) => bad_request("admin tokens are never restricted to specific workflows"),
-        Err(e) => internal_error("grant token workflow failed", e).into_response(),
+        Ok(GrantOutcome::UnknownToken) =>
+            (StatusCode::NOT_FOUND, Json(json!({"error": "token not found"}))).into_response(),
+        Ok(GrantOutcome::AdminToken) => (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "admin tokens ignore the workflow ACL; a grant would have no effect"
+        }))).into_response(),
+        Err(e) => internal_error("grant_token_workflow_handler", e).into_response(),
     }
 }
 
 /// DELETE /api/tokens/:id/workflows/:wf_id — revoke access to a workflow.
-/// `409` when it is the token's only grant: a token with no grants is
-/// unrestricted, so removing it would widen access. Revoke the token instead.
-/// Revoking a grant the token does not hold is a no-op `200`.
+/// Refuses (409) to remove a token's only grant, since that would leave it
+/// unrestricted; revoke the token itself to cut it off.
 pub async fn revoke_token_workflow_handler(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
     Path((token_id, workflow_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin(&caller) { return e.into_response(); }
-    match s.with_token_store(move |store| store.acl_revoke(&token_id, &workflow_id)).await {
-        Ok(AclRevoke::Revoked | AclRevoke::NotGranted) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
-        Ok(AclRevoke::LastGrant) => (StatusCode::CONFLICT, Json(json!({
-            "error": "this is the token's last workflow grant; removing it would make the token unrestricted. Revoke the token instead (DELETE /api/tokens/:id)"
+    let result = s.with_token_store(move |store| {
+        store.acl_revoke_unless_last(&token_id, &workflow_id)
+    }).await;
+    match result {
+        Ok(UngrantOutcome::Removed | UngrantOutcome::NotGranted) =>
+            (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Ok(UngrantOutcome::LastGrant) => (StatusCode::CONFLICT, Json(json!({
+            "error": "cannot remove the token's only workflow grant: the token would become unrestricted. Revoke the token to cut it off, or create a new token without workflow_ids for an unrestricted one"
         }))).into_response(),
-        Err(e) => internal_error("revoke token workflow failed", e).into_response(),
+        Err(e) => internal_error("revoke_token_workflow_handler", e).into_response(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_with_grants, expiry_error, valid_workflow_id, MAX_WORKFLOW_ID_CHARS};
+    use super::*;
 
-    #[test]
-    fn admin_scope_cannot_be_combined_with_workflow_grants() {
-        let ids = vec!["wf_1".to_string()];
-        assert!(admin_with_grants(&["admin".to_string()], &ids));
-        assert!(!admin_with_grants(&["admin".to_string()], &[]));
-        assert!(!admin_with_grants(&["read".to_string(), "write".to_string()], &ids));
+    fn body() -> CreateTokenBody {
+        CreateTokenBody {
+            label: "ci".to_string(),
+            scopes: vec!["read".to_string()],
+            expires_in_secs: None,
+            workflow_ids: vec![],
+        }
     }
 
     #[test]
-    fn workflow_id_must_be_non_blank_and_bounded() {
-        assert!(valid_workflow_id("wf_1"));
-        assert!(!valid_workflow_id(""));
-        assert!(!valid_workflow_id("   "));
-        assert!(valid_workflow_id(&"\u{e9}".repeat(MAX_WORKFLOW_ID_CHARS)));
-        assert!(!valid_workflow_id(&"a".repeat(MAX_WORKFLOW_ID_CHARS + 1)));
+    fn valid_create_body_passes() {
+        assert!(validate_create_token(&body()).is_ok());
     }
 
     #[test]
-    fn token_lifetime_must_be_positive_and_representable() {
-        assert!(expiry_error(3600).is_none());
-        assert!(expiry_error(0).is_some());
-        assert!(expiry_error(u64::MAX).is_some());
+    fn blank_or_overlong_label_is_rejected() {
+        let mut b = body();
+        b.label = "   ".to_string();
+        assert!(validate_create_token(&b).is_err());
+        b.label = "é".repeat(MAX_LABEL_CHARS);
+        assert!(validate_create_token(&b).is_ok());
+        b.label = "é".repeat(MAX_LABEL_CHARS + 1);
+        assert!(validate_create_token(&b).is_err());
+    }
+
+    #[test]
+    fn empty_scopes_are_rejected() {
+        let mut b = body();
+        b.scopes.clear();
+        assert!(validate_create_token(&b).is_err());
+    }
+
+    #[test]
+    fn admin_with_workflow_ids_is_rejected() {
+        let mut b = body();
+        b.scopes = vec!["admin".to_string()];
+        b.workflow_ids = vec!["wf_a".to_string()];
+        assert!(validate_create_token(&b).is_err());
+        b.workflow_ids.clear();
+        assert!(validate_create_token(&b).is_ok());
+    }
+
+    #[test]
+    fn workflow_id_limits_are_enforced() {
+        let mut b = body();
+        b.workflow_ids = vec!["w".to_string(); MAX_WORKFLOW_IDS];
+        assert!(validate_create_token(&b).is_ok());
+        b.workflow_ids.push("w".to_string());
+        assert!(validate_create_token(&b).is_err());
+        b.workflow_ids = vec!["w".repeat(MAX_WORKFLOW_ID_CHARS + 1)];
+        assert!(validate_create_token(&b).is_err());
+        b.workflow_ids = vec![" ".to_string()];
+        assert!(validate_create_token(&b).is_err());
+    }
+
+    #[test]
+    fn zero_and_unrepresentable_expiry_are_rejected() {
+        let mut b = body();
+        b.expires_in_secs = Some(0);
+        assert!(validate_create_token(&b).is_err());
+        b.expires_in_secs = Some(u64::MAX);
+        assert!(validate_create_token(&b).is_err());
+        b.expires_in_secs = Some(3600);
+        assert!(validate_create_token(&b).is_ok());
     }
 }

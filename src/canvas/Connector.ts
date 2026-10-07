@@ -109,9 +109,7 @@ export class Connector {
     // canvas's own dot-grid background. Active flow (moving glow-dot) and an
     // explicit selection/cut-highlight already carry their own strong solid
     // signal, so those stay solid rather than competing with the dash.
-    // Subsumes the old condition-only dash special case — a conditional
-    // edge is resting exactly as often as any other edge, so it no longer
-    // needs a separate check to end up dashed.
+    // A conditional edge is dashed by the same rule as any other resting edge.
     if (!this.active && !this.selected && !this.highlighted) ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
@@ -205,24 +203,38 @@ export class Connector {
 
 // ── Pending connector while dragging ─────────────────────────────────────────
 
+/**
+ * "forward": started on an output, ends on an input.
+ * "reverse": started on an input, ends on an output.
+ * "move":    started on an output with Ctrl/Cmd held; ends on another output,
+ *            which takes over every wire the start output has.
+ */
+export type PendingDirection = "forward" | "reverse" | "move";
+
 export class PendingConnector {
+  /** Node and port the drag started on, whichever side of the wire that is. */
   fromNode: string;
   fromPort: string;
   fromX: number; fromY: number;
   toX:   number; toY:   number;
+  readonly direction: PendingDirection;
 
-  constructor(fromNode: string, fromPort: string, x: number, y: number) {
+  constructor(fromNode: string, fromPort: string, x: number, y: number, direction: PendingDirection = "forward") {
     this.fromNode = fromNode; this.fromPort = fromPort;
     this.fromX = x; this.fromY = y; this.toX = x; this.toY = y;
+    this.direction = direction;
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
-    const dx = Math.abs(this.toX - this.fromX);
-    const cp = Math.max(dx * 0.55, 80);
+    const reverse = this.direction === "reverse";
+    const [x1, y1, x2, y2] = reverse
+      ? [this.toX, this.toY, this.fromX, this.fromY]
+      : [this.fromX, this.fromY, this.toX, this.toY];
+    const cp = Math.max(Math.abs(x2 - x1) * 0.55, 80);
     ctx.save();
     ctx.beginPath();
-    ctx.moveTo(this.fromX, this.fromY);
-    ctx.bezierCurveTo(this.fromX+cp, this.fromY, this.toX-cp, this.toY, this.toX, this.toY);
+    ctx.moveTo(x1, y1);
+    ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
     ctx.strokeStyle = getCanvasColors().actionNav;
     ctx.lineWidth   = 1.5;
     ctx.setLineDash([5, 4]);

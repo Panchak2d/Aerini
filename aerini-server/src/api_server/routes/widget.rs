@@ -127,12 +127,12 @@ async fn load_webhook_trigger(
             }
             Ok(Err(e)) => {
                 return Err(Box::new(
-                    internal_error("widget: scheduler lookup failed", e).into_response(),
+                    internal_error("load_webhook_trigger", e).into_response(),
                 ));
             }
             Err(e) => {
                 return Err(Box::new(
-                    internal_error("widget: scheduler lookup task failed", e).into_response(),
+                    internal_error("load_webhook_trigger: task failed", e).into_response(),
                 ));
             }
         }
@@ -154,7 +154,7 @@ async fn load_webhook_trigger(
         Ok(t) => t,
         Err(e) => {
             return Err(Box::new(
-                internal_error("widget: corrupt trigger_kind in scheduler row", e).into_response(),
+                internal_error("load_webhook_trigger: corrupt trigger_kind", e).into_response(),
             ));
         }
     };
@@ -247,10 +247,10 @@ pub async fn trigger_widget(
                     .into_response();
             }
             Ok(Err(e)) => {
-                return internal_error("widget: workflow load failed", e).into_response();
+                return internal_error("trigger_widget", e).into_response();
             }
             Err(e) => {
-                return internal_error("widget: workflow load task failed", e).into_response();
+                return internal_error("trigger_widget: task failed", e).into_response();
             }
         }
     };
@@ -274,7 +274,7 @@ pub async fn trigger_widget(
     let upstream = match relay_result {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, workflow_id = %workflow_id, "widget relay could not reach the webhook listener");
+            tracing::error!(workflow_id = %workflow_id, error = %e, "widget relay could not reach the webhook listener");
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({

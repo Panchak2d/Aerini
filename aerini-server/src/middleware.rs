@@ -3,9 +3,8 @@ use axum::response::IntoResponse;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::hash::Hash;
-use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::net::{IpAddr, Ipv6Addr};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// `Instant` is measured from an arbitrary origin (boot time on Windows and
@@ -19,122 +18,89 @@ fn evict_stale<K: Eq + Hash>(map: &DashMap<K, VecDeque<Instant>>, window: Durati
     });
 }
 
-/// Inline eviction sweeps start once a limiter holds more than this many keys.
-const EVICT_THRESHOLD: usize = 10_000;
+/// The key a client IP is limited under. An IPv6 subscriber is normally
+/// handed a whole /64, so one client can send from 2^64 addresses; limiting
+/// per address would give it a fresh budget on every request. IPv6 addresses
+/// are therefore limited per /64, and an IPv4-mapped IPv6 address shares its
+/// IPv4 address's budget.
+fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (!0u128 << 64))),
+        },
+    }
+}
 
-/// Past this many tracked keys, keys not yet in the map are let through
-/// untracked until a sweep brings the map back under the ceiling.
+/// Most keys a limiter tracks at once.
 const MAX_TRACKED_KEYS: usize = 50_000;
 
-/// Minimum spacing between inline maintenance runs.
-const MAINTENANCE_INTERVAL_MS: u64 = 1_000;
+/// Shortest gap between two inline sweeps of one limiter's table.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-const NEVER_RAN: u64 = u64::MAX;
-
-/// Lock-free throttle for inline maintenance, shared by every limiter.
-///
-/// `last_ms` is the millisecond offset from `base` of the last run, so a
-/// single `compare_exchange` lets exactly one concurrent caller win a slot.
-/// `saturated` is refreshed by each run and read on the request path, which
-/// keeps the hot path free of any map-wide operation.
-struct EvictionGate {
-    base:      Instant,
-    last_ms:   AtomicU64,
-    saturated: AtomicBool,
+/// Lets a full-table sweep run at most once per [`SWEEP_INTERVAL`], so a flood
+/// of distinct keys cannot make every request scan the whole table.
+#[derive(Default)]
+struct SweepGate {
+    last: Mutex<Option<Instant>>,
 }
 
-impl EvictionGate {
-    fn new() -> Self {
-        Self {
-            base:      Instant::now(),
-            last_ms:   AtomicU64::new(NEVER_RAN),
-            saturated: AtomicBool::new(false),
-        }
-    }
-
-    fn try_acquire(&self, now: Instant) -> bool {
-        let elapsed = u64::try_from(now.saturating_duration_since(self.base).as_millis())
-            .unwrap_or(NEVER_RAN - 1);
-        let last = self.last_ms.load(Ordering::Relaxed);
-        if last != NEVER_RAN && elapsed.saturating_sub(last) < MAINTENANCE_INTERVAL_MS {
-            return false;
-        }
-        self.last_ms
-            .compare_exchange(last, elapsed, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    }
-}
-
-/// Runs at most once per interval across all callers. Returns whether a
-/// stale-entry sweep ran.
-fn maintain<K: Eq + Hash>(
-    map:    &DashMap<K, VecDeque<Instant>>,
-    gate:   &EvictionGate,
-    window: Duration,
-    now:    Instant,
-) -> bool {
-    if !gate.try_acquire(now) {
-        return false;
-    }
-    let sweep = map.len() > EVICT_THRESHOLD;
-    if sweep {
-        evict_stale(map, window);
-    }
-    let saturated = map.len() >= MAX_TRACKED_KEYS;
-    if gate.saturated.swap(saturated, Ordering::Relaxed) != saturated && saturated {
-        tracing::warn!(
-            limit = MAX_TRACKED_KEYS,
-            "rate limiter key table is full; new keys are not tracked until stale entries expire"
-        );
-    }
-    sweep
-}
-
-fn record_hit<K: Eq + Hash>(
-    map:          &DashMap<K, VecDeque<Instant>>,
-    gate:         &EvictionGate,
-    key:          K,
-    max_requests: usize,
-    window:       Duration,
-) -> bool {
-    record_hit_at(map, gate, key, max_requests, window, Instant::now())
-}
-
-fn record_hit_at<K: Eq + Hash>(
-    map:          &DashMap<K, VecDeque<Instant>>,
-    gate:         &EvictionGate,
-    key:          K,
-    max_requests: usize,
-    window:       Duration,
-    now:          Instant,
-) -> bool {
-    if gate.saturated.load(Ordering::Relaxed) && !map.contains_key(&key) {
-        maintain(map, gate, window, now);
-        return true;
-    }
-
-    let cutoff = now.checked_sub(window);
-
-    let allowed = {
-        let mut entry = map.entry(key).or_default();
-        if let Some(cutoff) = cutoff {
-            while entry.front().is_some_and(|&ts| ts <= cutoff) {
-                entry.pop_front();
+impl SweepGate {
+    /// True for exactly one caller per interval; the first call is always due.
+    fn due(&self, now: Instant) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        match *last {
+            Some(prev) if now.saturating_duration_since(prev) < SWEEP_INTERVAL => false,
+            _ => {
+                *last = Some(now);
+                true
             }
         }
-        if entry.len() < max_requests {
-            entry.push_back(now);
-            true
-        } else {
-            false
-        }
-    };
-
-    maintain(map, gate, window, now);
-    allowed
+    }
 }
 
-/// Per-IP sliding-window rate limiter backed by a `DashMap`.
+/// Records a hit for `key`. At `max_keys` tracked keys, an unseen key is
+/// allowed without being tracked, so a flood of distinct keys cannot grow the
+/// table or lock legitimate callers out; keys already tracked stay limited.
+/// The cap is checked before the insert, so concurrent callers can overshoot
+/// it by a few keys.
+fn record_hit<K: Eq + Hash>(
+    map:          &DashMap<K, VecDeque<Instant>>,
+    gate:         &SweepGate,
+    key:          K,
+    max_requests: usize,
+    window:       Duration,
+    max_keys:     usize,
+) -> bool {
+    let now    = Instant::now();
+    let cutoff = now.checked_sub(window);
+
+    if map.len() >= max_keys && !map.contains_key(&key) {
+        if gate.due(now) {
+            evict_stale(map, window);
+        }
+        if map.len() >= max_keys {
+            return true;
+        }
+    }
+
+    let mut entry = map.entry(key).or_default();
+    if let Some(cutoff) = cutoff {
+        while entry.front().is_some_and(|&ts| ts <= cutoff) {
+            entry.pop_front();
+        }
+    }
+    if entry.len() < max_requests {
+        entry.push_back(now);
+        true
+    } else {
+        false
+    }
+}
+
+/// Per-client sliding-window rate limiter backed by a `DashMap`. A client is
+/// an IPv4 address or an IPv6 /64 (see [`limiter_key`]).
 ///
 /// Each IP address entry holds a `VecDeque<Instant>` of accepted request
 /// timestamps within the current window. On each call to `is_allowed`:
@@ -147,15 +113,14 @@ fn record_hit_at<K: Eq + Hash>(
 /// the window boundary because the window is measured from each individual
 /// request's timestamp, not from an epoch boundary.
 ///
-/// Memory: each entry holds at most `max_requests` timestamps. Stale entries
-/// are evicted by a background task (see `spawn_eviction_task`). Once the map
-/// holds more than 10 000 IPs, requests also trigger an inline sweep, at most
-/// one per second, so the map can exceed 10 000 entries between sweeps. If
-/// 50 000 IPs are tracked at once, further IPs are let through untracked
-/// (fail open) until a sweep frees space; tracked IPs stay limited.
+/// Memory: each entry holds at most `max_requests` timestamps. The map tracks
+/// at most 50 000 IPs; stale entries are evicted by a background task (see
+/// `spawn_eviction_task`) and, when the map is full, by a sweep that runs at
+/// most once per second. Past the cap, unseen IPs are allowed untracked until
+/// stale entries expire.
 pub struct RateLimiter {
     map:          DashMap<IpAddr, VecDeque<Instant>>,
-    gate:         EvictionGate,
+    gate:         SweepGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -164,7 +129,7 @@ impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
-            gate:         EvictionGate::new(),
+            gate:         SweepGate::default(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -191,8 +156,12 @@ impl RateLimiter {
     }
 
     /// Returns `true` if the request from `ip` is within the rate limit.
+    /// A client not yet tracked is always allowed while the table is full.
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        record_hit(&self.map, &self.gate, ip, self.max_requests, self.window)
+        record_hit(
+            &self.map, &self.gate, limiter_key(ip),
+            self.max_requests, self.window, MAX_TRACKED_KEYS,
+        )
     }
 }
 
@@ -209,15 +178,18 @@ fn truncate_key(key: &str) -> &str {
     &key[..end]
 }
 
-/// Same sliding-window algorithm as [`RateLimiter`], keyed by `String`
-/// instead of `IpAddr`. Used for the widget trigger route's per-workflow_id
-/// limit (routes::widget), where the key is caller-supplied and
-/// unauthenticated, so it is truncated to 128 bytes before use. Memory
-/// behaviour matches `RateLimiter`: inline sweeps at most once per second above
-/// 10 000 keys, and unseen keys pass untracked while 50 000 are tracked.
+/// Same sliding-window algorithm as [`RateLimiter`], keyed by an arbitrary
+/// `String` instead of `IpAddr`. Not merged into `RateLimiter` as a generic:
+/// `RateLimiter` is public API with its own call sites and tests fixed to
+/// `IpAddr`, and introducing a type parameter there would touch every one of
+/// them for a single new caller. This exists for the widget trigger route's
+/// per-workflow_id limit (routes::widget), where the key is caller-supplied
+/// and unauthenticated, so it is capped at 128 bytes before use — same
+/// reasoning as any untrusted-input-as-map-key case, unbounded key length is
+/// an unbounded-memory footgun.
 pub struct KeyedRateLimiter {
     map:          DashMap<String, VecDeque<Instant>>,
-    gate:         EvictionGate,
+    gate:         SweepGate,
     max_requests: usize,
     window:       Duration,
 }
@@ -226,7 +198,7 @@ impl KeyedRateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             map:          DashMap::new(),
-            gate:         EvictionGate::new(),
+            gate:         SweepGate::default(),
             max_requests: max_requests as usize,
             window:       Duration::from_secs(window_secs),
         }
@@ -251,7 +223,10 @@ impl KeyedRateLimiter {
     /// Returns `true` if a request keyed by `key` is within the rate limit.
     /// `key` is truncated to 128 bytes first (see struct doc).
     pub fn is_allowed(&self, key: &str) -> bool {
-        record_hit(&self.map, &self.gate, truncate_key(key).to_owned(), self.max_requests, self.window)
+        record_hit(
+            &self.map, &self.gate, truncate_key(key).to_owned(),
+            self.max_requests, self.window, MAX_TRACKED_KEYS,
+        )
     }
 }
 
@@ -288,12 +263,15 @@ fn insert_common_security_headers(h: &mut axum::http::HeaderMap) {
 /// (`/aerini-widget.js`) that is intentionally registered outside the
 /// `protected` router (see `api_server/mod.rs` route table doc comment).
 ///
-/// This must stay one layer, outermost on `app` (added last in
-/// `api_server/mod.rs`). `CorsLayer` answers preflight (`OPTIONS`) requests
-/// itself without calling the inner service (tower-http issue #497), so any
-/// layer placed outside it would stop `/api/*` preflight responses from
-/// getting these headers. It branches by path instead of splitting into two
-/// layers for the same reason.
+/// This stays a single layer at its original position — the outermost layer
+/// on `app`, added last in `api_server/mod.rs` — rather than being split into
+/// two Router-level layers around the CORS/rate-limit/body-limit stack.
+/// Splitting it would reorder `cors` to be outermost, and `CorsLayer` returns
+/// preflight (`OPTIONS`) responses directly without calling the inner
+/// service — confirmed via tower-http issue #497. That would mean `/api/*`
+/// preflight responses stop getting these headers entirely, not just a
+/// different `cache-control` value. Branching by path here keeps every other
+/// route's layering, and therefore its preflight behaviour, byte-identical.
 ///
 /// CSP is `default-src 'none'` for the JSON API — it returns only JSON, never
 /// HTML. The widget asset is excluded from that CSP value: a
@@ -378,23 +356,13 @@ pub async fn status_security_headers(
 #[cfg(test)]
 mod tests {
     use super::{
-        maintain, record_hit_at, too_many_requests, truncate_key, EvictionGate, KeyedRateLimiter,
-        RateLimiter, EVICT_THRESHOLD, MAINTENANCE_INTERVAL_MS, MAX_TRACKED_KEYS,
+        limiter_key, record_hit, too_many_requests, truncate_key, KeyedRateLimiter, RateLimiter,
+        SweepGate, SWEEP_INTERVAL,
     };
     use dashmap::DashMap;
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
-
-    const WINDOW: Duration = Duration::from_secs(60);
-
-    fn live_map(n: usize, at: Instant) -> DashMap<u32, VecDeque<Instant>> {
-        let map = DashMap::new();
-        for i in 0..n {
-            map.insert(i as u32, VecDeque::from([at]));
-        }
-        map
-    }
 
     #[test]
     fn too_many_requests_sets_status_and_retry_after() {
@@ -413,6 +381,26 @@ mod tests {
         assert!(rl.is_allowed(ip));
         assert!(rl.is_allowed(ip));
         assert!(!rl.is_allowed(ip));
+    }
+
+    #[test]
+    fn ipv6_addresses_share_one_budget_per_slash_64() {
+        let rl = RateLimiter::new(2, 60);
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other_64: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert!(rl.is_allowed(a));
+        assert!(rl.is_allowed(same_64));
+        assert!(!rl.is_allowed(a));
+        assert!(rl.is_allowed(other_64));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_limited_as_its_ipv4_address() {
+        let v4: IpAddr = "1.2.3.4".parse().unwrap();
+        let mapped: IpAddr = "::ffff:1.2.3.4".parse().unwrap();
+        assert_eq!(limiter_key(mapped), v4);
+        assert_eq!(limiter_key(v4), v4);
     }
 
     #[test]
@@ -436,52 +424,42 @@ mod tests {
     }
 
     #[test]
-    fn inline_sweep_runs_once_per_interval() {
-        let gate = EvictionGate::new();
-        let t0 = gate.base;
-        let map = live_map(EVICT_THRESHOLD + 1, t0);
-        let sweeps = (0..MAINTENANCE_INTERVAL_MS)
-            .filter(|&ms| maintain(&map, &gate, WINDOW, t0 + Duration::from_millis(ms)))
-            .count();
-        assert_eq!(sweeps, 1);
+    fn sweep_gate_opens_once_per_interval() {
+        let gate = SweepGate::default();
+        let t0 = Instant::now();
+        assert!(gate.due(t0));
+        assert!(!gate.due(t0));
+        assert!(!gate.due(t0 + SWEEP_INTERVAL - Duration::from_millis(1)));
+        assert!(gate.due(t0 + SWEEP_INTERVAL));
+        assert!(!gate.due(t0 + SWEEP_INTERVAL));
     }
 
     #[test]
-    fn inline_sweep_runs_again_after_interval() {
-        let gate = EvictionGate::new();
-        let t0 = gate.base;
-        let map = live_map(EVICT_THRESHOLD + 1, t0);
-        let interval = Duration::from_millis(MAINTENANCE_INTERVAL_MS);
-        assert!(maintain(&map, &gate, WINDOW, t0));
-        assert!(!maintain(&map, &gate, WINDOW, t0 + interval - Duration::from_millis(1)));
-        assert!(maintain(&map, &gate, WINDOW, t0 + interval));
-        assert!(!maintain(&map, &gate, WINDOW, t0 + interval));
+    fn full_table_lets_unseen_keys_through_untracked_and_keeps_tracked_keys_limited() {
+        let map: DashMap<u32, VecDeque<Instant>> = DashMap::new();
+        let gate = SweepGate::default();
+        let window = Duration::from_secs(60);
+        for k in 0..3 {
+            assert!(record_hit(&map, &gate, k, 1, window, 3));
+        }
+        for _ in 0..5 {
+            assert!(record_hit(&map, &gate, 99, 1, window, 3));
+        }
+        assert_eq!(map.len(), 3);
+        assert!(!record_hit(&map, &gate, 0, 1, window, 3));
     }
 
     #[test]
-    fn limit_holds_while_sweeps_are_skipped() {
-        let gate = EvictionGate::new();
-        let t0 = gate.base;
-        let map = live_map(EVICT_THRESHOLD + 1, t0);
-        assert!(maintain(&map, &gate, WINDOW, t0));
-        let results: Vec<bool> = (0..5)
-            .map(|ms| {
-                let now = t0 + Duration::from_millis(ms);
-                record_hit_at(&map, &gate, u32::MAX, 3, WINDOW, now)
-            })
-            .collect();
-        assert_eq!(results, [true, true, true, false, false]);
-    }
-
-    #[test]
-    fn full_table_admits_unseen_keys_untracked_and_keeps_limiting_tracked_ones() {
-        let gate = EvictionGate::new();
-        let t0 = gate.base;
-        let map = live_map(MAX_TRACKED_KEYS, t0);
-        map.insert(u32::MAX, VecDeque::from([t0; 3]));
-        assert!(maintain(&map, &gate, WINDOW, t0));
-        assert!(record_hit_at(&map, &gate, u32::MAX - 1, 3, WINDOW, t0));
-        assert!(!map.contains_key(&(u32::MAX - 1)));
-        assert!(!record_hit_at(&map, &gate, u32::MAX, 3, WINDOW, t0));
+    fn full_table_sweeps_stale_keys_to_make_room() {
+        let map: DashMap<u32, VecDeque<Instant>> = DashMap::new();
+        let gate = SweepGate::default();
+        let window = Duration::from_millis(1);
+        for k in 0..3 {
+            assert!(record_hit(&map, &gate, k, 1, window, 3));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(record_hit(&map, &gate, 99, 1, window, 3));
+        assert!(map.contains_key(&99));
+        assert_eq!(map.len(), 1);
     }
 }

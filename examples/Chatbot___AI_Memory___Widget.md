@@ -156,6 +156,8 @@ Workflow templates in Markdown format document the intended structure — use th
 
 **Single-turn (no memory).** Remove both AI Memory nodes and the append branch. The AI Prompt receives only the current message — no history. Suitable for one-shot Q&A.
 
+**Remembering files (desktop Chat Panel).** The widget sends text only, but the Chat Panel can attach files. To keep them visible to the model on later messages, set the user-message AI Memory node's **Files** to `{{Webhook.output.files}}`, turn on **Include Files**, and wire its output to AI Prompt's Files port. Limits, deletion, and privacy are covered in [Nodes Reference §Remembering files](../docs/guide/nodes.md#remembering-files).
+
 **Multi-session.** If different users should have separate conversation threads, ensure each request includes a distinct `session_id`. The widget generates one automatically; if you use your own auth, override it with a user-specific identifier.
 
 **Custom persona per session.** Add a Switch node before AI Prompt to route different session IDs to differently-configured AI Prompt nodes (different system prompts, models, or temperature settings).

@@ -1,5 +1,5 @@
-import { getNodeDescriptor } from "./canvas/node-registry";
-import { NODE_IDS, TRIGGER_NODE_IDS } from "./node-ids";
+import { getNodeDescriptor, isTriggerNodeType } from "./canvas/node-registry";
+import { NODE_IDS } from "./node-ids";
 import { THEMES, getStoredTheme, applyTheme } from "./theme";
 
 type ImportCallback = (obj: Record<string, unknown>) => void;
@@ -284,7 +284,7 @@ function getNodeCategory(typeId: string): "action" | "logic" | "utility" | "ai" 
 
 /** Fallback only — used when no real descriptor for typeId exists in the node registry (e.g. "unsupported"). */
 function getDefaultPorts(typeId: string): { inputs: Array<{id:string;label:string;position:string}>; outputs: Array<{id:string;label:string;position:string}> } {
-  const inputs = TRIGGER_NODE_IDS.has(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
+  const inputs = isTriggerNodeType(typeId) ? [] : [{ id: "input", label: "In", position: "left" }];
   const outputs = typeId === NODE_IDS.STOP ? [] : [{ id: "output", label: "Out", position: "right" }];
   return { inputs, outputs };
 }

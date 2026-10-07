@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::db::WorkflowDb;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 pub struct SetVariableNode {
     /// None in serve mode (single-workflow daemon) — persist is a no-op there.
@@ -47,12 +47,14 @@ impl Node for SetVariableNode {
                 label: "In".to_string(),
                 position: PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![PortDefinition {
                 id: "output".to_string(),
                 label: "Out".to_string(),
                 position: PortPosition::Right,
                 port_type: None,
+                arity: PortArity::Single,
             }],
         }
     }
@@ -154,12 +156,14 @@ impl Node for GetVariableNode {
                 label: "In".to_string(),
                 position: PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![PortDefinition {
                 id: "output".to_string(),
                 label: "Out".to_string(),
                 position: PortPosition::Right,
                 port_type: None,
+                arity: PortArity::Single,
             }],
         }
     }

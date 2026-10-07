@@ -27,17 +27,6 @@ export function isPluginNodeType(typeId: string): boolean {
   return _registry.get(typeId)?.is_plugin === true;
 }
 
-/** True when `typeId` is a plugin whose backend descriptor reports it can
- *  supply its own trigger (`trigger_capable`). */
-export function isPluginTriggerType(typeId: string): boolean {
-  return _registry.get(typeId)?.trigger_capable === true;
-}
-
-/** True for a built-in trigger or a trigger-capable plugin. */
-export function isTriggerNodeType(typeId: string): boolean {
-  return TRIGGER_NODE_IDS.has(typeId) || isPluginTriggerType(typeId);
-}
-
 /**
  * True when a registry that has actually loaded has no descriptor for `typeId`.
  * An empty registry means "not loaded" (the startup fetch failed, or there is
@@ -56,4 +45,22 @@ export function isUnregisteredNodeType(typeId: string): boolean {
  */
 export function isDangerousNodeType(typeId: string): boolean {
   return DANGEROUS_NODE_IDS.has(typeId) || isPluginNodeType(typeId);
+}
+
+/**
+ * True for a built-in trigger (Schedule, Webhook, Manual Trigger) or a plugin
+ * whose descriptor says it exports the trigger interface. Use this instead of
+ * testing TRIGGER_NODE_IDS directly so plugin triggers count as entry nodes.
+ */
+export function isTriggerNodeType(typeId: string): boolean {
+  return TRIGGER_NODE_IDS.has(typeId) || _registry.get(typeId)?.trigger_capable === true;
+}
+
+/** Node objects only need this shape: callers pass canvas.nodes.values()
+ *  without this file taking a dependency on the Canvas type. */
+export function findTriggerNodeTypeId(nodes: Iterable<{ data: { node_type_id: string } }>): string | null {
+  for (const n of nodes) {
+    if (isTriggerNodeType(n.data.node_type_id)) return n.data.node_type_id;
+  }
+  return null;
 }

@@ -95,7 +95,7 @@ interface metadata {
         /// or a `style` attribute. Rendered inside a fixed 24x24 viewBox, stroke-only,
         /// single theme-driven color -- matching the built-in node icon style exactly.
         /// Anything outside this allowlist is stripped by the host before rendering
-        /// (see docs/plugin-authoring.md). Empty string -> generic plugin glyph.
+        /// (see docs/development/plugin-authoring.md). Empty string -> generic plugin glyph.
         icon: string,
     }
 
@@ -156,46 +156,53 @@ world aerini-node-with-trigger {
     export trigger;
 }
 
-/// `aerini-node-with-trigger` plus the optional `metadata` export, for a trigger
-/// plugin that wants a custom icon/author/version. Target THIS world instead of
-/// `aerini-node-with-trigger` to get them; a trigger plugin built against
-/// `aerini-node-with-trigger` keeps loading unchanged and gets the host
-/// defaults described on `interface metadata`. Additive, like every other
-/// world in this package.
+/// Extends `aerini-node-with-trigger` with the optional `metadata` export, so
+/// a trigger plugin can set its own icon, author, and version. Additive: a
+/// trigger plugin built against `aerini-node-with-trigger` keeps loading
+/// unchanged and gets the same host-side defaults a plugin without `metadata`
+/// gets.
 world aerini-node-with-trigger-and-metadata {
     export node;
     export trigger;
     export metadata;
 }
 
-/// Optional, host-provided hint about when a trigger plugin's next event is
-/// due, so the Background Runs panel can show a "next in Ns" countdown.
-/// Like `storage` and `fs-watch`, this is an IMPORT the host links
-/// unconditionally: a plugin built before it existed has no such import and
-/// is unaffected (it simply shows plain "running"), and no existing
-/// interface, record or world changes shape.
+/// Optional, host-provided schedule reporting for trigger plugins. Like
+/// `storage`, this is an *import*: the plugin calls it, the host provides it.
 ///
-/// It is an import, not a query, because only the running `trigger.events`
-/// instance knows its own timer -- the instance `node.execute` runs on is a
-/// separate one that cannot see it. The running instance calls
-/// `report-next-fire` whenever it arms or re-arms its timer.
+/// A trigger plugin calls `report-next-fire` to say when it expects to emit
+/// its next event, so the Background Runs panel can show a countdown instead
+/// of a bare "running". The value is for display only. It never schedules,
+/// delays, or triggers anything: events still start a run only when the
+/// guest writes them to the `events` stream.
+///
+/// Call it whenever the expectation changes, typically right after each
+/// event and once when `events` starts. The host keeps only the latest
+/// reported time for each running trigger instance and forgets it when that
+/// instance stops or restarts.
 interface trigger-schedule {
-    /// Reports when the next event is expected, in milliseconds since the
-    /// Unix epoch (UTC). Advisory only: it never changes when the host runs
-    /// anything. The host ignores a value that is already past, more than a
-    /// year ahead, or earlier than the last event it received, and it may
-    /// coalesce rapid calls, so report once each time the timer is armed, and
-    /// again after each event for the following one. Never traps and never
-    /// blocks.
-    report-next-fire: func(unix-ms: u64);
+    /// Why a report was not accepted.
+    enum schedule-error {
+        /// The time was more than 5 seconds in the past.
+        in-past,
+        /// There is no running trigger instance to report to, for example
+        /// when called from `describe` or `execute`.
+        unavailable,
+    }
+
+    /// Report the time of the next expected event, in milliseconds since the
+    /// Unix epoch (UTC). A time up to 5 seconds in the past is accepted and
+    /// treated as "now". A time further ahead than 30 days is shortened to
+    /// 30 days from now and still accepted.
+    report-next-fire: func(unix-millis: u64) -> result<_, schedule-error>;
 }
 
-/// `aerini-node-with-trigger` plus the `trigger-schedule` import. Target THIS
-/// world to report next-fire times; plugins built against
-/// `aerini-node-with-trigger` keep loading unchanged. A trigger plugin that
-/// wants `metadata` as well hand-declares its own world exporting `node`,
-/// `trigger` and `metadata` and importing `trigger-schedule`, the same way
-/// `storage` and `fs-watch` combine with other worlds.
+/// Pairs `trigger-schedule` with the `node` and `trigger` exports. Additive
+/// alongside every other world in this package: plugins built against any
+/// earlier world keep loading unchanged and keep showing "running". A plugin
+/// that also wants `metadata` hand-declares its own world, as described for
+/// `storage`; the host links `trigger-schedule` for every trigger plugin
+/// regardless of which world it targeted.
 world aerini-node-with-trigger-and-next-fire {
     export node;
     export trigger;

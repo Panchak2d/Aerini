@@ -84,11 +84,59 @@ async fn parallel_route_failure(
     }))
 }
 
+/// Scheduling state used to decide whether a node may start.
+///
+/// A node starts once every predecessor is resolved: either completed, or
+/// unreachable. A predecessor is unreachable when nothing can still activate it
+/// (a branch that was not taken), so it must not block a node such as Merge that
+/// waits on several branches. A branch that merely has not finished yet is not
+/// unreachable: it, or one of its ancestors, is still active, running, owned by
+/// a loop, or waiting on an unresolved predecessor.
+struct Readiness<'a> {
+    predecessors:    &'a HashMap<String, HashSet<String>>,
+    // `on_failure` routes activate their target without a graph edge from the
+    // failing node, so that node's own failure can still activate the target.
+    failure_sources: &'a HashMap<String, Vec<String>>,
+    active_nodes:    &'a HashSet<String>,
+    in_flight:       &'a HashSet<String>,
+    completed:       &'a HashSet<String>,
+    loop_managed:    &'a HashSet<String>,
+}
+
+impl Readiness<'_> {
+    /// `memo` caches the unreachable verdicts of one scheduling pass; it must
+    /// not outlive a change to any of the sets above.
+    fn is_ready(&self, node_id: &str, memo: &mut HashMap<String, bool>) -> bool {
+        self.predecessors.get(node_id)
+            .is_none_or(|preds| preds.iter().all(|p| self.is_resolved(p, memo)))
+    }
+
+    fn is_resolved(&self, node_id: &str, memo: &mut HashMap<String, bool>) -> bool {
+        self.completed.contains(node_id) || self.is_unreachable(node_id, memo)
+    }
+
+    fn is_unreachable(&self, node_id: &str, memo: &mut HashMap<String, bool>) -> bool {
+        if let Some(&known) = memo.get(node_id) {
+            return known;
+        }
+        let unreachable = !self.active_nodes.contains(node_id)
+            && !self.in_flight.contains(node_id)
+            && !self.loop_managed.contains(node_id)
+            && self.predecessors.get(node_id)
+                .is_some_and(|preds| !preds.is_empty() && preds.iter().all(|p| self.is_resolved(p, memo)))
+            && self.failure_sources.get(node_id)
+                .is_none_or(|sources| sources.iter().all(|s| self.is_resolved(s, memo)));
+        memo.insert(node_id.to_string(), unreachable);
+        unreachable
+    }
+}
+
 /// Parallel implementation of [`WorkflowExecutor::run_inner`].
 ///
 /// Runs whenever `WorkflowExecutor.parallel_execution == true`.
-/// Independent branches (nodes whose predecessors have all completed) are
-/// spawned concurrently as tokio tasks, bounded by `max_concurrent_nodes`.
+/// Independent branches (nodes whose predecessors are all resolved, see
+/// [`Readiness`]) are spawned concurrently as tokio tasks, bounded by
+/// `max_concurrent_nodes`.
 ///
 /// The sequential path in `run_inner` is untouched.
 pub(super) async fn run_inner_parallel(
@@ -109,13 +157,21 @@ pub(super) async fn run_inner_parallel(
         workflow.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
     // predecessor_map[N] = set of node IDs with edges pointing TO N.
-    // A node is "ready" when all its predecessors are in `completed`.
+    // A node is "ready" when every predecessor is resolved (see `Readiness`).
     let predecessor_map: HashMap<String, HashSet<String>> = workflow.nodes.iter()
         .map(|n| {
             let preds: HashSet<String> = graph.predecessors(&n.id).into_iter().collect();
             (n.id.clone(), preds)
         })
         .collect();
+
+    // failure_sources[R] = nodes whose failure can route to R through an `on_failure` edge.
+    let mut failure_sources: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &workflow.edges {
+        if let Some(target) = &edge.on_failure {
+            failure_sources.entry(target.clone()).or_default().push(edge.from_node.clone());
+        }
+    }
 
     {
         let mut s = state.write().await;
@@ -173,18 +229,27 @@ pub(super) async fn run_inner_parallel(
         }
 
         // ── 1. Disabled nodes: handle synchronously (no task spawn needed). ───
-        let disabled_ready: Vec<String> = active_nodes.iter()
-            .filter(|id| {
-                !in_flight.contains(*id)
-                    && !completed.contains(*id)
-                    && !loop_managed.contains(*id)
-                    && node_map.get(id.as_str()).map(|n| n.disabled).unwrap_or(false)
-                    && predecessor_map.get(*id)
-                        .map(|preds| preds.iter().all(|p| completed.contains(p)))
-                        .unwrap_or(true)
-            })
-            .cloned()
-            .collect();
+        let disabled_ready: Vec<String> = {
+            let readiness = Readiness {
+                predecessors:    &predecessor_map,
+                failure_sources: &failure_sources,
+                active_nodes:    &active_nodes,
+                in_flight:       &in_flight,
+                completed:       &completed,
+                loop_managed:    &loop_managed,
+            };
+            let mut memo = HashMap::new();
+            active_nodes.iter()
+                .filter(|id| {
+                    !in_flight.contains(*id)
+                        && !completed.contains(*id)
+                        && !loop_managed.contains(*id)
+                        && node_map.get(id.as_str()).map(|n| n.disabled).unwrap_or(false)
+                        && readiness.is_ready(id.as_str(), &mut memo)
+                })
+                .cloned()
+                .collect()
+        };
 
         for node_id in disabled_ready {
             let node_def = match node_map.get(node_id.as_str()).copied() {
@@ -211,18 +276,27 @@ pub(super) async fn run_inner_parallel(
         }
 
         // ── 2. Find ready executable nodes. ──────────────────────────────────
-        let ready: Vec<String> = active_nodes.iter()
-            .filter(|id| {
-                !in_flight.contains(*id)
-                    && !completed.contains(*id)
-                    && !loop_managed.contains(*id)
-                    && !node_map.get(id.as_str()).map(|n| n.disabled).unwrap_or(false)
-                    && predecessor_map.get(*id)
-                        .map(|preds| preds.iter().all(|p| completed.contains(p)))
-                        .unwrap_or(true)
-            })
-            .cloned()
-            .collect();
+        let ready: Vec<String> = {
+            let readiness = Readiness {
+                predecessors:    &predecessor_map,
+                failure_sources: &failure_sources,
+                active_nodes:    &active_nodes,
+                in_flight:       &in_flight,
+                completed:       &completed,
+                loop_managed:    &loop_managed,
+            };
+            let mut memo = HashMap::new();
+            active_nodes.iter()
+                .filter(|id| {
+                    !in_flight.contains(*id)
+                        && !completed.contains(*id)
+                        && !loop_managed.contains(*id)
+                        && !node_map.get(id.as_str()).map(|n| n.disabled).unwrap_or(false)
+                        && readiness.is_ready(id.as_str(), &mut memo)
+                })
+                .cloned()
+                .collect()
+        };
 
         if ready.is_empty() && join_set.is_empty() {
             break; // All done — nothing running, nothing left to do.
@@ -686,6 +760,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn two_wires_into_a_single_port_fail_before_any_node_runs_in_both_modes() {
+        for parallel in [false, true] {
+            let mut registry = NodeRegistry::new();
+            registry.register(Arc::new(InstantNode));
+            let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+
+            let workflow = Workflow {
+                schema_version: CURRENT_VERSION.to_string(),
+                id: "wf_arity".to_string(),
+                name: "Arity".to_string(),
+                description: String::new(),
+                nodes: vec![
+                    make_node("n_a", "parallel_instant_test"),
+                    make_node("n_b", "parallel_instant_test"),
+                    make_node("n_c", "parallel_instant_test"),
+                ],
+                edges: vec![make_edge("n_a", "n_c"), make_edge("n_b", "n_c")],
+                metadata: Default::default(),
+                max_duration_secs: None,
+                unlimited_duration: false,
+                parallel_execution: parallel,
+                max_concurrent_nodes: None,
+                settings: Default::default(),
+            };
+
+            let err = match executor.run(Arc::new(workflow), HashMap::new()).await {
+                Err(e) => e,
+                Ok(_) => panic!("parallel={parallel}: expected PortArityViolation, got a run result"),
+            };
+            assert!(
+                matches!(&err, EngineError::PortArityViolation { node_id, port_id, count: 2 } if node_id == "n_c" && port_id == "input"),
+                "parallel={parallel}: {err:?}"
+            );
+        }
+    }
+
     // All nodes complete: three independent (no-edge) entry nodes run in parallel.
     // Every node must appear in node_outputs when all succeed.
     #[tokio::test]
@@ -827,6 +939,205 @@ mod tests {
         assert!(
             matches!(result, Err(EngineError::ExecutionCancelled)),
             "expected ExecutionCancelled (on_error route must not mask a cancel); got {:?}", result
+        );
+    }
+
+    // ── Merge scheduling ─────────────────────────────────────────────────
+
+    macro_rules! test_node {
+        ($name:ident, $type_id:literal, |$input:ident| $body:expr) => {
+            struct $name;
+            #[async_trait::async_trait]
+            impl Node for $name {
+                fn type_id(&self)        -> &'static str { $type_id }
+                fn display_name(&self)   -> &'static str { $type_id }
+                fn node_type(&self)      -> NodeType     { NodeType::Utility }
+                fn version(&self)        -> &'static str { "1.0" }
+                fn input_schema(&self)   -> serde_json::Value { serde_json::json!({}) }
+                fn output_schema(&self)  -> serde_json::Value { serde_json::json!({}) }
+                async fn execute(&self, $input: NodeInput) -> NodeOutput { $body }
+            }
+        };
+    }
+
+    // Leaves through the `left` port.
+    test_node!(BranchLeftNode, "parallel_branch_left_test", |_input| {
+        NodeOutput::success(serde_json::json!({ "branch": "left" }))
+    });
+
+    // Outputs its own node id so a merged value shows which nodes contributed.
+    test_node!(EchoNode, "parallel_echo_test", |input| {
+        NodeOutput::success(serde_json::json!({ "id": input.node_id }))
+    });
+
+    test_node!(SleepEchoNode, "parallel_sleep_echo_test", |input| {
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        NodeOutput::success(serde_json::json!({ "id": input.node_id }))
+    });
+
+    test_node!(SleepFailNode, "parallel_sleep_fail_test", |_input| {
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        NodeOutput::failure(
+            crate::error::NodeError::unrecoverable("PARALLEL_FAIL", "parallel test failure"),
+        )
+    });
+
+    fn merge_test_registry() -> NodeRegistry {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(crate::nodes::merge::MergeNode));
+        registry.register(Arc::new(BranchLeftNode));
+        registry.register(Arc::new(EchoNode));
+        registry.register(Arc::new(SleepEchoNode));
+        registry.register(Arc::new(SleepFailNode));
+        registry
+    }
+
+    fn make_port_edge(from: &str, port: &str, to: &str) -> WorkflowEdge {
+        WorkflowEdge {
+            id: format!("e_{}_{}_to_{}", from, port, to),
+            from_port: port.to_string(),
+            ..make_edge(from, to)
+        }
+    }
+
+    fn make_workflow(
+        id: &str,
+        nodes: Vec<WorkflowNode>,
+        edges: Vec<WorkflowEdge>,
+        parallel: bool,
+    ) -> Workflow {
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            nodes,
+            edges,
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: parallel,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    // A branching node takes one of two routes and both rejoin at a Merge. The
+    // Merge must run with the branch that was taken, in both modes, and its
+    // value must hold only the nodes wired into it.
+    #[tokio::test]
+    async fn merge_runs_when_one_branch_is_untaken_and_ignores_unrelated_nodes() {
+        for parallel in [false, true] {
+            let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+            let workflow = make_workflow(
+                "wf_merge_rejoin",
+                vec![
+                    make_node("n_branch", "parallel_branch_left_test"),
+                    make_node("n_left",   "parallel_echo_test"),
+                    make_node("n_right",  "parallel_echo_test"),
+                    make_node("n_other",  "parallel_echo_test"),
+                    make_node("n_merge",  "merge"),
+                ],
+                vec![
+                    make_port_edge("n_branch", "left", "n_left"),
+                    make_port_edge("n_branch", "right", "n_right"),
+                    make_edge("n_left", "n_merge"),
+                    make_edge("n_right", "n_merge"),
+                ],
+                parallel,
+            );
+
+            let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+            assert!(result.success, "parallel={parallel}: {:?}", result.error);
+            assert!(!result.node_outputs.contains_key("n_right"), "parallel={parallel}");
+            assert_eq!(
+                result.node_outputs.get("n_merge"),
+                Some(&serde_json::json!({ "n_left": { "id": "n_left" } })),
+                "parallel={parallel}"
+            );
+        }
+    }
+
+    // A branch that has not started yet (its own predecessor is still running)
+    // is pending, not untaken: the Merge must wait for it.
+    #[tokio::test]
+    async fn merge_waits_for_a_branch_that_has_not_started_yet() {
+        let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+            .with_parallel_execution(true)
+            .with_max_concurrent_nodes(8);
+        let workflow = make_workflow(
+            "wf_merge_pending",
+            vec![
+                make_node("n_fast",       "parallel_echo_test"),
+                make_node("n_slow",       "parallel_sleep_echo_test"),
+                make_node("n_after_slow", "parallel_echo_test"),
+                make_node("n_merge",      "merge"),
+            ],
+            vec![
+                make_edge("n_fast", "n_merge"),
+                make_edge("n_slow", "n_after_slow"),
+                make_edge("n_after_slow", "n_merge"),
+            ],
+            true,
+        );
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            result.node_outputs.get("n_merge"),
+            Some(&serde_json::json!({
+                "n_fast":       { "id": "n_fast" },
+                "n_after_slow": { "id": "n_after_slow" },
+            })),
+        );
+    }
+
+    // `n_recovery` has no edge from the failing node, so it looks untaken until
+    // that node fails and routes to it through its `on_failure` edge. The Merge
+    // must wait for it rather than run first without its output.
+    #[tokio::test]
+    async fn merge_waits_for_a_branch_reachable_only_through_on_failure() {
+        let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+            .with_parallel_execution(true)
+            .with_max_concurrent_nodes(8);
+        let workflow = make_workflow(
+            "wf_merge_on_failure",
+            vec![
+                make_node("n_branch",   "parallel_branch_left_test"),
+                make_node("n_fast",     "parallel_echo_test"),
+                make_node("n_dead",     "parallel_echo_test"),
+                make_node("n_fail",     "parallel_sleep_fail_test"),
+                make_node("n_never",    "parallel_echo_test"),
+                make_node("n_recovery", "parallel_echo_test"),
+                make_node("n_merge",    "merge"),
+            ],
+            vec![
+                make_port_edge("n_branch", "left", "n_fast"),
+                make_port_edge("n_branch", "right", "n_dead"),
+                make_edge("n_dead", "n_recovery"),
+                WorkflowEdge {
+                    on_failure: Some("n_recovery".to_string()),
+                    ..make_edge("n_fail", "n_never")
+                },
+                make_edge("n_fast", "n_merge"),
+                make_edge("n_recovery", "n_merge"),
+            ],
+            true,
+        );
+
+        let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(!result.node_outputs.contains_key("n_never"));
+        assert_eq!(
+            result.node_outputs.get("n_merge"),
+            Some(&serde_json::json!({
+                "n_fast":     { "id": "n_fast" },
+                "n_recovery": { "id": "n_recovery" },
+            })),
         );
     }
 }

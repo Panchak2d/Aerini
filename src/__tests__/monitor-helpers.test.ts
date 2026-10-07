@@ -2,12 +2,15 @@ import { describe, it, expect } from "vitest";
 import {
   formatDuration,
   applyFilter,
-  collectRows,
   getStartAllTargets,
   getStopAllTargets,
   formatRowStatusCopy,
   formatNextRun,
   updatePeak,
+  isListening,
+  isEventTriggerType,
+  triggerTypeFromKindJson,
+  resolveNextRunAt,
 } from "../monitor-helpers";
 
 describe("monitor-helpers.formatDuration", () => {
@@ -40,31 +43,6 @@ describe("monitor-helpers.applyFilter", () => {
 
   it("edge case: 'stopped' isolates only stopped rows, excluding every other status", () => {
     expect(applyFilter(rows, "stopped", "").map(r => r.id)).toEqual(["3"]);
-  });
-
-  it("'scheduled' keeps armed rows whose trigger fires on its own (webhook and plugin included, no nextRunAt needed) and drops manual, unarmed and idle rows", () => {
-    const run = (id: string, extra: Record<string, unknown>) => ({ id, name: id, status: "running" as const, ...extra });
-    const all = [
-      run("webhook", { triggerType: "webhook" }),
-      run("plugin", { triggerType: "plugin" }),
-      run("interval", { triggerType: "interval", nextRunAt: "2026-10-02T10:00:00Z" }),
-      run("manual", { triggerType: "manual" }),
-      run("legacy-with-next", { nextRunAt: "2026-10-02T10:00:00Z" }),
-      run("legacy-no-next", {}),
-      { id: "stopped-webhook", name: "x", status: "stopped" as const, triggerType: "webhook" as const },
-      { id: "idle", name: "y", status: "idle" as const },
-    ];
-    expect(applyFilter(all, "scheduled", "").map(r => r.id))
-      .toEqual(["webhook", "plugin", "interval", "legacy-with-next"]);
-  });
-
-  it("collectRows carries a job's triggerType and waiting through to its row", () => {
-    const rows = collectRows(
-      [{ id: "w", name: "w", status: "running", startedAt: 1, triggerType: "webhook", waiting: true }],
-      [],
-    );
-    expect(rows[0].triggerType).toBe("webhook");
-    expect(rows[0].waiting).toBe(true);
   });
 });
 
@@ -118,36 +96,6 @@ describe("monitor-helpers.formatRowStatusCopy", () => {
     const row = { id: "1", name: "a", status: "idle" as const };
     expect(formatRowStatusCopy(row, now)).toBe("—");
   });
-
-  describe("Listening label", () => {
-    const base = { id: "1", name: "a", status: "running" as const, startedAt: now - 2_820_000 };
-
-    it("a waiting webhook or plugin row with no next run shows Listening", () => {
-      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const, waiting: true }, now)).toBe("Listening");
-      expect(formatRowStatusCopy({ ...base, triggerType: "plugin" as const, waiting: true }, now)).toBe("Listening");
-    });
-
-    it("a plugin that reports a next run is not labelled Listening", () => {
-      const row = { ...base, triggerType: "plugin" as const, waiting: true, nextRunAt: "2026-10-03T10:00:00Z" };
-      expect(formatRowStatusCopy(row, now)).toBe("47m");
-    });
-
-    it("an executing webhook run, or one with unknown waiting, shows elapsed time", () => {
-      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const, waiting: false }, now)).toBe("47m");
-      expect(formatRowStatusCopy({ ...base, triggerType: "webhook" as const }, now)).toBe("47m");
-    });
-
-    it("manual, interval and unknown-type rows are unchanged even when waiting", () => {
-      for (const triggerType of ["manual", "interval", undefined] as const) {
-        expect(formatRowStatusCopy({ ...base, triggerType, waiting: true }, now)).toBe("47m");
-      }
-    });
-
-    it("a stopped row never shows Listening, even with a stale waiting flag", () => {
-      const row = { id: "1", name: "a", status: "stopped" as const, finishedAt: now - 45_000, triggerType: "webhook" as const, waiting: true };
-      expect(formatRowStatusCopy(row, now)).toBe("Stopped 45s ago");
-    });
-  });
 });
 
 describe("monitor-helpers.updatePeak", () => {
@@ -169,5 +117,73 @@ describe("monitor-helpers.formatNextRun", () => {
 
   it("edge case: countdowns at or past 60s render as minutes and seconds", () => {
     expect(formatNextRun(125)).toBe("Next run 2m 5s");
+  });
+});
+
+describe("monitor-helpers trigger kinds", () => {
+  it("triggerTypeFromKindJson reads the kind tag and returns null for bad input", () => {
+    expect(triggerTypeFromKindJson('{"kind":"plugin","type_id":"p","config":"{}"}')).toBe("plugin");
+    expect(triggerTypeFromKindJson("not json")).toBeNull();
+    expect(triggerTypeFromKindJson('{"secs":5}')).toBeNull();
+    expect(triggerTypeFromKindJson(undefined)).toBeNull();
+  });
+
+  it("isEventTriggerType is true only for webhook and plugin", () => {
+    expect(isEventTriggerType("webhook")).toBe(true);
+    expect(isEventTriggerType("plugin")).toBe(true);
+    expect(isEventTriggerType("interval")).toBe(false);
+    expect(isEventTriggerType(null)).toBe(false);
+  });
+});
+
+describe("monitor-helpers Listening", () => {
+  const now = 1_000_000;
+  it("shows Listening for a running webhook or plugin row without a next-fire time", () => {
+    for (const triggerType of ["webhook", "plugin"]) {
+      const row = { id: "1", name: "a", status: "running" as const, startedAt: now - 90_000, triggerType };
+      expect(isListening(row)).toBe(true);
+      expect(formatRowStatusCopy(row, now)).toBe("Listening");
+    }
+  });
+
+  it("keeps the elapsed time when a plugin reports a next-fire time, and for schedule rows", () => {
+    const plugin = { id: "1", name: "a", status: "running" as const, startedAt: now - 90_000, triggerType: "plugin", nextRunAt: "2030-01-01T00:00:00Z" };
+    expect(isListening(plugin)).toBe(false);
+    expect(formatRowStatusCopy(plugin, now)).toBe("2m");
+    const sched = { id: "2", name: "b", status: "running" as const, startedAt: now - 5_000, triggerType: "interval" };
+    expect(formatRowStatusCopy(sched, now)).toBe("5s");
+  });
+
+  it("a stopped webhook row is not Listening", () => {
+    expect(isListening({ status: "stopped", triggerType: "webhook" })).toBe(false);
+  });
+});
+
+describe("monitor-helpers Scheduled filter", () => {
+  const rows = [
+    { id: "w", name: "hook", status: "running" as const, triggerType: "webhook" },
+    { id: "p", name: "plug", status: "running" as const, triggerType: "plugin" },
+    { id: "s", name: "sched", status: "running" as const, triggerType: "cron", nextRunAt: "2030-01-01T00:00:00Z" },
+    { id: "x", name: "stopped hook", status: "stopped" as const, triggerType: "webhook" },
+    { id: "i", name: "idle", status: "idle" as const },
+  ];
+  it("lists running Schedule, Webhook, and plugin rows, with or without a next-fire time", () => {
+    expect(applyFilter(rows, "scheduled", "").map(r => r.id)).toEqual(["w", "p", "s"]);
+  });
+});
+
+describe("monitor-helpers.resolveNextRunAt", () => {
+  it("uses the event value when present", () => {
+    expect(resolveNextRunAt("T2", { status: "running", nextRunAt: "T1" }, "running")).toBe("T2");
+  });
+  it("keeps the previous value across a null event while the job stays running", () => {
+    expect(resolveNextRunAt(null, { status: "running", nextRunAt: "T1" }, "running")).toBe("T1");
+  });
+  it("drops it when the job stops or finishes", () => {
+    expect(resolveNextRunAt(null, { status: "running", nextRunAt: "T1" }, "stopped")).toBeUndefined();
+    expect(resolveNextRunAt(null, { status: "running", nextRunAt: "T1" }, "done")).toBeUndefined();
+  });
+  it("does not revive a stale value when a stopped job starts again", () => {
+    expect(resolveNextRunAt(null, { status: "stopped", nextRunAt: "T1" }, "running")).toBeUndefined();
   });
 });

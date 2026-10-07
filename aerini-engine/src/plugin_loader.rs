@@ -55,8 +55,8 @@
 //! against this crate's standard SSRF policy — the same `SsrfPolicy::Strict` the
 //! Database and HTTP nodes enforce — before `wasmtime_wasi_http`'s default send
 //! path is allowed to run it. Action plugins (`wasi:http` p2) and trigger plugins
-//! (p2 and p3, `trigger_engine`'s async ABI) share one [`PluginHttpHooks`]
-//! implementation, so the two engines can't drift apart on what's blocked. See [`check_ssrf_uri`]
+//! (p3, `trigger_engine`'s async ABI) share one [`PluginHttpHooks`] implementation,
+//! so the two engines can't drift apart on what's blocked. See [`check_ssrf_uri`]
 //! for exactly what is and isn't caught.
 //!
 //! # Plugin storage
@@ -76,23 +76,16 @@
 //! A second, dedicated `wasmtime::Engine` (`PluginLoader::trigger_engine`, configured
 //! with `wasm_component_model_async`) hosts trigger-plugin
 //! components — those exporting `aerini-node-with-trigger`'s optional `trigger`
-//! interface alongside `node`. The `node`/`describe`/`execute` path above stays fully
-//! synchronous and runs on the action engine, except for a trigger plugin that only
-//! links on this one (it imports WASI Preview 3): that plugin's `describe()` and
-//! `execute()` run here too, as async calls, each bounded by a 30-second timeout and
-//! a 30-second wall-clock deadline that yields to the runtime about once a second
-//! while the guest runs, so a guest that spins never holds a runtime thread. The
-//! candidate scan that resolves a trigger plugin by `type_id` is bounded too: each file
-//! gets the same 30 s as any other call, no new file is started once the scan has run for
-//! 90 s, and a file over budget is skipped and named in the error. A running `events()` stream has no
-//! wall-clock deadline (idle between events is normal) but is bounded against
-//! spinning: the guest yields to the runtime about once a second and is
-//! interrupted after about 30 s with no host call and no delivered event, so
-//! job abort always takes effect. See `wit/node.wit`'s doc comment on
-//! `interface trigger` for why the two can't share one engine. Trigger plugins get
-//! SSRF-filtered `wasi:http` linked at both p2 and p3 (a `wasm32-wasip2` guest's
-//! standard library imports WASI 0.2 even when its own code uses the p3 async
-//! interfaces) — see "Outbound HTTP" above — but no raw-socket grant, the same effective position
+//! interface alongside `node`. Action plugins' `node`/`describe`/`execute` path
+//! above stays fully synchronous on the other engine; see `wit/node.wit`'s doc
+//! comment on `interface trigger` for why the two can't share one engine. A trigger
+//! plugin that imports WASI 0.3 cannot be hosted on the synchronous engine at all
+//! (those imports are async-typed), so its own `describe`/`execute` run here too,
+//! through the `*_async` APIs: `load_plugin`/`describe_plugin` keep their
+//! synchronous signatures by driving that work on a scratch thread with its own
+//! runtime, and `execute` simply awaits it. Trigger plugins get
+//! SSRF-filtered `wasi:http` (p3) linked the same way action plugins get p2 — see
+//! "Outbound HTTP" above — but no raw-socket grant, the same effective position
 //! action plugins are in absent an explicit grant. See [`PluginLoader::start_trigger`].
 //!
 //! # Filesystem watching
@@ -103,19 +96,19 @@
 //! in the host process, keyed per plugin type-id like `storage`, and buffers events
 //! for whichever plugin calls `poll()` next — no relation to `trigger`/the async
 //! event pump above; `poll` is a normal synchronous import call, satisfiable from an
-//! ordinary `execute()`, so it doesn't depend on that pump. Linked into
+//! ordinary `execute()`, so it doesn't inherit that pump's open bugs. Linked into
 //! every plugin's linker unconditionally, exactly like `storage`.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -185,35 +178,36 @@ mod wit_metadata {
 /// and the plain [`String`] events it yields, never these generated types
 /// directly.
 mod wit_trigger {
-    // `describe` and `execute` are async-bound: a store that instantiated a
-    // component with async host imports rejects synchronous guest calls.
     wasmtime::component::bindgen!({
         world: "aerini-node-with-trigger",
         path: "wit",
-        exports: {
-            "aerini:plugin/node.describe": async,
-            "aerini:plugin/node.execute": async,
-        },
     });
-
-    pub use aerini::plugin::types::{NodeInput, NodeOutput, Param};
 }
 
-/// Bindings for the `aerini-node-with-trigger-and-metadata` world. Used only
-/// to read `describe()` plus `describe-metadata()` from a trigger plugin that
-/// exports `metadata`; `execute` and `events` always go through
-/// [`wit_trigger`], which a plugin exporting this superset satisfies the same
-/// way a `metadata` plugin satisfies [`wit`] on the action engine.
+/// Bindings for the `aerini-node-with-trigger-and-metadata` world (`node`,
+/// `trigger` and `metadata` exports). Used only to read `describe-metadata`
+/// from a trigger plugin at load time; runtime calls (`execute`, `events`) go
+/// through [`wit_trigger`], which any component exporting this superset also
+/// satisfies.
 mod wit_trigger_metadata {
     wasmtime::component::bindgen!({
         world: "aerini-node-with-trigger-and-metadata",
         path: "wit",
-        exports: {
-            "aerini:plugin/node.describe": async,
-            "aerini:plugin/node.execute": async,
-            "aerini:plugin/metadata.describe-metadata": async,
-        },
     });
+}
+
+/// Bindings for the `aerini-node-with-trigger-and-next-fire` world, used only
+/// for the `trigger-schedule` host trait and its `add_to_linker`. Like
+/// `storage`, an import needs no per-world detection: the trigger linker
+/// provides it to every trigger plugin, and a component that does not import
+/// it is unaffected.
+mod wit_trigger_next_fire {
+    wasmtime::component::bindgen!({
+        world: "aerini-node-with-trigger-and-next-fire",
+        path: "wit",
+    });
+
+    pub use aerini::plugin::trigger_schedule::{add_to_linker, Host as TriggerScheduleHost, ScheduleError};
 }
 
 /// Bindings for the `aerini-node-with-storage` world (`node` export +
@@ -256,26 +250,6 @@ mod wit_fs_watch {
     };
 }
 
-/// Bindings for the `aerini-node-with-trigger-and-next-fire` world, used only
-/// for the `trigger-schedule::Host` trait and its generated `add_to_linker`,
-/// same role and same "an import needs no per-world detection" reasoning as
-/// [`wit_storage`]: a trigger plugin is still resolved and driven through
-/// [`wit_trigger`], whichever world its own build targeted. The import is
-/// linked in [`link_trigger_imports`] only; a plugin that does not import it
-/// is unaffected.
-mod wit_trigger_schedule {
-    wasmtime::component::bindgen!({
-        world: "aerini-node-with-trigger-and-next-fire",
-        path: "wit",
-        exports: {
-            "aerini:plugin/node.describe": async,
-            "aerini:plugin/node.execute": async,
-        },
-    });
-
-    pub use aerini::plugin::trigger_schedule::{add_to_linker, Host as TriggerScheduleHost};
-}
-
 /// A plugin's pre-instantiated bindings, in whichever of the two `aerini:plugin`
 /// world shapes it actually exports. Produced by
 /// [`PluginLoader::detect_node_pre`](PluginLoader::detect_node_pre).
@@ -286,20 +260,26 @@ enum NodePre {
     WithMetadata(wit_metadata::AeriniNodeWithMetadataPre<PluginState>),
 }
 
-/// What `execute()` instantiates: the action engine's `node`-only bindings, or,
-/// for a plugin that only links on `trigger_engine` (it imports WASI Preview 3),
-/// that engine's bindings.
-enum ExecPre {
-    Action(wit::AeriniNodePre<PluginState>),
-    Trigger(wit_trigger::AeriniNodeWithTriggerPre<TriggerPluginState>),
+/// Latest next-fire time a running trigger plugin reported, if any. See
+/// [`PluginLoader::start_trigger`].
+pub type NextFireWatch = tokio::sync::watch::Receiver<Option<DateTime<Utc>>>;
+
+/// Pre-instantiated bindings for a component hosted on `trigger_engine`.
+type TriggerPre = wit_trigger::AeriniNodeWithTriggerPre<TriggerPluginState>;
+
+/// What [`PluginLoader::compile_and_link`] produced for a file.
+enum LinkedPlugin {
+    /// Every import is satisfied on the synchronous engine.
+    Sync(wasmtime::component::InstancePre<PluginState>),
+    /// Only satisfiable on `trigger_engine` (the component imports async-typed
+    /// WASI 0.3 interfaces) and exports `aerini-node-with-trigger`.
+    Trigger(TriggerPre),
 }
 
-/// A trigger plugin's pre-instantiated bindings on `trigger_engine`.
-/// `with_metadata` is `Some` only when the component also exports `metadata`.
-#[derive(Clone)]
-struct TriggerPres {
-    plain: wit_trigger::AeriniNodeWithTriggerPre<TriggerPluginState>,
-    with_metadata: Option<wit_trigger_metadata::AeriniNodeWithTriggerAndMetadataPre<TriggerPluginState>>,
+/// Where a loaded plugin's `execute()` runs.
+enum NodeBackend {
+    Sync { engine: Engine, pre: wit::AeriniNodePre<PluginState> },
+    Trigger { pre: TriggerPre },
 }
 
 /// World-agnostic result of calling `describe()` (and `describe-metadata()`, when
@@ -312,7 +292,7 @@ struct RawDescribe {
     input_schema: String,
     output_schema: String,
     /// Empty when the plugin doesn't export `metadata`, or exports it but left
-    /// this field unset -- both mean "use the host default" (see
+    /// this field unset -- both mean "use the host default" (Constraint 1 /
     /// `wit/node.wit`'s doc comment).
     version: String,
     author: String,
@@ -368,6 +348,131 @@ fn describe_via_pre(
     }
 }
 
+/// Instantiates `pre` into `store` and calls `describe()` through the `_async`
+/// APIs, which are the only ones a store with async-typed imports accepts.
+/// Returns the instance alongside the result so the trigger-resolution path can
+/// keep using it. A trigger world has no `metadata` export, so `version`,
+/// `author` and `icon` stay empty (host defaults).
+async fn instantiate_and_describe_trigger_inner(
+    pre: &TriggerPre,
+    store: &mut wasmtime::Store<TriggerPluginState>,
+) -> wasmtime::Result<(wit_trigger::AeriniNodeWithTrigger, RawDescribe)> {
+    let bindings = pre.instantiate_async(&mut *store).await?;
+    let (d,) = bindings
+        .aerini_plugin_node()
+        .func_describe()
+        .call_async(&mut *store, ())
+        .await?;
+    let raw = RawDescribe {
+        type_id: d.type_id,
+        display_name: d.display_name,
+        category: d.category,
+        description: d.description,
+        input_schema: d.input_schema,
+        output_schema: d.output_schema,
+        version: String::new(),
+        author: String::new(),
+        icon: String::new(),
+    };
+    Ok((bindings, raw))
+}
+
+/// Bounds `call` by [`PLUGIN_TRIGGER_CALL_TIMEOUT`], which also covers a guest
+/// blocked in a host call (the epoch deadline only interrupts running guest
+/// code).
+async fn within_trigger_call_timeout<T>(
+    call: impl std::future::Future<Output = wasmtime::Result<T>>,
+) -> Result<T, PluginLoadError> {
+    match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, call).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(PluginLoadError::WasmLink(e.to_string())),
+        Err(_elapsed) => Err(PluginLoadError::CallTimedOut(PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs())),
+    }
+}
+
+/// [`instantiate_and_describe_trigger_inner`] under [`within_trigger_call_timeout`].
+async fn instantiate_and_describe_trigger(
+    pre: &TriggerPre,
+    store: &mut wasmtime::Store<TriggerPluginState>,
+) -> Result<(wit_trigger::AeriniNodeWithTrigger, RawDescribe), PluginLoadError> {
+    within_trigger_call_timeout(instantiate_and_describe_trigger_inner(pre, store)).await
+}
+
+/// Like [`instantiate_and_describe_trigger_inner`] for a component that also
+/// exports `metadata`: one instantiation, `describe()` plus
+/// `describe-metadata()`. The instance is not returned; the event stream is
+/// always started from the plain trigger bindings.
+async fn describe_trigger_with_metadata_inner(
+    pre: &wit_trigger_metadata::AeriniNodeWithTriggerAndMetadataPre<TriggerPluginState>,
+    store: &mut wasmtime::Store<TriggerPluginState>,
+) -> wasmtime::Result<RawDescribe> {
+    let bindings = pre.instantiate_async(&mut *store).await?;
+    let (d,) = bindings
+        .aerini_plugin_node()
+        .func_describe()
+        .call_async(&mut *store, ())
+        .await?;
+    let (m,) = bindings
+        .aerini_plugin_metadata()
+        .func_describe_metadata()
+        .call_async(&mut *store, ())
+        .await?;
+    Ok(RawDescribe {
+        type_id: d.type_id,
+        display_name: d.display_name,
+        category: d.category,
+        description: d.description,
+        input_schema: d.input_schema,
+        output_schema: d.output_schema,
+        version: m.version,
+        author: m.author,
+        icon: m.icon,
+    })
+}
+
+/// Describes a trigger plugin for loading: through the `metadata`-aware
+/// bindings when the component exports `metadata`, otherwise through the plain
+/// trigger bindings with default identity fields. The export check is
+/// type-level only.
+async fn describe_trigger_for_load(
+    pre: &TriggerPre,
+    store: &mut wasmtime::Store<TriggerPluginState>,
+) -> Result<RawDescribe, PluginLoadError> {
+    match wit_trigger_metadata::AeriniNodeWithTriggerAndMetadataPre::new(pre.instance_pre().clone()) {
+        Ok(meta_pre) => within_trigger_call_timeout(describe_trigger_with_metadata_inner(&meta_pre, store)).await,
+        Err(_) => instantiate_and_describe_trigger(pre, store).await.map(|(_, raw)| raw),
+    }
+}
+
+/// Runs the future built by `make` to completion on a fresh current-thread
+/// runtime on its own scoped thread, blocking the caller until it finishes.
+/// This is what lets the synchronous `load_plugin`/`describe_plugin` drive
+/// `_async` wasmtime calls: it is safe from any context (plain thread, tokio
+/// worker, current-thread runtime), whereas `Handle::block_on` panics when called
+/// from inside a runtime. The future is built on the new thread, so it need not
+/// be `Send`; the store it creates is dropped inside the runtime.
+fn block_on_scratch_runtime<T, F, Fut>(make: F) -> Result<T, PluginLoadError>
+where
+    T: Send,
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T, PluginLoadError>>,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || -> Result<T, PluginLoadError> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(PluginLoadError::Io)?;
+                rt.block_on(make())
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(PluginLoadError::WasmLink("plugin describe thread panicked".to_string()))
+            })
+    })
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Errors that can occur while loading a WASM plugin.
@@ -388,8 +493,11 @@ pub enum PluginLoadError {
     #[error("no plugin exporting `aerini-node-with-trigger` with type_id \"{0}\" found in the plugin directory")]
     NoSuchTriggerPlugin(String),
 
-    #[error("{0}")]
-    TriggerScanIncomplete(String),
+    #[error("no plugin exporting `aerini-node-with-trigger` with type_id \"{type_id}\" found in the plugin directory; scan incomplete: {detail}")]
+    TriggerScanIncomplete { type_id: String, detail: String },
+
+    #[error("plugin ran for {0}s without returning and was stopped")]
+    CallTimedOut(u64),
 
     #[error("plugin signature check failed: {0}")]
     SignatureRejected(String),
@@ -624,20 +732,12 @@ impl wit_fs_watch::FsWatchHost for PluginState {
     }
 }
 
-/// What [`PluginLoader::start_trigger`] returns: the event pump's task, the
-/// event channel, and the instance's latest reported next-fire time.
-pub type TriggerStart = (
-    tokio::task::JoinHandle<()>,
-    tokio::sync::mpsc::Receiver<Result<String, String>>,
-    tokio::sync::watch::Receiver<Option<u64>>,
-);
-
 // ── Trigger plugin store state ─────────────────────────────────────────────────
 
 /// Per-instance store state for a trigger-plugin component, run on
 /// [`PluginLoader::trigger_engine`].
 ///
-/// HTTP is linked via `wasi:http` p2 and p3 ([`PluginHttpHooks`]), SSRF-filtered
+/// HTTP is linked via `wasi:http` p3 ([`PluginHttpHooks`]), SSRF-filtered
 /// identically to [`PluginState`]'s p2 HTTP -- see "Outbound HTTP" in this
 /// module's own doc comment. Raw `wasi:sockets` capability is left at
 /// `WasiCtxBuilder`'s own default (no `allow_tcp`/`socket_addr_check`
@@ -665,40 +765,31 @@ struct TriggerPluginState {
     /// `storage`, opening [`FsWatchRegistry`] cannot fail), kept `Option`
     /// only for symmetry with `storage`'s degrade-gracefully contract.
     fs_watch: Option<PluginFsWatchHandle>,
-    /// Counts WASI/HTTP host calls and delivered events; [`SpinGuard`] reads
-    /// it to tell a guest that is suspended or doing I/O from one that is
-    /// spinning.
-    host_calls: u64,
-    /// Set by the epoch callback just before it interrupts a spinning guest,
-    /// so the pump can report the cause instead of a bare trap.
-    spin_trapped: Arc<AtomicBool>,
-    /// Set by the hard-deadline callback of [`make_trigger_store`] just before
-    /// it interrupts a guest that outlived its wall-clock budget, so the
-    /// caller can report the cause instead of a bare trap.
-    deadline_trapped: Arc<AtomicBool>,
-    /// Latest value the running instance passed to `trigger-schedule`'s
-    /// `report-next-fire`, raw and unvalidated (the scheduler validates it).
-    /// `None` outside [`PluginLoader::start_trigger`], where there is no
-    /// reader, so a call is dropped.
-    next_fire: Option<tokio::sync::watch::Sender<Option<u64>>>,
+    /// Count of guest-initiated host calls (WASI, `wasi:http`, `storage`,
+    /// `fs-watch`) plus delivered trigger events, read by the stall watchdog.
+    activity: Arc<AtomicU64>,
+    /// Where `trigger-schedule.report-next-fire` publishes the validated time.
+    /// `None` until [`PluginLoader::start_trigger`] attaches one, so a call made
+    /// during `describe` or `execute` has nowhere to report to.
+    next_fire: Option<tokio::sync::watch::Sender<Option<DateTime<Utc>>>>,
 }
 
 impl TriggerPluginState {
-    fn note_activity(&mut self) {
-        self.host_calls = self.host_calls.wrapping_add(1);
+    fn touch(&self) {
+        self.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl WasiView for TriggerPluginState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        self.note_activity();
+        self.touch();
         WasiCtxView { ctx: &mut self.wasi_ctx, table: &mut self.table }
     }
 }
 
 impl WasiHttpView for TriggerPluginState {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
-        self.note_activity();
+        self.touch();
         WasiHttpCtxView {
             ctx: &mut self.http_ctx,
             table: &mut self.table,
@@ -709,22 +800,26 @@ impl WasiHttpView for TriggerPluginState {
 
 impl wit_storage::StorageHost for TriggerPluginState {
     fn get(&mut self, key: String) -> Option<String> {
+        self.touch();
         let handle = self.storage.as_ref()?;
         handle.db.get(&handle.scope, &key)
     }
 
     fn set(&mut self, key: String, value: String) -> Result<(), wit_storage::StorageError> {
+        self.touch();
         let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
         handle.db.set(&handle.scope, &key, &value)
     }
 
     fn delete(&mut self, key: String) {
+        self.touch();
         if let Some(handle) = self.storage.as_ref() {
             handle.db.delete(&handle.scope, &key);
         }
     }
 
     fn list_keys(&mut self, prefix: String) -> Result<Vec<String>, wit_storage::StorageError> {
+        self.touch();
         let handle = self.storage.as_ref().ok_or(wit_storage::StorageError::Unavailable)?;
         handle.db.list_keys(&handle.scope, &prefix)
     }
@@ -732,25 +827,58 @@ impl wit_storage::StorageHost for TriggerPluginState {
 
 impl wit_fs_watch::FsWatchHost for TriggerPluginState {
     fn poll(&mut self, target: wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
+        self.touch();
         let handle = self.fs_watch.as_ref().ok_or(wit_fs_watch::WatchError::Unavailable)?;
         handle.registry.poll(&handle.plugin_type_id, &target)
     }
 
     fn unwatch(&mut self, target: wit_fs_watch::WatchTarget) {
+        self.touch();
         if let Some(handle) = self.fs_watch.as_ref() {
             handle.registry.unwatch(&handle.plugin_type_id, &target);
         }
     }
 }
 
-/// Deliberately does not call `note_activity`: a guest looping on this call
-/// must still be caught by the spin guard. `send_replace` never blocks and
-/// never fails, so a guest cannot stall the host through it.
-impl wit_trigger_schedule::TriggerScheduleHost for TriggerPluginState {
-    fn report_next_fire(&mut self, unix_ms: u64) {
-        if let Some(tx) = self.next_fire.as_ref() {
-            tx.send_replace(Some(unix_ms));
-        }
+/// A reported next-fire time may be this far in the past and still be accepted
+/// (it is then treated as "now"), to absorb clock reads and scheduling delay
+/// between the guest computing the time and the host receiving it.
+const NEXT_FIRE_PAST_SLACK_MS: u64 = 5_000;
+
+/// Furthest ahead a reported next-fire time is shown; later times are shortened
+/// to this horizon rather than rejected.
+const NEXT_FIRE_MAX_HORIZON_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Validates a guest-reported next-fire time against the host clock.
+fn validate_next_fire(
+    reported_ms: u64,
+    now_ms: u64,
+) -> Result<DateTime<Utc>, wit_trigger_next_fire::ScheduleError> {
+    if reported_ms.saturating_add(NEXT_FIRE_PAST_SLACK_MS) < now_ms {
+        return Err(wit_trigger_next_fire::ScheduleError::InPast);
+    }
+    let shown_ms = reported_ms.clamp(now_ms, now_ms.saturating_add(NEXT_FIRE_MAX_HORIZON_MS));
+    i64::try_from(shown_ms)
+        .ok()
+        .and_then(DateTime::from_timestamp_millis)
+        .ok_or(wit_trigger_next_fire::ScheduleError::Unavailable)
+}
+
+impl wit_trigger_next_fire::TriggerScheduleHost for TriggerPluginState {
+    fn report_next_fire(&mut self, unix_millis: u64) -> Result<(), wit_trigger_next_fire::ScheduleError> {
+        self.touch();
+        let sink = self.next_fire.as_ref().ok_or(wit_trigger_next_fire::ScheduleError::Unavailable)?;
+        let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+        let at = validate_next_fire(unix_millis, now_ms)?;
+        sink.send_if_modified(|current| {
+            if *current == Some(at) {
+                false
+            } else {
+                *current = Some(at);
+                true
+            }
+        });
+        Ok(())
     }
 }
 
@@ -766,9 +894,7 @@ fn make_trigger_plugin_state(
         http_hooks: PluginHttpHooks,
         storage,
         fs_watch,
-        host_calls: 0,
-        spin_trapped: Arc::new(AtomicBool::new(false)),
-        deadline_trapped: Arc::new(AtomicBool::new(false)),
+        activity: Arc::new(AtomicU64::new(0)),
         next_fire: None,
     }
 }
@@ -779,14 +905,9 @@ fn make_trigger_plugin_state(
 /// instead of buffering unboundedly on the host side; if the receiver is
 /// dropped mid-stream, the stream is reported as `Dropped` so the guest's
 /// writer stops.
-///
-/// Wasmtime drops the consumer when the guest closes the stream (and when
-/// it reports `Dropped`), which drops `_closed` and resolves its receiver --
-/// the pump in [`PluginLoader::start_trigger`] waits on that to know the
-/// stream has ended.
 struct TriggerEventConsumer {
     tx: tokio_util::sync::PollSender<Result<String, String>>,
-    _closed: tokio::sync::oneshot::Sender<()>,
+    activity: Arc<AtomicU64>,
 }
 
 impl StreamConsumer<TriggerPluginState> for TriggerEventConsumer {
@@ -828,7 +949,7 @@ impl StreamConsumer<TriggerPluginState> for TriggerEventConsumer {
                 if this.tx.send_item(Ok(event.data)).is_err() {
                     return Poll::Ready(Ok(StreamResult::Dropped));
                 }
-                store.data_mut().note_activity();
+                this.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 Poll::Ready(Ok(StreamResult::Completed))
             }
@@ -836,231 +957,188 @@ impl StreamConsumer<TriggerPluginState> for TriggerEventConsumer {
     }
 }
 
-/// Creates a trigger-engine store for one bounded guest call sequence
-/// (`describe`, `execute`, or the instantiate-and-describe probe of a
-/// resolve candidate).
-///
-/// The epoch deadline callback yields to the async runtime every
-/// [`TRIGGER_SPIN_WINDOW_TICKS`] ticks (about 1 s) and interrupts the guest
-/// once `budget` of wall-clock time has passed since the store was created.
-/// A guest that spins therefore never holds a runtime thread for more than
-/// about a second at a time, so `tokio::time::timeout` and task abort take
-/// effect, while the overall limit is still `budget`. All calls on the store
-/// must use the `*_async` entry points: a callback `Yield` from a
-/// synchronous entry point is a trap.
-///
-/// A store that becomes a long-lived `events()` instance must be switched to
-/// [`install_trigger_spin_guard`] by its owner
-/// ([`PluginLoader::resolve_trigger_instance`]), because a wall-clock budget
-/// would stop a trigger that is idle between events.
+/// Builds a trigger-engine store. Guest code yields to the async runtime every
+/// [`PLUGIN_TRIGGER_YIELD_TICKS`] instead of trapping, so a guest that spins
+/// without returning cannot hold a runtime thread; callers bound the wall-clock
+/// time with [`PLUGIN_TRIGGER_CALL_TIMEOUT`], which cancels the call at one of
+/// those yield points. (`trigger_engine` has epoch interruption enabled, so a
+/// store without a deadline would trap at once.) A trigger instance that stays
+/// alive and idle between events indefinitely keeps this yield cadence once
+/// resolved; [`PluginLoader::start_trigger`] swaps the plain yield for the
+/// stall watchdog ([`install_stall_watch`]), and stopping the stream is the
+/// owning job task's abort (`scheduler/runner.rs`).
 fn make_trigger_store(
     engine: &Engine,
     state: TriggerPluginState,
-    budget: Duration,
 ) -> wasmtime::Store<TriggerPluginState> {
     let mut store = wasmtime::Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
-    let started = Instant::now();
-    let trapped = store.data().deadline_trapped.clone();
-    store.epoch_deadline_callback(move |_cx| {
-        if call_budget_spent(started.elapsed(), budget) {
-            trapped.store(true, std::sync::atomic::Ordering::Relaxed);
-            return Ok(wasmtime::UpdateDeadline::Interrupt);
-        }
-        Ok(wasmtime::UpdateDeadline::Yield(TRIGGER_SPIN_WINDOW_TICKS))
-    });
-    store.set_epoch_deadline(TRIGGER_SPIN_WINDOW_TICKS);
+    store.set_epoch_deadline(PLUGIN_TRIGGER_YIELD_TICKS);
+    store.epoch_deadline_async_yield_and_update(PLUGIN_TRIGGER_YIELD_TICKS);
     store
 }
 
-/// Whether a bounded guest call has used up its wall-clock `budget`.
-fn call_budget_spent(elapsed: Duration, budget: Duration) -> bool {
-    elapsed >= budget
+/// How long a running trigger may execute with no activity before it is
+/// stopped. "Activity" is any guest call into a host import (WASI, `wasi:http`,
+/// `storage`, `fs-watch`) or an event delivered on the stream. A trigger parked
+/// in a host call, or waiting on its stream, executes no guest code and so
+/// accrues nothing against this limit.
+const PLUGIN_TRIGGER_STALL_LIMIT: Duration = Duration::from_secs(30);
+
+/// Longest interval between two epoch checks still counted as unbroken guest
+/// execution. A spinning guest is checked about once a second; a longer gap
+/// means the guest was parked in between, which is not time spent running.
+const PLUGIN_TRIGGER_STALL_MAX_GAP: Duration = Duration::from_secs(5);
+
+/// Accumulates guest execution time that passed with no activity.
+struct StallTracker {
+    seen: u64,
+    last_check: Instant,
+    quiet: Duration,
 }
 
-/// Error text for a failed bounded trigger call: names the hard deadline when
-/// it was the cause, otherwise the underlying error.
-fn call_failure_message(err: &wasmtime::Error, deadline_trapped: &AtomicBool, budget: Duration) -> String {
-    if deadline_trapped.load(std::sync::atomic::Ordering::Relaxed) {
-        format!("plugin ran for {}s without returning and was stopped", budget.as_secs())
-    } else {
-        err.to_string()
+impl StallTracker {
+    fn new(activity: u64, now: Instant) -> Self {
+        Self { seen: activity, last_check: now, quiet: Duration::ZERO }
     }
-}
 
-fn candidate_file_name(path: &Path) -> String {
-    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
-}
-
-/// Error text for a resolve scan that found no match but skipped files that
-/// did not finish `describe()`, or stopped starting files at its scan budget.
-fn trigger_scan_incomplete_message(type_id: &str, timed_out: &[String], budget_spent: bool) -> String {
-    let mut msg = format!("no trigger plugin with type_id \"{type_id}\" was found");
-    if !timed_out.is_empty() {
-        msg.push_str(&format!(
-            "; these files did not finish describe() within {}s and were skipped: {}",
-            PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs(),
-            timed_out.join(", ")
-        ));
+    /// Restarts the count from `now`.
+    fn rearm(&mut self, activity: u64, now: Instant) {
+        *self = Self::new(activity, now);
     }
-    if budget_spent {
-        msg.push_str(&format!(
-            "; the directory scan started no further files after {}s",
-            TRIGGER_RESOLVE_SCAN_BUDGET.as_secs()
-        ));
-    }
-    msg
-}
 
-/// Instantiates `pres` on its own (trigger) engine and calls `describe()` (and
-/// `describe-metadata()`, when the component exports `metadata`), bounded by
-/// [`PLUGIN_TRIGGER_CALL_TIMEOUT`], enforced both by `tokio::time::timeout`
-/// and by the store's hard deadline (see [`make_trigger_store`]). A trigger
-/// plugin without a `metadata` export leaves the metadata fields empty, so the
-/// host defaults apply. Failures are logged at `debug` and returned as `None`;
-/// see [`PluginLoader::describe_trigger_only`].
-async fn describe_trigger_pre(pres: TriggerPres) -> Option<RawDescribe> {
-    let call = async {
-        let engine = pres.plain.engine().clone();
-        let mut store = make_trigger_store(
-            &engine,
-            make_trigger_plugin_state(None, None),
-            PLUGIN_TRIGGER_CALL_TIMEOUT,
-        );
-        let trapped = store.data().deadline_trapped.clone();
-        let fail = |e: wasmtime::Error| call_failure_message(&e, &trapped, PLUGIN_TRIGGER_CALL_TIMEOUT);
-        if let Some(pre) = &pres.with_metadata {
-            let bindings = match pre.instantiate_async(&mut store).await {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::debug!(error = %fail(e), "trigger-only describe: instantiate failed");
-                    return None;
-                }
-            };
-            let d = match bindings.aerini_plugin_node().call_describe(&mut store).await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::debug!(error = %fail(e), "trigger-only describe: describe failed");
-                    return None;
-                }
-            };
-            let m = match bindings.aerini_plugin_metadata().call_describe_metadata(&mut store).await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::debug!(error = %fail(e), "trigger-only describe: describe-metadata failed");
-                    return None;
-                }
-            };
-            return Some(RawDescribe {
-                type_id: d.type_id,
-                display_name: d.display_name,
-                category: d.category,
-                description: d.description,
-                input_schema: d.input_schema,
-                output_schema: d.output_schema,
-                version: m.version,
-                author: m.author,
-                icon: m.icon,
-            });
+    /// Records an epoch check at `now` with the current activity count and
+    /// returns `true` once [`PLUGIN_TRIGGER_STALL_LIMIT`] of unbroken, quiet
+    /// execution has accumulated.
+    fn observe(&mut self, activity: u64, now: Instant) -> bool {
+        let gap = now.saturating_duration_since(self.last_check);
+        self.last_check = now;
+        if activity != self.seen {
+            self.seen = activity;
+            self.quiet = Duration::ZERO;
+        } else if gap <= PLUGIN_TRIGGER_STALL_MAX_GAP {
+            self.quiet += gap;
+        } else {
+            self.quiet = Duration::ZERO;
         }
-
-        let bindings = match pres.plain.instantiate_async(&mut store).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::debug!(error = %fail(e), "trigger-only describe: instantiate failed");
-                return None;
-            }
-        };
-        match bindings.aerini_plugin_node().call_describe(&mut store).await {
-            Ok(d) => Some(RawDescribe {
-                type_id: d.type_id,
-                display_name: d.display_name,
-                category: d.category,
-                description: d.description,
-                input_schema: d.input_schema,
-                output_schema: d.output_schema,
-                version: String::new(),
-                author: String::new(),
-                icon: String::new(),
-            }),
-            Err(e) => {
-                tracing::debug!(error = %fail(e), "trigger-only describe: describe failed");
-                None
-            }
-        }
-    };
-
-    match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, call).await {
-        Ok(raw) => raw,
-        Err(_) => {
-            tracing::debug!("trigger-only describe: timed out");
-            None
-        }
+        self.quiet >= PLUGIN_TRIGGER_STALL_LIMIT
     }
 }
 
-/// Runs one `node.execute()` call for a plugin that only links on
-/// `trigger_engine`, on a fresh store, bounded by
-/// [`PLUGIN_TRIGGER_CALL_TIMEOUT`], enforced both by `tokio::time::timeout`
-/// and by the store's hard deadline (see [`make_trigger_store`]). Same
-/// per-call isolation as the action engine path in [`WasmPluginNode::execute`].
-async fn execute_on_trigger_engine(
-    pre: wit_trigger::AeriniNodeWithTriggerPre<TriggerPluginState>,
-    input: wit_trigger::NodeInput,
-    storage: Option<PluginStorageHandle>,
-    fs_watch: Option<PluginFsWatchHandle>,
-) -> Result<wit_trigger::NodeOutput, String> {
-    let engine = pre.engine().clone();
-    let mut store = make_trigger_store(
-        &engine,
-        make_trigger_plugin_state(storage, fs_watch),
-        PLUGIN_TRIGGER_CALL_TIMEOUT,
+fn stall_message() -> String {
+    format!(
+        "plugin made no host call and delivered no event for {}s of execution and was stopped",
+        PLUGIN_TRIGGER_STALL_LIMIT.as_secs()
+    )
+}
+
+/// Handles shared between a resolved trigger's stall callback and its pump.
+struct StallWatch {
+    /// Set by the pump once `events()` has returned; until then the callback
+    /// only yields, so the `events()` call keeps its own timeout.
+    armed: Arc<AtomicBool>,
+    stalled: Arc<AtomicBool>,
+    signal: Arc<tokio::sync::Notify>,
+}
+
+/// Replaces the store's plain yield with a callback that still yields every
+/// [`PLUGIN_TRIGGER_YIELD_TICKS`] but also feeds [`StallTracker`], and traps
+/// the guest when it reports a stall.
+fn install_stall_watch(store: &mut wasmtime::Store<TriggerPluginState>) -> StallWatch {
+    let activity = Arc::clone(&store.data().activity);
+    let armed = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(tokio::sync::Notify::new());
+
+    let mut tracker = StallTracker::new(
+        activity.load(std::sync::atomic::Ordering::Relaxed),
+        Instant::now(),
     );
-    let trapped = store.data().deadline_trapped.clone();
-    let fail = |e: wasmtime::Error| call_failure_message(&e, &trapped, PLUGIN_TRIGGER_CALL_TIMEOUT);
-    let call = async {
-        let bindings = pre.instantiate_async(&mut store).await.map_err(fail)?;
-        bindings
-            .aerini_plugin_node()
-            .call_execute(&mut store, &input)
-            .await
-            .map_err(fail)
+    let (cb_armed, cb_stalled, cb_signal) = (Arc::clone(&armed), Arc::clone(&stalled), Arc::clone(&signal));
+
+    store.set_epoch_deadline(PLUGIN_TRIGGER_YIELD_TICKS);
+    store.epoch_deadline_callback(move |_cx| {
+        let now = Instant::now();
+        let count = activity.load(std::sync::atomic::Ordering::Relaxed);
+        if !cb_armed.load(std::sync::atomic::Ordering::Acquire) {
+            tracker.rearm(count, now);
+        } else if tracker.observe(count, now) {
+            cb_stalled.store(true, std::sync::atomic::Ordering::Release);
+            cb_signal.notify_one();
+            return Err(wasmtime::format_err!("{}", stall_message()));
+        }
+        Ok(wasmtime::UpdateDeadline::Yield(PLUGIN_TRIGGER_YIELD_TICKS))
+    });
+
+    StallWatch { armed, stalled, signal }
+}
+
+/// The linker for `trigger_engine`: WASI 0.2 (async) and 0.3, `wasi:http` 0.3,
+/// and this package's `storage`, `fs-watch` and `trigger-schedule` imports. The one place that
+/// import surface is defined, shared by the capability probe, load-time
+/// `describe`, and trigger resolution.
+fn trigger_linker(
+    engine: &Engine,
+) -> Result<wasmtime::component::Linker<TriggerPluginState>, String> {
+    let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(engine);
+    // A `wasm32-wasip2` guest's std runtime imports WASI 0.2 alongside the
+    // 0.3 interfaces `wasip3` provides; both sets must be linked.
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|e| e.to_string())?;
+    wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|e| e.to_string())?;
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker).map_err(|e| e.to_string())?;
+    wit_storage::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+        &mut linker,
+        |state| state,
+    )
+    .map_err(|e| e.to_string())?;
+    wit_fs_watch::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+        &mut linker,
+        |state| state,
+    )
+    .map_err(|e| e.to_string())?;
+    wit_trigger_next_fire::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
+        &mut linker,
+        |state| state,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(linker)
+}
+
+/// The trigger world's `node-input` has the same shape as the sync world's but
+/// is a distinct generated type.
+fn wit_input_to_trigger(input: &wit::NodeInput) -> wit_trigger::aerini::plugin::types::NodeInput {
+    use wit_trigger::aerini::plugin::types as t;
+    let conv = |ps: &[wit::Param]| -> Vec<t::Param> {
+        ps.iter()
+            .map(|p| t::Param { key: p.key.clone(), value: p.value.clone() })
+            .collect()
     };
-    match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, call).await {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "execute() did not return within {}s",
-            PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs()
-        )),
+    t::NodeInput { params: conv(&input.params), credentials: conv(&input.credentials) }
+}
+
+fn trigger_output_to_wit(out: wit_trigger::aerini::plugin::types::NodeOutput) -> wit::NodeOutput {
+    wit::NodeOutput {
+        success: out.success,
+        data: out.data,
+        error_code: out.error_code,
+        error_message: out.error_message,
+        recoverable: out.recoverable,
     }
 }
 
-/// Registers every import a trigger component may need on `linker`. p2 and
-/// p3 are both required: a `wasm32-wasip2` guest's standard library imports
-/// WASI 0.2 even when its own code uses the p3 async interfaces, and p2/p3
-/// register under different semver keys, so they coexist on one linker. The
-/// p2 async variants are used because this linker only serves
-/// `trigger_engine`. All HTTP, p2 and p3, goes through [`PluginHttpHooks`].
-fn link_trigger_imports(
-    linker: &mut wasmtime::component::Linker<TriggerPluginState>,
-) -> wasmtime::Result<()> {
-    wasmtime_wasi::p2::add_to_linker_async(linker)?;
-    wasmtime_wasi_http::p2::add_only_http_to_linker_async(linker)?;
-    wasmtime_wasi::p3::add_to_linker(linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(linker)?;
-    wit_storage::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
-        linker,
-        |state| state,
-    )?;
-    wit_fs_watch::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
-        linker,
-        |state| state,
-    )?;
-    wit_trigger_schedule::add_to_linker::<TriggerPluginState, wasmtime::component::HasSelf<TriggerPluginState>>(
-        linker,
-        |state| state,
-    )?;
-    Ok(())
+/// Runs one `execute()` on `trigger_engine` in a fresh store.
+async fn run_trigger_execute(
+    pre: &TriggerPre,
+    store: &mut wasmtime::Store<TriggerPluginState>,
+    input: &wit_trigger::aerini::plugin::types::NodeInput,
+) -> wasmtime::Result<wit::NodeOutput> {
+    let bindings = pre.instantiate_async(&mut *store).await?;
+    let (out,) = bindings
+        .aerini_plugin_node()
+        .func_execute()
+        .call_async(&mut *store, (input,))
+        .await?;
+    Ok(trigger_output_to_wit(out))
 }
 
 // ── Outbound HTTP SSRF enforcement ─────────────────────────────────────────────
@@ -1072,7 +1150,7 @@ fn link_trigger_imports(
 /// egress before `default_send_request` is allowed to run.
 ///
 /// One implementation serves both engines: `wasmtime_wasi_http` routes p2
-/// (action and trigger plugins) and p3 (trigger plugins) requests through the same
+/// (action plugins) and p3 (trigger plugins) requests through the same
 /// `WasiHttpHooks` trait, and reports rejections through its own
 /// version-agnostic [`HttpError`], which it maps to each protocol's
 /// `error-code` itself.
@@ -1137,7 +1215,7 @@ impl From<SsrfRejection> for HttpError {
 /// Applies this crate's standard SSRF policy (`SsrfPolicy::Strict` — the same
 /// policy the Database and HTTP nodes enforce, see `nodes::util::check_ssrf_ip`)
 /// to a WASM plugin's outbound request URI before it is sent. Shared by both
-/// [`PluginHttpHooks::send_request`], for both action (p2) and trigger (p2, p3)
+/// [`PluginHttpHooks::send_request`], for both action (p2) and trigger (p3)
 /// plugins.
 ///
 /// IP-literal hosts are checked directly (IPv6 authority brackets are stripped
@@ -1255,105 +1333,29 @@ const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// The epoch ticker thread (started in [`PluginLoader::new`]) increments the
 /// engine epoch every 10 ms. A deadline of 3 000 ticks therefore limits each
 /// plugin call to approximately 30 seconds of wall-clock time before it is
-/// interrupted with a trap. Applies to both `describe()` at load time and
-/// `execute()` per workflow run.
+/// interrupted with a trap. Applies to `describe()` at load time and
+/// `execute()` per workflow run on the synchronous engine; trigger-engine
+/// stores yield instead (see [`PLUGIN_TRIGGER_YIELD_TICKS`]).
 const PLUGIN_EPOCH_DEADLINE: u64 = 3_000;
 
-/// Epoch ticks between yields for a long-lived trigger `events()` instance
-/// (100 ticks of 10 ms is about 1 s). Each time the deadline passes while the
-/// guest is running, the host yields to the async runtime, so a spinning guest
-/// cannot hold a runtime thread and the owning job's abort can take effect.
-const TRIGGER_SPIN_WINDOW_TICKS: u64 = 100;
-
-/// Consecutive [`TRIGGER_SPIN_WINDOW_TICKS`] windows with no host call and no
-/// delivered event after which a trigger instance is interrupted: 30 windows
-/// is about 30 s, the same budget as [`PLUGIN_EPOCH_DEADLINE`].
-const TRIGGER_MAX_SILENT_WINDOWS: u32 = 30;
-
-/// Decides, each time a trigger instance's epoch deadline passes, whether the
-/// guest has been spinning. The deadline is absolute, so it also passes while
-/// the guest is suspended; a suspended or I/O-bound guest always shows host
-/// activity, and only a guest that stayed silent for `max_silent_windows`
-/// windows in a row is treated as spinning.
-struct SpinGuard {
-    last_activity: u64,
-    silent_windows: u32,
-    max_silent_windows: u32,
-}
-
-impl SpinGuard {
-    fn new(initial_activity: u64, max_silent_windows: u32) -> Self {
-        Self { last_activity: initial_activity, silent_windows: 0, max_silent_windows }
-    }
-
-    /// Returns `true` when the guest must be interrupted.
-    fn on_deadline(&mut self, activity: u64) -> bool {
-        if activity != self.last_activity {
-            self.last_activity = activity;
-            self.silent_windows = 0;
-            return false;
-        }
-        self.silent_windows = self.silent_windows.saturating_add(1);
-        self.silent_windows >= self.max_silent_windows
-    }
-}
-
-/// Replaces the per-call trap deadline of a store that is about to back a
-/// long-lived `events()` stream with [`SpinGuard`]-driven yielding.
-fn install_trigger_spin_guard(store: &mut wasmtime::Store<TriggerPluginState>) {
-    let mut guard = SpinGuard::new(store.data().host_calls, TRIGGER_MAX_SILENT_WINDOWS);
-    store.epoch_deadline_callback(move |cx| {
-        let state = cx.data();
-        if guard.on_deadline(state.host_calls) {
-            state.spin_trapped.store(true, std::sync::atomic::Ordering::Relaxed);
-            return Ok(wasmtime::UpdateDeadline::Interrupt);
-        }
-        Ok(wasmtime::UpdateDeadline::Yield(TRIGGER_SPIN_WINDOW_TICKS))
-    });
-    store.set_epoch_deadline(TRIGGER_SPIN_WINDOW_TICKS);
-}
-
-/// Error text for a failed trigger call: names the spin guard when it was the
-/// cause, otherwise the underlying error.
-fn trigger_failure_message(err: &wasmtime::Error, spin_trapped: &AtomicBool) -> String {
-    if spin_trapped.load(std::sync::atomic::Ordering::Relaxed) {
-        format!(
-            "plugin ran for about {}s without yielding or doing any I/O and was stopped",
-            TRIGGER_MAX_SILENT_WINDOWS as u64 * TRIGGER_SPIN_WINDOW_TICKS / 100
-        )
-    } else {
-        err.to_string()
-    }
-}
-
-/// Per-call wall-clock budget for any single guest call made on the trigger
-/// engine while describing, executing, resolving or starting a trigger-plugin
-/// instance (`describe`, `execute`, and the initial `events(config)` call) — the async trigger engine's counterpart to
+/// Per-call wall-clock budget for any single guest call made while resolving
+/// or starting a trigger-plugin instance (`describe`, and the initial
+/// `events(config)` call) — the async trigger engine's counterpart to
 /// [`PLUGIN_EPOCH_DEADLINE`]'s role above, using the same ~30s budget for
 /// consistency. Deliberately not applied to *draining* an already-started
 /// event stream afterward: waiting indefinitely between events is the
 /// normal, expected state for a trigger (unlike a bounded `describe`/`events`
 /// call, which should always return promptly) — timing that out would
-/// misfire on every healthy, simply-quiet trigger. A running stream is
-/// bounded only against spinning, by [`SpinGuard`].
+/// misfire on every healthy, simply-quiet trigger.
 const PLUGIN_TRIGGER_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long [`PluginLoader::describe_trigger_only`] waits for its helper
-/// thread before giving up on it. [`PLUGIN_TRIGGER_CALL_TIMEOUT`] bounds the
-/// call, both by `tokio::time::timeout` and by the store's hard deadline (a
-/// spinning guest yields about once a second, so it cannot hold the thread);
-/// this wait is a backstop that keeps the synchronous caller (app startup, a
-/// Tauri command) from hanging on a helper thread that fails to return.
-const TRIGGER_ONLY_DESCRIBE_WAIT: std::time::Duration = std::time::Duration::from_secs(35);
+/// Epoch ticks (10 ms each) a trigger-engine guest may run before it yields
+/// to the async runtime: about one second.
+const PLUGIN_TRIGGER_YIELD_TICKS: u64 = 100;
 
-/// Wall-clock time after which one [`PluginLoader::resolve_trigger_instance`]
-/// call starts no further candidate files, so a directory full of slow or
-/// hostile files cannot hold a start indefinitely. Compilation time counts
-/// against it. Each file already started keeps its full
-/// [`PLUGIN_TRIGGER_CALL_TIMEOUT`], so a matching plugin with a slow
-/// `describe()` is never cut short; a scan therefore ends at most
-/// [`PLUGIN_TRIGGER_CALL_TIMEOUT`] after this budget.
-const TRIGGER_RESOLVE_SCAN_BUDGET: Duration = Duration::from_secs(90);
+/// Once a trigger-plugin directory scan has run this long, no further file
+/// is started.
+const TRIGGER_SCAN_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Max chars of a malformed plugin `data` string echoed into the error log
 /// (`wit_output_to_engine`) — avoids dumping an arbitrarily large/binary
@@ -2356,8 +2358,7 @@ pub struct PluginLoader {
     /// `wasm_component_model_async`, which `engine` above is not -- the two
     /// configurations are mutually exclusive on one `Engine`/`Config`, so
     /// action-plugin execution and trigger-plugin event streaming never
-    /// share one. Epoch interruption is on, advanced by the same ticker
-    /// thread as `engine`: see `make_trigger_store`'s doc comment.
+    /// share one. Epoch-interrupted like `engine`; see `make_trigger_store`.
     trigger_engine: Engine,
     /// Compiled-`Component` cache for `trigger_engine`, keyed and
     /// invalidated identically to `component_cache` — kept as a separate
@@ -2485,23 +2486,25 @@ impl PluginLoader {
         config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
 
+        // Spawn a process-lifetime background thread that advances the epoch
+        // counter every 10 ms. The thread holds a clone of the engine (cheap —
+        // Engine is Arc-backed) and runs until the process exits. Combined with
+        // PLUGIN_EPOCH_DEADLINE = 3 000, this gives plugins ~30 s per call.
+        //
         // Second engine for trigger-plugin components. `wasm_component_model_async`
         // is what lets this engine compile and instantiate a component using
         // `trigger.events`'s async ABI; `engine` above doesn't set it, and per
         // `wit/node.wit`'s own doc comment the two configurations cannot be
-        // combined on one `Engine`. Epoch interruption is on here too, so
-        // `describe()`/`execute()` calls on this engine are bounded the same
-        // way; see `make_trigger_store`.
+        // combined on one `Engine`. Epoch interruption is enabled here too, so
+        // a trigger plugin's `describe`/`execute` is bounded exactly like an
+        // action plugin's — see `make_trigger_store`.
         let mut trigger_config = Config::new();
         trigger_config.wasm_component_model(true);
         trigger_config.wasm_component_model_async(true);
         trigger_config.epoch_interruption(true);
         let trigger_engine = Engine::new(&trigger_config)?;
 
-        // Process-lifetime background thread that advances both engines' epoch
-        // counters every 10 ms. It holds clones of the engines (cheap — Engine
-        // is Arc-backed) and runs until the process exits. Combined with
-        // PLUGIN_EPOCH_DEADLINE = 3 000, this gives plugins ~30 s per call.
+        // One ticker advances both engines' epochs.
         let ticker_engine = engine.clone();
         let ticker_trigger_engine = trigger_engine.clone();
         std::thread::Builder::new()
@@ -2667,7 +2670,7 @@ impl PluginLoader {
     /// shapes. Extracted so the two call paths — one that goes on to leak
     /// `'static` strings and register a live `Node`, one that doesn't —
     /// can't drift apart on the compile/link logic itself.
-    fn compile_and_link(&self, path: &Path) -> Result<wasmtime::component::InstancePre<PluginState>, PluginLoadError> {
+    fn compile_and_link(&self, path: &Path) -> Result<LinkedPlugin, PluginLoadError> {
         // Steps 1-2: read + compile — or reuse a cached `Component` for this
         // exact path if its (mtime, len) fingerprint matches what's cached.
         // `std::fs::metadata` (not `std::fs::read`) is the first fallible
@@ -2736,7 +2739,7 @@ impl PluginLoader {
         // for a plain custom host-implemented interface). Linked
         // unconditionally, like (a)/(b) above: a plugin compiled before
         // `storage` existed has no such import to satisfy, so this is a
-        // no-op for it, not a compatibility risk.
+        // no-op for it, not a compatibility risk (Constraint 1).
         wit_storage::add_to_linker::<PluginState, wasmtime::component::HasSelf<PluginState>>(
             &mut linker,
             |state| state,
@@ -2750,8 +2753,62 @@ impl PluginLoader {
             |state| state,
         ).map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
 
-        linker.instantiate_pre(&component)
-            .map_err(|e| PluginLoadError::WasmLink(e.to_string()))
+        match linker.instantiate_pre(&component) {
+            Ok(pre) => Ok(LinkedPlugin::Sync(pre)),
+            // A plugin built with `wasip3` imports async-typed WASI 0.3
+            // interfaces, which a store on the synchronous engine can never
+            // host. If the component links and exports the trigger world on
+            // `trigger_engine`, it is served from there instead; anything else
+            // keeps the strict sync-link error.
+            Err(sync_err) => match self.trigger_pre(path) {
+                Ok(pre) => Ok(LinkedPlugin::Trigger(pre)),
+                Err(_) => Err(PluginLoadError::WasmLink(sync_err.to_string())),
+            },
+        }
+    }
+
+    /// Compiles `path` for `trigger_engine` (cached) and returns its
+    /// pre-instantiated trigger bindings, or the reason it isn't one. Type-level
+    /// only: no guest code runs.
+    fn trigger_pre(&self, path: &Path) -> Result<TriggerPre, String> {
+        let component = self.compile_trigger_component_sync(path).map_err(|e| e.to_string())?;
+        let linker = trigger_linker(&self.trigger_engine)?;
+        let instance_pre = linker.instantiate_pre(&component).map_err(|e| e.to_string())?;
+        TriggerPre::new(instance_pre).map_err(|e| e.to_string())
+    }
+
+    /// Links `path` and calls `describe()` once, on whichever engine the
+    /// component can be hosted on, returning the result with the backend
+    /// `execute()` must use. Shared by `load_plugin` and `describe_plugin` so
+    /// the two can't drift apart.
+    fn describe_linked(&self, path: &Path) -> Result<(RawDescribe, NodeBackend), PluginLoadError> {
+        match self.compile_and_link(path)? {
+            LinkedPlugin::Sync(instance_pre) => {
+                let node_pre = self.detect_node_pre(instance_pre.clone())?;
+
+                // Runtime `execute()` always goes through the plain `node`-only Pre --
+                // every valid plugin exports it, with or without `metadata`. Cannot
+                // fail: `detect_node_pre` above already proved `node` is exported by
+                // this exact component.
+                let exec_pre = wit::AeriniNodePre::new(instance_pre)
+                    .expect("node export already confirmed by detect_node_pre");
+
+                let mut store = make_store(&self.engine, make_plugin_state(None, None));
+                let raw = describe_via_pre(&node_pre, &mut store)?;
+                Ok((raw, NodeBackend::Sync { engine: self.engine.clone(), pre: exec_pre }))
+            }
+            LinkedPlugin::Trigger(pre) => {
+                let pre_ref = &pre;
+                let raw = block_on_scratch_runtime(move || async move {
+                    let mut store = make_trigger_store(
+                        pre_ref.engine(),
+                        make_trigger_plugin_state(None, None),
+                    );
+                    describe_trigger_for_load(pre_ref, &mut store).await
+                })?;
+                Ok((raw, NodeBackend::Trigger { pre }))
+            }
+        }
     }
 
     /// Determines which world `instance_pre` exports and returns the matching
@@ -2774,43 +2831,11 @@ impl PluginLoader {
         }
     }
 
-    /// The compile/link/detect/describe steps [`load_plugin`](Self::load_plugin)
-    /// and [`describe_plugin`](Self::describe_plugin) share. Returns the
-    /// `describe()` result and the bindings `execute()` will instantiate.
-    ///
-    /// A plugin that fails to link on the action engine
-    /// (→ [`PluginLoadError::WasmLink`]) is retried as a trigger plugin on
-    /// `trigger_engine` ([`describe_trigger_only`](Self::describe_trigger_only)),
-    /// the only engine whose linker carries WASI Preview 3, and its
-    /// `execute()` runs there too ([`ExecPre::Trigger`]). If the retry does not
-    /// succeed, the original `WasmLink` error is returned unchanged.
-    fn describe_raw(&self, path: &Path) -> Result<(RawDescribe, ExecPre), PluginLoadError> {
-        match self.compile_and_link(path) {
-            Ok(instance_pre) => {
-                let node_pre = self.detect_node_pre(instance_pre.clone())?;
-                let mut store = make_store(&self.engine, make_plugin_state(None, None));
-                let raw = describe_via_pre(&node_pre, &mut store)?;
-                // `node` is exported by this exact component (just proved by
-                // `detect_node_pre`), so this type-level check cannot fail.
-                let exec_pre = wit::AeriniNodePre::new(instance_pre)
-                    .map_err(|_| PluginLoadError::MissingInterface)?;
-                Ok((raw, ExecPre::Action(exec_pre)))
-            }
-            Err(PluginLoadError::WasmLink(link_err)) => match self.describe_trigger_only(path) {
-                Some((raw, pre)) => Ok((raw, ExecPre::Trigger(pre))),
-                None => Err(PluginLoadError::WasmLink(link_err)),
-            },
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Rejects `path` when its signature sidecar is present but invalid
-    /// (→ [`PluginLoadError::SignatureRejected`]). Unsigned, unrecognized-format
-    /// and validly-signed files pass. Shared by [`load_plugin`](Self::load_plugin),
-    /// [`describe_plugin`](Self::describe_plugin) and the trigger resolve scan
-    /// so none compiles or runs a file's `describe()` before its signature has
-    /// been checked.
-    fn ensure_signature_acceptable(&self, path: &Path) -> Result<(), PluginLoadError> {
+    /// Rejects `path` if its signature sidecar is present but bad (content
+    /// doesn't match the signed hash, signature doesn't verify, or sidecar
+    /// malformed). Unsigned files and files signed under any key pass. Runs
+    /// before any compilation or guest code.
+    fn require_acceptable_signature(&self, path: &Path) -> Result<(), PluginLoadError> {
         match self.verify_signature(path)? {
             signature::SigCheckResult::IntegrityMismatch => Err(PluginLoadError::SignatureRejected(
                 "file does not match its signed checksum — may be corrupted or tampered".to_string(),
@@ -2841,18 +2866,13 @@ impl PluginLoader {
     /// 1. Read the file (→ [`PluginLoadError::Io`] on failure).
     /// 2. Compile to a component (→ [`PluginLoadError::WasmCompile`] on failure).
     /// 3. Build a linker with full WASIp2 + HTTP + `storage` and pre-instantiate
-    ///    (→ [`PluginLoadError::WasmLink`] on failure, unless the file is a
-    ///    trigger plugin that only links on the trigger engine: it is then
-    ///    described there, and its `execute()` runs there too, on a fresh
-    ///    store bounded by [`PLUGIN_TRIGGER_CALL_TIMEOUT`] and the epoch
-    ///    deadline).
+    ///    (→ [`PluginLoadError::WasmLink`] on failure).
     /// 4. Detect whether the component exports `aerini-node` or
     ///    `aerini-node-with-metadata` (→ [`PluginLoadError::MissingInterface`]
     ///    if neither).
-    /// 5. Call `describe()` (and `describe-metadata()`, when exported — by a
-    ///    trigger-only plugin too, via `aerini-node-with-trigger-and-metadata`)
-    ///    once to populate the [`NodeDescriptor`](crate::node::NodeDescriptor). A
-    ///    plugin that doesn't export `metadata` gets the host defaults from
+    /// 5. Call `describe()` (and `describe-metadata()`, when exported) once to
+    ///    populate the [`NodeDescriptor`](crate::node::NodeDescriptor). A plugin
+    ///    that doesn't export `metadata` gets the host defaults from
     ///    `wit/node.wit`'s doc comment: empty author, `"1.0.0"` version, no icon.
     /// 6. Open (or reuse) this plugin's directory's storage database (see
     ///    [`PluginLoader::plugin_storage`]) — never fails the load; a plugin
@@ -2864,9 +2884,9 @@ impl PluginLoader {
     /// The describe result is cached in [`WasmPluginNode`] for the lifetime
     /// of the process — it is never called again after load time.
     pub fn load_plugin(&self, path: &Path) -> Result<Arc<dyn Node>, PluginLoadError> {
-        self.ensure_signature_acceptable(path)?;
+        self.require_acceptable_signature(path)?;
 
-        let (raw, exec_pre) = self.describe_raw(path)?;
+        let (raw, backend) = self.describe_linked(path)?;
 
         // Leak type_id/display_name/description/icon/author/version once per plugin load —
         // bounded intentional leak: plugins are loaded once at process start and
@@ -2899,11 +2919,11 @@ impl PluginLoader {
         // filename with no parent component.
         let storage_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let storage = self.plugin_storage(storage_dir);
-        let trigger_capable = matches!(exec_pre, ExecPre::Trigger(_)) || self.probe_trigger_capable(path);
+        let trigger_capable =
+            matches!(backend, NodeBackend::Trigger { .. }) || self.probe_trigger_capable(path);
 
         Ok(Arc::new(WasmPluginNode {
-            engine: self.engine.clone(),
-            exec_pre,
+            backend,
             type_id,
             display_name,
             description,
@@ -2923,21 +2943,19 @@ impl PluginLoader {
     /// without registering it as a live [`Node`] and without leaking any
     /// memory — every string in the returned [`PluginDescriptor`] is owned.
     ///
-    /// Runs the identical compile/link/detect/describe steps as
-    /// [`load_plugin`](Self::load_plugin), but never calls [`Box::leak`] and
+    /// Checks the signature sidecar first, like [`load_plugin`](Self::load_plugin),
+    /// so a rejected file is never compiled or run. Runs the identical
+    /// compile/link/detect/describe steps as `load_plugin`, but never calls [`Box::leak`] and
     /// never constructs a [`WasmPluginNode`] — the compiled component, linker,
     /// and store are all dropped when this method returns. Safe to call as
     /// many times as a caller needs, unlike `load_plugin`, whose leak is only
-    /// bounded when called once per plugin per process. Checks the signature
-    /// sidecar first, like `load_plugin`: a file whose signature is present but
-    /// invalid returns [`PluginLoadError::SignatureRejected`] without being
-    /// compiled or having its `describe()` run. Discards the
+    /// bounded when called once per plugin per process. Discards the
     /// `metadata`-only fields (`icon`/`author`/`version`) — no current caller
     /// of `describe_plugin` needs them; see `PluginInfo` (Settings-tab
     /// listing), which doesn't carry an icon on either the Rust or TS side.
     pub fn describe_plugin(&self, path: &Path) -> Result<PluginDescriptor, PluginLoadError> {
-        self.ensure_signature_acceptable(path)?;
-        let (raw, _) = self.describe_raw(path)?;
+        self.require_acceptable_signature(path)?;
+        let (raw, _backend) = self.describe_linked(path)?;
 
         let node_type = category_to_node_type(&raw.category, &raw.type_id);
 
@@ -3120,94 +3138,30 @@ impl PluginLoader {
     /// linker and `AeriniNodeWithTriggerPre::new` are both type-level only
     /// -- no guest code executes, unlike `resolve_trigger_instance`'s
     /// `instantiate_async` + `describe()` call. Links the same import
-    /// surface `resolve_trigger_instance` links ([`link_trigger_imports`]) so a
-    /// plugin that imports `http` or `storage` isn't undercounted here relative
-    /// to what actually resolves later.
+    /// surface `resolve_trigger_instance` links (`wasi:p3` + `wasi:http` p3 +
+    /// `storage`) so a plugin that imports `http` or `storage` isn't
+    /// undercounted here relative to what actually resolves later.
     fn probe_trigger_capable(&self, path: &Path) -> bool {
-        self.trigger_pre(path).is_some()
-    }
-
-    /// The type-level half of [`probe_trigger_capable`](Self::probe_trigger_capable),
-    /// returning the pre-instantiated bindings instead of a bool: `None` when
-    /// the file does not compile, does not link against
-    /// [`link_trigger_imports`]' surface, or does not export
-    /// `aerini-node-with-trigger`. When the component also exports `metadata`,
-    /// the result carries the superset bindings too. No guest code runs.
-    fn trigger_pre(&self, path: &Path) -> Option<TriggerPres> {
-        let component = self.compile_trigger_component_sync(path).ok()?;
-
-        let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
-        link_trigger_imports(&mut linker).ok()?;
-
-        let instance_pre = linker.instantiate_pre(&component).ok()?;
-        let with_metadata =
-            wit_trigger_metadata::AeriniNodeWithTriggerAndMetadataPre::new(instance_pre.clone()).ok();
-        let plain = wit_trigger::AeriniNodeWithTriggerPre::new(instance_pre).ok()?;
-        Some(TriggerPres { plain, with_metadata })
-    }
-
-    /// Describes a plugin that cannot link on the action engine but is a
-    /// valid trigger plugin: its imports (e.g. WASI Preview 3) exist only on
-    /// `trigger_engine`'s linker. `None` when the file is not one, or when
-    /// `describe()` fails, traps or does not finish, so a caller can fall
-    /// back to the error it already has. On success it also returns the
-    /// bindings `execute()` will instantiate on `trigger_engine`.
-    ///
-    /// The type-level check is synchronous and cheap, so an ordinary plugin
-    /// that failed to link for any other reason never reaches the helper
-    /// thread. Past it, `describe()` needs an async call, but this is reached
-    /// from synchronous entry points that are themselves called from inside a
-    /// tokio runtime, where `block_on` panics. The call therefore runs on its
-    /// own short-lived thread with its own runtime, and the caller waits at
-    /// most [`TRIGGER_ONLY_DESCRIBE_WAIT`].
-    fn describe_trigger_only(
-        &self,
-        path: &Path,
-    ) -> Option<(RawDescribe, wit_trigger::AeriniNodeWithTriggerPre<TriggerPluginState>)> {
-        let pres = self.trigger_pre(path)?;
-        let exec_pre = pres.plain.clone();
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("wasm-trigger-describe".to_string())
-            .spawn(move || {
-                let raw = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok()
-                    .and_then(|rt| rt.block_on(describe_trigger_pre(pres)));
-                let _ = tx.send(raw);
-            })
-            .ok()?;
-
-        let raw = rx.recv_timeout(TRIGGER_ONLY_DESCRIBE_WAIT).ok().flatten()?;
-        Some((raw, exec_pre))
+        self.trigger_pre(path).is_ok()
     }
 
     /// Scans `dir` for a `.wasm` file exporting `aerini-node-with-trigger`
     /// whose `describe().type_id` matches `type_id`, and returns it
     /// instantiated and ready for `events()` to be called on it.
     ///
-    /// Every file that fails to compile, instantiate or `describe()` is
-    /// skipped and logged at `debug`, not `warn` -- unlike
-    /// `load_plugins_from_dir`'s directory scan, a "miss" here is the
-    /// expected outcome for the majority of files in a plugin directory
-    /// (every action-only plugin links fine but has no `trigger` export, so
-    /// it fails to instantiate as `aerini-node-with-trigger` every time this
-    /// is called). A failure to populate the linker is host misconfiguration,
-    /// not a per-plugin miss, and returns [`PluginLoadError::WasmLink`].
+    /// A file whose signature sidecar is bad is skipped before it is compiled
+    /// or run. Each file gets [`PLUGIN_TRIGGER_CALL_TIMEOUT`] to instantiate and
+    /// `describe()`, and no further file is started once the scan has run for
+    /// [`TRIGGER_SCAN_LIMIT`]; a file that times out, or a scan cut short, is
+    /// named in [`PluginLoadError::TriggerScanIncomplete`].
     ///
-    /// A file with an invalid signature sidecar is skipped before it is
-    /// compiled or run, as in [`load_plugin`](Self::load_plugin).
-    ///
-    /// Instantiating and describing one candidate is bounded by
-    /// [`PLUGIN_TRIGGER_CALL_TIMEOUT`] (a guest that spins is interrupted by
-    /// its store's hard deadline, one that suspends forever by
-    /// `tokio::time::timeout`), and the scan stops starting files once it has
-    /// run for [`TRIGGER_RESOLVE_SCAN_BUDGET`]. A file that exceeds its budget
-    /// is skipped. If no file matches and any were skipped that way, or the
-    /// scan budget ran out, the error is [`PluginLoadError::TriggerScanIncomplete`]
-    /// naming them, rather than a bare [`PluginLoadError::NoSuchTriggerPlugin`].
+    /// Every file that fails to compile or link against `trigger_engine` is
+    /// skipped, not logged as a warning -- unlike `load_plugins_from_dir`'s
+    /// directory scan, a "miss" here is the expected outcome for the
+    /// majority of files in a plugin directory (every action-only plugin,
+    /// built against WASIp2, cannot satisfy `wasmtime_wasi::p3`'s linker
+    /// imports and will fail here every time this is called; that is not a
+    /// problem to surface, just a non-match).
     async fn resolve_trigger_instance(
         &self,
         dir: &Path,
@@ -3233,9 +3187,8 @@ impl PluginLoader {
             plugin_type_id: type_id.to_string(),
         });
 
-        let scan_started = Instant::now();
-        let mut timed_out: Vec<String> = Vec::new();
-        let mut budget_spent = false;
+        let scan_started = std::time::Instant::now();
+        let mut incomplete: Vec<String> = Vec::new();
 
         for entry in entries {
             let Ok(entry) = entry else { continue };
@@ -3244,84 +3197,56 @@ impl PluginLoader {
                 continue;
             }
 
-            if call_budget_spent(scan_started.elapsed(), TRIGGER_RESOLVE_SCAN_BUDGET) {
-                budget_spent = true;
+            if scan_started.elapsed() >= TRIGGER_SCAN_LIMIT {
+                incomplete.push(format!(
+                    "scan stopped after the {}s limit before every file was tried",
+                    TRIGGER_SCAN_LIMIT.as_secs()
+                ));
                 break;
             }
 
-            if let Err(e) = self.ensure_signature_acceptable(&path) {
-                tracing::debug!(path = %path.display(), error = %e, "trigger resolve: skipped");
+            if self.require_acceptable_signature(&path).is_err() {
                 continue;
             }
 
             let Ok(component) = self.compile_trigger_component(&path).await else { continue };
-
-            // Compilation counts against the scan budget, so it is checked
-            // again before the candidate is run.
-            if call_budget_spent(scan_started.elapsed(), TRIGGER_RESOLVE_SCAN_BUDGET) {
-                budget_spent = true;
-                break;
-            }
-
-            let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&self.trigger_engine);
-            link_trigger_imports(&mut linker).map_err(|e| PluginLoadError::WasmLink(e.to_string()))?;
+            let Ok(linker) = trigger_linker(&self.trigger_engine) else { continue };
+            let Ok(instance_pre) = linker.instantiate_pre(&component) else { continue };
+            let Ok(pre) = TriggerPre::new(instance_pre) else { continue };
 
             let mut store = make_trigger_store(
                 &self.trigger_engine,
                 make_trigger_plugin_state(storage_handle.clone(), fs_watch_handle.clone()),
-                PLUGIN_TRIGGER_CALL_TIMEOUT,
             );
-            let trapped = store.data().deadline_trapped.clone();
 
-            let attempt = async {
-                let bindings = wit_trigger::AeriniNodeWithTrigger::instantiate_async(&mut store, &component, &linker)
-                    .await
-                    .map_err(|e| ("instantiate", e))?;
-                let descriptor = bindings
-                    .aerini_plugin_node()
-                    .call_describe(&mut store)
-                    .await
-                    .map_err(|e| ("describe", e))?;
-                Ok::<_, (&'static str, wasmtime::Error)>((bindings, descriptor))
-            };
-            let (bindings, descriptor) = match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, attempt).await {
-                Ok(Ok(v)) => v,
-                Ok(Err((stage, e))) => {
-                    let message = call_failure_message(&e, &trapped, PLUGIN_TRIGGER_CALL_TIMEOUT);
-                    tracing::debug!(path = %path.display(), error = %message, "trigger resolve: {} failed", stage);
-                    if trapped.load(std::sync::atomic::Ordering::Relaxed) {
-                        timed_out.push(candidate_file_name(&path));
-                    }
+            // `describe` is a plain (non-`async`) WIT function, but this store
+            // has async-typed imports linked, so it must still be called through
+            // `call_async`: the sync `call_describe` rejects such a store.
+            let (bindings, raw) = match instantiate_and_describe_trigger(&pre, &mut store).await {
+                Ok(v) => v,
+                Err(PluginLoadError::CallTimedOut(secs)) => {
+                    let name = path
+                        .file_name()
+                        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    incomplete.push(format!("{name} (did not finish within the {secs}s per-file limit)"));
                     continue;
                 }
-                Err(_) => {
-                    tracing::debug!(
-                        path = %path.display(),
-                        budget_secs = PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs(),
-                        "trigger resolve: instantiate/describe timed out"
-                    );
-                    timed_out.push(candidate_file_name(&path));
-                    continue;
-                }
+                Err(_) => continue,
             };
 
-            if descriptor.type_id == type_id {
-                // This store now backs a long-lived event stream; swap the
-                // per-call trap deadline `make_trigger_store` set for the
-                // instantiate/describe calls above for the spin guard.
-                install_trigger_spin_guard(&mut store);
+            if raw.type_id == type_id {
                 return Ok((store, bindings));
             }
         }
 
-        if budget_spent || !timed_out.is_empty() {
-            return Err(PluginLoadError::TriggerScanIncomplete(trigger_scan_incomplete_message(
-                type_id,
-                &timed_out,
-                budget_spent,
-            )));
+        if incomplete.is_empty() {
+            Err(PluginLoadError::NoSuchTriggerPlugin(type_id.to_string()))
+        } else {
+            Err(PluginLoadError::TriggerScanIncomplete {
+                type_id: type_id.to_string(),
+                detail: incomplete.join("; "),
+            })
         }
-        Err(PluginLoadError::NoSuchTriggerPlugin(type_id.to_string()))
     }
 
     /// Resolves `type_id` to a trigger-capable plugin under `dir`, starts its
@@ -3336,105 +3261,87 @@ impl PluginLoader {
     /// the channel) -- this function does not itself decide when the stream
     /// should stop being read.
     ///
-    /// The third element is the latest raw value the instance reported through
-    /// `trigger-schedule`'s `report-next-fire` (`None` until it reports, and
-    /// always `None` for a plugin that does not import it). It is
-    /// unvalidated plugin input; the sender is dropped with the instance, so
-    /// `changed()` errors once the instance is gone.
-    ///
-    /// A guest that runs for about 30 s without any host call or delivered
-    /// event is interrupted and reported as an `Err` (see [`SpinGuard`]); the
-    /// guest yields to the runtime about once a second while it runs, so
-    /// aborting the returned handle always takes effect. A guest idle between
-    /// events is never interrupted.
-    ///
     /// The channel yields `Err(message)` for a single read failure (the
     /// plugin instance is left as-is; a further `recv()` may still succeed)
     /// and closes (`recv()` returns `None`) when the guest closes the
     /// stream or the instance traps -- the caller decides whether to treat
-    /// closure as fatal for this job (see `scheduler/runner.rs`). The pump
-    /// also ends, dropping the instance, when the receiver is dropped or the
-    /// returned `JoinHandle` is aborted.
+    /// closure as fatal for this job (see `scheduler/runner.rs`).
+    ///
+    /// Once `events()` has returned, a guest that executes for
+    /// [`PLUGIN_TRIGGER_STALL_LIMIT`] without a host call or a delivered event
+    /// is stopped and reported as an `Err` (see [`StallTracker`]); a trigger
+    /// idle between events is unaffected.
+    ///
+    /// The third element carries the latest next-fire time the guest reported
+    /// through `trigger-schedule` (validated by [`validate_next_fire`]), or
+    /// `None` if it has reported none. It is created fresh for each call, so a
+    /// restarted instance never inherits the previous instance's value, and it
+    /// is display-only: nothing here reads it to decide when to run.
     pub async fn start_trigger(
         &self,
         dir: &Path,
         type_id: &str,
         config: &str,
-    ) -> Result<TriggerStart, PluginLoadError> {
+    ) -> Result<(
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::Receiver<Result<String, String>>,
+        NextFireWatch,
+    ), PluginLoadError> {
         let (mut store, bindings) = self.resolve_trigger_instance(dir, type_id).await?;
+        let (next_fire_tx, next_fire_rx) = tokio::sync::watch::channel(None);
+        store.data_mut().next_fire = Some(next_fire_tx);
+        let watch = install_stall_watch(&mut store);
+        let activity = Arc::clone(&store.data().activity);
         let config = config.to_string();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let (hint_tx, hint_rx) = tokio::sync::watch::channel(None::<u64>);
-        store.data_mut().next_fire = Some(hint_tx);
-        let spin_trapped = store.data().spin_trapped.clone();
 
         let handle = tokio::spawn(async move {
+            let StallWatch { armed, stalled, signal } = watch;
             let pump_tx = tx.clone();
-            let call_spin_trapped = spin_trapped.clone();
-            let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel::<()>();
-
-            // `run_concurrent` drives the store's event loop only while its
-            // closure is pending, so the closure stays alive until the
-            // stream ends or the receiver is dropped; returning earlier
-            // would stop the guest's writer and the consumer from running.
             let run = store.run_concurrent(async move |accessor| -> wasmtime::Result<()> {
-                let reader = match bindings.aerini_plugin_trigger().call_events(accessor, config).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = pump_tx.send(Err(trigger_failure_message(&e, &call_spin_trapped))).await;
+                let events_call = bindings.aerini_plugin_trigger().call_events(accessor, config);
+                let reader = match tokio::time::timeout(PLUGIN_TRIGGER_CALL_TIMEOUT, events_call).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        let _ = pump_tx.send(Err(e.to_string())).await;
+                        return Ok(());
+                    }
+                    Err(_elapsed) => {
+                        let _ = pump_tx.send(Err(format!(
+                            "events() did not return within {}s",
+                            PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs()
+                        ))).await;
                         return Ok(());
                     }
                 };
-                let _ = ready_tx.send(());
+                armed.store(true, std::sync::atomic::Ordering::Release);
 
-                let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
                 let consumer = TriggerEventConsumer {
                     tx: tokio_util::sync::PollSender::new(pump_tx.clone()),
-                    _closed: closed_tx,
+                    activity,
                 };
                 if let Err(e) = accessor.with(|access| reader.pipe(access, consumer)) {
-                    let _ = pump_tx.send(Err(trigger_failure_message(&e, &call_spin_trapped))).await;
-                    return Ok(());
-                }
-
-                tokio::select! {
-                    _ = closed_rx => {}
-                    _ = pump_tx.closed() => {}
+                    let _ = pump_tx.send(Err(e.to_string())).await;
                 }
                 Ok(())
             });
-            tokio::pin!(run);
 
-            // The start deadline wraps the whole `run_concurrent` call, not a
-            // future inside its closure: a timeout inside the closure can fail
-            // to fire while the guest holds the store.
-            let deadline = tokio::time::sleep(PLUGIN_TRIGGER_CALL_TIMEOUT);
-            tokio::pin!(deadline);
-            let mut started = false;
-            let outcome = loop {
-                tokio::select! {
-                    result = &mut run => break Some(result),
-                    _ = &mut ready_rx, if !started => started = true,
-                    _ = &mut deadline, if !started => break None,
-                }
-            };
-
-            match outcome {
-                Some(result) => {
-                    if let Err(e) = result.and_then(|inner| inner) {
-                        let _ = tx.send(Err(trigger_failure_message(&e, &spin_trapped))).await;
+            tokio::select! {
+                biased;
+                outcome = run => {
+                    if stalled.load(std::sync::atomic::Ordering::Acquire) {
+                        let _ = tx.send(Err(stall_message())).await;
+                    } else if let Err(e) = outcome.and_then(|inner| inner) {
+                        let _ = tx.send(Err(e.to_string())).await;
                     }
                 }
-                None => {
-                    let _ = tx.send(Err(format!(
-                        "events() did not return within {}s",
-                        PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs()
-                    ))).await;
+                _ = signal.notified() => {
+                    let _ = tx.send(Err(stall_message())).await;
                 }
             }
         });
 
-        Ok((handle, rx, hint_rx))
+        Ok((handle, rx, next_fire_rx))
     }
 }
 
@@ -3482,13 +3389,10 @@ impl PluginLoader {
 /// plugin's directory failed to open; every `storage.*` guest call then
 /// degrades per that same doc comment rather than failing the node.
 pub struct WasmPluginNode {
-    /// Shared engine — cheap to clone (internally ref-counted).
-    engine: Engine,
-    /// Pre-compiled component with import-satisfaction already verified.
-    /// Re-instantiated per `execute()` call, on the action engine, or on
-    /// `trigger_engine` for a plugin whose imports (e.g. WASI Preview 3) link
-    /// only there.
-    exec_pre: ExecPre,
+    /// Pre-compiled component with import-satisfaction already verified, on
+    /// whichever engine can host it. `Clone + Send + Sync`. Re-instantiated per
+    /// `execute()` call.
+    backend: NodeBackend,
     type_id: &'static str,
     display_name: &'static str,
     description: &'static str,
@@ -3555,11 +3459,12 @@ impl Node for WasmPluginNode {
 
     /// Execute the plugin node.
     ///
-    /// Runs synchronous Wasmtime instantiation + function call in
-    /// `tokio::task::spawn_blocking` so the async executor is never blocked
-    /// (a plugin that only links on `trigger_engine` runs its async call on a
-    /// spawned task instead). A fresh `Store` is created per call for full
-    /// execution isolation.
+    /// On the synchronous engine, runs Wasmtime instantiation + the function
+    /// call in `tokio::task::spawn_blocking` so the async executor is never
+    /// blocked. A trigger plugin served from `trigger_engine` is awaited
+    /// directly through the `_async` APIs, bounded by the epoch deadline and
+    /// [`PLUGIN_TRIGGER_CALL_TIMEOUT`]. A fresh `Store` is created per call
+    /// either way, for full execution isolation.
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let wit_input = engine_input_to_wit(&input);
         // Scoped by this node's own type_id, not by `input.node_id`/
@@ -3576,10 +3481,10 @@ impl Node for WasmPluginNode {
             plugin_type_id: self.type_id.to_string(),
         });
 
-        let result: Result<Result<wit::NodeOutput, String>, tokio::task::JoinError> = match &self.exec_pre {
-            ExecPre::Action(pre) => {
+        let result = match &self.backend {
+            NodeBackend::Sync { engine, pre } => {
+                let engine = engine.clone();
                 let pre = pre.clone();
-                let engine = self.engine.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut store = make_store(&engine, make_plugin_state(storage_handle, fs_watch_handle));
 
@@ -3592,18 +3497,26 @@ impl Node for WasmPluginNode {
                 })
                 .await
             }
-            // The trigger engine's calls are async, so no `spawn_blocking`;
-            // `tokio::spawn` keeps a panic in the call isolated as a
-            // `JoinError`, like the arm above.
-            ExecPre::Trigger(pre) => {
-                let pre = pre.clone();
-                let wit_input = trigger_input_from_wit(wit_input);
-                tokio::spawn(async move {
-                    execute_on_trigger_engine(pre, wit_input, storage_handle, fs_watch_handle)
-                        .await
-                        .map(trigger_output_to_wit)
-                })
+            NodeBackend::Trigger { pre } => {
+                let trigger_input = wit_input_to_trigger(&wit_input);
+                let mut store = make_trigger_store(
+                    pre.engine(),
+                    make_trigger_plugin_state(storage_handle, fs_watch_handle),
+                );
+                let outcome = match tokio::time::timeout(
+                    PLUGIN_TRIGGER_CALL_TIMEOUT,
+                    run_trigger_execute(pre, &mut store, &trigger_input),
+                )
                 .await
+                {
+                    Ok(Ok(out)) => Ok(out),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_elapsed) => Err(format!(
+                        "plugin ran for {}s without returning and was stopped",
+                        PLUGIN_TRIGGER_CALL_TIMEOUT.as_secs()
+                    )),
+                };
+                Ok(outcome)
             }
         };
 
@@ -3619,30 +3532,6 @@ impl Node for WasmPluginNode {
                 format!("plugin task panicked: {join_err}"),
             )),
         }
-    }
-}
-
-/// Moves a [`wit::NodeInput`] into the structurally identical type `bindgen!`
-/// generates separately for `trigger_engine`'s world.
-fn trigger_input_from_wit(input: wit::NodeInput) -> wit_trigger::NodeInput {
-    let convert = |params: Vec<wit::Param>| -> Vec<wit_trigger::Param> {
-        params
-            .into_iter()
-            .map(|p| wit_trigger::Param { key: p.key, value: p.value })
-            .collect()
-    };
-    wit_trigger::NodeInput { params: convert(input.params), credentials: convert(input.credentials) }
-}
-
-/// Inverse of [`trigger_input_from_wit`] for `execute()`'s result, so both
-/// engines share [`wit_output_to_engine`].
-fn trigger_output_to_wit(out: wit_trigger::NodeOutput) -> wit::NodeOutput {
-    wit::NodeOutput {
-        success: out.success,
-        data: out.data,
-        error_code: out.error_code,
-        error_message: out.error_message,
-        recoverable: out.recoverable,
     }
 }
 
@@ -3920,47 +3809,22 @@ mod tests {
         PluginLoader::new().expect("Wasmtime engine init failed in test")
     }
 
-    #[test]
-    fn spin_guard_interrupts_only_after_max_consecutive_silent_windows() {
-        let mut g = SpinGuard::new(7, 3);
-        assert!(!g.on_deadline(7));
-        assert!(!g.on_deadline(7));
-        assert!(g.on_deadline(7), "third silent window must interrupt");
-    }
+    /// Writes a sidecar next to `wasm_path` declaring a content hash that
+    /// can't match the file, and returns the sidecar's path.
+    fn write_tampered_sidecar(wasm_path: &Path) -> PathBuf {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
-    #[test]
-    fn spin_guard_activity_resets_the_silent_count() {
-        let mut g = SpinGuard::new(0, 3);
-        assert!(!g.on_deadline(0));
-        assert!(!g.on_deadline(0));
-        assert!(!g.on_deadline(1), "activity since the last window is not a spin");
-        assert!(!g.on_deadline(1));
-        assert!(!g.on_deadline(1));
-        assert!(g.on_deadline(1));
-        assert!(!g.on_deadline(u64::MAX), "a changed counter, including after wraparound, resets");
-    }
-
-    #[test]
-    fn call_budget_spent_only_at_or_after_the_budget() {
-        let budget = Duration::from_secs(30);
-        assert!(!call_budget_spent(Duration::ZERO, budget));
-        assert!(!call_budget_spent(Duration::from_millis(29_999), budget));
-        assert!(call_budget_spent(budget, budget));
-        assert!(call_budget_spent(Duration::from_secs(31), budget));
-    }
-
-    #[test]
-    fn scan_incomplete_message_names_files_and_the_budgets_they_exceeded() {
-        let files = vec!["a.wasm".to_string(), "b.wasm".to_string()];
-        assert_eq!(
-            trigger_scan_incomplete_message("t", &files, false),
-            "no trigger plugin with type_id \"t\" was found; these files did not finish describe() \
-             within 30s and were skipped: a.wasm, b.wasm"
-        );
-        assert_eq!(
-            trigger_scan_incomplete_message("t", &[], true),
-            "no trigger plugin with type_id \"t\" was found; the directory scan started no further files after 90s"
-        );
+        let sig_path = signature::sig_sidecar_path(wasm_path);
+        let sig_json = serde_json::json!({
+            "schema_version": 1,
+            "algorithm": "ed25519",
+            "public_key": B64.encode([0u8; 32]),
+            "files": [{"name": "plugin.wasm", "blake3": "0".repeat(64)}],
+            "signature": B64.encode([0u8; 64]),
+        })
+        .to_string();
+        std::fs::write(&sig_path, sig_json).expect("sig sidecar write failed");
+        sig_path
     }
 
     /// Non-existent path must return `PluginLoadError::Io`.
@@ -4004,23 +3868,12 @@ mod tests {
     /// before any compilation is attempted, not just logged and let through.
     #[test]
     fn load_plugin_rejects_tampered_signature() {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-
         let l = loader();
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
         tmp.write_all(b"(component)").expect("tempfile write failed");
         tmp.flush().expect("tempfile flush failed");
 
-        let sig_path = signature::sig_sidecar_path(tmp.path());
-        let sig_json = serde_json::json!({
-            "schema_version": 1,
-            "algorithm": "ed25519",
-            "public_key": B64.encode([0u8; 32]),
-            "files": [{"name": "plugin.wasm", "blake3": "0".repeat(64)}],
-            "signature": B64.encode([0u8; 64]),
-        })
-        .to_string();
-        std::fs::write(&sig_path, sig_json).expect("sig sidecar write failed");
+        let sig_path = write_tampered_sidecar(tmp.path());
 
         let result = l.load_plugin(tmp.path());
         let err = result.err().expect("expected the tampered signature to reject the load");
@@ -4052,6 +3905,48 @@ mod tests {
             1,
             "expected exactly one real signature check across three verify_signature calls on an unchanged file"
         );
+    }
+
+    /// `describe_plugin` must reject a tampered file with `SignatureRejected`,
+    /// like `load_plugin`, instead of compiling and describing it.
+    #[test]
+    fn describe_plugin_rejects_tampered_signature() {
+        let l = loader();
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        tmp.write_all(b"(component)").expect("tempfile write failed");
+        tmp.flush().expect("tempfile flush failed");
+
+        let sig_path = write_tampered_sidecar(tmp.path());
+
+        let err = l.describe_plugin(tmp.path()).err().expect("expected the tampered signature to reject the describe");
+        assert!(
+            matches!(err, PluginLoadError::SignatureRejected(_)),
+            "expected SignatureRejected, got: {err:?}"
+        );
+
+        let _ = std::fs::remove_file(&sig_path);
+    }
+
+    /// `resolve_trigger_instance` must skip a tampered file before compiling
+    /// it. `(component)` compiles fine on its own, so an unsigned copy bumps
+    /// the trigger compile count (control) while the tampered one must not.
+    #[tokio::test]
+    async fn resolve_trigger_instance_skips_tampered_file_without_compiling() {
+        let l = loader();
+
+        let tampered_dir = tempfile::tempdir().expect("tempdir create failed");
+        let tampered = tampered_dir.path().join("plugin.wasm");
+        std::fs::write(&tampered, b"(component)").expect("write failed");
+        write_tampered_sidecar(&tampered);
+
+        let err = l.resolve_trigger_instance(tampered_dir.path(), "any").await.err().expect("expected a miss");
+        assert!(matches!(err, PluginLoadError::NoSuchTriggerPlugin(_)), "expected NoSuchTriggerPlugin, got: {err:?}");
+        assert_eq!(l.trigger_compile_count(), 0, "tampered file must not be compiled");
+
+        let unsigned_dir = tempfile::tempdir().expect("tempdir create failed");
+        std::fs::write(unsigned_dir.path().join("plugin.wasm"), b"(component)").expect("write failed");
+        let _ = l.resolve_trigger_instance(unsigned_dir.path(), "any").await;
+        assert_eq!(l.trigger_compile_count(), 1, "unsigned file should be compiled");
     }
 
     /// `describe_plugin` must classify errors identically to `load_plugin`
@@ -4265,81 +4160,8 @@ mod tests {
         state.delete("k1".to_string()); // must not panic
     }
 
-    /// Normal case: every import surface a trigger component may need (WASI
-    /// p2 and p3, `wasi:http` p2 and p3, `storage`, `fs-watch`) registers on
-    /// one linker without a duplicate-definition error.
-    #[test]
-    fn link_trigger_imports_registers_p2_and_p3_on_one_linker() {
-        let l = loader();
-        let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&l.trigger_engine);
-
-        link_trigger_imports(&mut linker).expect("p2 + p3 + http + storage + fs-watch must coexist on one linker");
-    }
-
-    /// A component importing `trigger-schedule` pre-instantiates on the
-    /// trigger linker: the import is linked with the signature the WIT
-    /// declares.
-    #[test]
-    fn trigger_linker_satisfies_trigger_schedule_import() {
-        let l = loader();
-        let component = wasmtime::component::Component::new(
-            &l.trigger_engine,
-            r#"(component (import "aerini:plugin/trigger-schedule@0.1.0"
-                (instance (export "report-next-fire" (func (param "unix-ms" u64))))))"#,
-        )
-        .expect("component must compile");
-        let mut linker = wasmtime::component::Linker::<TriggerPluginState>::new(&l.trigger_engine);
-        link_trigger_imports(&mut linker).expect("link failed");
-
-        linker.instantiate_pre(&component).expect("trigger-schedule import must be satisfied");
-    }
-
-    /// `report_next_fire` keeps the latest raw value, never counts as spin-guard
-    /// activity, and with no reader attached is a silent no-op.
-    #[test]
-    fn report_next_fire_keeps_latest_without_counting_as_activity() {
-        use wit_trigger_schedule::TriggerScheduleHost as _;
-        let mut state = make_trigger_plugin_state(None, None);
-        state.report_next_fire(5); // no reader: must not panic
-
-        let (tx, rx) = tokio::sync::watch::channel(None::<u64>);
-        state.next_fire = Some(tx);
-        state.report_next_fire(1_000);
-        state.report_next_fire(2_000);
-
-        assert_eq!(*rx.borrow(), Some(2_000));
-        assert_eq!(state.host_calls, 0);
-    }
-
-    /// A file whose signature sidecar is invalid is skipped before it is
-    /// compiled.
-    #[tokio::test]
-    async fn resolve_trigger_instance_skips_file_with_invalid_signature() {
-        let l = loader();
-        let dir = tempfile::tempdir().expect("tempdir create failed");
-        let wasm = dir.path().join("p.wasm");
-        std::fs::write(&wasm, b"(component)").expect("write failed");
-        std::fs::write(signature::sig_sidecar_path(&wasm), b"not json").expect("sidecar write failed");
-
-        let err = l.resolve_trigger_instance(dir.path(), "x").await.err().expect("must not resolve");
-        assert!(matches!(err, PluginLoadError::NoSuchTriggerPlugin(_)));
-        assert_eq!(l.trigger_compile_count(), 0, "a rejected file must not be compiled");
-    }
-
-    /// A component that links but lacks the `trigger` export is a non-match,
-    /// not an error.
-    #[tokio::test]
-    async fn resolve_trigger_instance_skips_component_without_trigger_export() {
-        let l = loader();
-        let dir = tempfile::tempdir().expect("tempdir create failed");
-        std::fs::write(dir.path().join("p.wasm"), b"(component)").expect("write failed");
-
-        let err = l.resolve_trigger_instance(dir.path(), "x").await.err().expect("must not resolve");
-        assert!(matches!(err, PluginLoadError::NoSuchTriggerPlugin(ref t) if t == "x"));
-    }
-
     /// `probe_trigger_capable`'s throwaway linker also links `storage` and
-    /// `wasi:http` alongside WASI p2 and p3 — this must not change its answer
+    /// `wasi:http` p3 alongside `wasi:p3` — this must not change its answer
     /// for a component that imports none of them: still `false`, since it
     /// doesn't export `trigger` either.
     #[test]
@@ -4352,116 +4174,193 @@ mod tests {
         assert!(!l.probe_trigger_capable(tmp.path()));
     }
 
-    /// A component that cannot link on the action engine and has no `trigger`
-    /// export is not a trigger plugin: both entry points must return the
-    /// original `WasmLink` error, not `MissingInterface` or a different
-    /// message.
+    /// A non-trigger component with an unsatisfied import must fail at link
+    /// time, not load and trap later. The import is a function: wasmtime treats
+    /// an unresolved import of an instance with no exports as satisfied.
     #[test]
-    fn unlinkable_component_without_trigger_export_keeps_its_wasm_link_error() {
+    fn load_plugin_unsatisfied_import_without_trigger_export_fails_link() {
         let l = loader();
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
-        tmp.write_all(
-            br#"(component (import "wasi:clocks/monotonic-clock@0.3.0" (instance (export "now" (func (result u64))))))"#,
-        )
-        .expect("tempfile write failed");
+        tmp.write_all(b"(component (import \"missing-fn\" (func)))")
+            .expect("tempfile write failed");
         tmp.flush().expect("tempfile flush failed");
 
-        let load_err = l.load_plugin(tmp.path()).err().expect("load_plugin should fail");
-        let describe_err = l.describe_plugin(tmp.path()).err().expect("describe_plugin should fail");
+        let err = l.load_plugin(tmp.path()).err().expect("expected WasmLink error, got Ok");
+        assert!(matches!(err, PluginLoadError::WasmLink(_)), "expected WasmLink, got: {err:?}");
+    }
 
-        for err in [load_err, describe_err] {
-            assert!(
-                matches!(&err, PluginLoadError::WasmLink(m) if m.contains("wasi:clocks/monotonic-clock@0.3.0")),
-                "expected the original WasmLink error, got: {err:?}"
-            );
+    /// The scratch-thread bridge `load_plugin`/`describe_plugin` use must work
+    /// from a plain thread.
+    #[test]
+    fn block_on_scratch_runtime_works_outside_a_runtime() {
+        let v = block_on_scratch_runtime(|| async { Ok::<_, PluginLoadError>(7u32) })
+            .expect("bridge failed");
+        assert_eq!(v, 7);
+    }
+
+    /// ...and from inside a multi-thread runtime, where `Handle::block_on`
+    /// would panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_on_scratch_runtime_works_inside_multi_thread_runtime() {
+        let v = block_on_scratch_runtime(|| async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Ok::<_, PluginLoadError>(9u32)
+        })
+        .expect("bridge failed");
+        assert_eq!(v, 9);
+    }
+
+    /// ...and from inside a current-thread runtime.
+    #[tokio::test]
+    async fn block_on_scratch_runtime_works_inside_current_thread_runtime() {
+        let v = block_on_scratch_runtime(|| async { Ok::<_, PluginLoadError>(1u32) })
+            .expect("bridge failed");
+        assert_eq!(v, 1);
+    }
+
+    /// A panic in the bridged future surfaces as an error instead of
+    /// unwinding into the caller.
+    #[test]
+    fn block_on_scratch_runtime_maps_panic_to_error() {
+        let r: Result<u32, PluginLoadError> = block_on_scratch_runtime(|| async {
+            if true {
+                panic!("boom");
+            }
+            Ok::<u32, PluginLoadError>(0)
+        });
+        assert!(matches!(r, Err(PluginLoadError::WasmLink(_))));
+    }
+
+    /// The trigger linker defines the full import surface without a duplicate
+    /// definition between the WASI 0.2 (async) and 0.3 sets.
+    #[test]
+    fn trigger_linker_builds_on_trigger_engine() {
+        let l = loader();
+        assert!(trigger_linker(&l.trigger_engine).is_ok());
+    }
+
+    #[test]
+    fn wit_input_to_trigger_preserves_params_and_credentials() {
+        let input = wit::NodeInput {
+            params: vec![wit::Param { key: "a".into(), value: "1".into() }],
+            credentials: vec![wit::Param { key: "tok".into(), value: "s".into() }],
+        };
+        let t = wit_input_to_trigger(&input);
+        assert_eq!((t.params[0].key.as_str(), t.params[0].value.as_str()), ("a", "1"));
+        assert_eq!((t.credentials[0].key.as_str(), t.credentials[0].value.as_str()), ("tok", "s"));
+        assert_eq!((t.params.len(), t.credentials.len()), (1, 1));
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn stall_tracker_trips_after_limit_of_quiet_execution() {
+        let t0 = Instant::now();
+        let mut t = StallTracker::new(0, t0);
+        for i in 1..=29 {
+            assert!(!t.observe(0, t0 + secs(i)));
+        }
+        assert!(t.observe(0, t0 + secs(30)));
+    }
+
+    #[test]
+    fn stall_tracker_activity_restarts_the_count() {
+        let t0 = Instant::now();
+        let mut t = StallTracker::new(0, t0);
+        for i in 1..=20 {
+            assert!(!t.observe(0, t0 + secs(i)));
+        }
+        assert!(!t.observe(1, t0 + secs(21)));
+        for i in 22..=50 {
+            assert!(!t.observe(1, t0 + secs(i)));
+        }
+        assert!(t.observe(1, t0 + secs(51)));
+    }
+
+    #[test]
+    fn stall_tracker_ignores_time_spent_parked() {
+        let t0 = Instant::now();
+        let mut t = StallTracker::new(0, t0);
+        assert!(!t.observe(0, t0 + secs(3600)));
+        assert!(!t.observe(0, t0 + secs(3601)));
+    }
+
+    #[test]
+    fn stall_tracker_rearm_discards_accumulated_quiet() {
+        let t0 = Instant::now();
+        let mut t = StallTracker::new(0, t0);
+        for i in 1..=20 {
+            t.observe(0, t0 + secs(i));
+        }
+        t.rearm(0, t0 + secs(21));
+        for i in 22..=50 {
+            assert!(!t.observe(0, t0 + secs(i)));
         }
     }
 
-    /// Normal case: `describe_plugin` applies the same signature gate as
-    /// `load_plugin`, so a tampered file is rejected before it is compiled or
-    /// its `describe()` is run, rather than described as if it were fine.
     #[test]
-    fn describe_plugin_rejects_tampered_signature() {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-
-        let l = loader();
-        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
-        tmp.write_all(b"(component)").expect("tempfile write failed");
-        tmp.flush().expect("tempfile flush failed");
-
-        let sig_path = signature::sig_sidecar_path(tmp.path());
-        let sig_json = serde_json::json!({
-            "schema_version": 1,
-            "algorithm": "ed25519",
-            "public_key": B64.encode([0u8; 32]),
-            "files": [{"name": "plugin.wasm", "blake3": "0".repeat(64)}],
-            "signature": B64.encode([0u8; 64]),
-        })
-        .to_string();
-        std::fs::write(&sig_path, sig_json).expect("sig sidecar write failed");
-
-        let err = l.describe_plugin(tmp.path()).err().expect("expected the tampered signature to reject describe");
-        assert!(
-            matches!(err, PluginLoadError::SignatureRejected(_)),
-            "expected SignatureRejected, got: {err:?}"
-        );
-
-        let _ = std::fs::remove_file(&sig_path);
-    }
-
-    /// Edge case: an unsigned file must still reach compilation in
-    /// `describe_plugin` (here failing as `MissingInterface`, not as a
-    /// signature error) -- unsigned plugins are the common case and stay valid.
-    #[test]
-    fn describe_plugin_unsigned_file_is_not_signature_rejected() {
-        let l = loader();
-        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile create failed");
-        tmp.write_all(b"(component)").expect("tempfile write failed");
-        tmp.flush().expect("tempfile flush failed");
-
-        let err = l.describe_plugin(tmp.path()).err().expect("an empty component exports no `node`");
-        assert!(
-            matches!(err, PluginLoadError::MissingInterface),
-            "expected MissingInterface, got: {err:?}"
-        );
-    }
-
-    /// `execute()` on the trigger engine must see exactly what the action
-    /// engine would: every param and credential, in order.
-    #[test]
-    fn trigger_input_from_wit_preserves_params_and_credentials() {
-        let input = wit::NodeInput {
-            params: vec![
-                wit::Param { key: "a".to_string(), value: "1".to_string() },
-                wit::Param { key: FULL_INPUT_JSON_PARAM_KEY.to_string(), value: "{}".to_string() },
-            ],
-            credentials: vec![wit::Param { key: "api_key".to_string(), value: "s3cr3t".to_string() }],
-        };
-
-        let out = trigger_input_from_wit(input);
-
-        let params: Vec<(&str, &str)> = out.params.iter().map(|p| (p.key.as_str(), p.value.as_str())).collect();
-        assert_eq!(params, vec![("a", "1"), (FULL_INPUT_JSON_PARAM_KEY, "{}")]);
-        assert_eq!(out.credentials.len(), 1);
-        assert_eq!((out.credentials[0].key.as_str(), out.credentials[0].value.as_str()), ("api_key", "s3cr3t"));
-    }
-
-    /// A failed `execute()` on the trigger engine must keep its error code,
-    /// message and `recoverable` flag through to the engine's `NodeOutput`.
-    #[test]
-    fn trigger_output_to_wit_preserves_failure_fields() {
-        let out = wit_output_to_engine(trigger_output_to_wit(wit_trigger::NodeOutput {
+    fn trigger_output_to_wit_preserves_every_field() {
+        let o = trigger_output_to_wit(wit_trigger::aerini::plugin::types::NodeOutput {
             success: false,
-            data: String::new(),
-            error_code: "boom".to_string(),
-            error_message: "it broke".to_string(),
+            data: "{}".into(),
+            error_code: "c".into(),
+            error_message: "m".into(),
             recoverable: true,
-        }));
+        });
+        assert!(!o.success && o.recoverable);
+        assert_eq!((o.data.as_str(), o.error_code.as_str(), o.error_message.as_str()), ("{}", "c", "m"));
+    }
 
-        assert!(!out.success);
-        let err = out.error.expect("failure output carries its error");
-        assert_eq!(err.code, "boom");
-        assert_eq!(err.message, "it broke");
-        assert!(err.recoverable);
+    const NOW_MS: u64 = 1_800_000_000_000;
+
+    #[test]
+    fn next_fire_future_time_within_horizon_is_kept() {
+        let at = validate_next_fire(NOW_MS + 60_000, NOW_MS).expect("accepted");
+        assert_eq!(at.timestamp_millis(), (NOW_MS + 60_000) as i64);
+    }
+
+    #[test]
+    fn next_fire_slightly_past_is_treated_as_now() {
+        let at = validate_next_fire(NOW_MS - NEXT_FIRE_PAST_SLACK_MS, NOW_MS).expect("accepted");
+        assert_eq!(at.timestamp_millis(), NOW_MS as i64);
+    }
+
+    #[test]
+    fn next_fire_past_beyond_slack_is_rejected() {
+        let err = validate_next_fire(NOW_MS - NEXT_FIRE_PAST_SLACK_MS - 1, NOW_MS).unwrap_err();
+        assert!(matches!(err, wit_trigger_next_fire::ScheduleError::InPast));
+    }
+
+    #[test]
+    fn next_fire_beyond_horizon_is_capped_not_rejected() {
+        let at = validate_next_fire(u64::MAX, NOW_MS).expect("accepted");
+        assert_eq!(at.timestamp_millis(), (NOW_MS + NEXT_FIRE_MAX_HORIZON_MS) as i64);
+    }
+
+    #[test]
+    fn report_next_fire_without_a_sink_is_unavailable() {
+        use wit_trigger_next_fire::TriggerScheduleHost as _;
+        let mut state = make_trigger_plugin_state(None, None);
+        let err = state.report_next_fire(u64::MAX).unwrap_err();
+        assert!(matches!(err, wit_trigger_next_fire::ScheduleError::Unavailable));
+    }
+
+    #[test]
+    fn report_next_fire_publishes_latest_and_rejects_past_without_overwriting() {
+        use wit_trigger_next_fire::TriggerScheduleHost as _;
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let mut state = make_trigger_plugin_state(None, None);
+        state.next_fire = Some(tx);
+
+        let soon = (Utc::now().timestamp_millis() + 60_000) as u64;
+        state.report_next_fire(soon).expect("accepted");
+        let first = *rx.borrow();
+        assert_eq!(first.map(|t| t.timestamp_millis()), Some(soon as i64));
+
+        let err = state.report_next_fire(1).unwrap_err();
+        assert!(matches!(err, wit_trigger_next_fire::ScheduleError::InPast));
+        assert_eq!(*rx.borrow(), first);
     }
 }

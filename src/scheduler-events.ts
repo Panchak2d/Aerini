@@ -10,9 +10,11 @@ import { setWorkflowRunning } from "./workflow-manager";
 import { getBgJobs, updateBgJobStoreFromEvent, hydrateBgJobsFromScheduler } from "./run-manager";
 import { saveRunToHistory } from "./run-history";
 import { isTauri, escapeHtml } from "./utils";
-import { NODE_IDS, findTriggerNodeTypeId } from "./node-ids";
+import { NODE_IDS } from "./node-ids";
+import { findTriggerNodeTypeId } from "./canvas/node-registry";
 import { getCurrentZone } from "./sidebar-sections";
 import { loadBgPanel } from "./bg-panel-loader";
+import type { RunningSync } from "./running-sync";
 
 type Toast  = (msg: string, type: "success" | "error" | "info") => void;
 type Status = (msg: string) => void;
@@ -43,6 +45,7 @@ export async function bindSchedulerEvents(
   // care about the Performance panel) are unaffected. See the call below
   // for why a scheduler status transition is exactly when this is needed.
   refreshPerf?:  () => void,
+  runningSync?:  RunningSync,
 ): Promise<void> {
   await listenNodeStatus((evt) => {
     runManager.onNodeStatusEvent(evt.workflow_id, evt.node_id, evt.status);
@@ -50,6 +53,7 @@ export async function bindSchedulerEvents(
 
   await listenSchedulerStatus(async (evt: SchedulerStatusEvent) => {
     updateBgJobStoreFromEvent(evt);
+    runningSync?.observe(evt.workflow_id, evt.status);
     const bgPanel = await loadBgPanel();
     bgPanel.renderBgJobsDebounced(wfManager, runManager, "all", "", toast);
     bgPanel.updateBgRunButton(wfManager.currentId);

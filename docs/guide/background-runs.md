@@ -9,9 +9,9 @@ If you haven't read [Concepts](../getting-started/concepts.md) yet, do that firs
 Click the arrow next to the **Run** button and you'll see two options:
 
 - **Run Now**: test immediately, results shown below. This runs the workflow once, right now, and shows the outcome live on the canvas and in the output drawer, the same as pressing plain **Run**.
-- **Schedule Run**: run automatically via Schedule or Webhook trigger. This hands the workflow off to Aerini's background scheduler, which owns it from that point on, whether or not you're looking at it.
+- **Schedule Run**: run automatically via a Schedule, Webhook, or trigger-plugin trigger. This hands the workflow off to Aerini's background scheduler, which owns it from that point on, whether or not you're looking at it.
 
-Only a workflow whose trigger is **Schedule** or **Webhook** can use Schedule Run. Try it on a **Manual Trigger** workflow and Aerini stops you with a clear message instead: add a Schedule or Webhook trigger first.
+Only a workflow whose trigger is **Schedule**, **Webhook**, or a trigger plugin can use Schedule Run. Try it on a **Manual Trigger** workflow and Aerini stops you with a clear message instead: add a Schedule, Webhook, or trigger-plugin node first. A trigger plugin starts its own events only when the workflow runs in the background; **Run** executes it once as an ordinary step.
 
 Run Now still has a special case worth knowing for each of those two triggers:
 
@@ -40,15 +40,19 @@ Two workflows can't claim the same port at once. If you try, Aerini tells you wh
 
 Everything about the port, path, secret, and dedup window is the same as the field-level detail already covered in [Nodes Reference](nodes.md#webhook), including the reminder that the webhook only ever binds to `127.0.0.1`. Reaching it from outside your machine, in server mode or otherwise, needs a reverse proxy in front of it.
 
+## How trigger plugins behave in the background
+
+A trigger plugin runs its own event source: Aerini keeps one instance of the plugin alive and starts a run each time it emits an event. Like Webhook, it has no fixed schedule, so by default the Background Runs panel shows it as "running". A plugin that reports when its next event is due shows a countdown instead, and the countdown is cleared when you stop the workflow or the plugin restarts. The countdown is only a display: runs start when the plugin emits an event, not when the countdown reaches zero. If the time passes without a new report, the panel shows "running…" until the plugin reports again. Plugin authors can add this; see [Showing a countdown to the next event](../development/plugin-authoring.md#showing-a-countdown-to-the-next-event).
+
 ## Skipped runs, not queued runs
 
-If a Schedule or Webhook fire lands while the same workflow's previous run is still going, the new one is skipped rather than queued behind it, and you'll see it as a toast: "run skipped, previous run still in progress." For Webhook specifically, a duplicate delivery inside the node's configured dedup window is skipped the same way. Either way, the caller that sent the request still gets its normal response.
+If a Schedule, Webhook, or trigger-plugin fire lands while the same workflow's previous run is still going, the new one is skipped rather than queued behind it, and you'll see it as a toast: "run skipped, previous run still in progress." For Webhook specifically, a duplicate delivery inside the node's configured dedup window is skipped the same way. Either way, the caller that sent the request still gets its normal response.
 
 In practice this means a workflow that takes longer than its own interval just runs less often than configured. It never piles up a backlog of runs waiting to fire.
 
 ## Run on launch
 
-Next to Save is a toggle button labeled **Run on launch**. It only appears on a workflow with a Schedule or Webhook trigger; on anything else it's hidden, with a tooltip explaining why.
+Next to Save is a toggle button labeled **Run on launch**. It only appears on a workflow with a Schedule, Webhook, or trigger-plugin trigger; on anything else it's hidden, with a tooltip explaining why.
 
 Turning it on does the same save-and-hand-off as Schedule Run, but also marks the workflow to start automatically every time you open Aerini, without you clicking Schedule Run again. On a fresh app launch it doesn't fire an extra run right away: an Interval or Cron job works out its next occurrence from the current time and waits for that, the same as if you'd just started it by hand.
 
@@ -61,13 +65,19 @@ Run on launch is meant for Interval, Cron, and Webhook triggers, which repeat in
 
 ## The Background Runs panel
 
-Click **Background Runs** in the sidebar to see every workflow currently or recently running in the background: name, a status dot, and either a countdown to its next run or how long its last run took.
-
-Schedule triggers always have the countdown. A trigger plugin has one only if the plugin reports when its next event is due (see [Trigger plugins](../development/plugin-authoring.md#showing-a-countdown-to-the-next-event)); otherwise the job just shows "running". If a plugin's reported time passes without an event, the panel shows "running…" until the plugin reports a new one.
+Click **Background Runs** in the sidebar to see every workflow currently or recently running in the background: name, a status dot, and either a countdown to its next run ("next in Ns") or, for a running job with no known next time such as a Webhook or most trigger plugins, "running", or how long its last run took.
 
 ![The Background Runs panel with a live countdown to the next scheduled fire](../public/images/background-runs-panel.png)
 
 From here you can stop a job that's currently running. Anything that isn't running (stopped, done, or failed) instead shows two actions: restart it, or dismiss it from the list. Clicking a job opens that workflow and jumps straight to its **History** tab.
+
+## Editing a workflow while it runs
+
+Edits to a running workflow are saved automatically about half a second after you make them. The next run reads the saved workflow, so rewiring nodes or changing a node's settings takes effect on the next run without a restart. A run that is already in progress finishes with the version it started with.
+
+The trigger is the exception. Schedule timing (interval, cron, or run-at time), a Webhook's port, path, method, secret and dedup window, a trigger plugin's settings, and the trigger node's type are fixed when the job starts. After you change one, the status bar shows **Restart to apply trigger**, and the [Chat panel](chat-panel.md) offers a **Restart** button. Otherwise stop the job and start it again. Stopping ends any run in progress, so the Chat panel asks first when one is running.
+
+The app notices a trigger change by comparing the canvas with the saved workflow as it was when the app first saw the job running. If you open Aerini while a job is already running, that comparison starts from the workflow saved at that moment. If autosave fails, the status bar shows **Not saved**, because the running job can only see saved edits; press `Ctrl+S` to retry.
 
 ## Run history
 
@@ -82,7 +92,7 @@ Two extra things worth knowing:
 
 ## Unattended execution and dangerous nodes
 
-A manual Run on a workflow containing Shell Command, Code, or Database shows a one-time confirmation dialog before it executes. A scheduled or webhook-triggered background fire skips that dialog entirely; it only logs a warning. If a workflow with one of those nodes is set to run unattended, it will keep executing that node unattended, on every single fire, with nobody watching to catch a problem before it happens. See [Security](security.md) for the full model around these nodes and what else it's worth locking down before exposing a webhook to the outside world.
+A manual Run on a workflow containing Shell Command, Code, or Database shows a confirmation dialog before it executes. A scheduled or webhook-triggered background fire skips that dialog entirely; it only logs a warning. If a workflow with one of those nodes is set to run unattended, it will keep executing that node unattended, on every single fire, with nobody watching to catch a problem before it happens. See [Security](security.md) for the full model around these nodes and what else it's worth locking down before exposing a webhook to the outside world.
 
 ## Stopping background runs for good
 

@@ -169,20 +169,6 @@ describe("renderErrorsTab — error icon", () => {
 // renderSummaryTab — shared error icon
 // ---------------------------------------------------------------------------
 
-describe("renderSummaryTab — node type label escaping", () => {
-  it("escapes an unmapped node type id taken from the workflow file", () => {
-    const result: WorkflowResult = {
-      execution_id: "e1", workflow_id: "w1", success: true,
-      node_outputs: { n1: "ok" },
-      logs: [],
-    };
-    const nodes = new Map([["n1", { data: { name: "n", node_type_id: "<img src=x>" } }]]) as never;
-    const html = renderSummaryTab(result, nodes);
-    expect(html).not.toContain("<img");
-    expect(html).toContain("&lt;img src=x&gt;");
-  });
-});
-
 describe("renderSummaryTab — error icon", () => {
   it("includes the shared circle-alert icon in the error card when the run failed", () => {
     const result: WorkflowResult = {
@@ -200,6 +186,28 @@ describe("renderSummaryTab — error icon", () => {
       logs: [{ level: "warn", message: "hmm", timestamp: new Date().toISOString() }],
     };
     expect(renderSummaryTab(result, new Map())).not.toContain("sum-error-card");
+  });
+});
+
+describe("renderSummaryTab — node type label escaping", () => {
+  function summaryFor(typeId: string): string {
+    const result: WorkflowResult = {
+      execution_id: "e1", workflow_id: "w1", success: true,
+      node_outputs: { n1: { ok: true } },
+      logs: [],
+    };
+    const nodes = new Map([["n1", { data: { name: "N", node_type_id: typeId } }]]);
+    return renderSummaryTab(result, nodes as unknown as Parameters<typeof renderSummaryTab>[1]);
+  }
+
+  it("known type id renders its short label", () => {
+    expect(summaryFor("shell_exec")).toContain(">Shell</span>");
+  });
+
+  it("unknown type id containing HTML metacharacters is escaped, not injected raw", () => {
+    const html = summaryFor("<img src=x>");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x&gt;");
   });
 });
 

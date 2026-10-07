@@ -1,4 +1,4 @@
-import type { BgJob, TriggerType } from "./run-manager";
+import type { BgJob } from "./run-manager";
 import type { WorkflowSummary } from "./ipc/workflow";
 
 export type RowStatus = "running" | "done" | "failed" | "stopped" | "idle";
@@ -10,8 +10,32 @@ export interface MonitorRow {
   startedAt?: number;
   finishedAt?: number;
   nextRunAt?: string | null;
-  triggerType?: TriggerType;
-  waiting?: boolean;
+  alwaysOn?: boolean;
+  /** "interval" | "cron" | "once" | "webhook" | "manual" | "plugin"; absent when unknown. */
+  triggerType?: string | null;
+}
+
+const BACKGROUND_TRIGGER_TYPES = new Set(["interval", "cron", "once", "webhook", "plugin"]);
+
+/** Trigger types that wait for an outside event rather than a clock. */
+export function isEventTriggerType(triggerType: string | null | undefined): boolean {
+  return triggerType === "webhook" || triggerType === "plugin";
+}
+
+/** Reads the `kind` tag from a stored TriggerKind JSON string; null if it is not valid JSON or has no tag. */
+export function triggerTypeFromKindJson(json: string | null | undefined): string | null {
+  if (!json) return null;
+  try {
+    const kind = (JSON.parse(json) as { kind?: unknown }).kind;
+    return typeof kind === "string" ? kind : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True for an armed Webhook or plugin trigger that is waiting for an event and has no next-fire time to count down to. */
+export function isListening(row: Pick<MonitorRow, "status" | "triggerType" | "nextRunAt">): boolean {
+  return row.status === "running" && isEventTriggerType(row.triggerType) && !row.nextRunAt;
 }
 
 export function getStartAllTargets(rows: MonitorRow[]): MonitorRow[] {
@@ -30,26 +54,11 @@ export function collectRows(jobs: BgJob[], idleWfs: WorkflowSummary[]): MonitorR
     startedAt: j.startedAt,
     finishedAt: j.finishedAt,
     nextRunAt: j.nextRunAt,
+    alwaysOn: j.alwaysOn,
     triggerType: j.triggerType,
-    waiting: j.waiting,
   }));
   for (const wf of idleWfs) rows.push({ id: wf.id, name: wf.name, status: "idle" });
   return rows;
-}
-
-// A job counts as scheduled while it is armed (running) with a trigger that
-// fires on its own: a timer, a webhook listener or a plugin. A job whose
-// trigger type isn't known falls back to whether it has a next-run time.
-export function isScheduledRow(r: MonitorRow): boolean {
-  if (r.status !== "running") return false;
-  return r.triggerType ? r.triggerType !== "manual" : !!r.nextRunAt;
-}
-
-// An armed webhook or plugin job between runs with no known next fire: it is
-// waiting for a request or event, not executing. Elapsed time would mislead.
-export function isListeningRow(r: MonitorRow): boolean {
-  return r.status === "running" && r.waiting === true && !r.nextRunAt
-    && (r.triggerType === "webhook" || r.triggerType === "plugin");
 }
 
 export function applyFilter(rows: MonitorRow[], status: string, query: string): MonitorRow[] {
@@ -59,7 +68,8 @@ export function applyFilter(rows: MonitorRow[], status: string, query: string): 
   else if (status === "failed") out = out.filter(r => r.status === "failed");
   else if (status === "stopped") out = out.filter(r => r.status === "stopped");
   else if (status === "idle") out = out.filter(r => r.status === "idle");
-  else if (status === "scheduled") out = out.filter(isScheduledRow);
+  else if (status === "scheduled") out = out.filter(r => !!r.nextRunAt || r.alwaysOn === true
+    || (r.status === "running" && !!r.triggerType && BACKGROUND_TRIGGER_TYPES.has(r.triggerType)));
   if (query) out = out.filter(r => r.name.toLowerCase().includes(query));
   return out;
 }
@@ -74,7 +84,7 @@ export function formatDuration(ms: number): string {
 // than adding a second one. `now` defaults to Date.now() but is an explicit
 // param so this stays a pure, directly-testable function.
 export function formatRowStatusCopy(row: MonitorRow, now: number = Date.now()): string {
-  if (isListeningRow(row)) return "Listening";
+  if (isListening(row)) return "Listening";
   if (row.status === "running" && row.startedAt) return formatDuration(now - row.startedAt);
   if (row.finishedAt && row.status === "done")    return `Last run ${formatDuration(now - row.finishedAt)} ago`;
   if (row.finishedAt && row.status === "failed")  return `Failed ${formatDuration(now - row.finishedAt)} ago`;
@@ -100,4 +110,22 @@ export function formatNextRun(secsLeft: number): string {
   return secsLeft < 60
     ? `Next run ${secsLeft}s`
     : `Next run ${Math.floor(secsLeft / 60)}m ${secsLeft % 60}s`;
+}
+
+/**
+ * Next-fire time to keep for a job after a scheduler event. A null in the
+ * event keeps the previous value only while the job continues running (the
+ * scheduler sends a null completion event just before the real next time);
+ * a job that stopped, finished, failed, or is starting again after one of
+ * those never keeps a stale countdown.
+ */
+export function resolveNextRunAt(
+  eventNext: string | null,
+  previous: { status: string; nextRunAt?: string | null } | undefined,
+  newStatus: string,
+): string | undefined {
+  if (eventNext) return eventNext;
+  if (newStatus !== "running") return undefined;
+  if (!previous || previous.status !== "running") return undefined;
+  return previous.nextRunAt ?? undefined;
 }

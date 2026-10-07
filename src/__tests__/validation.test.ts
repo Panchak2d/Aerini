@@ -4,7 +4,6 @@ import { describe, it, expect } from "vitest";
 import type { Canvas } from "../canvas/Canvas";
 import { CanvasNode, type CanvasNodeData } from "../canvas/Node";
 import { validateWorkflow } from "../validation";
-import { registerNodeDescriptors } from "../canvas/node-registry";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level)
 import { vi } from "vitest";
@@ -125,23 +124,24 @@ describe("validateWorkflow — ai_agent required fields", () => {
   });
 });
 
-describe("validateWorkflow — plugin triggers", () => {
-  const pluginDesc = (trigger_capable: boolean) => ({
-    type_id: "com.example.heartbeat-trigger", display_name: "Heartbeat", node_type: "action" as const,
-    version: "1", input_schema: {}, output_schema: {}, ports: { inputs: [], outputs: [] },
-    is_plugin: true, trigger_capable,
-  });
-  const lone = () => ({ nodes: new Map([["p", makeNode("p", "com.example.heartbeat-trigger")]]) }) as unknown as Canvas;
-
-  it("accepts a trigger-capable plugin as the workflow's trigger", () => {
-    registerNodeDescriptors([pluginDesc(true)]);
-    expect(validateWorkflow(lone())).toEqual([]);
+describe("validateWorkflow — plugin trigger as entry", () => {
+  it("accepts a trigger_capable plugin as the workflow's trigger", async () => {
+    const { registerNodeDescriptors } = await import("../canvas/node-registry");
+    registerNodeDescriptors([{
+      type_id: "hb", display_name: "hb", node_type: "action", version: "1",
+      input_schema: {}, output_schema: {}, ports: { inputs: [], outputs: [] },
+      is_plugin: true, trigger_capable: true,
+    }]);
+    const plugin = makeNode("p1", "hb");
+    const canvas = { nodes: new Map([[plugin.data.id, plugin]]) } as unknown as Canvas;
+    expect(validateWorkflow(canvas).some(e => e.includes("No trigger node found"))).toBe(false);
     registerNodeDescriptors([]);
   });
 
-  it("still reports no trigger for a plugin that is not trigger-capable", () => {
-    registerNodeDescriptors([pluginDesc(false)]);
-    expect(validateWorkflow(lone()).some(e => e.includes("No trigger node found"))).toBe(true);
-    registerNodeDescriptors([]);
+  it("names plugin triggers in the missing-trigger message", () => {
+    const n = makeNode("n1", "http_request");
+    const canvas = { nodes: new Map([[n.data.id, n]]) } as unknown as Canvas;
+    const msg = validateWorkflow(canvas).find(e => e.includes("No trigger node found"));
+    expect(msg).toContain("trigger plugin");
   });
 });

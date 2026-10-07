@@ -5,6 +5,13 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
+/// Discord caps message content at 2000 characters, not bytes.
+const DISCORD_MAX_CONTENT_CHARS: usize = 2000;
+
+fn content_too_long(content: &str) -> bool {
+    content.chars().count() > DISCORD_MAX_CONTENT_CHARS
+}
+
 pub struct DiscordNode;
 
 #[async_trait]
@@ -56,8 +63,7 @@ impl Node for DiscordNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content field is required")),
         };
 
-        // Enforce Discord's 2000-character message limit.
-        if content.len() > 2000 {
+        if content_too_long(&content) {
             return NodeOutput::failure(NodeError::unrecoverable(
                 "CONTENT_TOO_LONG",
                 "content exceeds Discord's 2000-character limit",
@@ -79,10 +85,10 @@ impl Node for DiscordNode {
                         vec!["Discord message sent via webhook".to_string()],
                     )
                 } else {
-                    let body_text = super::util::read_error_snippet(resp).await;
-                    NodeOutput::failure(super::util::http_status_error(
-                        "DISCORD_ERROR",
+                    let body_text = super::util::read_text_capped(resp, super::util::MAX_ERROR_BODY_BYTES).await;
+                    NodeOutput::failure(super::util::provider_error(
                         status,
+                        "DISCORD_ERROR",
                         format!("HTTP {}: {}", status, body_text),
                     ))
                 }
@@ -94,3 +100,19 @@ impl Node for DiscordNode {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::content_too_long;
+
+    #[test]
+    fn limit_is_inclusive_at_2000_chars() {
+        assert!(!content_too_long(&"a".repeat(2000)));
+        assert!(content_too_long(&"a".repeat(2001)));
+    }
+
+    #[test]
+    fn multibyte_content_is_counted_in_chars_not_bytes() {
+        assert!(!content_too_long(&"é".repeat(1500)));
+        assert!(content_too_long(&"é".repeat(2001)));
+    }
+}

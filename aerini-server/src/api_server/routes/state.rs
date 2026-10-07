@@ -121,16 +121,6 @@ impl ApiState {
     }
 }
 
-/// Logs `e` and returns a generic `500`, so internal error text (SQL, file
-/// paths) is never sent to the client.
-pub fn internal_error(context: &str, e: impl std::fmt::Display) -> ApiError {
-    tracing::error!(error = %e, "{}", context);
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": "internal server error"})),
-    )
-}
-
 fn deny_on_join_error(joined: Result<Option<TokenRecord>, tokio::task::JoinError>) -> Option<TokenRecord> {
     joined.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "token verification task failed, denying access");
@@ -145,8 +135,15 @@ pub fn acl_allows(filter: &Option<HashSet<String>>, workflow_id: &str) -> bool {
     }
 }
 
-fn acl_lookup_failed(e: &str) -> ApiError {
-    internal_error("ACL lookup failed", e)
+/// Logs `err` with `context` and returns the generic `500` every handler uses
+/// for a failed store, database or task call, so internal error text never
+/// reaches the client.
+pub fn internal_error(context: &str, err: impl std::fmt::Display) -> ApiError {
+    tracing::error!(context, error = %err, "request failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "internal server error"})),
+    )
 }
 
 /// Whether `caller` may act on `workflow_id`: admin and tokens with no grants
@@ -169,7 +166,7 @@ pub async fn require_workflow_acl(
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "token ACL does not permit access to this workflow"})),
         )),
-        Err(e) => Err(acl_lookup_failed(&e)),
+        Err(e) => Err(internal_error("acl lookup", e)),
     }
 }
 
@@ -182,7 +179,7 @@ pub async fn require_unrestricted(s: &ApiState, caller: &TokenRecord) -> Result<
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "token is restricted to specific workflows and cannot use server-wide routes"})),
         )),
-        Err(e) => Err(acl_lookup_failed(&e)),
+        Err(e) => Err(internal_error("acl lookup", e)),
     }
 }
 
@@ -198,6 +195,13 @@ mod tests {
             created_at: "c".to_string(),
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn internal_error_hides_the_cause_from_the_client() {
+        let (status, Json(body)) = internal_error("ctx", "no such table: api_tokens");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, serde_json::json!({"error": "internal server error"}));
     }
 
     #[test]

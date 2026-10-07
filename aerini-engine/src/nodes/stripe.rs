@@ -101,7 +101,7 @@ impl Node for StripeNode {
                 {
                     Ok(resp) => {
                         let status = resp.status().as_u16();
-                        match crate::nodes::util::read_json_response_capped(resp).await {
+                        match super::util::read_json_response_capped(resp).await {
                             Ok(v) => {
                                 if status == 200 || status == 201 {
                                     let intent_id = v["id"].as_str().unwrap_or("").to_string();
@@ -111,10 +111,10 @@ impl Node for StripeNode {
                                     )
                                 } else {
                                     let msg = v["error"]["message"].as_str().unwrap_or("unknown error").to_string();
-                                    NodeOutput::failure(super::util::http_status_error("STRIPE_ERROR", status, format!("HTTP {}: {}", status, msg)))
+                                    NodeOutput::failure(super::util::provider_error(status, "STRIPE_ERROR", format!("HTTP {}: {}", status, msg)))
                                 }
                             }
-                            Err(e) => NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e)),
+                            Err(e) => NodeOutput::failure(super::util::provider_error(status, "PARSE_ERROR", e)),
                         }
                     }
                     Err(e) => {

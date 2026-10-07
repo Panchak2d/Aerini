@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/node-bundled"],
     "icon": [
       "icons/32x32.png",
@@ -48,8 +49,12 @@
     ]
   },
   "plugins": {
-    "shell": {
-      "open": true
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVGRTY2OEQxOTdCQUQ3RDIKUldUUzE3cVgwV2ptWHdnYk55ZEpFb3Vkd1ljUDhwSndOVUtEOEhoQzZKZTZxL1Y3bmZPUHlXTEsK",
+      "endpoints": [
+        "https://github.com/Panchak2d/aerini/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
     }
   }
 }

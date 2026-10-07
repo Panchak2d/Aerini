@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -62,23 +62,23 @@ async fn check_ssrf(raw_url: &str) -> Result<(), String> {
     crate::nodes::util::check_host_ssrf(host, port, crate::nodes::util::SsrfPolicy::Strict).await
 }
 
-/// Repeated response headers (e.g. `Set-Cookie`) are joined with ", " instead
-/// of the last value silently replacing earlier ones.
-fn headers_to_json(headers: &reqwest::header::HeaderMap) -> Value {
-    let mut map = serde_json::Map::new();
-    for (k, v) in headers {
+/// Collects response headers into a JSON object, joining repeated headers
+/// (such as `Set-Cookie`) with `, ` in the order received.
+fn join_response_headers(map: &reqwest::header::HeaderMap) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in map.iter() {
         let val = v.to_str().unwrap_or("");
-        match map.get_mut(k.as_str()) {
+        match out.get_mut(k.as_str()) {
             Some(Value::String(existing)) => {
                 existing.push_str(", ");
                 existing.push_str(val);
             }
             _ => {
-                map.insert(k.as_str().to_string(), Value::String(val.to_string()));
+                out.insert(k.as_str().to_string(), Value::String(val.to_string()));
             }
         }
     }
-    Value::Object(map)
+    Value::Object(out)
 }
 
 fn redact_url_for_log(raw_url: &str) -> String {
@@ -135,6 +135,7 @@ impl Node for HttpRequestNode {
                 label: "In".to_string(),
                 position: PortPosition::Left,
                 port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![
                 PortDefinition {
@@ -142,12 +143,14 @@ impl Node for HttpRequestNode {
                     label: "Success".to_string(),
                     position: PortPosition::Right,
                     port_type: None,
+                    arity: PortArity::Single,
                 },
                 PortDefinition {
                     id: "on_error".to_string(),
                     label: "Error".to_string(),
                     position: PortPosition::Right,
                     port_type: None,
+                    arity: PortArity::Single,
                 },
             ],
         }
@@ -183,12 +186,14 @@ impl Node for HttpRequestNode {
         if let Some(headers_obj) = input.input["headers"].as_object() {
             for (k, v) in headers_obj {
                 let v_str = match v {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b)   => b.to_string(),
-                    _ => continue,
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
                 };
-                req = req.header(k.as_str(), v_str);
+                if let Some(v_str) = v_str {
+                    req = req.header(k.as_str(), v_str);
+                }
             }
         }
 
@@ -228,7 +233,7 @@ impl Node for HttpRequestNode {
         match req.send().await {
             Ok(mut response) => {
                 let status = response.status().as_u16();
-                let headers = headers_to_json(response.headers());
+                let headers = join_response_headers(response.headers());
 
                 // Reject before reading if Content-Length already exceeds the cap.
                 // This prevents reqwest from pre-allocating a buffer sized to the
@@ -270,7 +275,7 @@ impl Node for HttpRequestNode {
                         }
                         Ok(None) => break,
                         Err(e) => return NodeOutput::failure(
-                            NodeError::unrecoverable("RESPONSE_READ_ERROR", e.to_string())
+                            NodeError::unrecoverable("RESPONSE_READ_ERROR", super::util::reqwest_err_msg(&e))
                         ),
                     }
                 }
@@ -302,6 +307,17 @@ impl Node for HttpRequestNode {
 mod tests {
     use super::*;
     use crate::model::ExecutionContext;
+
+    #[test]
+    fn repeated_response_headers_are_joined() {
+        let mut map = reqwest::header::HeaderMap::new();
+        map.append("set-cookie", "a=1".parse().unwrap());
+        map.append("set-cookie", "b=2".parse().unwrap());
+        map.append("x-one", "v".parse().unwrap());
+        let out = join_response_headers(&map);
+        assert_eq!(out["set-cookie"], "a=1, b=2");
+        assert_eq!(out["x-one"], "v");
+    }
 
     fn make_input(input: Value) -> NodeInput {
         NodeInput {
@@ -363,11 +379,6 @@ mod tests {
     // cannot be inspected via execute() without making a real network call.
     // These tests verify the encoding logic that execute() applies before send.
     // All assertions are against the same encoding the production code uses.
-    //
-    // PLAN NOTE — "timeout config field read correctly":
-    // http.rs has no configurable timeout input field. The shared client is
-    // initialised with a hardcoded 30 s timeout (see shared_http_client()).
-    // There is nothing to read from input. Test below verifies the constant.
 
     #[test]
     fn bearer_token_format_is_bearer_space_token() {
@@ -432,17 +443,6 @@ mod tests {
     fn max_response_bytes_constant_is_ten_megabytes() {
         // Verifies the hard cap has not been silently changed.
         assert_eq!(MAX_RESPONSE_BYTES, 10 * 1024 * 1024);
-    }
-
-    #[test]
-    fn headers_to_json_joins_repeated_headers() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.append("set-cookie", "a=1".parse().unwrap());
-        h.append("set-cookie", "b=2".parse().unwrap());
-        h.append("x-one", "v".parse().unwrap());
-        let out = headers_to_json(&h);
-        assert_eq!(out["set-cookie"], "a=1, b=2");
-        assert_eq!(out["x-one"], "v");
     }
 
     // ── check_ssrf — pure IP-literal path (no DNS) ───────────────────────────

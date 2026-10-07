@@ -12,10 +12,15 @@ import type { SchedulerStatusEvent } from "../ipc/events";
 import { addSchedulerStatusListener } from "../scheduler-events";
 import { escapeHtml } from "../utils";
 import { type ChatSettings, DEFAULT_CHAT_SETTINGS } from "../canvas/CanvasSerializer";
+import type { Connector } from "../canvas/Connector";
+import { RunningSync, triggerFingerprint } from "../running-sync";
+import { showConfirm } from "../confirm";
+import { checkChatReadiness, type ChatGraphEdge, type ChatGraphNode, type ReadinessIssue } from "../chat/readiness";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
 const RESPONSE_TIMEOUT_MS = 30_000;
+const MAX_READINESS_ROWS = 3;
 
 interface ChatImageFile { filename: string; data: string; mime_type: string; }
 
@@ -117,6 +122,9 @@ export class ChatPanel {
   private brandingEl:   HTMLElement | null;
   /** Container for pending-attachment chips, inserted above .chat-input-row. No matching static markup in index.html — created here, mirroring the existing pattern of programmatic DOM construction elsewhere in this file (session menu, lightbox). */
   private pendingAttachmentsEl: HTMLElement;
+  /** Persistent wiring problems for this workflow, with one-click fixes — see syncReadiness(). Created here, between the status notice and the message list. */
+  private readinessEl: HTMLElement;
+  private sync: RunningSync;
 
   private canvas:    Canvas;
   private wfManager: WorkflowManager;
@@ -129,7 +137,7 @@ export class ChatPanel {
   private chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
 
   // `awaitingReply` only gates the input lock / "one send at a time" rule —
-  // it's cleared on timeout so the user regains control (per spec). `replyPending`
+  // it's cleared on timeout so the user regains control. `replyPending`
   // tracks whether we still owe a render for an outstanding request; it stays
   // true across a timeout so a reply that arrives late still gets shown instead
   // of being silently dropped.
@@ -171,7 +179,8 @@ export class ChatPanel {
    *  this workflow" prompt. */
   private mainRunActive = false;
 
-  constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast, runManager: RunManager) {
+  constructor(canvas: Canvas, wfManager: WorkflowManager, toast: Toast, runManager: RunManager, sync?: RunningSync) {
+    this.sync      = sync ?? new RunningSync(async () => null);
     this.canvas    = canvas;
     this.wfManager = wfManager;
     this.toast     = toast;
@@ -200,12 +209,18 @@ export class ChatPanel {
       inputRow.parentElement.insertBefore(this.pendingAttachmentsEl, inputRow);
     }
 
+    this.readinessEl = document.createElement("div");
+    this.readinessEl.className = "chat-readiness hidden";
+    this.readinessEl.setAttribute("role", "status");
+    this.messagesEl.parentElement?.insertBefore(this.readinessEl, this.messagesEl);
+
     this.bindStaticEvents();
 
     // listenSchedulerStatus (ipc/events.ts) only ever delivers to its first
     // caller (scheduler-events.ts, registered at app init) — this fan-out
     // subscription is the supported way for anything else to observe events.
     addSchedulerStatusListener((evt) => this.onSchedulerStatus(evt));
+    this.sync.onChange(() => { if (this.el.classList.contains("chat-open")) this.syncReadiness(); });
 
     // RunManager only ever runs one workflow at a time and keeps its
     // currentWorkflowId synced on every navigation (see app.ts's onNavigate),
@@ -259,6 +274,7 @@ export class ChatPanel {
     const show = this.hasWebhookAndOutput();
     this.chatBtn?.classList.toggle("hidden", !show);
     if (!show && this.el.classList.contains("chat-open")) this.hide();
+    else if (show && this.el.classList.contains("chat-open")) this.syncReadiness();
   }
 
   /** Call on workflow navigation — the open session and pending request belong to the old workflow. */
@@ -304,6 +320,8 @@ export class ChatPanel {
       this.inputEl.value = this.inputEl.value.slice(0, settings.max_message_length);
       this.autosizeInput();
     }
+
+    this.syncReadiness();
   }
 
   // ── Attachments  ────────────────────────────────────────────────
@@ -454,28 +472,118 @@ export class ChatPanel {
     return null;
   }
 
+  private graphSnapshot(): { nodes: ChatGraphNode[]; edges: ChatGraphEdge[] } {
+    const nodes: ChatGraphNode[] = [];
+    for (const [id, n] of this.canvas.nodes) {
+      nodes.push({ id, name: n.data.name ?? "", type: n.data.node_type_id, config: (n.data.config ?? {}) as Record<string, unknown> });
+    }
+    const edges = Array.from((this.canvas.connectors ?? new Map<string, Connector>()).values(), c => c.data);
+    return { nodes, edges };
+  }
+
   /**
-   * Whether any non-Webhook node's config references the Webhook's `files` output
-   * (or `body.attachments`). Answers "true" when the Webhook can't be identified by
-   * name, so an unknowable case never raises a false warning.
+   * Re-derives the wiring banner from the canvas. `filesInUse` forces the
+   * attachment check even when the setting is off — a file was just sent.
    */
-  private attachmentsHaveConsumer(): boolean {
-    let name: string | null = null;
-    for (const n of this.canvas.nodes.values()) {
-      if (n.data.node_type_id === NODE_IDS.WEBHOOK) { name = n.data.name || null; break; }
+  private syncReadiness(filesInUse = false): void {
+    const { nodes, edges } = this.graphSnapshot();
+    const issues = checkChatReadiness(nodes, edges, { checkFiles: filesInUse || this.chatSettings.allow_attachments });
+    this.renderReadiness(issues);
+  }
+
+  private canvasFingerprint(): string | null {
+    const { nodes, edges } = this.graphSnapshot();
+    return triggerFingerprint(nodes.map(n => ({ id: n.id, node_type_id: n.type, config: n.config })), edges);
+  }
+
+  private renderReadiness(issues: ReadinessIssue[]): void {
+    const rows = issues.slice(0, MAX_READINESS_ROWS).map(i => this.readinessRow(i));
+    if (issues.length > MAX_READINESS_ROWS) {
+      rows.push(this.buildReadinessRow(`${issues.length - MAX_READINESS_ROWS} more wiring problems on the canvas.`, []));
     }
-    if (!name) return true;
-    const needles = [`${name}.output.files`, `${name}.output.body.attachments`];
-    const refs = (v: unknown, depth: number): boolean => {
-      if (typeof v === "string") return v.length < 1000 && needles.some(x => v.includes(x));
-      if (depth > 4 || !v || typeof v !== "object") return false;
-      return Object.values(v as Record<string, unknown>).some(x => refs(x, depth + 1));
-    };
-    for (const n of this.canvas.nodes.values()) {
-      if (n.data.node_type_id === NODE_IDS.WEBHOOK) continue;
-      if (refs(n.data.config, 0)) return true;
+    if (this.wfManager.autoSaveFailed) {
+      rows.push(this.buildReadinessRow("Your latest changes aren't saved, so the running workflow can't see them. Press Ctrl+S to retry.", []));
     }
-    return false;
+    if (this.schedulerRunning && this.sync.triggerChanged(this.wfManager.currentId, this.canvasFingerprint())) {
+      rows.push(this.buildReadinessRow("The trigger changed since this workflow started. Restart it to apply the change.", [
+        { label: "Restart", run: () => { void this.handleRestart(); } },
+      ]));
+    }
+    this.readinessEl.replaceChildren(...rows);
+    this.readinessEl.classList.toggle("hidden", rows.length === 0);
+  }
+
+  private readinessRow(issue: ReadinessIssue): HTMLElement {
+    if (issue.kind === "not_connected") {
+      const { from, to } = issue;
+      const text = `"${to.name}" uses the output of "${from.name}", but "${from.name}" doesn't run before it, so its values will be empty.`;
+      const actions = issue.fixable
+        ? [{ label: "Connect them", run: () => this.applyReadinessFix(() => this.canvas.connectPorts(from.id, "output", to.id, "input")) }]
+        : [];
+      return this.buildReadinessRow(text, actions);
+    }
+    if (issue.candidates.length === 0) {
+      return this.buildReadinessRow("Files you attach won't reach the AI: no AI node runs after the Webhook, so nothing can read them.", []);
+    }
+    const { webhook } = issue;
+    return this.buildReadinessRow(
+      "Files you attach won't reach the AI yet: nothing in this workflow reads them.",
+      issue.candidates.slice(0, MAX_READINESS_ROWS).map(c => ({
+        label: `Connect to "${c.name}"`,
+        run:   () => this.applyReadinessFix(() => this.canvas.connectPorts(webhook.id, "output", c.id, "attachments")),
+      })),
+    );
+  }
+
+  private buildReadinessRow(text: string, actions: { label: string; run: () => void }[]): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "chat-readiness-row";
+    const p = document.createElement("p");
+    p.className = "chat-readiness-text";
+    p.textContent = text;
+    row.appendChild(p);
+    for (const a of actions) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-primary chat-readiness-btn";
+      btn.textContent = a.label;
+      btn.addEventListener("click", a.run);
+      row.appendChild(btn);
+    }
+    return row;
+  }
+
+  private applyReadinessFix(connect: () => boolean): void {
+    if (!connect()) {
+      this.toast("Couldn't connect these automatically. Drag a wire between them on the canvas.", "error");
+      return;
+    }
+    this.toast("Connected. Ctrl+Z on the canvas undoes it.", "success");
+    this.syncReadiness();
+    // The scheduler re-reads the saved workflow on every run, so saving is all a wiring fix needs.
+    if (this.schedulerRunning) void this.wfManager.flushAutoSave().then(() => this.syncReadiness());
+  }
+
+  private async handleRestart(): Promise<void> {
+    const id = this.wfManager.currentId;
+    if (this.sync.isRunInFlight(id)
+        && !await showConfirm("A run is in progress and restarting will stop it. Restart anyway?", false, "Restart", "neutral")) return;
+    try {
+      // Save first: the scheduler reads the trigger from the stored row, and a failed save must not leave the job stopped.
+      const snapshot = await this.wfManager.prepareForBgRun();
+      if (!snapshot) return;
+      try {
+        await stopScheduledWorkflow(id);
+      } catch {
+        // Not running on the backend — nothing to stop.
+      }
+      const usedFallback = await this.startOnFreePort(snapshot.id);
+      if (!usedFallback) this.toast("Workflow restarted", "success");
+    } catch (rawError) {
+      const err = parseSchedulerError(String(rawError));
+      this.toast(`Restart failed: ${(err as { message?: string }).message ?? rawError}`, "error");
+    }
+    this.refreshRunningState();
   }
 
   private findOutputNodeId(): string | null {
@@ -542,6 +650,7 @@ export class ChatPanel {
   private refreshRunningState(): void {
     this.syncStatus();
     this.syncInputLock();
+    this.syncReadiness();
   }
 
   private syncInputLock(): void {
@@ -772,9 +881,7 @@ export class ChatPanel {
       return;
     }
 
-    if (attachments.length > 0 && !this.attachmentsHaveConsumer()) {
-      this.toast("Files sent, but no node reads them. Connect the Webhook to an AI Prompt's Files port.", "info");
-    }
+    if (attachments.length > 0) this.syncReadiness(true);
 
     this.pendingTimer = setTimeout(() => {
       this.failPending("No response after 30s. The workflow may be busy or the message was dropped.");

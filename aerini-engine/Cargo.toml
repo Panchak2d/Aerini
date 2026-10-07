@@ -156,8 +156,8 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 # component-model-async), used by the second, dedicated async Engine that
 # hosts trigger-plugin components (`aerini-node-with-trigger` world). The
 # default (p2, sync) plugin engine is unaffected by this feature. "p2" is
-# listed explicitly because "p3" does not imply it and the trigger linker
-# registers `wasmtime_wasi::p2` too.
+# listed explicitly because "p3" does not imply it and both linkers register
+# `wasmtime_wasi::p2`.
 #
 # All three pinned to an EXACT version (`=49.0.2`) rather than a caret range:
 # both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as

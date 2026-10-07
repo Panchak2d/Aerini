@@ -6,6 +6,8 @@ export interface PortDefinition {
   position: "left" | "right" | "top" | "bottom";
   /** Semantic type tag for this port (e.g. `"files"`). Optional — absent means untyped. */
   port_type?: string;
+  /** How many wires an input port accepts. Absent means `"single"`. */
+  arity?: "single" | "multi";
 }
 
 export interface NodeDescriptor {
@@ -20,14 +22,14 @@ export interface NodeDescriptor {
   dynamic_ports?: boolean;
   /** True when this node was loaded from a WASM plugin rather than built in. */
   is_plugin?: boolean;
-  /** True when this node can start a workflow run; plugin triggers are listed under the palette's Triggers section. */
-  trigger_capable?: boolean;
   /** One or two sentence description shown in the palette tooltip. Empty string when not set. */
   description?: string;
   /** Raw inner-SVG-shape markup declared by the plugin; untrusted until passed through getPluginIconSvg. Empty/absent -> generic plugin glyph. */
   icon?: string;
   /** Author or organization name declared by the plugin. Empty/absent when not set. */
   author?: string;
+  /** True when this node can start its own events as a workflow trigger (a plugin exporting `trigger`). */
+  trigger_capable?: boolean;
 }
 
 export interface WorkflowLogEntry {

@@ -674,9 +674,6 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     if max_workflow_duration_secs.is_some() {
         daemon = daemon.with_server_max_duration_secs(max_workflow_duration_secs);
     }
-    if let Some(ref dir) = plugin_dir {
-        daemon = daemon.with_plugin_dir(dir.clone());
-    }
     let daemon = Arc::new(daemon);
 
     log.push("INFO", None, format!("Starting '{}'", config.workflow_name));

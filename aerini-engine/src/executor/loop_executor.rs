@@ -1392,7 +1392,7 @@ mod tests {
         assert_eq!(default_counter.load(Ordering::SeqCst), 0, "default must never fire — switch always takes case_2");
     }
 
-    // ── regression: on_error-port routing keeps the loop alive ────
+    // ── on_error-port routing keeps the loop alive ────
     //
     // A body node wired with an `on_error` edge to an in-body recovery node
     // must have that edge honoured on failure: the recovery node runs THIS
@@ -1748,7 +1748,7 @@ mod tests {
         );
     }
 
-    // ── regression: WorkflowEdge.on_failure field routing ─────────
+    // ── WorkflowEdge.on_failure field routing ─────────
     //
     // Same scenario as above, but via the other mechanism top-level nodes get
     // (executor/mod.rs::find_failure_route) — an `on_failure` pointer on an
@@ -1974,6 +1974,13 @@ mod tests {
             fn version(&self) -> &'static str { "1.0" }
             fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
             fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn ports(&self) -> crate::node::NodePorts {
+                let mut ports = crate::node::NodePorts::default();
+                for input in ports.inputs.iter_mut() {
+                    input.arity = crate::node::PortArity::Multi;
+                }
+                ports
+            }
             async fn execute(&self, _: NodeInput) -> NodeOutput {
                 self.counter.fetch_add(1, Ordering::SeqCst);
                 NodeOutput::success(serde_json::json!({}))

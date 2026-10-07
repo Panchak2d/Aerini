@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 use super::util::{ordered_node_outputs, traverse_dotpath};
 
 /// Output node — the final display node in a workflow.
@@ -46,10 +46,10 @@ impl Node for OutputNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![
-                PortDefinition { id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None },
+                PortDefinition { id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None, arity: PortArity::Single },
             ],
             outputs: vec![
-                PortDefinition { id: "output".to_string(), label: "Out".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "output".to_string(), label: "Out".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }

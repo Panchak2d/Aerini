@@ -259,7 +259,10 @@ jobs:
 
       # Full `tauri build` (not vite:build) — this is the check the desktop binary
       # itself, not just the frontend bundle, actually compiles and packages on
-      # every platform it ships for. Unsigned, same as release.yml; nothing here
-      # is uploaded or published.
+      # every platform it ships for. The updater signing key is required because
+      # createUpdaterArtifacts is on; nothing here is uploaded or published.
       - name: Build desktop app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build

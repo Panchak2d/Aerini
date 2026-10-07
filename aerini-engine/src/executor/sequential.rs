@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::context::{new_shared_state, LogLevel};
 use crate::error::EngineError;
-use crate::graph::ExecutionGraph;
+use crate::graph::{validate_port_arity, ExecutionGraph};
 use crate::model::{NodeOutput, Workflow};
 
 use super::{WorkflowExecutor, WorkflowResult};
@@ -19,6 +19,8 @@ impl WorkflowExecutor {
         workflow: Arc<Workflow>,
         initial_variables: HashMap<String, Value>,
     ) -> Result<WorkflowResult, EngineError> {
+        validate_port_arity(&workflow, &self.registry)?;
+
         if self.config.parallel_execution {
             let executor_arc = Arc::new(self.clone());
             return run_inner_parallel(executor_arc, workflow, initial_variables).await;

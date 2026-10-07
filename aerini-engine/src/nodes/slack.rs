@@ -75,13 +75,13 @@ impl Node for SlackNode {
                             )
                         } else {
                             let err = v["error"].as_str().unwrap_or("unknown_error").to_string();
-                            NodeOutput::failure(super::util::http_status_error("SLACK_ERROR", status, err))
+                            NodeOutput::failure(super::util::provider_error(status, "SLACK_ERROR", err))
                         }
                     }
-                    Err(e) => NodeOutput::failure(super::util::http_status_error(
-                        "PARSE_ERROR",
+                    Err(e) => NodeOutput::failure(super::util::provider_error(
                         status,
-                        format!("HTTP {}: could not parse Slack response: {}", status, e),
+                        "PARSE_ERROR",
+                        format!("HTTP {}: could not read Slack response: {}", status, e),
                     )),
                 }
             }

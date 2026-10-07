@@ -29,6 +29,12 @@ impl ProcessedAttachments {
 pub(crate) const ATTACHMENT_ONLY_PROMPT: &str =
     "The user attached file(s) with no message. Look at what was attached and respond helpfully.";
 
+/// MIME types `process_attachments` turns into content a model can read.
+pub(crate) const SUPPORTED_ATTACHMENT_MIMES: &[&str] = &[
+    "image/png", "image/jpeg", "image/webp", "image/gif",
+    "application/pdf", "text/plain", "text/markdown",
+];
+
 /// Splits the raw `attachments` array into provider-agnostic buckets.
 ///
 /// Each item follows Aerini's file-object contract:
@@ -150,6 +156,14 @@ mod attachment_tests {
         assert!(pa.warning.contains("c.txt"));
         assert!(pa.warning.contains("hello world"));
         assert!(pa.logs.is_empty());
+    }
+
+    #[test]
+    fn every_supported_mime_type_yields_readable_content() {
+        for mime in SUPPORTED_ATTACHMENT_MIMES {
+            let pa = process_attachments(&[json!({ "filename": "f", "mime_type": mime, "data": b64("hello") })]);
+            assert!(pa.has_content(), "{} is listed as supported but produced no content", mime);
+        }
     }
 
     #[test]

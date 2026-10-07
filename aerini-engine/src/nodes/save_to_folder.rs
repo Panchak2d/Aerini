@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 pub struct SaveToFolderNode;
 
@@ -322,7 +322,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             for sf in subfolders {
                 let id    = sf["id"].as_str().unwrap_or("input").to_string();
                 let label = sf["name"].as_str().unwrap_or("Subfolder").to_string();
-                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()) });
+                inputs.push(PortDefinition { id, label, position: PortPosition::Left, port_type: Some("files".to_string()), arity: PortArity::Single });
             }
         }
     }
@@ -333,6 +333,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             label:     "In".to_string(),
             position:  PortPosition::Left,
             port_type: Some("files".to_string()),
+            arity: PortArity::Single,
         });
     }
 
@@ -343,6 +344,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
             label:     "Out".to_string(),
             position:  PortPosition::Right,
             port_type: None,
+            arity: PortArity::Single,
         }],
     }
 }

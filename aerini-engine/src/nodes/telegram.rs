@@ -81,12 +81,12 @@ impl Node for TelegramNode {
                             )
                         } else {
                             let description = v["description"].as_str().unwrap_or("unknown error").to_string();
-                            NodeOutput::failure(super::util::http_status_error("TELEGRAM_ERROR", status, description))
+                            NodeOutput::failure(super::util::provider_error(status, "TELEGRAM_ERROR", description))
                         }
                     }
-                    Err(e) => NodeOutput::failure(super::util::http_status_error(
-                        "PARSE_ERROR",
+                    Err(e) => NodeOutput::failure(super::util::provider_error(
                         status,
+                        "PARSE_ERROR",
                         format!("HTTP {}: {}", status, e),
                     )),
                 }

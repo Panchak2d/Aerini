@@ -1,9 +1,10 @@
 import { Canvas } from "./canvas/Canvas";
-import { TRIGGER_NODE_IDS, NODE_IDS } from "./node-ids";
+import { NODE_IDS } from "./node-ids";
+import { isTriggerNodeType } from "./canvas/node-registry";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { ChatSettings } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
-import { getNodeTypes, checkBundledNode } from "./ipc/workflow";
+import { getNodeTypes, checkBundledNode, loadWorkflow } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import { initStatusBarFields } from "./statusbar-fields";
@@ -30,11 +31,14 @@ import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
 import { updateAlwaysOnBtn } from "./always-on";
 import { bindSchedulerEvents } from "./scheduler-events";
+import { RunningSync } from "./running-sync";
+import { initSyncChip } from "./sync-chip";
 import { bindToolbar } from "./toolbar";
 import { initTooltips } from "./tooltip-manager";
 import { loadBgPanel, getBgPanelIfLoaded } from "./bg-panel-loader";
 import type { ChatPanel as ChatPanelType } from "./panels/ChatPanel";
 import { initTheme } from "./theme";
+import { bindExternalLinks } from "./external-links";
 
 // applied as the very first thing this module does, ahead of every
 // function declaration and ahead of init()'s own call at the bottom of this
@@ -125,6 +129,7 @@ async function init() {
   }
 
   // WorkflowManager — pass showConfirm so it uses the modal, not window.confirm
+  const runningSync = new RunningSync(id => (isTauri() ? loadWorkflow(id) : Promise.resolve(null)));
   const wfManager = new WorkflowManager(canvas, {
     onUnsaved: markUnsaved,
     onTitle:   setTitle,
@@ -153,18 +158,22 @@ async function init() {
       wfManager.parallelExecution,
       wfManager.maxConcurrentNodes,
     );
+    runningSync.notify();
   };
+
+  wfManager.onAutoSaveStateChange = () => runningSync.notify();
 
   canvas.onCanvasChanged = () => {
     wfManager.markUnsaved(true);
     wfManager.scheduleAutoSave();
+    runningSync.notify();
     updateStatusHint();
     chatPanel.refreshButtonVisibility();
     // Only sync check — no IPC call on every canvas change
     const btn = document.getElementById("btn-always-on");
     if (btn) {
       const hasSchedulableTrigger = [...canvas.nodes.values()].some(n =>
-        TRIGGER_NODE_IDS.has(n.data.node_type_id as string)
+        isTriggerNodeType(n.data.node_type_id as string)
       );
       btn.classList.toggle("hidden", !hasSchedulableTrigger);
     }
@@ -183,7 +192,7 @@ async function init() {
   function _loadChat() {
     if (!_chatPanelPromise) {
       _chatPanelPromise = import("./panels/ChatPanel").then(({ ChatPanel: CP }) => {
-        _chatPanelInst = new CP(canvas, wfManager, toast, runManager);
+        _chatPanelInst = new CP(canvas, wfManager, toast, runManager, runningSync);
         _chatPanelInst.refreshButtonVisibility();
         return _chatPanelInst;
       });
@@ -289,6 +298,7 @@ async function init() {
       const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs, importWarnings } = deserialize(JSON.stringify(obj));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
+      canvas.warnArityViolations();
       wfManager.parallelExecution  = parallelExecution;
       wfManager.maxConcurrentNodes = maxConcurrentNodes;
       wfManager.unlimitedDuration  = unlimitedDuration;
@@ -300,6 +310,7 @@ async function init() {
       wfManager.markUnsaved(false); setTitle(name);
       document.getElementById("output-drawer")!.classList.add("hidden");
       setStatus(`Imported "${name}"`);
+      wfManager.onNavigate?.();
       wfManager.refreshWorkflowList();
       // One toast either way — this app has no toast queue/stacking, so a
       // second call right after would just render on top of the first at
@@ -331,6 +342,7 @@ async function init() {
   }
 
   bindPluginSettings(toast, refreshNodeDescriptors);
+  bindExternalLinks(toast);
 
   const { refreshRunBtn } = bindToolbar(
     canvas, wfManager, runManager, chatPanel,
@@ -357,7 +369,8 @@ async function init() {
     });
   });
 
-  await bindSchedulerEvents(canvas, wfManager, runManager, toast, setStatus, refreshRunBtn, statusBarFields.refreshMem, perfPanel.refresh);
+  await bindSchedulerEvents(canvas, wfManager, runManager, toast, setStatus, refreshRunBtn, statusBarFields.refreshMem, perfPanel.refresh, runningSync);
+  initSyncChip(canvas, wfManager, runningSync);
 
   if (isTauri()) {
     listenCloseRequested(() => wfManager.hasUnsaved, showConfirm).catch(console.error);

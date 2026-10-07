@@ -30,7 +30,7 @@ An `.aerinipkg` installs as a group: its member nodes appear together under one 
 Every installed plugin shows its display name, its type ID and filename, and (for a multi-node pack) which pack it belongs to. Two more things show up when relevant:
 
 - **A load error**, in place of the type ID/filename line, if Aerini couldn't actually load the file, an incompatible version, corrupt file, or similar.
-- **A signature status.** Publishers can optionally sign a plugin. **Unsigned** is the common, expected case for most community plugins and isn't itself a warning sign. Anything else, verified or unrecognized, is worth reading; a plugin whose signature fails to verify isn't loaded and shows a load error instead; see [Security §The plugin (.wasm) sandbox boundary](security.md#the-plugin-wasm-sandbox-boundary) for exactly what a signature does and doesn't guarantee today.
+- **A signature status.** Publishers can optionally sign a plugin. **Unsigned** is the common, expected case for most community plugins and isn't itself a warning sign. Anything else, verified, unrecognized, or a mismatch, is worth reading; see [Security §The plugin (.wasm) sandbox boundary](security.md#the-plugin-wasm-sandbox-boundary) for exactly what a signature does and doesn't guarantee today.
 
 ## Reloading and restarting
 
@@ -42,7 +42,7 @@ Click the **×** next to a standalone plugin, or **Remove pack** on a pack's hea
 
 ## What sandboxing a plugin actually means
 
-Every plugin call runs in its own fresh sandbox: no filesystem access at all, a capped memory ceiling, and outbound HTTP filtered by the same rules built-in nodes follow. A plugin node is flagged as a dangerous node in the UI, the same category as Shell Command, Code, and Database, and shows the same one-time confirmation before it runs. That's a summary; the exact limits, what the sandbox doesn't protect against, and what a verified signature does and doesn't mean are covered in full in [Security](security.md#the-plugin-wasm-sandbox-boundary).
+Every plugin call runs in its own fresh sandbox: no filesystem access at all, a capped memory ceiling, and outbound HTTP filtered by the same rules built-in nodes follow. A plugin node is flagged as a dangerous node in the UI, the same category as Shell Command, Code, and Database, and shows the same confirmation before it runs. That's a summary; the exact limits, what the sandbox doesn't protect against, and what a verified signature does and doesn't mean are covered in full in [Security](security.md#the-plugin-wasm-sandbox-boundary).
 
 ## See also
 

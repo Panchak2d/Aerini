@@ -458,3 +458,8 @@ body.resizing-v #output-drawer { transition: none; }
     animation: none !important;
   }
 }
+
+.sync-chip {
+  font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 4px; padding: 1px 6px; flex-shrink: 0;
+}

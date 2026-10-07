@@ -36,7 +36,7 @@ The **[canvas](../glossary.md#canvas)** is the screen where you do all of this, 
 
 A **[connection](../glossary.md#connection)** is the line between two nodes, the arrows in the diagram above. Drawing one from Node A to Node B means "when A finishes, send its output to B, and start B running."
 
-Each node has **[ports](../glossary.md#port)** on its edges: outputs on one side, inputs on the other. A connection always runs from one port to another. A branching node like If has two output ports (one per branch); connect something to only the branch you care about, and the other branch simply doesn't run when it's not the one taken.
+Each node has **[ports](../glossary.md#port)** on its edges: outputs on one side, inputs on the other. A connection always runs from one port to another. A branching node like If has two output ports (one per branch); connect something to only the branch you care about, and the other branch simply doesn't run when it's not the one taken. An output can feed any number of inputs, but an input takes one connection: dropping a second onto it replaces the first. Merge is the exception, and takes many.
 
 ## Trigger
 

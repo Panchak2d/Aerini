@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::{Node, NodePorts, PortDefinition, PortPosition};
+use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 use super::util::traverse_dotpath;
 
 pub struct SwitchNode;
@@ -62,17 +62,18 @@ impl Node for SwitchNode {
         NodePorts {
             inputs: vec![PortDefinition {
                 id: "input".to_string(), label: "In".to_string(), position: PortPosition::Left, port_type: None,
+                arity: PortArity::Single,
             }],
             outputs: vec![
-                PortDefinition { id: "case_1".to_string(), label: "Case 1".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_2".to_string(), label: "Case 2".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_3".to_string(), label: "Case 3".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_4".to_string(), label: "Case 4".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_5".to_string(), label: "Case 5".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_6".to_string(), label: "Case 6".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_7".to_string(), label: "Case 7".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "case_8".to_string(), label: "Case 8".to_string(), position: PortPosition::Right, port_type: None },
-                PortDefinition { id: "default".to_string(), label: "Default".to_string(), position: PortPosition::Right, port_type: None },
+                PortDefinition { id: "case_1".to_string(), label: "Case 1".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_2".to_string(), label: "Case 2".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_3".to_string(), label: "Case 3".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_4".to_string(), label: "Case 4".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_5".to_string(), label: "Case 5".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_6".to_string(), label: "Case 6".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_7".to_string(), label: "Case 7".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "case_8".to_string(), label: "Case 8".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
+                PortDefinition { id: "default".to_string(), label: "Default".to_string(), position: PortPosition::Right, port_type: None, arity: PortArity::Single },
             ],
         }
     }

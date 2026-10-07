@@ -42,12 +42,3 @@ export const NODE_IDS = {
 export const TRIGGER_NODE_IDS:   Set<string> = new Set([NODE_IDS.SCHEDULE, NODE_IDS.WEBHOOK, NODE_IDS.MANUAL_TRIGGER]);
 
 export const DANGEROUS_NODE_IDS: Set<string> = new Set([NODE_IDS.SHELL_EXEC, NODE_IDS.CODE, NODE_IDS.DATABASE]);
-
-/** Node objects only need this shape — callers pass canvas.nodes.values()
- *  without this file taking a dependency on the Canvas type. */
-export function findTriggerNodeTypeId(nodes: Iterable<{ data: { node_type_id: string } }>): string | null {
-  for (const n of nodes) {
-    if (TRIGGER_NODE_IDS.has(n.data.node_type_id)) return n.data.node_type_id;
-  }
-  return null;
-}

@@ -1,16 +1,29 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
-use crate::node::Node;
-use super::util::ordered_node_outputs;
+use crate::node::{Node, NodePorts, PortArity};
+use super::util::ordered_node_outputs_where;
 
-/// Merge node — collects all upstream node outputs into a single object.
+/// `context.metadata` key under which the executor passes a Merge node the ids
+/// of the upstream nodes it merges: those with a connection into this node,
+/// taken on the port they actually left through, that produced an output.
+pub const MERGE_UPSTREAM_IDS_KEY: &str = "__merge_upstream_ids";
+
+/// Merge node — collects the outputs of the nodes wired into it into a single value.
+///
+/// Only nodes that feed this node directly and whose connection fired in this
+/// run contribute. A branch that was not taken, a skipped node, or a node that
+/// is not wired in does not appear. With no contributing nodes the result is
+/// an empty `{}` / `[]`, and the same happens when the executor did not supply
+/// the upstream list.
 ///
 /// Config shape:
 /// {
 ///   "mode": "object" | "array"   (default: "object")
-///     "object" -> { "node_id_1": <output>, "node_id_2": <output>, ... }
+///     "object" -> { "node_id_1": <o>, "node_id_2": <o>, ... }
 ///     "array"  -> [ <output1>, <output2>, ... ]
 ///       Order: completion order (context.execution_order — see
 ///       `ExecutionState::mark_succeeded` in `context.rs`). execution_order
@@ -51,45 +64,38 @@ impl Node for MergeNode {
     fn output_schema(&self) -> Value {
         json!({
             "type": "object",
-            "description": "All upstream node outputs merged into one value"
+            "description": "The outputs of the upstream nodes wired into this one, merged into one value"
         })
+    }
+
+    fn ports(&self) -> NodePorts {
+        let mut ports = NodePorts::default();
+        if let Some(input) = ports.inputs.first_mut() {
+            input.arity = PortArity::Multi;
+        }
+        ports
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let mode = input.input["mode"].as_str().unwrap_or("object");
 
-        let outputs = &input.context.node_outputs;
+        let upstream: HashSet<&str> = input.context.metadata
+            .get(MERGE_UPSTREAM_IDS_KEY)
+            .and_then(Value::as_array)
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
 
-        // The zero-outputs case must match the non-empty path below, which always
-        // returns the merged value unwrapped (a bare array for "array" mode, a bare
-        // object for "object" mode — see the tests, which assert on `data` directly,
-        // never `data["merged"]`). A Merge node with zero upstream outputs — e.g.
-        // every incoming branch was disabled or skipped — must still produce a
-        // mode-correct, unwrapped empty value (`[]` or `{}`), not a hardcoded
-        // `{"merged": {}}` object regardless of mode: an empty result is exactly
-        // the case a caller is most likely to check the shape of.
+        let outputs = ordered_node_outputs_where(&input.context, |id| upstream.contains(id));
+        let count = outputs.len();
+
         let merged: Value = match mode {
-            "array" => {
-                Value::Array(
-                    ordered_node_outputs(&input.context)
-                        .into_iter()
-                        .map(|(_, v)| v)
-                        .collect()
-                )
-            }
-            _ => {
-                // "object" — key each output by its source node ID
-                let mut map = serde_json::Map::new();
-                for (node_id, output) in outputs.iter() {
-                    map.insert(node_id.clone(), output.clone());
-                }
-                Value::Object(map)
-            }
+            "array" => Value::Array(outputs.into_iter().map(|(_, v)| v).collect()),
+            _       => Value::Object(outputs.into_iter().collect()),
         };
 
         NodeOutput::success_with_logs(
             merged,
-            vec![format!("Merged {} upstream output(s) as {}", outputs.len(), mode)],
+            vec![format!("Merged {} upstream output(s) as {}", count, mode)],
         )
     }
 }
@@ -106,11 +112,30 @@ mod tests {
     use std::sync::Arc;
     use std::collections::HashMap;
 
-    fn make_input(mode: Option<&str>, node_outputs: HashMap<String, Value>) -> NodeInput {
+    #[test]
+    fn input_port_accepts_multiple_wires() {
+        let ports = MergeNode.ports();
+        assert_eq!(ports.inputs.len(), 1);
+        assert_eq!(ports.inputs[0].id, "input");
+        assert_eq!(ports.inputs[0].arity, PortArity::Multi);
+        assert_eq!(ports.outputs[0].arity, PortArity::Single);
+    }
+
+    /// Builds a Merge input whose upstream list is exactly `upstream`.
+    fn make_input_with_upstream(
+        mode: Option<&str>,
+        node_outputs: HashMap<String, Value>,
+        order: Vec<&str>,
+        upstream: Option<Vec<&str>>,
+    ) -> NodeInput {
         let input = match mode {
             Some(m) => json!({ "mode": m }),
             None    => json!({}),
         };
+        let mut metadata = HashMap::new();
+        if let Some(ids) = upstream {
+            metadata.insert(MERGE_UPSTREAM_IDS_KEY.to_string(), json!(ids));
+        }
         NodeInput {
             resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
@@ -121,33 +146,25 @@ mod tests {
             context: ExecutionContext {
                 variables: HashMap::new(),
                 node_outputs: Arc::new(node_outputs),
-                metadata: HashMap::new(),
-                ..Default::default()
+                metadata,
+                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
             },
         }
+    }
+
+    /// Every key in `node_outputs` is an upstream node of this Merge.
+    fn make_input(mode: Option<&str>, node_outputs: HashMap<String, Value>) -> NodeInput {
+        let ids: Vec<String> = node_outputs.keys().cloned().collect();
+        let upstream = Some(ids.iter().map(String::as_str).collect());
+        make_input_with_upstream(mode, node_outputs, vec![], upstream)
     }
 
     /// Same as make_input, but seeds execution_order too — needed for tests
     /// that assert on the exact resulting order, not just membership.
     fn make_input_ordered(mode: Option<&str>, node_outputs: HashMap<String, Value>, order: Vec<&str>) -> NodeInput {
-        let input = match mode {
-            Some(m) => json!({ "mode": m }),
-            None    => json!({}),
-        };
-        NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
-            cancel_token: None,
-            node_id: "n1".to_string(),
-            workflow_id: "wf".to_string(),
-            execution_id: "exec".to_string(),
-            input,
-            context: ExecutionContext {
-                variables: HashMap::new(),
-                node_outputs: Arc::new(node_outputs),
-                metadata: HashMap::new(),
-                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
-            },
-        }
+        let ids: Vec<String> = node_outputs.keys().cloned().collect();
+        let upstream = Some(ids.iter().map(String::as_str).collect());
+        make_input_with_upstream(mode, node_outputs, order, upstream)
     }
 
     // ── Empty context ───────────────────────────────────────────────────────
@@ -286,5 +303,51 @@ mod tests {
         let data = out.output.unwrap();
         // object-mode result: key is node_id "src"
         assert_eq!(data["src"]["k"], json!("v"));
+    }
+
+    // ── upstream restriction ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn object_mode_excludes_nodes_that_are_not_upstream() {
+        let mut outputs = HashMap::new();
+        outputs.insert("wired_a".to_string(),  json!({ "x": 1 }));
+        outputs.insert("wired_b".to_string(),  json!({ "y": 2 }));
+        outputs.insert("unrelated".to_string(), json!({ "secret": true }));
+        let out = MergeNode.execute(make_input_with_upstream(
+            Some("object"), outputs, vec![], Some(vec!["wired_a", "wired_b"]),
+        )).await;
+        assert!(out.success);
+        let data = out.output.unwrap();
+        assert_eq!(data.as_object().unwrap().len(), 2);
+        assert!(data.get("unrelated").is_none());
+        assert!(out.logs.iter().any(|l| l.contains("Merged 2 upstream")), "logs: {:?}", out.logs);
+    }
+
+    #[tokio::test]
+    async fn array_mode_orders_the_selected_subset_by_completion_order() {
+        let mut outputs = HashMap::new();
+        outputs.insert("z".to_string(), json!(20));
+        outputs.insert("m".to_string(), json!(99));
+        outputs.insert("a".to_string(), json!(10));
+        let out = MergeNode.execute(make_input_with_upstream(
+            Some("array"), outputs, vec!["z", "m", "a"], Some(vec!["a", "z"]),
+        )).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap(), json!([20, 10]));
+    }
+
+    #[tokio::test]
+    async fn no_upstream_nodes_returns_an_empty_value_even_when_other_outputs_exist() {
+        for (mode, empty) in [("object", json!({})), ("array", json!([]))] {
+            for upstream in [None, Some(vec![])] {
+                let mut outputs = HashMap::new();
+                outputs.insert("other".to_string(), json!(1));
+                let out = MergeNode.execute(make_input_with_upstream(
+                    Some(mode), outputs, vec![], upstream,
+                )).await;
+                assert!(out.success);
+                assert_eq!(out.output.unwrap(), empty, "mode {mode}");
+            }
+        }
     }
 }

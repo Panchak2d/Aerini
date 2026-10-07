@@ -815,12 +815,15 @@ export function renderCredentialSection(
     // Provider matches this node's currently selected Provider, plus any
     // credential with no Provider set at all — those stay visible
     // regardless, since Advanced metadata is optional and hiding them would
-    // silently break existing workflows.
+    // silently break existing workflows. A blank or "auto" Provider means
+    // the provider is detected later (from the Base URL), so nothing can
+    // mismatch yet and the pool is left unfiltered.
     const isAiProviderField = credKey === "api_key" && AI_NODE_IDS.has(node.data.node_type_id);
     const curProvider = isAiProviderField
       ? String((node.data.config as Record<string, unknown>)["provider"] ?? "")
       : "";
-    if (isAiProviderField) {
+    const filterByProvider = isAiProviderField && curProvider !== "" && curProvider !== "auto";
+    if (filterByProvider) {
       pool = pool.filter(c => {
         const p = credentialProviderMap.get(c.id);
         return !p || p === curProvider;
@@ -853,8 +856,8 @@ export function renderCredentialSection(
       warn.className = "config-hint config-hint-warn";
       warn.textContent = !creds.length
         ? "No credentials saved. Click Credentials in the toolbar."
-        : isAiProviderField
-          ? `No saved credentials for provider ${curProvider ? formatProviderLabel(curProvider) : "(unspecified)"}. Add one in Credentials in the toolbar.`
+        : filterByProvider
+          ? `No saved credentials for provider ${formatProviderLabel(curProvider)}. Add one in Credentials in the toolbar.`
           : `No saved credentials of type "${credType}". Add one in Credentials in the toolbar.`;
       body.appendChild(warn);
     }

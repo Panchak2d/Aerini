@@ -17,6 +17,19 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-ask",
-    "dialog:allow-message"
+    "dialog:allow-message",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/Panchak2d/**" },
+        { "url": "https://www.patreon.com/**" },
+        { "url": "https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/" },
+        { "url": "https://ngrok.com/" },
+        { "url": "https://console.cloud.google.com/" },
+        { "url": "https://developers.facebook.com/" },
+        { "url": "https://developers.tiktok.com/" },
+        { "url": "https://www.youtube.com/watch*" }
+      ]
+    }
   ]
 }

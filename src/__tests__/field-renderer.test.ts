@@ -263,6 +263,20 @@ describe("field-renderer — AI-node credential provider filtering", () => {
     expect(warn.textContent).toBe("No saved credentials for provider Gemini. Add one in Credentials in the toolbar.");
   });
 
+  it("edge case: Provider \"auto\" or blank leaves the AI api_key picker unfiltered, so a credential tagged with any provider is selectable", () => {
+    for (const provider of ["auto", ""]) {
+      const ctx = makeCtx(makeAiNode("n1", provider));
+      ctx.creds.push({ id: "c1", name: "Gemini key", cred_type: "api_key" });
+      const providerMap = new Map<string, string | undefined>([["c1", "gemini"]]);
+
+      renderCredentialSection(ctx, AI_API_KEY_PROPS, undefined, () => {}, providerMap);
+
+      const options = Array.from(ctx.body.querySelectorAll(".csel-option")).map(el => el.textContent);
+      expect(options).toEqual(["— none —", "Gemini key — Gemini"]);
+      expect(ctx.body.querySelector(".config-hint-warn")).toBeNull();
+    }
+  });
+
   it("edge case: a non-AI node's api_key field is unaffected by provider filtering, even with a provider map supplied", () => {
     const ctx = makeCtx(makeNode("n1")); // node_type_id "save_to_folder", not an AI node
     ctx.creds.push({ id: "c1", name: "Some key", cred_type: "api_key" });

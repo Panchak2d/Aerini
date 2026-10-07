@@ -36,8 +36,8 @@ Runs the multi-workflow REST API, with bearer-token auth and no export package o
 |---|---|---|---|
 | `--token <token>` | `AERINI_TOKEN` | auto-generated | Bearer token for API auth. If you set one, it must be at least 32 characters, the server exits with an error otherwise. Left unset, the server generates a 43-character token, prints it once to stderr, and grants it all three [scopes](../glossary.md#scoped-token) (`read`, `write`, `admin`). |
 | `--port <port>` | `AERINI_PORT` | `7700` | Port to listen on. Unlike `serve`'s `--port`, this one is env-backed and always has a default. |
-| `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Directory for the SQLite database and the token/credential key file. A leading `~` expands to `$HOME`. |
-| `--allow-origin <list>` | | none | Comma-separated additional origins allowed to call the API. Localhost origins (`http://localhost[:port]`, `http://127.0.0.1[:port]`) are always allowed regardless of this flag. |
+| `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Directory for the SQLite database and the token/credential key file. `~` or a leading `~/` expands to your home directory (`$HOME`, or `USERPROFILE` on Windows when `HOME` is unset); `~name/...` is used as written. The server exits with an error if it needs a home directory and can't find one. |
+| `--allow-origin <list>` | | none | Comma-separated additional origins allowed to call the API. Localhost origins (`http://localhost[:port]`, `http://127.0.0.1[:port]`, `http://[::1][:port]`) are always allowed regardless of this flag. |
 | `--allow-env-vars <list>` | | none | Comma-separated environment variable names a workflow may read via `{{$env.VAR}}`. Anything not listed resolves to an empty string. |
 | `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Same as `serve`'s `--bind`. |
 | `--file-sandbox-dir <dir>` | | `<data-dir>/files` | Restricts File node I/O to this directory. Unlike `serve`, leaving this unset doesn't just warn: the server creates `<data-dir>/files` and uses it as the sandbox automatically. |
