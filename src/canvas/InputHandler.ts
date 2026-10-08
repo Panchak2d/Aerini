@@ -1,6 +1,7 @@
 import type { Canvas } from "./Canvas";
 import { CanvasNode, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
+import { historyShortcut } from "./UndoManager";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 import { isMonitorModeActive } from "../monitor-mode";
 
@@ -63,7 +64,8 @@ export class InputHandler {
   onKey(e: KeyboardEvent): void {
     if (isMonitorModeActive()) return;
     const activeEl = document.activeElement;
-    const inInput = activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
+    const inInput = activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement
+      || activeEl instanceof HTMLSelectElement || (activeEl instanceof HTMLElement && activeEl.isContentEditable);
     if (e.key === "Shift") { this.shiftHeld = true; this.canvas.el.classList.add("shift-held"); }
     if (inInput) return;
 
@@ -86,8 +88,8 @@ export class InputHandler {
     }
     // ── End canvas navigation ───────────────────────────────────────────────
 
-    if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); c.undo(); }
-    if ((e.metaKey || e.ctrlKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); c.redo(); }
+    const history = historyShortcut(e);
+    if (history) { e.preventDefault(); if (history === "undo") c.undo(); else c.redo(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === "d") { e.preventDefault(); c.dupSelected(); }
     if ((e.metaKey || e.ctrlKey) && e.key === "a") {
       e.preventDefault();
@@ -375,8 +377,7 @@ export class InputHandler {
     if (this.isPanning) { this.isPanning = false; c.el.style.cursor = "default"; c.onViewportChange?.(); return; }
 
     if (this.isCutting) {
-      const cut = c.doCut();
-      if (cut.length) { c.pushUndo({ type: "cut_edges", connectors: cut }); c.onCanvasChanged?.(); }
+      if (c.doCut().length) c.onCanvasChanged?.();
       this.isCutting = false; this.cutPath = []; c.el.style.cursor = "default"; return;
     }
 
@@ -416,10 +417,13 @@ export class InputHandler {
           }
           if (moves.length) c.pushUndo({ type: "move_nodes", moves } as UndoAction);
         } else {
-          const p = this.draggingNode.data.position;
+          const dragged = this.draggingNode;
+          const p = dragged.data.position;
           if (p.x !== this.dragFromX || p.y !== this.dragFromY) {
-            c.pushUndo({ type: "move_node", nodeId: this.draggingNode.data.id, from: { x: this.dragFromX, y: this.dragFromY }, to: { ...p } });
-            c.tryWireInsert(this.draggingNode);
+            c.transact(`Move "${dragged.data.name}"`, () => {
+              c.pushUndo({ type: "move_node", nodeId: dragged.data.id, from: { x: this.dragFromX, y: this.dragFromY }, to: { ...p } });
+              c.tryWireInsert(dragged);
+            });
           }
         }
       }
@@ -428,6 +432,12 @@ export class InputHandler {
     }
 
     if (this.isBoxSel) { this.isBoxSel = false; c.el.style.cursor = this.shiftHeld ? "crosshair" : "default"; }
+  }
+
+  /** True while a drag, wire pull, box-select, pan or cut is in progress. */
+  isGestureActive(): boolean {
+    return !!(this.draggingNode || this.pendingConn || this.reconnEdge || this.portPress || this.moveGroup
+      || this.isCutting || this.isBoxSel || this.isPanning);
   }
 
   onLeave(): void {
@@ -454,12 +464,9 @@ export class InputHandler {
       }
     }
 
-    for (const [id, conn] of c.connectors) {
+    for (const conn of c.connectors.values()) {
       if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) {
-        c.connectors.delete(id);
-        c.clearDynamicPortExpr(conn);
-        c.pushUndo({ type: "delete_edge", connector: conn });
-        c.onCanvasChanged?.(); return;
+        c.deleteConnector(conn); return;
       }
     }
 

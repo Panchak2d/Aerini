@@ -137,11 +137,13 @@ export async function showPopover(
   // the flat-mode "input" port) — prune any connector left pointing at a port
   // that no longer exists.
   const onChange = () => {
+    let pruned: ReturnType<Canvas["pruneOrphanedConnectors"]> = [];
     if (node.data.dynamic_ports) {
       node.derivePorts(node.data.config as Record<string, unknown>);
       node.rebuildPorts();
-      canvas.pruneOrphanedConnectors(node.data.id);
+      pruned = canvas.pruneOrphanedConnectors(node.data.id);
     }
+    canvas.commitNodeEdit(node, pruned);
     onChangeFn();
   };
 
@@ -391,6 +393,10 @@ export async function showPopover(
   _activePopoverNode = node;
 
   positionPopover(pop, node, canvasEl);
+
+  // Every edit made from here on is undoable relative to the fully rendered form,
+  // so defaults the render itself fills in are not attributed to the first keystroke.
+  canvas.beginNodeEdit(node);
 
   // Move focus to the first focusable field inside the popover body.
   // Scoped to `body`, not `pop` — `pop` includes the header, where testBtn

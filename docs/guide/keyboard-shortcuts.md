@@ -1,6 +1,6 @@
 # Keyboard Shortcuts
 
-Every shortcut below appears in the app itself: click **Shortcuts** in the toolbar (next to Credentials and Settings), or press **?** anywhere on the canvas, to open the same list. Three rows are exceptions to that. Two note a second working key combo the in-app list leaves out — `Backspace` for Delete, already documented in [Getting Started](../getting-started/getting-started.md), and `Ctrl+Shift+Z` for Redo, confirmed directly against `InputHandler.ts`. The third, `Ctrl+Shift+C` for Chat, is missing from the in-app list altogether, not just a second combo for an action already there — confirmed directly against `toolbar.ts`. Everything else here matches the in-app list exactly.
+Every shortcut below appears in the app itself: click **Shortcuts** in the toolbar (next to Credentials and Settings), or press **?** anywhere on the canvas, to open the same list. Two rows are exceptions to that. One notes a second working key combo the in-app list leaves out — `Backspace` for Delete, already documented in [Getting Started](../getting-started/getting-started.md). The other, `Ctrl+Shift+C` for Chat, is missing from the in-app list altogether, not just a second combo for an action already there — confirmed directly against `toolbar.ts`. Everything else here matches the in-app list exactly.
 
 ## Canvas
 
@@ -21,8 +21,8 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Select all | `Ctrl+A` |
 | Duplicate | `Ctrl+D` |
 | Delete | `Del` or `Backspace` |
-| Undo | `Ctrl+Z` |
-| Redo | `Ctrl+Y` or `Ctrl+Shift+Z` |
+| Undo — the toolbar's **Undo** button does the same, and its tooltip names the step. Covers adding, deleting, moving, and wiring nodes, plus renaming, disabling, choosing a saved credential, and changing a node's settings. History is per open workflow and is cleared when you switch to another | `Ctrl+Z` |
+| Redo — also a toolbar button | `Ctrl+Y` or `Ctrl+Shift+Z` |
 | Cut connector | Alt-drag across it |
 | Move where a wire ends — drag from the wired input, or click the wire and drag the ring on its input end; dropping anywhere else cancels, and `Esc` cancels mid-drag. On an input that takes many wires, such as Merge's, click the wire first | Drag |
 | Wire backwards — drag from an empty input to an output, or release over empty canvas to pick a node to connect into it | Drag |

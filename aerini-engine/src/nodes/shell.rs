@@ -220,8 +220,10 @@ fn redact_command_log(cmd: &str) -> String {
     }
 }
 
-/// Redacts `Authorization:` header values. Handles both plain and quoted forms.
-/// Example: `-H "Authorization: Bearer sk-abc"` → `-H "Authorization: [REDACTED]"`
+/// Redacts `Authorization:` header values. Handles double-quoted, single-quoted
+/// and unquoted forms; a closing quote is kept so the rest of the command still
+/// reads correctly.
+/// Example: `-H 'Authorization: Bearer sk-abc'` → `-H 'Authorization: [REDACTED]'`
 fn redact_authorization_header(cmd: &str) -> String {
     let mut result = String::with_capacity(cmd.len());
     // ASCII-only lowering: "authorization:" is a fixed ASCII literal,
@@ -239,21 +241,8 @@ fn redact_authorization_header(cmd: &str) -> String {
     while i < cmd.len() {
         if lower[i..].starts_with("authorization:") {
             result.push_str("Authorization: [REDACTED]");
-            let rest = &cmd[i + 14..];
-            // Skip the authorization value:
-            // - If a closing quote is present, consume up to and including it
-            //   (handles `-H "Authorization: Bearer token"` patterns).
-            // - Otherwise, consume to the next whitespace or end of string.
-            // Do NOT use cmd.len()-i as the fallback — that would swallow
-            // everything that follows (e.g., the URL after the header arg).
-            let skip = if let Some(q) = rest.find('"') {
-                14 + q + 1
-            } else {
-                rest.find(|c: char| c.is_ascii_whitespace())
-                    .map(|s| 14 + s)
-                    .unwrap_or(14 + rest.len())
-            };
-            i += skip;
+            let quote = cmd[..i].chars().next_back().filter(|c| matches!(c, '"' | '\''));
+            i += 14 + authorization_value_len(&cmd[i + 14..], quote);
         } else {
             let ch = cmd[i..].chars().next().expect("valid UTF-8 offset");
             result.push(ch);
@@ -261,6 +250,31 @@ fn redact_authorization_header(cmd: &str) -> String {
         }
     }
     result
+}
+
+/// Byte length of the header value that follows `Authorization:`, not
+/// including a closing quote.
+/// - Quoted (`quote` is the quote char right before the header name): everything
+///   up to the closing quote, or the end of the string when unterminated.
+/// - Unquoted: one word, or two when the first is an auth scheme
+///   (`Bearer <token>`). Never runs on to the URL or flags that follow.
+fn authorization_value_len(rest: &str, quote: Option<char>) -> usize {
+    if let Some(q) = quote {
+        return rest.find(q).unwrap_or(rest.len());
+    }
+    const SCHEMES: &[&str] = &["bearer", "basic", "digest", "token"];
+    let mut end = 0;
+    for pass in 0..2 {
+        let tail = &rest[end..];
+        let word_start = end + (tail.len() - tail.trim_start().len());
+        end = rest[word_start..]
+            .find(|c: char| c.is_ascii_whitespace())
+            .map_or(rest.len(), |n| word_start + n);
+        if pass == 0 && !SCHEMES.iter().any(|s| rest[word_start..end].eq_ignore_ascii_case(s)) {
+            break;
+        }
+    }
+    end
 }
 
 /// Redacts the value that immediately follows `prefix` (case-insensitive).
@@ -560,6 +574,20 @@ mod tests {
         assert!(!out.contains("sk-abc123"), "secret should be gone, got: {}", out);
         // URL that follows the header must not be swallowed.
         assert!(out.contains("https://api.example.com"), "URL must be preserved, got: {}", out);
+        assert_eq!(out, "curl -H \"Authorization: [REDACTED]\" https://api.example.com");
+    }
+
+    #[test]
+    fn single_quoted_authorization_header_is_redacted() {
+        let out = redact_authorization_header("curl -H 'Authorization: Bearer sk-abc123' https://x");
+        assert_eq!(out, "curl -H 'Authorization: [REDACTED]' https://x");
+    }
+
+    #[test]
+    fn unquoted_authorization_header_redacts_scheme_and_token_only() {
+        let out = redact_authorization_header("curl -H Authorization: Bearer sk-abc123 https://x");
+        assert!(!out.contains("sk-abc123"), "token must be gone, got: {}", out);
+        assert!(out.ends_with(" https://x"), "trailing args must survive, got: {}", out);
     }
 
     // Same Unicode/ASCII alignment concern as

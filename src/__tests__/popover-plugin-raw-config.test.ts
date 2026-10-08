@@ -44,7 +44,7 @@ function registerPlugin(properties: Record<string, unknown>, isPlugin = true): v
 }
 
 const canvasEl = document.createElement("canvas");
-const fakeCanvas = {} as unknown as Canvas;
+const fakeCanvas = { beginNodeEdit: () => {}, commitNodeEdit: () => {} } as unknown as Canvas;
 
 async function openPopover(node: CanvasNode): Promise<void> {
   const p = showPopover(node, canvasEl, () => {}, fakeCanvas);

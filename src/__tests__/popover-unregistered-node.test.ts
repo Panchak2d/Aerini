@@ -43,7 +43,7 @@ function descriptor(typeId: string, isPlugin: boolean): NodeDescriptor {
 }
 
 const canvasEl = document.createElement("canvas");
-const fakeCanvas = {} as unknown as Canvas;
+const fakeCanvas = { beginNodeEdit: () => {}, commitNodeEdit: () => {} } as unknown as Canvas;
 
 async function openPopover(node: CanvasNode): Promise<void> {
   const p = showPopover(node, canvasEl, () => {}, fakeCanvas);

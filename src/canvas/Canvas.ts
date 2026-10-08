@@ -4,7 +4,8 @@ import { serialize } from "./CanvasSerializer";
 import { NODE_IDS } from "../node-ids";
 import type { NodeDescriptor } from "../ipc/workflow";
 import { UndoManager } from "./UndoManager";
-import type { UndoAction, ConfigPatch } from "./UndoManager";
+import { snapshotConfig, diffConfig } from "./UndoManager";
+import type { UndoAction, ConfigPatch, HistoryState, HistoryResult } from "./UndoManager";
 import { Minimap } from "./Minimap";
 import { SnapEngine } from "./SnapEngine";
 import { ContextMenu } from "./ContextMenu";
@@ -31,8 +32,15 @@ export class Canvas {
   ctx: CanvasRenderingContext2D;
   private dpr = 1;
 
-  nodes:      Map<string, CanvasNode> = new Map();
-  connectors: Map<string, Connector>  = new Map();
+  private _nodes:      Map<string, CanvasNode> = new Map();
+  private _connectors: Map<string, Connector>  = new Map();
+
+  get nodes(): Map<string, CanvasNode> { return this._nodes; }
+  /** Replacing the map means another workflow was loaded, so the previous workflow's undo history is dropped. */
+  set nodes(m: Map<string, CanvasNode>) { this._nodes = m; this.undoMgr?.clear(); }
+
+  get connectors(): Map<string, Connector> { return this._connectors; }
+  set connectors(m: Map<string, Connector>) { this._connectors = m; this.undoMgr?.clear(); }
 
   panX = 0; panY = 0; zoom = 1;
   readonly MIN_ZOOM = 0.05;
@@ -61,6 +69,8 @@ export class Canvas {
   onNodeSelected:   ((n: CanvasNode | null) => void) | null = null;
   onNodeClicked:    ((n: CanvasNode) => void) | null = null;
   onCanvasChanged:  (() => void) | null = null;
+  /** Fires whenever the undo/redo stacks change or an undo/redo is attempted. */
+  onHistoryChange:  ((s: HistoryState) => void) | null = null;
   onRunNode:        ((nodeId: string) => void) | null = null;
   onZoomChange:     ((zoom: number) => void) | null = null;
   onViewportChange: (() => void) | null = null;
@@ -492,11 +502,16 @@ export class Canvas {
       const inP  = node.ports.find(p => p.isInput);
       const outP = node.ports.find(p => !p.isInput);
       if (!inP || !outP) continue;
+      const touched = [node.data.id, conn.data.to_node];
+      const before = this.configKeys(touched);
       this.connectors.delete(id);
       const e1 = new Connector({ id: newConnectorId(), from_node: conn.data.from_node, from_port: conn.data.from_port, to_node: node.data.id, to_port: inP.id, condition: null, on_success: null, on_failure: null });
       const e2 = new Connector({ id: newConnectorId(), from_node: node.data.id, from_port: outP.id, to_node: conn.data.to_node, to_port: conn.data.to_port, condition: null, on_success: null, on_failure: null });
       this.connectors.set(e1.data.id, e1); this.connectors.set(e2.data.id, e2);
-      this.pushUndo({ type: "split_edge", removed: conn, added1: e1, added2: e2, node });
+      this.applyConnectionDefaults(e1.data.from_node, e1.data.to_node, e1.data.to_port);
+      this.applyConnectionDefaults(e2.data.from_node, e2.data.to_node, e2.data.to_port);
+      const configs = this.diffConfigKeys(before, this.configKeys(touched));
+      this.pushUndo({ type: "split_edge", removed: conn, added1: e1, added2: e2, node, configs });
       this.onCanvasChanged?.(); return true;
     }
     return false;
@@ -518,16 +533,26 @@ export class Canvas {
     return false;
   }
 
+  /** Deletes every wire the cut path crosses and records it as one undo step. */
   doCut(): Connector[] {
-    const out: Connector[] = [];
-    for (const [id, c] of this.connectors) if (this.edgeCrossesPath(c)) { out.push(c); this.connectors.delete(id); }
-    for (const c of out) this.clearDynamicPortExpr(c);
+    const out = [...this.connectors.values()].filter(c => this.edgeCrossesPath(c));
+    if (!out.length) return out;
+    this.transact(out.length === 1 ? "Cut wire" : `Cut ${out.length} wires`, () => {
+      const targets = out.map(c => c.data.to_node);
+      const before = this.configKeys(targets);
+      for (const c of out) this.connectors.delete(c.data.id);
+      for (const c of out) this.clearDynamicPortExpr(c);
+      this.pushUndo({ type: "cut_edges", connectors: out });
+      const configs = this.diffConfigKeys(before, this.configKeys(targets));
+      if (configs.length) this.pushUndo({ type: "config_patch", configs });
+    });
     return out;
   }
 
-  pruneOrphanedConnectors(nodeId: string): void {
+  pruneOrphanedConnectors(nodeId: string): Connector[] {
+    const removed: Connector[] = [];
     const node = this.nodes.get(nodeId);
-    if (!node) return;
+    if (!node) return removed;
     const validPorts = new Set(node.ports.map(p => p.id));
     for (const [cid, c] of this.connectors) {
       if (c.data.to_node === nodeId && !validPorts.has(c.data.to_port)) {
@@ -535,10 +560,13 @@ export class Canvas {
           (node.data.config as Record<string, unknown>).files = "";
         }
         this.connectors.delete(cid);
+        removed.push(c);
       } else if (c.data.from_node === nodeId && !validPorts.has(c.data.from_port)) {
         this.connectors.delete(cid);
+        removed.push(c);
       }
     }
+    return removed;
   }
 
   // ── Connector logic ───────────────────────────────────────────────────────
@@ -643,6 +671,7 @@ export class Canvas {
 
     const displaced = this.isMultiInput(toNode, toPort) ? [] : existing;
     const steps: UndoAction[] = [];
+    const before = this.configKeys([toNode]);
     for (const old of displaced) {
       this.connectors.delete(old.data.id);
       this.clearDynamicPortExpr(old);
@@ -653,7 +682,9 @@ export class Canvas {
     steps.push({ type: "add_edge", connector: conn });
     if (displaced.length) this.onWarn?.(this.replacedNotice(displaced, toNode, toPort));
     this.applyConnectionDefaults(srcNode, toNode, toPort);
-    this.pushUndo(steps.length === 1 ? steps[0] : { type: "batch", actions: steps });
+    const configs = this.diffConfigKeys(before, this.configKeys([toNode]));
+    if (configs.length) steps.push({ type: "config_patch", configs });
+    this.pushUndo(steps.length === 1 ? steps[0] : { type: "batch", actions: steps }, "Connect nodes");
     this.onCanvasChanged?.();
     return true;
   }
@@ -789,13 +820,7 @@ export class Canvas {
     const out = new Map<string, Map<string, string>>();
     for (const id of new Set(nodeIds)) {
       const n = this.nodes.get(id);
-      if (!n) continue;
-      const keys = new Map<string, string>();
-      for (const [k, v] of Object.entries(n.data.config)) {
-        const json = JSON.stringify(v);
-        if (json !== undefined) keys.set(k, json);
-      }
-      out.set(id, keys);
+      if (n) out.set(id, snapshotConfig(n));
     }
     return out;
   }
@@ -803,13 +828,8 @@ export class Canvas {
   private diffConfigKeys(before: Map<string, Map<string, string>>, after: Map<string, Map<string, string>>): ConfigPatch[] {
     const patches: ConfigPatch[] = [];
     for (const [nodeId, b] of before) {
-      const a = after.get(nodeId) ?? new Map<string, string>();
-      const keys: ConfigPatch["keys"] = {};
-      for (const k of new Set([...b.keys(), ...a.keys()])) {
-        const bv = b.get(k) ?? null, av = a.get(k) ?? null;
-        if (bv !== av) keys[k] = { before: bv, after: av };
-      }
-      if (Object.keys(keys).length) patches.push({ nodeId, keys });
+      const patch = diffConfig(nodeId, b, after.get(nodeId) ?? new Map<string, string>());
+      if (patch) patches.push(patch);
     }
     return patches;
   }
@@ -914,31 +934,99 @@ export class Canvas {
   }
 
   deleteSelected() {
-    const dn: CanvasNode[] = [], dc: Connector[] = [];
-    for (const id of this.selectedNodes) {
-      const n = this.nodes.get(id); if (!n) continue; dn.push(n); this.nodes.delete(id);
-      for (const [cid, c] of this.connectors) if (c.data.from_node === id || c.data.to_node === id) { dc.push(c); this.connectors.delete(cid); }
+    const dn = [...this.selectedNodes].map(id => this.nodes.get(id)).filter((n): n is CanvasNode => !!n);
+    const gone = new Set(dn.map(n => n.data.id));
+    const loneConn = this.selectedConn && this.connectors.get(this.selectedConn.data.id) === this.selectedConn ? this.selectedConn : null;
+    const dc = [...this.connectors.values()].filter(c => gone.has(c.data.from_node) || gone.has(c.data.to_node) || c === loneConn);
+    if (dn.length || dc.length) {
+      this.removeGraphParts(dn, dc, dn.length > 1 ? `Delete ${dn.length} nodes`
+        : dn.length ? `Delete "${dn[0].data.name}"` : "Delete wire");
     }
-    if (this.selectedConn && !dc.includes(this.selectedConn)) { dc.push(this.selectedConn); this.connectors.delete(this.selectedConn.data.id); }
-    for (const c of dc) this.clearDynamicPortExpr(c);
-    // Each node's undo action only carries the connectors that actually touch
-    // that node, not the full shared dc array: undoing one node from a
-    // multi-node delete must not also resurrect connectors whose other
-    // endpoint is a still-deleted sibling — a dangling from_node/to_node
-    // reference.
-    for (const n of dn) {
-      const ownConns = dc.filter(c => c.data.from_node === n.data.id || c.data.to_node === n.data.id);
-      this.pushUndo({ type: "delete_node", node: n, connectors: ownConns });
-    }
-    if (!dn.length && dc.length) for (const c of dc) this.pushUndo({ type: "delete_edge", connector: c });
     this.clearSelection(); if (dn.length || dc.length) this.onCanvasChanged?.();
+  }
+
+  /**
+   * Deletes nodes and wires as one undo step, including the config their wires
+   * had injected into surviving nodes. Each wire is owned by the first deleted
+   * node it touches, so no wire is ever restored twice or left half-attached.
+   */
+  private removeGraphParts(dn: CanvasNode[], dc: Connector[], label: string): void {
+    const gone = new Set(dn.map(n => n.data.id));
+    this.transact(label, () => {
+      const targets = dc.map(c => c.data.to_node).filter(id => !gone.has(id));
+      const before = this.configKeys(targets);
+      for (const n of dn) this.nodes.delete(n.data.id);
+      for (const c of dc) this.connectors.delete(c.data.id);
+      for (const c of dc) this.clearDynamicPortExpr(c);
+      const owned = new Set<Connector>();
+      for (const n of dn) {
+        const own = dc.filter(c => !owned.has(c) && (c.data.from_node === n.data.id || c.data.to_node === n.data.id));
+        own.forEach(c => owned.add(c));
+        this.pushUndo({ type: "delete_node", node: n, connectors: own });
+      }
+      for (const c of dc) if (!owned.has(c)) this.pushUndo({ type: "delete_edge", connector: c });
+      const configs = this.diffConfigKeys(before, this.configKeys(targets));
+      if (configs.length) this.pushUndo({ type: "config_patch", configs });
+    });
+  }
+
+  /** Removes one wire as an undo step; used by right-click delete. */
+  deleteConnector(conn: Connector): void {
+    if (this.connectors.get(conn.data.id) !== conn) return;
+    this.removeGraphParts([], [conn], "Delete wire");
+    if (this.selectedConn === conn) { conn.selected = false; this.selectedConn = null; }
+    this.onCanvasChanged?.();
   }
 
   // ── Undo ──────────────────────────────────────────────────────────────────
 
-  pushUndo(a: UndoAction) { this.undoMgr.push(a); }
-  undo() { this.undoMgr.undo(); }
-  redo() { this.undoMgr.redo(); }
+  pushUndo(a: UndoAction, label?: string) { this.undoMgr.push(a, { label }); }
+  /** Groups every pushUndo made inside `fn` into one undo step. */
+  transact<T>(label: string, fn: () => T): T { return this.undoMgr.transact(label, fn); }
+  undo(): boolean { return this.undoMgr.undo().ok; }
+  redo(): boolean { return this.undoMgr.redo().ok; }
+  canUndo(): boolean { return this.undoMgr.canUndo(); }
+  canRedo(): boolean { return this.undoMgr.canRedo(); }
+  historyState(): HistoryState { return this.undoMgr.state(); }
+  undoStep(): HistoryResult { return this.undoMgr.undo(); }
+  redoStep(): HistoryResult { return this.undoMgr.redo(); }
+
+  /** Property edits (name, enabled, retry, config) become undoable between begin and commit. */
+  beginNodeEdit(n: CanvasNode) { this.undoMgr.trackNode(n); }
+  commitNodeEdit(n: CanvasNode, removedWires: Connector[] = []) { this.undoMgr.commitNode(n, { wires: removedWires }); }
+  /** Applies `mutate` to one node as a single, non-merging undo step. */
+  editNode(n: CanvasNode, mutate: () => void) { this.undoMgr.editNode(n, mutate); this.onCanvasChanged?.(); }
+
+  /** True while a drag, wire pull, box-select or cut is in flight; undo would corrupt its start state. */
+  isGestureActive(): boolean { return this.input?.isGestureActive?.() ?? false; }
+
+  /**
+   * Runs after every undo/redo: drops selection (closing the config popover,
+   * whose fields may now be stale), selects what the step touched so the person
+   * can see it, and scrolls it into view when it is off-screen.
+   */
+  afterHistoryApplied(ids: string[]): void {
+    this.clearSelection();
+    const live: CanvasNode[] = [];
+    for (const id of ids) { const n = this.nodes.get(id); if (n) { this.selectNode(n); live.push(n); } }
+    this.revealNodes(live);
+  }
+
+  private revealNodes(nodes: CanvasNode[]): void {
+    if (!nodes.length || !this.el) return;
+    const r = this.el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return;
+    const x0 = -this.panX / this.zoom, x1 = (r.width - this.panX) / this.zoom;
+    const y0 = -this.panY / this.zoom, y1 = (unobstructedHeight(r) - this.panY) / this.zoom;
+    const visible = nodes.some(n => {
+      const p = n.data.position;
+      return p.x + NODE_WIDTH > x0 && p.x < x1 && p.y + n.height > y0 && p.y < y1;
+    });
+    if (visible) return;
+    const n = nodes[0];
+    this.centerOn(n.data.position.x + NODE_WIDTH / 2, n.data.position.y + n.height / 2);
+    this.onViewportChange?.();
+  }
 
   // ── Placement ─────────────────────────────────────────────────────────────
 
@@ -946,12 +1034,14 @@ export class Canvas {
     const ids = this.selectedNodes.size > 0 ? [...this.selectedNodes] : this.selectedNode ? [this.selectedNode.data.id] : [];
     if (!ids.length) return;
     const news: CanvasNode[] = [];
-    for (const id of ids) {
-      const orig = this.nodes.get(id); if (!orig) continue;
-      const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
-      this.snap.avoidOverlap(copy);
-      this.nodes.set(copy.data.id, copy); this.pushUndo({ type: "add_node", node: copy }); news.push(copy);
-    }
+    this.transact(ids.length === 1 ? "Duplicate node" : `Duplicate ${ids.length} nodes`, () => {
+      for (const id of ids) {
+        const orig = this.nodes.get(id); if (!orig) continue;
+        const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
+        this.snap.avoidOverlap(copy);
+        this.nodes.set(copy.data.id, copy); this.pushUndo({ type: "add_node", node: copy }); news.push(copy);
+      }
+    });
     this.clearSelection(); for (const n of news) this.selectNode(n); this.onCanvasChanged?.();
   }
 
@@ -976,8 +1066,6 @@ export class Canvas {
     }
 
     const node = createNodeFromDescriptor(desc, px, py);
-    this.nodes.set(node.data.id, node);
-    this.pushUndo({ type: "add_node", node });
     if (this._pendingPresetConfig) {
       Object.assign(node.data.config, this._pendingPresetConfig);
       this._pendingPresetConfig = undefined;
@@ -987,7 +1075,11 @@ export class Canvas {
       this._pendingPresetName = undefined;
     }
     this.snap.avoidOverlap(node);
-    this.tryWireInsert(node);
+    this.transact(`Add "${node.data.name}"`, () => {
+      this.nodes.set(node.data.id, node);
+      this.pushUndo({ type: "add_node", node });
+      this.tryWireInsert(node);
+    });
     this.onCanvasChanged?.();
     this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
     return node;
@@ -1064,11 +1156,12 @@ export class Canvas {
     if (this._pendingPresetName)   { node.data.name = this._pendingPresetName; this._pendingPresetName = undefined; }
 
     this.snap.avoidOverlap(node);
-    this.nodes.set(node.data.id, node);
-    this.pushUndo({ type: "add_node", node });
-    this.onCanvasChanged?.();
-
-    this.connectOrReplace(drop.fromNode, drop.fromPort, node.data.id, desc.ports.inputs[0].id);
+    this.transact(`Add "${node.data.name}"`, () => {
+      this.nodes.set(node.data.id, node);
+      this.pushUndo({ type: "add_node", node });
+      this.onCanvasChanged?.();
+      this.connectOrReplace(drop.fromNode, drop.fromPort, node.data.id, desc.ports.inputs[0].id);
+    });
   }
 
   completeInputWireDrop(desc: NodeDescriptor): void {
@@ -1083,11 +1176,12 @@ export class Canvas {
     const node = createNodeFromDescriptor(desc, px, py);
 
     this.snap.avoidOverlap(node);
-    this.nodes.set(node.data.id, node);
-    this.pushUndo({ type: "add_node", node });
-    this.onCanvasChanged?.();
-
-    this.connectOrReplace(node.data.id, desc.ports.outputs[0].id, drop.toNode, drop.toPort);
+    this.transact(`Add "${node.data.name}"`, () => {
+      this.nodes.set(node.data.id, node);
+      this.pushUndo({ type: "add_node", node });
+      this.onCanvasChanged?.();
+      this.connectOrReplace(node.data.id, desc.ports.outputs[0].id, drop.toNode, drop.toPort);
+    });
   }
 }
 
