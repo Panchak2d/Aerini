@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-serial_test = "3"
+serial_test = "4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
