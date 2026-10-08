@@ -64,11 +64,11 @@ export class ContextMenu {
       false,
       () => {
         const ids = isMultiSelect ? [...c.selectedNodes] : [node.data.id];
-        for (const id of ids) {
-          const n = c.nodes.get(id);
-          if (n) n.disabled = !n.disabled;
-        }
-        c.onCanvasChanged?.();
+        const targets = ids.map(id => c.nodes.get(id)).filter((n): n is CanvasNode => !!n);
+        const verb = node.disabled ? "Enable" : "Disable";
+        c.transact(targets.length > 1 ? `${verb} ${targets.length} nodes` : `${verb} "${node.data.name}"`, () => {
+          for (const n of targets) c.editNode(n, () => { n.disabled = !n.disabled; });
+        });
       }
     );
 
@@ -134,7 +134,7 @@ export class ContextMenu {
       settled = true;
       document.removeEventListener("mousedown", dismiss, true);
       const v = inp.value.trim();
-      if (v) { node.data.name = v; c.onCanvasChanged?.(); }
+      if (v && v !== node.data.name) c.editNode(node, () => { node.data.name = v; });
       inp.remove();
     };
     dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };

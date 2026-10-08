@@ -4,7 +4,7 @@ import { InputHandler } from "../canvas/InputHandler";
 import { Canvas } from "../canvas/Canvas";
 import { Connector } from "../canvas/Connector";
 import { CanvasNode } from "../canvas/Node";
-import type { UndoAction } from "../canvas/UndoManager";
+import { UndoManager } from "../canvas/UndoManager";
 import { serialize, deserialize, registerNodeDescriptors } from "../canvas/CanvasSerializer";
 import { checkDangerousNodes } from "../validation";
 import type { NodeDescriptor } from "../ipc/workflow";
@@ -44,45 +44,63 @@ function makeConnector(id: string, fromNode: string, toNode: string): Connector 
 }
 
 // ---------------------------------------------------------------------------
-// deleteSelected must partition connectors per node, so
-// undoing one node from a multi-node delete can't resurrect a connector
-// whose other endpoint is a still-deleted sibling.
+// deleteSelected is one undo step; each wire is restored exactly once, and a
+// wire between two deleted nodes can never come back dangling.
 // ---------------------------------------------------------------------------
 
-describe("Canvas.deleteSelected — per-node undo partitioning", () => {
-  it("each delete_node action only carries connectors touching that node", () => {
-    const nA = { data: { id: "A" } } as unknown as CanvasNode;
-    const nB = { data: { id: "B" } } as unknown as CanvasNode;
-    const cAB = makeConnector("e_ab", "A", "B");          // touches both deleted nodes
-    const cAX = makeConnector("e_ax", "A", "X");          // touches only A (X survives)
+describe("Canvas.deleteSelected — atomic undo", () => {
+  function setup() {
+    const canvas = Object.create(Canvas.prototype) as Canvas & Record<string, unknown>;
+    const a = makeNode("A"), b = makeNode("B"), x = makeNode("X");
+    canvas.nodes = new Map([["A", a], ["B", b], ["X", x]]);
+    const cAB = makeConnector("e_ab", "A", "B");
+    const cAX = makeConnector("e_ax", "A", "X");
+    canvas.connectors = new Map([["e_ab", cAB], ["e_ax", cAX]]);
+    canvas.selectedNodes = new Set(["A", "B"]);
+    canvas.selectedNode = null;
+    canvas.selectedConn = null;
+    canvas.onCanvasChanged = vi.fn();
+    canvas.undoMgr = new UndoManager(canvas);
+    return { canvas, a, b, x, cAB, cAX };
+  }
+  const depth = (c: Canvas) => (c.undoMgr as unknown as { stack: unknown[] }).stack.length;
 
-    const pushed: UndoAction[] = [];
-    const fakeThis = {
-      selectedNodes: new Set(["A", "B"]),
-      nodes: new Map<string, CanvasNode>([["A", nA], ["B", nB]]),
-      connectors: new Map<string, Connector>([["e_ab", cAB], ["e_ax", cAX]]),
-      selectedConn: null,
-      clearDynamicPortExpr: vi.fn(),
-      pushUndo: (a: UndoAction) => pushed.push(a),
-      clearSelection: vi.fn(),
-      onCanvasChanged: null,
-    };
+  it("deleting several nodes is one undo step that restores every node and wire exactly once", () => {
+    const { canvas, a, b, cAB, cAX } = setup();
+    canvas.deleteSelected();
+    expect(canvas.nodes.size).toBe(1);
+    expect(canvas.connectors.size).toBe(0);
+    expect(depth(canvas)).toBe(1);
 
-    Canvas.prototype.deleteSelected.call(fakeThis as unknown as Canvas);
+    canvas.undo();
+    expect(canvas.nodes.get("A")).toBe(a);
+    expect(canvas.nodes.get("B")).toBe(b);
+    expect([...canvas.connectors.keys()].sort()).toEqual(["e_ab", "e_ax"]);
+    expect(canvas.connectors.get("e_ab")).toBe(cAB);
+    expect(canvas.connectors.get("e_ax")).toBe(cAX);
 
-    const deleteActions = pushed.filter(a => a.type === "delete_node") as Extract<UndoAction, { type: "delete_node" }>[];
-    expect(deleteActions).toHaveLength(2);
+    canvas.redo();
+    expect(canvas.nodes.size).toBe(1);
+    expect(canvas.connectors.size).toBe(0);
+  });
 
-    const forA = deleteActions.find(a => a.node.data.id === "A")!;
-    const forB = deleteActions.find(a => a.node.data.id === "B")!;
+  it("edge case: a wire selected together with nodes is restored with them, and a stale selection deletes nothing twice", () => {
+    const { canvas, cAX } = setup();
+    canvas.selectedNodes = new Set(["B"]);
+    canvas.selectedConn = cAX;
+    canvas.deleteSelected();
+    expect(canvas.connectors.size).toBe(0);
+    expect(depth(canvas)).toBe(1);
 
-    // A's action must not carry a connector that only touches B (none exist
-    // here, but it also must not carry more than what touches A).
-    expect(forA.connectors.map(c => c.data.id).sort()).toEqual(["e_ab", "e_ax"]);
-    // B's action must NOT carry e_ax — that connector never touched B. Before
-    // the fix, both actions shared one array containing every deleted
-    // connector regardless of which node it actually touched.
-    expect(forB.connectors.map(c => c.data.id).sort()).toEqual(["e_ab"]);
+    canvas.undo();
+    expect([...canvas.connectors.keys()].sort()).toEqual(["e_ab", "e_ax"]);
+
+    canvas.selectedNodes = new Set();
+    canvas.selectedConn = cAX;
+    canvas.deleteSelected();
+    canvas.selectedConn = cAX;
+    canvas.deleteSelected();
+    expect(depth(canvas)).toBe(1);
   });
 });
 

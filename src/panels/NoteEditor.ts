@@ -34,8 +34,11 @@ export function showNoteEditor(
   ta.style.minHeight = `${sh}px`;
   ta.style.resize = "both";
 
+  canvas.beginNodeEdit(node);
+
   ta.addEventListener("input", () => {
     node.data.config["text"] = ta.value;
+    canvas.commitNodeEdit(node);
     onChange();
   });
 
@@ -58,6 +61,7 @@ export function showNoteEditor(
       node.data.config["color"] = c;
       colorRow.querySelectorAll(".note-color-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
+      canvas.commitNodeEdit(node);
       onChange();
     });
     colorRow.appendChild(btn);

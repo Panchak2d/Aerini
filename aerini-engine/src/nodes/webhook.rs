@@ -90,6 +90,13 @@ pub fn mint_signed_token(secret: &str, path: &str, ttl_secs: i64) -> String {
     format!("{SIGNED_TOKEN_PREFIX}{expiry}.{sig_b64}")
 }
 
+/// True when `ts` is within `window_secs` of `now` in either direction.
+/// `abs_diff` cannot overflow, so a hostile header such as `i64::MIN` is
+/// rejected like any other out-of-window value instead of panicking.
+fn timestamp_within_window(now: i64, ts: i64, window_secs: u64) -> bool {
+    now.abs_diff(ts) <= window_secs
+}
+
 /// Validates a token of the form `awh1.<expiry_unix>.<sig>` against `secret`/`path`.
 /// Constant-time signature comparison, same rationale as the raw-secret path below.
 fn validate_signed_token(secret: &str, path: &str, rest: &str) -> bool {
@@ -628,7 +635,7 @@ async fn handle_request(
     // replay by sending a fresh timestamp with any body. For body integrity, verify
     // a platform HMAC header in a downstream Code node.
     if st.validate_timestamp {
-        const WINDOW_SECS: i64 = 300; // 5 minutes
+        const WINDOW_SECS: u64 = 300; // 5 minutes
         let provided_ts = headers
             .get("x-webhook-timestamp")
             .and_then(|v| v.as_str())
@@ -641,11 +648,7 @@ async fn handle_request(
                     .expect("static response builder parameters are infallible")));
             }
             Some(ts) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if (now - ts).abs() > WINDOW_SECS {
+                if !timestamp_within_window(unix_now(), ts, WINDOW_SECS) {
                     return Ok(with_cors(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Full::new(Bytes::from_static(b"Timestamp too old or too far in future")))
@@ -688,6 +691,17 @@ mod tests {
     use crate::model::ExecutionContext;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn timestamp_window_is_symmetric_inclusive_and_overflow_safe() {
+        let now = 1_800_000_000;
+        assert!(timestamp_within_window(now, now - 300, 300));
+        assert!(timestamp_within_window(now, now + 300, 300));
+        assert!(!timestamp_within_window(now, now - 301, 300));
+        assert!(!timestamp_within_window(now, now + 301, 300));
+        assert!(!timestamp_within_window(now, i64::MIN, 300));
+        assert!(!timestamp_within_window(now, i64::MAX, 300));
+    }
 
     fn make_input(node_id: &str, port: u64, path: &str, variables: HashMap<String, Value>) -> NodeInput {
         NodeInput {

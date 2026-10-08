@@ -31,6 +31,9 @@ function makeCanvas() {
     ["ai", node("ai", ["input", "attachments"], ["output"])],
   ]);
   canvas.connectors = new Map();
+  canvas.selectedNodes = new Set();
+  canvas.selectedNode = null;
+  canvas.selectedConn = null;
   canvas.onCanvasChanged = vi.fn();
   canvas.onWarn = vi.fn();
   canvas.undoMgr = new UndoManager(canvas);

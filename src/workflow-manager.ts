@@ -1542,8 +1542,8 @@ export class WorkflowManager {
     this.maxDurationSecs    = undefined;
     this.chatSettings       = { ...DEFAULT_CHAT_SETTINGS };
     this.markUnsaved(false);
-    this.canvas.nodes.clear();
-    this.canvas.connectors.clear();
+    this.canvas.nodes = new Map();
+    this.canvas.connectors = new Map();
     this.canvas.clearSelection();
     this.onPanelClose?.();
     this.onTitleChange("Untitled");
