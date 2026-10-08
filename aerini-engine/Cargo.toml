@@ -192,7 +192,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
-serial_test = "3"
+serial_test = "4"
 # hooks: Connection::authorizer, used only by
 # nodes::ai_memory::tests::append_fails_cleanly_when_seq_lookup_errors to
 # force get_next_seq's SELECT to fail without a trigger (triggers don't fire
