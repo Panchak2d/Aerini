@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::NodePorts;
-use super::util::ordered_node_outputs;
+use super::util::{cfg_u64_opt, ordered_node_outputs};
 
 pub struct JsonNode;
 
@@ -27,7 +27,8 @@ impl crate::node::Node for JsonNode {
                 },
                 "input_text": { "type": "string", "description": "JSON string to parse" },
                 "pointer":    { "type": "string", "description": "JSON pointer e.g. /user/name or /0/temperature" },
-                "index":      { "type": "number", "description": "Array index for array_get", "default": 0 }
+                "index":      { "type": "number", "description": "Array index for array_get", "default": 0 },
+                "source_node": { "type": "string", "description": "Node ID whose output stringify, extract, merge and array_get read. Leave blank to read the whole run context (deprecated)." }
             }
         })
     }
@@ -41,90 +42,138 @@ impl crate::node::Node for JsonNode {
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let op = input.input["operation"].as_str().unwrap_or("extract");
 
-        match op {
-            "parse" => {
-                let text = input.input["input_text"].as_str().unwrap_or("{}");
-                match serde_json::from_str::<Value>(text) {
-                    Ok(v)  => NodeOutput::success(json!({ "result": v })),
-                    Err(e) => NodeOutput::failure(
-                        NodeError::unrecoverable("PARSE_FAILED", e.to_string())
-                    ),
-                }
-            }
+        if op == "parse" {
+            let text = input.input["input_text"].as_str().unwrap_or("{}");
+            return match serde_json::from_str::<Value>(text) {
+                Ok(v)  => NodeOutput::success(json!({ "result": v })),
+                Err(e) => NodeOutput::failure(
+                    NodeError::unrecoverable("PARSE_FAILED", e.to_string())
+                ),
+            };
+        }
 
+        if !matches!(op, "stringify" | "extract" | "merge" | "array_get") {
+            return NodeOutput::failure(
+                NodeError::unrecoverable("UNKNOWN_OPERATION", format!("'{}' is not a valid operation", op))
+            );
+        }
+
+        let scope = match source_scope(&input) {
+            Ok(s) => s,
+            Err(failure) => return failure,
+        };
+
+        let mut logs = Vec::new();
+        if scope.is_none() {
+            tracing::warn!(node_id = %input.node_id, "{}", WHOLE_CONTEXT_WARNING);
+            logs.push(format!("Warning: {}", WHOLE_CONTEXT_WARNING));
+        }
+
+        let result = match op {
             "stringify" => {
-                let combined: Value = json!(input.context.node_outputs);
-                let s = serde_json::to_string_pretty(&combined).unwrap_or_default();
-                NodeOutput::success(json!({ "result": s }))
+                let s = match scope {
+                    Some(v) => serde_json::to_string_pretty(v),
+                    None    => serde_json::to_string_pretty(&json!(input.context.node_outputs)),
+                };
+                json!({ "result": s.unwrap_or_default() })
             }
 
             "extract" => {
-                let pointer = input.input["pointer"].as_str().unwrap_or("/");
-                let combined = json!(input.context.node_outputs);
-
-                let ptr = if pointer.starts_with('/') {
-                    pointer.to_string()
-                } else {
-                    format!("/{}", pointer)
-                };
-
-                let extracted = combined.pointer(&ptr).cloned().unwrap_or(Value::Null);
-                NodeOutput::success_with_logs(
-                    json!({ "result": extracted }),
-                    vec![format!("Extracted pointer '{}'", ptr)],
-                )
+                let pointer = input.input["pointer"].as_str();
+                match (scope, pointer) {
+                    (Some(v), None | Some("")) => json!({ "result": v }),
+                    (Some(v), Some(p)) => {
+                        let ptr = normalize_pointer(p);
+                        logs.push(format!("Extracted pointer '{}'", ptr));
+                        json!({ "result": v.pointer(&ptr).cloned().unwrap_or(Value::Null) })
+                    }
+                    (None, p) => {
+                        let ptr = normalize_pointer(p.unwrap_or("/"));
+                        logs.push(format!("Extracted pointer '{}'", ptr));
+                        let combined = json!(input.context.node_outputs);
+                        json!({ "result": combined.pointer(&ptr).cloned().unwrap_or(Value::Null) })
+                    }
+                }
             }
 
             "merge" => {
-                // iterate in real completion order so which
-                // node's keys "win" a collision is deterministic (the most
-                // recently completed node wins) instead of depending on the
-                // raw HashMap's unspecified iteration order.
-                let mut merged = serde_json::Map::new();
-                for (_, output_val) in ordered_node_outputs(&input.context) {
-                    if let Some(obj) = output_val.as_object() {
-                        for (k, v) in obj {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                NodeOutput::success(json!({ "result": merged }))
-            }
-
-            "array_get" => {
-                let idx = input.input["index"].as_u64().unwrap_or(0) as usize;
-
-                // "first array found" now means first in real
-                // completion order, not first in the raw HashMap's
-                // unspecified iteration order.
-                for (_, output_val) in ordered_node_outputs(&input.context) {
-                    if let Some(arr) = output_val.as_array() {
-                        let item = arr.get(idx).cloned().unwrap_or(Value::Null);
-                        return NodeOutput::success(json!({ "result": item, "index": idx, "length": arr.len() }));
-                    }
-                    // Check one level deeper. serde_json::Map is BTreeMap-backed
-                    // (no `preserve_order` feature in Cargo.toml), so this inner
-                    // iteration is already deterministic.
-                    if let Some(obj) = output_val.as_object() {
-                        for v in obj.values() {
-                            if let Some(arr) = v.as_array() {
-                                let item = arr.get(idx).cloned().unwrap_or(Value::Null);
-                                return NodeOutput::success(json!({ "result": item, "index": idx, "length": arr.len() }));
+                let merged = match scope {
+                    Some(v) => v.as_object().cloned().unwrap_or_default(),
+                    None => {
+                        let mut merged = serde_json::Map::new();
+                        for (_, output_val) in ordered_node_outputs(&input.context) {
+                            if let Some(obj) = output_val.as_object() {
+                                for (k, v) in obj {
+                                    merged.insert(k.clone(), v.clone());
+                                }
                             }
                         }
+                        merged
                     }
-                }
-
-                NodeOutput::success(json!({ "result": null, "index": idx, "note": "no array found in context" }))
+                };
+                json!({ "result": merged })
             }
 
-            other => NodeOutput::failure(
-                NodeError::unrecoverable("UNKNOWN_OPERATION", format!("'{}' is not a valid operation", other))
-            ),
-        }
+            _ => {
+                let idx = match cfg_u64_opt(&input.input["index"], "index") {
+            Ok(v) => v.unwrap_or(0) as usize,
+            Err(e) => return NodeOutput::failure(e),
+        };
+                let picked = match scope {
+                    Some(v) => first_array(v).map(|a| pick_item(a, idx)),
+                    None => ordered_node_outputs(&input.context)
+                        .iter()
+                        .find_map(|(_, v)| first_array(v).map(|a| pick_item(a, idx))),
+                };
+                let note = if scope.is_some() { "no array found in source node" } else { "no array found in context" };
+                picked.unwrap_or_else(|| json!({ "result": null, "index": idx, "note": note }))
+            }
+        };
+
+        NodeOutput::success_with_logs(result, logs)
     }
 }
 
+const WHOLE_CONTEXT_WARNING: &str = "json: reading the whole run context; set source_node";
+
+fn source_scope(input: &NodeInput) -> Result<Option<&Value>, NodeOutput> {
+    match &input.input["source_node"] {
+        Value::Null => Ok(None),
+        Value::String(id) if id.trim().is_empty() => Ok(None),
+        Value::String(id) => match input.context.node_outputs.get(id.as_str()) {
+            Some(out) => Ok(Some(out)),
+            None => Err(NodeOutput::failure(NodeError::unrecoverable(
+                "SOURCE_NOT_FOUND",
+                format!("Node '{}' has no output in context", id),
+            ))),
+        },
+        other => Err(NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_SOURCE_NODE",
+            format!(
+                "source_node is set to a non-string value ({}), which is not a valid node ID",
+                other
+            ),
+        ))),
+    }
+}
+
+fn normalize_pointer(pointer: &str) -> String {
+    if pointer.starts_with('/') {
+        pointer.to_string()
+    } else {
+        format!("/{}", pointer)
+    }
+}
+
+fn first_array(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .as_array()
+        .or_else(|| value.as_object()?.values().find_map(Value::as_array))
+}
+
+fn pick_item(arr: &[Value], idx: usize) -> Value {
+    json!({ "result": arr.get(idx).cloned().unwrap_or(Value::Null), "index": idx, "length": arr.len() })
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -367,6 +416,89 @@ mod tests {
         let out = JsonNode.execute(input).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["result"], json!(1));
+    }
+
+    // ── source_node ────────────────────────────────────────────────────────
+
+    fn two_node_context() -> HashMap<String, Value> {
+        let mut outputs = HashMap::new();
+        outputs.insert("a".to_string(), json!({ "name": "Ann", "rows": [1, 2, 3] }));
+        outputs.insert("b".to_string(), json!({ "name": "Bob", "secret": "s3cret", "rows": [9] }));
+        outputs
+    }
+
+    #[tokio::test]
+    async fn source_node_limits_every_operation_to_that_nodes_output() {
+        let run = |op: Value| async move {
+            let out = JsonNode.execute(make_input(op, two_node_context())).await;
+            assert!(out.success, "expected success, got: {:?}", out.error);
+            out.output.unwrap()
+        };
+
+        let s = run(json!({ "operation": "stringify", "source_node": "a" })).await;
+        let reparsed: Value = serde_json::from_str(s["result"].as_str().unwrap()).unwrap();
+        assert_eq!(reparsed, json!({ "name": "Ann", "rows": [1, 2, 3] }), "stringify must serialise only node a");
+
+        let e = run(json!({ "operation": "extract", "source_node": "b", "pointer": "/name" })).await;
+        assert_eq!(e["result"], json!("Bob"), "extract pointer is relative to node b's output");
+
+        let m = run(json!({ "operation": "merge", "source_node": "a" })).await;
+        assert_eq!(m["result"], json!({ "name": "Ann", "rows": [1, 2, 3] }), "merge must not pull in node b's keys");
+
+        let g = run(json!({ "operation": "array_get", "source_node": "b", "index": 0 })).await;
+        assert_eq!(g["result"], json!(9), "array_get must read node b's array");
+    }
+
+    #[tokio::test]
+    async fn source_node_extract_without_pointer_returns_whole_output() {
+        let input = make_input(
+            json!({ "operation": "extract", "source_node": "a" }),
+            two_node_context(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["result"], json!({ "name": "Ann", "rows": [1, 2, 3] }));
+    }
+
+    #[tokio::test]
+    async fn unknown_source_node_fails_with_source_not_found() {
+        let input = make_input(
+            json!({ "operation": "merge", "source_node": "ghost" }),
+            two_node_context(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "SOURCE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn non_string_source_node_fails_with_invalid_source_node() {
+        let input = make_input(
+            json!({ "operation": "stringify", "source_node": 5 }),
+            two_node_context(),
+        );
+        let out = JsonNode.execute(input).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_SOURCE_NODE");
+    }
+
+    #[tokio::test]
+    async fn unset_or_blank_source_node_warns_about_reading_whole_context() {
+        for cfg in [
+            json!({ "operation": "stringify" }),
+            json!({ "operation": "stringify", "source_node": "  " }),
+        ] {
+            let out = JsonNode.execute(make_input(cfg, two_node_context())).await;
+            assert!(out.success);
+            assert!(
+                out.logs.iter().any(|l| l.contains("reading the whole run context; set source_node")),
+                "expected whole-context warning, got: {:?}", out.logs
+            );
+        }
+        let scoped = JsonNode
+            .execute(make_input(json!({ "operation": "stringify", "source_node": "a" }), two_node_context()))
+            .await;
+        assert!(scoped.logs.iter().all(|l| !l.contains("whole run context")));
     }
 
     // ── unknown operation ──────────────────────────────────────────────────

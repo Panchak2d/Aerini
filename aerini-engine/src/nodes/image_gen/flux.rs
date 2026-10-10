@@ -3,9 +3,12 @@ use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::{check_host_ssrf_from_url, read_json_response_capped, SsrfPolicy};
+use crate::nodes::util::{
+    check_host_ssrf_from_url, poll_network_fault, poll_status_fault,
+    read_json_response_capped, PollFault, PollRetry, SsrfPolicy,
+};
 
-use super::shared::{network_err, download_to_base64};
+use super::shared::{network_err, download_to_base64, ImageRun};
 
 // -- BFL FLUX (flux-pro-1.1 and flux-2-pro) -----------------------------------
 //
@@ -13,13 +16,12 @@ use super::shared::{network_err, download_to_base64};
 //   1. POST submit -> { id, polling_url }
 //   2. GET polling_url (x-key auth) until status == "Ready" or terminal failure
 //   3. Download result.sample (expires 10 min) -> base64 -> return in contract
-// n>1: loop sequentially (no native batch endpoint).
+// n>1: loop sequentially (no native batch endpoint). The loop stops on the codes
+// in shared::stops_the_loop; any other failure is skipped and the rest run.
 
 const BFL_POLL_MAX_ITERS: u32  = 240;  // 120 s at 500 ms per poll
 const BFL_POLL_INTERVAL_MS: u64 = 500;
 
-// Bundles the per-request fields shared by gen_flux and call_flux_one --
-// clippy::too_many_arguments (max 7) was exceeded by both (8 and 9 args).
 pub(super) struct FluxRequest<'a> {
     pub(super) endpoint: &'a str, // "/v1/flux-pro-1.1" or "/v1/flux-2-pro"
     pub(super) source:   &'a str, // "flux_pro" or "flux_2_pro"
@@ -31,47 +33,22 @@ pub(super) struct FluxRequest<'a> {
 
 pub(super) async fn gen_flux(client: reqwest::Client, req: FluxRequest<'_>, n: usize) -> NodeOutput {
     let ts = Utc::now().timestamp_millis();
-    let mut files: Vec<Value>     = Vec::new();
-    let mut logs:  Vec<String>    = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-    let mut last_error: Option<NodeError> = None;
+    let mut run = ImageRun::new(format!("{} image", req.source), n);
 
     for i in 0..n {
         match call_flux_one(&client, &req, ts, i).await {
-            Ok(media_obj) => {
-                logs.push(format!("{} image {}/{} generated", req.source, i + 1, n));
-                files.push(media_obj);
-            }
+            Ok(media_obj) => run.generated(i, media_obj),
             Err(e) => {
-                let msg = format!("{} image {}/{} failed: [{}] {}", req.source, i + 1, n, e.code, e.message);
-                logs.push(msg.clone());
-                failures.push(msg);
-                let is_terminal = matches!(e.code.as_str(), "INVALID_API_KEY" | "INSUFFICIENT_CREDITS");
-                last_error = Some(e);
-                if is_terminal { break; }
+                if run.failed(i, e) { break; }
             }
         }
     }
 
-    if files.is_empty() {
-        let err = last_error.unwrap_or_else(|| {
-            NodeError::unrecoverable("ALL_IMAGES_FAILED", failures.join("; "))
-        });
-        return NodeOutput::failure_with_logs(err, logs);
-    }
-
-    if !failures.is_empty() {
-        logs.push(format!(
-            "Partial success: {}/{} images generated. {} failed.",
-            files.len(), n, failures.len()
-        ));
-    }
-
-    NodeOutput::success_with_logs(
-        json!({ "files": files, "count": files.len(), "source": req.source }),
-        logs,
-    )
+    run.finish(req.source)
 }
+
+const BFL_NOT_FOUND_MAX: u32 = 5;
+const BFL_NOT_FOUND_DELAY_CAP_MS: u64 = 8_000;
 
 async fn call_flux_one(
     client: &reqwest::Client,
@@ -92,11 +69,6 @@ async fn call_flux_one(
         .get(req.source)
         .expect("flux_pro/flux_2_pro always registered");
 
-    // was a manual `.header("x-key", req.api_key)` — registry-managed
-    // now, matching every other image-gen provider file. flux_pro/flux_2_pro
-    // are already registered with AuthStyle::HeaderKey("x-key") for exactly
-    // this purpose (provider/records.rs); a future auth-scheme change there
-    // now applies here automatically instead of silently not applying.
     let resp = crate::provider::ProviderRegistry::apply_auth(
         record,
         client.post(&url),
@@ -110,7 +82,7 @@ async fn call_flux_one(
 
     let status = resp.status().as_u16();
     let json: Value = read_json_response_capped(resp).await.map_err(|e| {
-        NodeError::unrecoverable("PARSE_ERROR", e)
+        crate::nodes::util::provider_error(status, "PARSE_ERROR", e)
     })?;
 
     if status >= 400 {
@@ -133,12 +105,35 @@ async fn call_flux_one(
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("PROTOCOL_ERROR", "BFL response missing polling_url"))?
         .to_string();
+    let job_id = json["id"].as_str().unwrap_or("unknown");
 
-    let image_url = bfl_poll(client, record, &polling_url, req.api_key).await?;
+    let image_url = bfl_poll(client, record, &polling_url, req.api_key)
+        .await
+        .map_err(|e| timeout_with_job_ref(e, job_id, &polling_url))?;
     let b64       = download_to_base64(client, &image_url).await?;
     let filename  = format!("{}_{}_{}.png", req.source, ts, index);
 
     Ok(json!({ "filename": filename, "data": b64, "mime_type": "image/png" }))
+}
+
+fn timeout_with_job_ref(e: NodeError, job_id: &str, polling_url: &str) -> NodeError {
+    if e.code != "TIMEOUT" && e.code != "TASK_NOT_FOUND" {
+        return e;
+    }
+    NodeError::unrecoverable(
+        e.code,
+        format!("{} Job id: {}. Polling URL: {}", e.message, job_id, polling_url),
+    )
+}
+
+fn moderated_error(status: &str, json: &Value) -> NodeError {
+    let what = if status == "Request Moderated" { "rejected the prompt" } else { "withheld the generated image" };
+    let detail = match &json["details"] {
+        Value::Null => String::new(),
+        Value::Object(m) if m.is_empty() => String::new(),
+        d => format!(": {}", d.to_string().chars().take(300).collect::<String>()),
+    };
+    NodeError::unrecoverable("CONTENT_POLICY_VIOLATION", format!("BFL {} ({}){}", what, status, detail))
 }
 
 async fn bfl_poll(
@@ -153,10 +148,28 @@ async fn bfl_poll(
         NodeError::unrecoverable("SSRF_BLOCKED", e)
     })?;
 
-    for _ in 0..BFL_POLL_MAX_ITERS {
-        tokio::time::sleep(std::time::Duration::from_millis(BFL_POLL_INTERVAL_MS)).await;
+    bfl_poll_loop(client, record, polling_url, api_key, BFL_POLL_INTERVAL_MS, BFL_POLL_MAX_ITERS).await
+}
 
-        let resp = crate::provider::ProviderRegistry::apply_auth(
+async fn bfl_poll_loop(
+    client: &reqwest::Client,
+    record: &crate::provider::ProviderRecord,
+    polling_url: &str,
+    api_key: &str,
+    interval_ms: u64,
+    max_iters: u32,
+) -> Result<String, NodeError> {
+    let mut retry = PollRetry::new("BFL");
+    let mut not_found: u32 = 0;
+
+    for _ in 0..max_iters {
+        let not_found_delay = interval_ms
+            .saturating_mul(1u64 << not_found.min(4))
+            .min(BFL_NOT_FOUND_DELAY_CAP_MS.max(interval_ms));
+        let delay = retry.delay_ms(interval_ms).max(if not_found > 0 { not_found_delay } else { 0 });
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+        let resp = match crate::provider::ProviderRegistry::apply_auth(
             record,
             client.get(polling_url),
             api_key,
@@ -164,11 +177,42 @@ async fn bfl_poll(
             .header("Accept", "application/json")
             .send()
             .await
-            .map_err(network_err)?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                retry.fault(poll_network_fault(&e))?;
+                continue;
+            }
+        };
 
-        let json: Value = read_json_response_capped(resp).await.map_err(|e| {
-            NodeError::unrecoverable("PARSE_ERROR", format!("BFL poll parse error: {}", e))
-        })?;
+        if let Some(fault) = poll_status_fault(resp.status().as_u16()) {
+            retry.fault(fault)?;
+            continue;
+        }
+
+        let json: Value = match read_json_response_capped(resp).await {
+            Ok(v) => v,
+            Err(e) => {
+                retry.fault(PollFault::Transient(format!("unreadable body: {}", e)))?;
+                continue;
+            }
+        };
+        retry.good();
+
+        if json["status"].as_str() == Some("Task not found") {
+            not_found += 1;
+            if not_found >= BFL_NOT_FOUND_MAX {
+                return Err(NodeError::unrecoverable(
+                    "TASK_NOT_FOUND",
+                    format!(
+                        "BFL reported \"Task not found\" {} times in a row. The job was not resubmitted.",
+                        not_found
+                    ),
+                ));
+            }
+            continue;
+        }
+        not_found = 0;
 
         match json["status"].as_str() {
             Some("Ready") => {
@@ -180,7 +224,10 @@ async fn bfl_poll(
                         "BFL returned Ready but result.sample is missing",
                     ));
             }
-            Some(s) if matches!(s, "Error" | "Failed" | "Content Moderated" | "Request Moderated") => {
+            Some(s @ ("Request Moderated" | "Content Moderated")) => {
+                return Err(moderated_error(s, &json));
+            }
+            Some(s @ ("Error" | "Failed")) => {
                 let detail = json["result"].as_str()
                     .or_else(|| json["error"].as_str())
                     .unwrap_or("No detail");
@@ -196,8 +243,8 @@ async fn bfl_poll(
     Err(NodeError::unrecoverable(
         "TIMEOUT",
         format!(
-            "BFL generation timed out after {}s",
-            BFL_POLL_MAX_ITERS as u64 * BFL_POLL_INTERVAL_MS / 1000
+            "BFL generation timed out after {}s. The job was not cancelled and may still finish and be billed by the provider.",
+            max_iters as u64 * interval_ms / 1000
         ),
     ))
 }
@@ -234,5 +281,114 @@ mod tests {
             req.headers().get("x-key").map(|v| v.to_str().unwrap()),
             Some("bfl-test-key")
         );
+    }
+    use super::bfl_poll_loop;
+    use crate::nodes::util::poll_test_support::spawn_sequence_mock;
+
+    const READY: &str = r#"{"status":"Ready","result":{"sample":"https://cdn.example/img.png"}}"#;
+    const PENDING: &str = r#"{"status":"Pending"}"#;
+
+    async fn run_poll(responses: Vec<(u16, &'static str)>) -> Result<String, crate::error::NodeError> {
+        let url = spawn_sequence_mock(responses).await;
+        let record = ProviderRegistry::global().get("flux_pro").unwrap();
+        bfl_poll_loop(&reqwest::Client::new(), record, &url, "k", 1, 30).await
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_survives_transient_failures_and_a_good_poll_resets_the_streak() {
+        let sample = run_poll(vec![
+            (503, "x"), (502, "x"), (200, "<html>"), (503, "x"),
+            (200, PENDING),
+            (503, "x"), (503, "x"), (503, "x"), (503, "x"),
+            (200, READY),
+        ])
+        .await
+        .expect("should reach Ready");
+        assert_eq!(sample, "https://cdn.example/img.png");
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_json_4xx_without_status_fails_immediately() {
+        let e = run_poll(vec![(422, r#"{"detail":"bad"}"#)]).await.expect_err("must fail");
+        assert_eq!(e.code, "POLL_REJECTED");
+        assert!(!e.recoverable);
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_gives_up_unrecoverable_when_the_server_goes_away() {
+        let e = run_poll(vec![(200, PENDING)]).await.expect_err("must give up");
+        assert_eq!(e.code, "POLL_FAILED");
+        assert!(!e.recoverable);
+        assert!(e.message.contains("not resubmitted"));
+    }
+
+    use super::{moderated_error, timeout_with_job_ref};
+    use crate::error::NodeError;
+
+    const NOT_FOUND: &str = r#"{"status":"Task not found"}"#;
+
+    #[tokio::test]
+    async fn bfl_poll_gives_up_after_five_task_not_found_in_a_row() {
+        let e = run_poll(vec![(200, NOT_FOUND); 5]).await.expect_err("must fail");
+        assert_eq!(e.code, "TASK_NOT_FOUND");
+        assert!(!e.recoverable);
+        assert!(e.message.contains("not resubmitted"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_tolerates_a_brief_task_not_found_and_any_other_status_resets_the_count() {
+        let mut replies = vec![(200, NOT_FOUND); 4];
+        replies.push((200, PENDING));
+        replies.extend(vec![(200, NOT_FOUND); 4]);
+        replies.push((200, READY));
+        let sample = run_poll(replies).await.expect("should reach Ready");
+        assert_eq!(sample, "https://cdn.example/img.png");
+    }
+
+    #[test]
+    fn a_task_not_found_error_gets_the_job_reference_too() {
+        let e = timeout_with_job_ref(NodeError::unrecoverable("TASK_NOT_FOUND", "m"), "job-1", "https://u");
+        assert_eq!(e.code, "TASK_NOT_FOUND");
+        assert!(e.message.contains("job-1") && e.message.contains("https://u"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_moderated_statuses_end_as_a_content_policy_violation() {
+        for status in ["Request Moderated", "Content Moderated"] {
+            let body: &'static str = Box::leak(
+                format!(r#"{{"status":"{status}","details":{{"moderation_reasons":["x"]}}}}"#).into_boxed_str(),
+            );
+            let e = run_poll(vec![(200, body)]).await.expect_err("must fail");
+            assert_eq!(e.code, "CONTENT_POLICY_VIOLATION", "{status}");
+            assert!(!e.recoverable);
+            assert!(e.message.contains(status) && e.message.contains("moderation_reasons"), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn moderated_error_without_details_has_no_trailing_detail() {
+        let e = moderated_error("Request Moderated", &serde_json::json!({"status": "Request Moderated", "details": {}}));
+        assert!(e.message.ends_with("(Request Moderated)"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn bfl_poll_timeout_says_the_job_may_still_be_billed() {
+        let url = spawn_sequence_mock(vec![(200, PENDING), (200, PENDING)]).await;
+        let record = ProviderRegistry::global().get("flux_pro").unwrap();
+        let e = bfl_poll_loop(&reqwest::Client::new(), record, &url, "k", 1, 2).await.expect_err("must time out");
+        assert_eq!(e.code, "TIMEOUT");
+        assert!(e.message.contains("may still finish and be billed"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_timeout_keeps_the_job_id_and_polling_url_and_other_errors_are_untouched() {
+        let timeout = NodeError::unrecoverable("TIMEOUT", "BFL generation timed out after 120s.");
+        let e = timeout_with_job_ref(timeout, "job-1", "https://api.bfl.ai/v1/get_result?id=job-1");
+        assert_eq!(e.code, "TIMEOUT");
+        assert!(!e.recoverable);
+        assert!(e.message.contains("job-1") && e.message.contains("get_result?id=job-1"), "{}", e.message);
+
+        let other = timeout_with_job_ref(NodeError::unrecoverable("POLL_FAILED", "m"), "job-1", "u");
+        assert_eq!(other.message, "m");
     }
 }

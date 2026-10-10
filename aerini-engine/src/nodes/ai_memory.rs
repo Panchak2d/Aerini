@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::{cfg_bool_opt, cfg_u64_opt, decode_file_data};
 
 use super::ai_prompt::{extract_port_attachments, SUPPORTED_ATTACHMENT_MIMES};
 
@@ -21,6 +22,8 @@ const MAX_SESSION_FILE_BYTES: i64 = 32 * 1024 * 1024;
 const DEFAULT_MAX_STORED_FILES: u64 = 20;
 const DEFAULT_RECALL_FILES: u64 = 5;
 const MAX_RECALL_FILES: u64 = 20;
+const MAX_READ_MESSAGES: u64 = 100_000;
+const MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 struct StoredFile {
     filename:  String,
@@ -183,121 +186,208 @@ impl Node for AiMemoryNode {
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
         let operation = match input.input["operation"].as_str() {
-            Some(op) => op,
+            Some(op) => op.to_string(),
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_OP", "operation is required")),
         };
         let session_id = match input.input["session_id"].as_str() {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => s.to_string(),
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_SESSION", "session_id is required")),
         };
-        let max_messages     = input.input["max_messages"].as_u64().unwrap_or(20) as usize;
-        let max_stored       = input.input["max_stored"].as_u64().unwrap_or(1000).max(1) as i64;
-        let max_stored_files = input.input["max_stored_files"].as_u64().unwrap_or(DEFAULT_MAX_STORED_FILES).clamp(1, 1000) as i64;
-        let max_files        = input.input["max_files"].as_u64().unwrap_or(DEFAULT_RECALL_FILES).clamp(1, MAX_RECALL_FILES) as usize;
-        let include_files    = input.input["include_files"].as_bool().unwrap_or(false);
+        let max_messages = match cfg_u64_opt(&input.input["max_messages"], "max_messages") {
+            Ok(v) => v.unwrap_or(20).min(MAX_READ_MESSAGES) as usize,
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let max_stored = match cfg_u64_opt(&input.input["max_stored"], "max_stored") {
+            Ok(v) => v.unwrap_or(1000).clamp(1, i64::MAX as u64) as i64,
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let max_stored_files = match cfg_u64_opt(&input.input["max_stored_files"], "max_stored_files") {
+            Ok(v) => v.unwrap_or(DEFAULT_MAX_STORED_FILES).clamp(1, 1000) as i64,
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let max_files = match cfg_u64_opt(&input.input["max_files"], "max_files") {
+            Ok(v) => v.unwrap_or(DEFAULT_RECALL_FILES).clamp(1, MAX_RECALL_FILES) as usize,
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let include_files = match cfg_bool_opt(&input.input["include_files"], "include_files") {
+            Ok(v) => v.unwrap_or(false),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let pool = match self.get_pool() {
-            Ok(p)  => p,
+            Ok(p)  => p.clone(),
             Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e)),
         };
-        let mut conn = match pool.get() {
-            Ok(c)  => c,
-            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e.to_string())),
+
+        let files_raw = if matches!(operation.as_str(), "append" | "write") {
+            extract_port_attachments(&input.input["files"])
+        } else {
+            Vec::new()
         };
 
-        match operation {
-            "read" => {
-                match read_messages(&conn, session_id, max_messages) {
-                    Ok(msgs) => {
-                        let count = msgs.len();
-                        let mut out  = json!({ "messages": msgs, "count": count, "session_id": session_id });
-                        let mut logs = vec![format!("Read {} messages from session '{}'", count, session_id)];
-                        if include_files {
-                            if let Err(e) = recall_into(&conn, session_id, max_messages, max_files, &mut out, &mut logs) {
-                                return NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e));
-                            }
-                        }
-                        NodeOutput::success_with_logs(out, logs)
-                    }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e)),
-                }
-            }
+        let job = Job {
+            operation,
+            session_id,
+            role:      input.input["role"].as_str().map(str::to_string),
+            content:   input.input["content"].as_str().map(str::to_string),
+            files_raw,
+            max_messages,
+            max_stored,
+            max_stored_files,
+            max_files,
+            include_files,
+        };
 
-            "append" => {
-                let role = match input.input["role"].as_str() {
-                    Some(r) => r,
-                    None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for append")),
-                };
-                let content = match input.input["content"].as_str() {
-                    Some(c) if !c.is_empty() => c,
-                    _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for append")),
-                };
-                let (files, mut logs) = prepare_files(&extract_port_attachments(&input.input["files"]));
-                if let Err(e) = append_message(&mut conn, session_id, role, content, &files, max_stored, max_stored_files) {
-                    return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
-                }
-                let msgs  = read_messages(&conn, session_id, max_messages).unwrap_or_default();
-                let count = msgs.len();
-                let mut out = json!({ "messages": msgs, "count": count, "session_id": session_id });
-                logs.push(format!("Appended {} message to session '{}'", role, session_id));
-                if !files.is_empty() {
-                    logs.push(format!("Stored {} file(s) with the message", files.len()));
-                }
-                if include_files {
-                    recall_after_commit(&conn, session_id, max_messages, max_files, &mut out, &mut logs);
-                }
-                NodeOutput::success_with_logs(out, logs)
-            }
-
-            "write" => {
-                let role = match input.input["role"].as_str() {
-                    Some(r) => r,
-                    None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", "role is required for write")),
-                };
-                let content = match input.input["content"].as_str() {
-                    Some(c) if !c.is_empty() => c,
-                    _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", "content is required for write")),
-                };
-                let (files, mut logs) = prepare_files(&extract_port_attachments(&input.input["files"]));
-                if let Err(e) = replace_history(&mut conn, session_id, role, content, &files, max_stored_files) {
-                    return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
-                }
-                let mut out = json!({ "messages": [{"role": role, "content": content}], "count": 1, "session_id": session_id });
-                logs.push(format!("Wrote 1 message to session '{}'", session_id));
-                if !files.is_empty() {
-                    logs.push(format!("Stored {} file(s) with the message", files.len()));
-                }
-                if include_files {
-                    recall_after_commit(&conn, session_id, max_messages, max_files, &mut out, &mut logs);
-                }
-                NodeOutput::success_with_logs(out, logs)
-            }
-
-            "clear" => {
-                match clear_session(&mut conn, session_id) {
-                    Ok((messages, files)) => NodeOutput::success_with_logs(
-                        json!({ "messages": [], "count": 0, "session_id": session_id }),
-                        vec![format!("Cleared {} messages and {} files from session '{}'", messages, files, session_id)],
-                    ),
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("CLEAR_ERROR", e)),
-                }
-            }
-
-            "forget_files" => {
-                match conn.execute("DELETE FROM ai_memory_files WHERE session_id = ?1", params![session_id]) {
-                    Ok(n) => NodeOutput::success_with_logs(
-                        json!({ "session_id": session_id, "files_removed": n }),
-                        vec![format!("Removed {} files from session '{}'", n, session_id)],
-                    ),
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("FORGET_ERROR", e.to_string())),
-                }
-            }
-
-            other => NodeOutput::failure(NodeError::unrecoverable(
-                "INVALID_OP",
-                format!("Unknown operation '{}'. Use: read, write, append, clear, forget_files", other),
-            )),
+        match tokio::task::spawn_blocking(move || run_job(pool, job)).await {
+            Ok(out) => out,
+            Err(_)  => NodeOutput::failure(NodeError::unrecoverable("DB_TASK_PANIC", "AI memory worker stopped unexpectedly")),
         }
+    }
+}
+
+/// Everything one operation needs, owned so it can run on a blocking thread.
+struct Job {
+    operation:        String,
+    session_id:       String,
+    role:             Option<String>,
+    content:          Option<String>,
+    files_raw:        Vec<Value>,
+    max_messages:     usize,
+    max_stored:       i64,
+    max_stored_files: i64,
+    max_files:        usize,
+    include_files:    bool,
+}
+
+/// The role a message is stored under: one of the three the chat APIs accept,
+/// in lower case. Anything else would be stored and then rejected by the AI
+/// provider on a later read.
+fn normalize_role(role: &str) -> Option<&'static str> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "user"      => Some("user"),
+        "assistant" => Some("assistant"),
+        "system"    => Some("system"),
+        _           => None,
+    }
+}
+
+/// The role and content of an append or write, validated.
+fn message_fields<'a>(job: &'a Job, op: &str) -> Result<(&'static str, &'a str), NodeOutput> {
+    let role = match job.role.as_deref() {
+        Some(r) => r,
+        None => return Err(NodeOutput::failure(NodeError::unrecoverable("MISSING_ROLE", format!("role is required for {op}")))),
+    };
+    let role = match normalize_role(role) {
+        Some(r) => r,
+        None => return Err(NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_ROLE",
+            format!("role must be user, assistant or system, not '{}'", role),
+        ))),
+    };
+    let content = match job.content.as_deref() {
+        Some(c) if !c.is_empty() => c,
+        _ => return Err(NodeOutput::failure(NodeError::unrecoverable("MISSING_CONTENT", format!("content is required for {op}")))),
+    };
+    if content.len() > MAX_CONTENT_BYTES {
+        return Err(NodeOutput::failure(NodeError::unrecoverable(
+            "CONTENT_TOO_LARGE",
+            format!("content is {} KiB; the limit for one message is {} KiB", content.len() / 1024, MAX_CONTENT_BYTES / 1024),
+        )));
+    }
+    Ok((role, content))
+}
+
+fn run_job(pool: Pool<SqliteConnectionManager>, job: Job) -> NodeOutput {
+    let mut conn = match pool.get() {
+        Ok(c)  => c,
+        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e.to_string())),
+    };
+    let session_id = job.session_id.as_str();
+
+    match job.operation.as_str() {
+        "read" => {
+            match read_messages(&conn, session_id, job.max_messages) {
+                Ok(msgs) => {
+                    let count = msgs.len();
+                    let mut out  = json!({ "messages": msgs, "count": count, "session_id": session_id });
+                    let mut logs = vec![format!("Read {} messages from session '{}'", count, session_id)];
+                    if job.include_files {
+                        if let Err(e) = recall_into(&conn, session_id, job.max_messages, job.max_files, &mut out, &mut logs) {
+                            return NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e));
+                        }
+                    }
+                    NodeOutput::success_with_logs(out, logs)
+                }
+                Err(e) => NodeOutput::failure(NodeError::unrecoverable("READ_ERROR", e)),
+            }
+        }
+
+        "append" => {
+            let (role, content) = match message_fields(&job, "append") {
+                Ok(v)  => v,
+                Err(out) => return out,
+            };
+            let (files, mut logs) = prepare_files(&job.files_raw);
+            if let Err(e) = append_message(&mut conn, session_id, role, content, &files, job.max_stored, job.max_stored_files) {
+                return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
+            }
+            let msgs  = read_messages(&conn, session_id, job.max_messages).unwrap_or_default();
+            let count = msgs.len();
+            let mut out = json!({ "messages": msgs, "count": count, "session_id": session_id });
+            logs.push(format!("Appended {} message to session '{}'", role, session_id));
+            if !files.is_empty() {
+                logs.push(format!("Stored {} file(s) with the message", files.len()));
+            }
+            if job.include_files {
+                recall_after_commit(&conn, session_id, job.max_messages, job.max_files, &mut out, &mut logs);
+            }
+            NodeOutput::success_with_logs(out, logs)
+        }
+
+        "write" => {
+            let (role, content) = match message_fields(&job, "write") {
+                Ok(v)  => v,
+                Err(out) => return out,
+            };
+            let (files, mut logs) = prepare_files(&job.files_raw);
+            if let Err(e) = replace_history(&mut conn, session_id, role, content, &files, job.max_stored_files) {
+                return NodeOutput::failure(NodeError::unrecoverable("WRITE_ERROR", e));
+            }
+            let mut out = json!({ "messages": [{"role": role, "content": content}], "count": 1, "session_id": session_id });
+            logs.push(format!("Wrote 1 message to session '{}'", session_id));
+            if !files.is_empty() {
+                logs.push(format!("Stored {} file(s) with the message", files.len()));
+            }
+            if job.include_files {
+                recall_after_commit(&conn, session_id, job.max_messages, job.max_files, &mut out, &mut logs);
+            }
+            NodeOutput::success_with_logs(out, logs)
+        }
+
+        "clear" => {
+            match clear_session(&mut conn, session_id) {
+                Ok((messages, files)) => NodeOutput::success_with_logs(
+                    json!({ "messages": [], "count": 0, "session_id": session_id }),
+                    vec![format!("Cleared {} messages and {} files from session '{}'", messages, files, session_id)],
+                ),
+                Err(e) => NodeOutput::failure(NodeError::unrecoverable("CLEAR_ERROR", e)),
+            }
+        }
+
+        "forget_files" => {
+            match conn.execute("DELETE FROM ai_memory_files WHERE session_id = ?1", params![session_id]) {
+                Ok(n) => NodeOutput::success_with_logs(
+                    json!({ "session_id": session_id, "files_removed": n }),
+                    vec![format!("Removed {} files from session '{}'", n, session_id)],
+                ),
+                Err(e) => NodeOutput::failure(NodeError::unrecoverable("FORGET_ERROR", e.to_string())),
+            }
+        }
+
+        other => NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_OP",
+            format!("Unknown operation '{}'. Use: read, write, append, clear, forget_files", other),
+        )),
     }
 }
 
@@ -348,7 +438,7 @@ fn prepare_files(raw: &[Value]) -> (Vec<StoredFile>, Vec<String>) {
             logs.push(format!("Skipped file '{}': unsupported type '{}'", filename, mime));
             continue;
         }
-        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        let bytes = match decode_file_data(data) {
             Ok(b)  => b,
             Err(_) => {
                 logs.push(format!("Skipped file '{}': invalid base64 data", filename));
@@ -366,7 +456,7 @@ fn prepare_files(raw: &[Value]) -> (Vec<StoredFile>, Vec<String>) {
         files.push(StoredFile {
             filename,
             mime_type: mime.to_string(),
-            data:      data.to_string(),
+            data:      base64::engine::general_purpose::STANDARD.encode(&bytes),
             size:      bytes.len(),
             hash:      blake3::hash(&bytes).to_hex().to_string(),
         });
@@ -396,7 +486,7 @@ fn append_message(
     ).map_err(|e| e.to_string())?;
     store_files(&tx, session_id, seq, files, max_stored_files)?;
     // Prune oldest rows if session exceeds max_stored cap.
-    let _ = tx.execute(
+    tx.execute(
         "DELETE FROM ai_memory \
          WHERE session_id = ?1 \
            AND seq NOT IN ( \
@@ -405,7 +495,7 @@ fn append_message(
              ORDER BY seq DESC LIMIT ?2 \
            )",
         params![session_id, max_stored],
-    );
+    ).map_err(|e| format!("failed to prune old messages: {}", e))?;
     tx.execute(
         "DELETE FROM ai_memory_files \
          WHERE session_id = ?1 \
@@ -1282,6 +1372,46 @@ mod tests {
         assert_eq!(read["files"], json!([]));
 
         cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn role_outside_user_assistant_system_is_rejected_and_case_is_normalised() {
+        let path = temp_db_path("role_check");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+
+        let bad = node.execute(make_input("append", "s", Some("tool"), Some("x"))).await;
+        assert_eq!(bad.error.expect("error").code, "INVALID_ROLE");
+
+        let ok = node.execute(make_input("append", "s", Some(" User "), Some("hi"))).await;
+        assert!(ok.success, "{:?}", ok.error);
+        let read = node.execute(make_input("read", "s", None, None)).await.output.unwrap();
+        assert_eq!(read["messages"][0]["role"], "user");
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn message_over_the_size_limit_is_refused_without_storing_it() {
+        let path = temp_db_path("content_cap");
+        cleanup(&path);
+        let node = AiMemoryNode::new(path.clone());
+        let big = "a".repeat(MAX_CONTENT_BYTES + 1);
+
+        let out = node.execute(make_input("append", "s", Some("user"), Some(&big))).await;
+        assert_eq!(out.error.expect("error").code, "CONTENT_TOO_LARGE");
+        let read = node.execute(make_input("read", "s", None, None)).await.output.unwrap();
+        assert_eq!(read["count"], 0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn data_uri_file_is_stored_as_plain_base64() {
+        let raw = vec![json!({ "filename": "a.txt", "mime_type": "text/plain", "data": "data:text/plain;base64,aGk=" })];
+        let (files, logs) = prepare_files(&raw);
+        assert!(logs.is_empty(), "{logs:?}");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].data, "aGk=");
+        assert_eq!(files[0].size, 2);
     }
 
     #[test]

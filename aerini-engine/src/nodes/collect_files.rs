@@ -11,25 +11,25 @@
 // Output: standard media contract
 //   { "files": [...merged], "count": N, "source": "collect_files" }
 //
-// Filename collision: files from source N that collide with earlier filenames
-// get a "_{source_index}" suffix inserted before the extension.
+// Filename collision: a file whose name (compared case-insensitively) is already
+// taken gets "_{source_index}" inserted before the extension, then
+// "_{source_index}_2", "_{source_index}_3", ... until it is unique.
 //
 // Minimum 1 input port always shown (even with 0 sources configured).
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::HashSet;
-
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::FilenameSet;
 
 /// Caps applied while merging files across sources: `merged_files` must stay
 /// bounded since each entry typically embeds a file's full contents inline
 /// as base64. Both caps are checked as files are collected — the node fails
 /// fast rather than silently truncating the batch (a truncated file set
 /// handed to a downstream Save-to-Folder/S3 node would look like a
-/// successful, complete run).
+/// successful, complete run). The byte cap counts base64 characters.
 const MAX_MERGED_FILES: usize = 10_000;
 const MAX_MERGED_BYTES: usize = 10 * 1024 * 1024;
 
@@ -90,7 +90,7 @@ impl Node for CollectFilesNode {
         let cfg = &input.input;
 
         let sources = match cfg["sources"].as_array() {
-            Some(s) => s.clone(),
+            Some(s) => s,
             None => {
                 return NodeOutput::success_with_logs(
                     json!({ "files": [], "count": 0, "source": "collect_files" }),
@@ -100,7 +100,7 @@ impl Node for CollectFilesNode {
         };
 
         let mut merged_files: Vec<Value> = Vec::new();
-        let mut seen_filenames: HashSet<String> = HashSet::new();
+        let mut names = FilenameSet::default();
         let mut logs: Vec<String> = Vec::new();
         let mut total_bytes: usize = 0;
 
@@ -113,20 +113,47 @@ impl Node for CollectFilesNode {
                 continue;
             }
 
-            // After executor expression resolution, source_expr is a JSON string
-            // representing the serialized media contract or files array.
-            let parsed = parse_source_expr(expr_val);
-            let files = extract_files_array(&parsed);
+            let parsed = match parse_source_expr(expr_val) {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    logs.push(format!("Source '{}' did not resolve to a file list — skipped", name));
+                    continue;
+                }
+                Err(e) => {
+                    return NodeOutput::failure_with_logs(
+                        NodeError::unrecoverable(
+                            "INVALID_SOURCE",
+                            format!("Source '{}' (index {}) is not valid JSON: {}", name, source_index, e),
+                        ),
+                        logs,
+                    );
+                }
+            };
+            let had_files_key = parsed.is_array() || parsed.get("files").is_some();
+            let files = extract_files_array(parsed);
 
             if files.is_empty() {
-                logs.push(format!("Source '{}' resolved to 0 files — skipped", name));
+                if had_files_key {
+                    logs.push(format!("Source '{}' resolved to 0 files — skipped", name));
+                } else {
+                    logs.push(format!("Source '{}' has no 'files' array — skipped", name));
+                }
                 continue;
             }
 
             logs.push(format!("Source '{}': {} file(s)", name, files.len()));
 
-            for file in files {
-                let file_bytes = file.get("data").and_then(Value::as_str).map(str::len).unwrap_or(0);
+            for (file_index, mut file) in files.into_iter().enumerate() {
+                let Some(entry) = file.as_object_mut() else {
+                    return NodeOutput::failure_with_logs(
+                        NodeError::unrecoverable(
+                            "INVALID_FILE_ENTRY",
+                            format!("Source '{}' file #{} is not an object with filename and data", name, file_index),
+                        ),
+                        logs,
+                    );
+                };
+                let file_bytes = entry.get("data").and_then(Value::as_str).map(str::len).unwrap_or(0);
 
                 if merged_files.len() + 1 > MAX_MERGED_FILES {
                     return NodeOutput::failure_with_logs(
@@ -142,7 +169,7 @@ impl Node for CollectFilesNode {
                         NodeError::unrecoverable(
                             "TOTAL_SIZE_EXCEEDED",
                             format!(
-                                "Collect Files exceeds {} MB combined file-data limit",
+                                "Collect Files exceeds {} MB combined base64 file-data limit",
                                 MAX_MERGED_BYTES / (1024 * 1024)
                             ),
                         ),
@@ -151,15 +178,10 @@ impl Node for CollectFilesNode {
                 }
                 total_bytes += file_bytes;
 
-                let original_name = file["filename"].as_str().unwrap_or("file.bin").to_string();
-                let deduped = deduplicate_filename(&original_name, source_index, &seen_filenames);
-                seen_filenames.insert(deduped.clone());
-
-                let mut f = file;
-                if let Some(obj) = f.as_object_mut() {
-                    obj.insert("filename".to_string(), Value::String(deduped));
-                }
-                merged_files.push(f);
+                let original_name = entry.get("filename").and_then(Value::as_str).unwrap_or("file.bin");
+                let unique = names.claim(original_name, Some(source_index));
+                entry.insert("filename".to_string(), Value::String(unique));
+                merged_files.push(file);
             }
         }
 
@@ -184,7 +206,7 @@ pub fn derive_ports(config: &Value) -> NodePorts {
         }
     }
 
-    // Always show at least 1 input port (PLAN: "Minimum 1 input port always shown")
+    // At least one input port is always shown, even with no sources configured.
     if inputs.is_empty() {
         inputs.push(PortDefinition {
             id:        "input".to_string(),
@@ -207,15 +229,15 @@ pub fn derive_ports(config: &Value) -> NodePorts {
     }
 }
 
-/// Parse source_expr string:
-/// - If it looks like a JSON object/array: parse as JSON
-/// - Otherwise: treat as empty (unresolved expression)
-fn parse_source_expr(expr: &str) -> Value {
+/// Parses a resolved source expression. `Ok(None)` means it is not a JSON
+/// object or array (an empty or unresolved value, which callers skip);
+/// `Err` means it looks like JSON but is malformed.
+fn parse_source_expr(expr: &str) -> Result<Option<Value>, String> {
     let trimmed = expr.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        serde_json::from_str(trimmed).unwrap_or(Value::Null)
+        serde_json::from_str(trimmed).map(Some).map_err(|e| e.to_string())
     } else {
-        Value::Null
+        Ok(None)
     }
 }
 
@@ -223,42 +245,16 @@ fn parse_source_expr(expr: &str) -> Value {
 /// Accepts two shapes:
 ///   1. Media contract object: { "files": [...], ... }
 ///   2. Bare files array: [{ "filename": ..., "data": ..., "mime_type": ... }, ...]
-fn extract_files_array(val: &Value) -> Vec<Value> {
+fn extract_files_array(val: Value) -> Vec<Value> {
     match val {
-        Value::Object(obj) => {
-            if let Some(Value::Array(files)) = obj.get("files") {
-                files.clone()
-            } else {
-                vec![]
-            }
-        }
-        Value::Array(arr) => arr.clone(),
+        Value::Object(mut obj) => match obj.remove("files") {
+            Some(Value::Array(files)) => files,
+            _ => vec![],
+        },
+        Value::Array(arr) => arr,
         _ => vec![],
     }
 }
-
-/// If filename already seen, insert "_{source_index}" before the extension.
-fn deduplicate_filename(
-    filename: &str,
-    source_index: usize,
-    seen: &HashSet<String>,
-) -> String {
-    if !seen.contains(filename) {
-        return filename.to_string();
-    }
-    let dot = filename.rfind('.');
-    let renamed = match dot {
-        Some(pos) => format!("{}_{}{}", &filename[..pos], source_index, &filename[pos..]),
-        None      => format!("{}_{}", filename, source_index),
-    };
-    // If renamed also collides (extremely unlikely), append again
-    if seen.contains(&renamed) {
-        format!("{}_{}", renamed, source_index)
-    } else {
-        renamed
-    }
-}
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -359,26 +355,6 @@ mod tests {
         assert_eq!(out.output.unwrap()["count"], json!(3));
     }
 
-    // ── Filename deduplication ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn duplicate_filename_gets_suffix() {
-        let c1 = media_contract(vec![file("dup.txt")]);
-        let c2 = media_contract(vec![file("dup.txt")]); // same name
-        let out = CollectFilesNode.execute(make_input(json!([
-            { "id": "s1", "name": "A", "source_expr": c1 },
-            { "id": "s2", "name": "B", "source_expr": c2 }
-        ]))).await;
-        assert!(out.success);
-        let data = out.output.unwrap();
-        let files = data["files"].as_array().unwrap();
-        assert_eq!(files.len(), 2);
-        let names: Vec<&str> = files.iter()
-            .map(|f| f["filename"].as_str().unwrap())
-            .collect();
-        assert!(names[0] != names[1], "filenames should differ after dedup: {:?}", names);
-    }
-
     // ── Empty source_expr skipped ───────────────────────────────────────────
 
     #[tokio::test]
@@ -440,49 +416,56 @@ mod tests {
         assert!(out.success, "exactly MAX_MERGED_BYTES must still be accepted");
     }
 
-    // ── parse_source_expr unit tests ────────────────────────────────────────
+    // ── source parsing ──────────────────────────────────────────────────────
 
     #[test]
-    fn parse_source_expr_object() {
-        let v = parse_source_expr("{\"files\":[]}");
-        assert!(v.is_object());
+    fn parse_source_expr_distinguishes_unusable_from_malformed() {
+        assert!(parse_source_expr("{\"files\":[]}").unwrap().unwrap().is_object());
+        assert!(parse_source_expr("[1,2,3]").unwrap().unwrap().is_array());
+        assert_eq!(parse_source_expr("undefined").unwrap(), None);
+        assert!(parse_source_expr("{{not.json}}").is_err());
+        assert!(parse_source_expr("[{\"filename\":").is_err());
     }
 
-    #[test]
-    fn parse_source_expr_array() {
-        let v = parse_source_expr("[1,2,3]");
-        assert!(v.is_array());
+    #[tokio::test]
+    async fn malformed_json_source_fails_instead_of_being_skipped() {
+        let good = media_contract(vec![file("ok.txt")]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "Good", "source_expr": good },
+            { "id": "s2", "name": "Broken", "source_expr": "[{\"filename\": \"cut" }
+        ]))).await;
+        let err = out.error.expect("a half-delivered batch must not look complete");
+        assert_eq!(err.code, "INVALID_SOURCE");
+        assert!(err.message.contains("Broken"), "{}", err.message);
     }
 
-    #[test]
-    fn parse_source_expr_non_json_returns_null() {
-        let v = parse_source_expr("{{not.json}}");
-        assert!(v.is_null());
+    #[tokio::test]
+    async fn non_object_file_entry_fails_naming_the_source() {
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "Mixed", "source_expr": "[\"just-a-string\"]" }
+        ]))).await;
+        assert_eq!(out.error.expect("must fail").code, "INVALID_FILE_ENTRY");
     }
 
-    // ── deduplicate_filename unit tests ─────────────────────────────────────
+    // ── filename uniqueness ─────────────────────────────────────────────────
 
-    #[test]
-    fn dedup_filename_no_collision() {
-        let seen = std::collections::HashSet::new();
-        let result = deduplicate_filename("file.txt", 1, &seen);
-        assert_eq!(result, "file.txt");
-    }
-
-    #[test]
-    fn dedup_filename_with_extension() {
-        let mut seen = std::collections::HashSet::new();
-        seen.insert("file.txt".to_string());
-        let result = deduplicate_filename("file.txt", 1, &seen);
-        assert_eq!(result, "file_1.txt");
-    }
-
-    #[test]
-    fn dedup_filename_no_extension() {
-        let mut seen = std::collections::HashSet::new();
-        seen.insert("README".to_string());
-        let result = deduplicate_filename("README", 2, &seen);
-        assert_eq!(result, "README_2");
+    #[tokio::test]
+    async fn every_merged_filename_is_unique_even_for_repeats_inside_one_source() {
+        let c1 = media_contract(vec![file("a.txt"), file("a.txt"), file("a.txt"), file("A.TXT")]);
+        let c2 = media_contract(vec![file("a.txt"), json!({ "data": "x" }), json!({ "data": "y" })]);
+        let out = CollectFilesNode.execute(make_input(json!([
+            { "id": "s1", "name": "A", "source_expr": c1 },
+            { "id": "s2", "name": "B", "source_expr": c2 }
+        ]))).await;
+        assert!(out.success, "{:?}", out.error);
+        let data = out.output.unwrap();
+        let names: Vec<String> = data["files"].as_array().unwrap().iter()
+            .map(|f| f["filename"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, [
+            "a.txt", "a_0.txt", "a_0_2.txt", "A_0_3.TXT",
+            "a_1.txt", "file.bin", "file_1.bin",
+        ]);
     }
 
     // ── derive_ports ────────────────────────────────────────────────────────

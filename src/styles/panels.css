@@ -1905,7 +1905,7 @@
 
 #minimap-wrap {
   position: absolute;
-  bottom: calc(var(--status-h) + var(--canvas-stat-h) + 14px);
+  bottom: calc(var(--status-h) + var(--canvas-stat-h) + var(--drawer-inset, 0px) + 14px);
   right: 12px;
   z-index: 10;
   display: flex;
@@ -1928,6 +1928,10 @@
 #btn-minimap-toggle:hover { color: var(--t1); background: var(--bg3); }
 
 #minimap-wrap.minimap-hidden #minimap-canvas { display: none; }
+
+/* The chat panel is a fixed overlay on the canvas's right edge (z-index 75),
+   which would otherwise cover the minimap. */
+body.chat-panel-open #minimap-wrap { right: calc(var(--chat-w) + 12px); }
 
 
 /* ── FOCUS RINGS ────────────────────────────────────────────────────────────── */

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
+use super::util::cfg_u64;
 
 pub struct StripeNode;
 
@@ -56,7 +57,7 @@ impl Node for StripeNode {
 
         match action {
             "create_payment_intent" => {
-                let amount = match input.input["amount"].as_u64() {
+                let amount = match cfg_u64(&input.input["amount"]) {
                     Some(a) if a > 0 => a,
                     _ => return NodeOutput::failure(NodeError::unrecoverable(
                         "MISSING_AMOUNT",
@@ -111,14 +112,15 @@ impl Node for StripeNode {
                                     )
                                 } else {
                                     let msg = v["error"]["message"].as_str().unwrap_or("unknown error").to_string();
-                                    NodeOutput::failure(super::util::provider_error(status, "STRIPE_ERROR", format!("HTTP {}: {}", status, msg)))
+                                    // Safe only because the Idempotency-Key above is the same on every retry.
+                                    NodeOutput::failure(super::util::provider_error_for(super::util::Replay::Safe, status, "STRIPE_ERROR", format!("HTTP {}: {}", status, msg)))
                                 }
                             }
-                            Err(e) => NodeOutput::failure(super::util::provider_error(status, "PARSE_ERROR", e)),
+                            Err(e) => NodeOutput::failure(super::util::provider_error_for(super::util::Replay::Safe, status, "PARSE_ERROR", e)),
                         }
                     }
                     Err(e) => {
-                        super::util::http_err_output(&e)
+                        super::util::http_err_output(super::util::Replay::Safe, &e)
                     }
                 }
             }
@@ -200,6 +202,26 @@ mod tests {
     // neighboring `Authorization` header, set in the same builder chain,
     // has never had that coverage either. `.header("Idempotency-Key",
     // idempotency_key)` uses the identical `reqwest` header-setting idiom.
+
+    #[tokio::test]
+    async fn amount_given_as_numeric_string_passes_amount_validation() {
+        use crate::model::ExecutionContext;
+
+        async fn run(amount: &str) -> NodeOutput {
+            StripeNode.execute(NodeInput {
+                resolved_credentials: std::collections::HashMap::new(),
+                cancel_token: None,
+                node_id:      "n1".into(),
+                workflow_id:  "w1".into(),
+                execution_id: "e1".into(),
+                input:        json!({ "api_key": "sk_test_x", "action": "create_payment_intent", "amount": amount }),
+                context:      ExecutionContext::default(),
+            }).await
+        }
+
+        assert_eq!(run("1000").await.error.expect("must fail without currency").code, "MISSING_CURRENCY");
+        assert_eq!(run("10.5").await.error.expect("must reject a fraction").code, "MISSING_AMOUNT");
+    }
 
     #[test]
     fn idempotency_key_stable_across_retries() {

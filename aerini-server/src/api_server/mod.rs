@@ -711,19 +711,21 @@ pub async fn run(cfg: ServerConfig) {
         health_url = %format!("http://{}:{}/api/health", bind, port),
         "Aerini Server started in API mode"
     );
-    // HTTP Request nodes perform DNS pre-validation for SSRF, but a TOCTOU gap
-    // (DNS rebinding) means application-layer checks are defense-in-depth only.
     // In API mode any token holder with 'write' scope can submit workflows with
-    // HTTP Request nodes pointing at attacker-controlled domains.
-    // Required: configure a network-level egress firewall that blocks outbound
-    // connections to RFC-1918, loopback, link-local, and cloud metadata ranges.
-    // See docs/security.md for recommended iptables/nftables rules.
+    // HTTP Request nodes pointing at attacker-controlled domains. HTTP Request,
+    // AI, integration, Redis, Send Email, S3 and plugin HTTP re-check the address
+    // when they connect; Postgres and MySQL connections are only checked
+    // beforehand, which leaves a DNS rebinding window that needs a
+    // network-level egress firewall (or sslmode=verify-full / VERIFY_IDENTITY).
+    // See docs/guide/security.md for recommended iptables/nftables rules.
     tracing::warn!(
         "API mode active: HTTP Request nodes are available to all token holders with 'write' scope. \
-         The built-in SSRF protection has a DNS rebinding (TOCTOU) gap that cannot be closed at the \
-         application layer. Configure a network-level egress firewall to block connections to private, \
-         loopback, link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
-         See docs/security.md for details."
+         HTTP Request, AI, integration, Redis, Send Email, S3 and plugin HTTP check addresses when they \
+         connect, but Postgres and MySQL connections are only checked before they \
+         connect, so DNS rebinding can bypass that check unless the URL uses sslmode=verify-full \
+         (Postgres) or ssl-mode=VERIFY_IDENTITY (MySQL). Configure a network-level egress firewall to block \
+         connections to private, loopback, link-local, and cloud metadata ranges \
+         (e.g. 169.254.169.254). See docs/guide/security.md for details."
     );
     eprintln!("Control commands (from another terminal):");
     eprintln!("  aerini-server list    --token YOUR_TOKEN");

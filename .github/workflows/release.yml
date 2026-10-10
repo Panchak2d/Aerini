@@ -1,4 +1,5 @@
-name: Release
+for any design decisions: do whatever will give the best result [focus on user experience, maintainability, security and scalability].
+Research and think properly to ensure you take the best approach.name: Release
 
 on:
   push:

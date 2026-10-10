@@ -4,6 +4,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts};
+use super::util::cfg_f64_opt;
 
 pub struct DelayNode;
 
@@ -34,7 +35,10 @@ impl Node for DelayNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        let duration = input.input["duration"].as_f64().unwrap_or(1.0);
+        let duration = match cfg_f64_opt(&input.input["duration"], "duration") {
+            Ok(v) => v.unwrap_or(1.0),
+            Err(e) => return NodeOutput::failure(e),
+        };
         let unit     = input.input["unit"].as_str().unwrap_or("s");
 
         let ms: u64 = match unit {
@@ -54,3 +58,45 @@ impl Node for DelayNode {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ExecutionContext;
+
+    #[tokio::test]
+    async fn duration_given_as_numeric_string_is_applied() {
+        tokio::time::pause();
+
+        let out = DelayNode.execute(NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        json!({ "duration": "2", "unit": "s" }),
+            context:      ExecutionContext::default(),
+        }).await;
+
+        assert!(out.success);
+        assert_eq!(out.output.expect("expected output data")["waited_ms"], json!(2000));
+    }
+
+    #[tokio::test]
+    async fn unparseable_duration_fails_with_invalid_config_instead_of_defaulting() {
+        let out = DelayNode.execute(NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        json!({ "duration": "abc", "unit": "s" }),
+            context:      ExecutionContext::default(),
+        }).await;
+
+        assert!(!out.success);
+        let err = out.error.expect("expected error");
+        assert_eq!(err.code, "INVALID_CONFIG");
+        assert!(!err.recoverable);
+    }
+}

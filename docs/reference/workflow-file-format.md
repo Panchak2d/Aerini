@@ -93,7 +93,7 @@ A connection is the line drawn from one node's output to another's input; the JS
 | `to_port` | string | Yes | Input port name on the target node, e.g. `"input"`. At most one connection may end on a given input port unless that port is multi-input; see [Input port arity](#input-port-arity). |
 | `condition` | string or `null` | No | Expression the canvas uses to decide whether to draw the line. Not evaluated by the executor: routing follows `from_port` alone. |
 | `on_success` | string or `null` | No | Alternate target node ID activated when the source node succeeds, used to register an extra reachability edge. |
-| `on_failure` | string or `null` | No | Target node ID the executor routes to when the source node fails after every retry attempt, instead of aborting the run. |
+| `on_failure` | string or `null` | No | Target node ID the executor routes to when the source node fails after every retry attempt, instead of aborting the run. The target runs only when the route fires, after the source node, and does not need a connection from it. It cannot be a node that runs before the source: that is a cycle and the run fails with `CycleDetected`. |
 
 ### Input port arity
 

@@ -194,8 +194,7 @@ export function buildSidebarPalette(
 
       item.addEventListener("click", () => {
         blurSearch();
-        const r = document.getElementById("canvas")!.getBoundingClientRect();
-        const node = canvas.placeNode(desc, r.width / 2, r.height / 2);
+        const node = canvas.placeNode(desc);
         Object.assign(node.data.config, preset.config);
         node.data.name = preset.label;
         onStatus(`Placed ${preset.label} preset — double-click to configure`);
@@ -249,8 +248,7 @@ export function buildSidebarPalette(
 
       item.addEventListener("click", () => {
         blurSearch();
-        const r = document.getElementById("canvas")!.getBoundingClientRect();
-        canvas.placeNode(desc, r.width / 2, r.height / 2);
+        canvas.placeNode(desc);
         onStatus(`Placed ${desc.display_name} — double-click to configure`);
       });
       armDragOnThreshold(item, canvas, () => desc);
@@ -450,8 +448,7 @@ function insertFromPalette(desc: NodeDescriptor): void {
     closePalette();
     return;
   }
-  const r = document.getElementById("canvas")!.getBoundingClientRect();
-  _canvas.placeNode(desc, r.width / 2, r.height / 2);
+  _canvas.placeNode(desc);
   _onStatus?.(`Placed ${desc.display_name} — double-click to configure`);
   closePalette();
 }

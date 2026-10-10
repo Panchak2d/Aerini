@@ -53,11 +53,14 @@
 //!
 //! Every request a plugin sends through `wasi:http/outgoing-handler` is checked
 //! against this crate's standard SSRF policy — the same `SsrfPolicy::Strict` the
-//! Database and HTTP nodes enforce — before `wasmtime_wasi_http`'s default send
-//! path is allowed to run it. Action plugins (`wasi:http` p2) and trigger plugins
-//! (p3, `trigger_engine`'s async ABI) share one [`PluginHttpHooks`] implementation,
-//! so the two engines can't drift apart on what's blocked. See [`check_ssrf_uri`]
-//! for exactly what is and isn't caught.
+//! Database and HTTP nodes enforce. The host name is resolved once, every
+//! address must pass, and the connection goes to those validated addresses
+//! while the TLS server name stays the original host (see `plugin_http`), so
+//! DNS rebinding cannot swap the destination between check and connect.
+//! Action plugins (`wasi:http` p2) and trigger plugins (p3, `trigger_engine`'s
+//! async ABI) share one [`PluginHttpHooks`] implementation, so the two engines
+//! can't drift apart on what's blocked. A plugin that follows a redirect issues
+//! a new request, which goes through the same path.
 //!
 //! # Plugin storage
 //!
@@ -101,7 +104,6 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -121,13 +123,12 @@ use std::task::{Context, Poll};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
     Error as HttpError, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-    default_send_request,
 };
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodeRegistry};
-use crate::nodes::util::{SsrfPolicy, check_ssrf_ip};
+use crate::plugin_http::{resolve_pinned, send_pinned};
 
 // ── WIT bindings ──────────────────────────────────────────────────────────────
 
@@ -646,7 +647,7 @@ pub mod signature {
 /// - [`ResourceTable`] — tracks host-owned resources (shared by WASI and HTTP).
 /// - [`wasmtime::StoreLimits`] — enforces the 64 MiB memory cap per execution.
 /// - [`PluginHttpHooks`] — enforces this crate's SSRF policy on every outbound
-///   request before `wasi:http`'s default send path is allowed to run it.
+///   request and connects only to the validated address.
 /// - `storage` — this call's `storage` import backing, if any. `None` for
 ///   every `describe()`-time `Store` (no plugin type-id is known yet to
 ///   scope by) and for a `Store` built after [`PluginStorage::open`]
@@ -737,8 +738,8 @@ impl wit_fs_watch::FsWatchHost for PluginState {
 /// Per-instance store state for a trigger-plugin component, run on
 /// [`PluginLoader::trigger_engine`].
 ///
-/// HTTP is linked via `wasi:http` p3 ([`PluginHttpHooks`]), SSRF-filtered
-/// identically to [`PluginState`]'s p2 HTTP -- see "Outbound HTTP" in this
+/// HTTP is linked via `wasi:http` p3 ([`PluginHttpHooks`]), SSRF-filtered and
+/// address-pinned identically to [`PluginState`]'s p2 HTTP -- see "Outbound HTTP" in this
 /// module's own doc comment. Raw `wasi:sockets` capability is left at
 /// `WasiCtxBuilder`'s own default (no `allow_tcp`/`socket_addr_check`
 /// override), which denies every address absent an explicit grant -- the
@@ -1143,11 +1144,10 @@ async fn run_trigger_execute(
 
 // ── Outbound HTTP SSRF enforcement ─────────────────────────────────────────────
 
-/// `wasi:http`'s default send path (`default_send_request`) connects straight to
-/// whatever host the guest asks for — it has no knowledge of this application's
-/// SSRF policy. `WasiHttpHooks::send_request` is the documented interception
-/// point, so plugin traffic is checked exactly like any other node's HTTP/DB
-/// egress before `default_send_request` is allowed to run.
+/// Routes every `wasi:http` request from a plugin through
+/// [`resolve_pinned`] and [`send_pinned`]. `WasiHttpHooks::send_request` is the
+/// documented interception point and the default sender is never used, because
+/// it would resolve the host a second time.
 ///
 /// One implementation serves both engines: `wasmtime_wasi_http` routes p2
 /// (action plugins) and p3 (trigger plugins) requests through the same
@@ -1174,19 +1174,12 @@ impl WasiHttpHooks for PluginHttpHooks {
             > + Send,
     > {
         // Unused: nothing is sent on rejection, and the upstream default
-        // `send_request` (which the success path mirrors) discards it identically.
+        // `send_request` discards it identically.
         _ = fut;
         Box::new(async move {
-            // `check_ssrf_uri` does a blocking DNS lookup for a non-IP-literal
-            // host, and both protocol versions drive this future on an async
-            // task, so the check itself has to be offloaded.
-            let uri = request.uri().clone();
-            tokio::task::spawn_blocking(move || check_ssrf_uri(&uri))
-                .await
-                .map_err(|e| HttpError::InternalError(Some(format!("SSRF check task panicked: {e}"))))?
-                .map_err(HttpError::from)?;
+            let addrs = resolve_pinned(request.uri()).await.map_err(HttpError::from)?;
             use http_body_util::BodyExt;
-            let (res, io) = default_send_request(request, options).await?;
+            let (res, io) = send_pinned(request, options, addrs).await?;
             Ok((
                 res.map(BodyExt::boxed_unsync),
                 Box::new(io) as Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
@@ -1195,127 +1188,38 @@ impl WasiHttpHooks for PluginHttpHooks {
     }
 }
 
-/// Outcome of [`check_ssrf_uri`], mapped to [`HttpError`] by the `From` impl below.
-enum SsrfRejection {
-    UriInvalid,
-    Prohibited,
-    NotFound,
-}
-
-impl From<SsrfRejection> for HttpError {
-    fn from(rejection: SsrfRejection) -> Self {
-        match rejection {
-            SsrfRejection::UriInvalid => HttpError::HttpRequestUriInvalid,
-            SsrfRejection::Prohibited => HttpError::DestinationIpProhibited,
-            SsrfRejection::NotFound => HttpError::DestinationNotFound,
-        }
-    }
-}
-
-/// Applies this crate's standard SSRF policy (`SsrfPolicy::Strict` — the same
-/// policy the Database and HTTP nodes enforce, see `nodes::util::check_ssrf_ip`)
-/// to a WASM plugin's outbound request URI before it is sent. Shared by both
-/// [`PluginHttpHooks::send_request`], for both action (p2) and trigger (p3)
-/// plugins.
-///
-/// IP-literal hosts are checked directly (IPv6 authority brackets are stripped
-/// first — `hyper::Uri::host()` keeps them). Domain names are resolved with a
-/// blocking DNS lookup and every returned address is checked; safe to block on
-/// here since the only caller runs it inside `tokio::task::spawn_blocking`,
-/// never on an async worker thread. A missing or unparsable host, a failed resolution, or an
-/// empty result set all reject the request — fail closed, matching this
-/// crate's existing SSRF-check convention (`nodes::util::check_host_ssrf`).
-///
-/// Residual limits, same caveat `check_host_ssrf` itself documents:
-/// - A DNS-rebinding TOCTOU gap remains between this check and the connect
-///   `default_send_request` performs a moment later.
-/// - No explicit timeout on the resolution call, consistent with every other
-///   SSRF check in this crate — a stalled resolver holds one blocking-pool
-///   thread, not an async worker.
-///
-/// Both require network-level egress filtering to close fully — see the
-/// startup warning in `load_plugins`.
-fn check_ssrf_uri(uri: &hyper::Uri) -> Result<(), SsrfRejection> {
-    let host = uri.host().ok_or(SsrfRejection::UriInvalid)?;
-    let port = uri
-        .port_u16()
-        .unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
-
-    // `hyper::Uri::host()` keeps the `[...]` brackets around an IPv6 literal;
-    // strip them before attempting to parse as an IP address.
-    let ip_candidate = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
-    if let Ok(ip) = ip_candidate.parse::<std::net::IpAddr>() {
-        return check_ssrf_ip(ip, SsrfPolicy::Strict).map_err(|_| SsrfRejection::Prohibited);
-    }
-
-    let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") || lower == "metadata.google.internal" {
-        return Err(SsrfRejection::Prohibited);
-    }
-
-    let addrs = (host, port).to_socket_addrs().map_err(|_| SsrfRejection::NotFound)?;
-    let mut resolved_any = false;
-    for addr in addrs {
-        resolved_any = true;
-        check_ssrf_ip(addr.ip(), SsrfPolicy::Strict).map_err(|_| SsrfRejection::Prohibited)?;
-    }
-    if !resolved_any {
-        return Err(SsrfRejection::NotFound);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod plugin_http_hooks_tests {
-    use super::{HttpError, PluginHttpHooks, SsrfRejection, WasiBody, WasiHttpHooks, check_ssrf_uri};
+    use super::{HttpError, PluginHttpHooks, WasiBody, WasiHttpHooks};
 
-    #[test]
-    fn public_ip_allowed() {
-        let uri: hyper::Uri = "http://93.184.216.34/".parse().unwrap();
-        assert!(check_ssrf_uri(&uri).is_ok());
-    }
-
-    #[test]
-    fn private_ip_blocked() {
-        let v4: hyper::Uri = "http://192.168.1.1/".parse().unwrap();
-        assert!(matches!(check_ssrf_uri(&v4), Err(SsrfRejection::Prohibited)));
-
-        // IPv6 loopback via bracketed authority -- `hyper::Uri::host()` keeps the
-        // brackets, exercising the strip-before-parse path above.
-        let v6: hyper::Uri = "http://[::1]:8080/".parse().unwrap();
-        assert!(matches!(check_ssrf_uri(&v6), Err(SsrfRejection::Prohibited)));
-    }
-
-    #[test]
-    fn relative_uri_without_host_rejected() {
-        let uri: hyper::Uri = "/no-authority".parse().unwrap();
-        assert!(matches!(check_ssrf_uri(&uri), Err(SsrfRejection::UriInvalid)));
-    }
-
-    // Exercises `PluginHttpHooks::send_request` itself: the SSRF check has to
-    // survive being offloaded through `spawn_blocking` and surface as the
-    // guest-visible `HttpError::DestinationIpProhibited`, which the pure
-    // `check_ssrf_uri` tests above can't prove.
-    #[tokio::test]
-    async fn send_request_rejects_private_ip() {
+    async fn send(uri: &str) -> Result<(), HttpError> {
         use http_body_util::{BodyExt, Empty};
         use hyper::body::Bytes;
         use std::future::Future;
 
         let body: WasiBody = Empty::<Bytes>::new().map_err(|never| match never {}).boxed_unsync();
-        let request = hyper::Request::builder()
-            .uri("http://192.168.1.1/")
-            .body(body)
-            .expect("request build failed");
+        let request = hyper::Request::builder().uri(uri).body(body).expect("request build failed");
         let fut: Box<dyn Future<Output = Result<(), HttpError>> + Send> = Box::new(async { Ok(()) });
 
         let mut hooks = PluginHttpHooks;
-        let result = Box::into_pin(hooks.send_request(request, None, fut)).await;
+        Box::into_pin(hooks.send_request(request, None, fut)).await.map(|_| ())
+    }
 
-        match result {
-            Err(HttpError::DestinationIpProhibited) => {}
-            Err(other) => panic!("expected DestinationIpProhibited, got {other:?}"),
-            Ok(_) => panic!("expected the private-IP request to be rejected"),
+    #[tokio::test]
+    async fn send_request_rejects_private_and_loopback_destinations() {
+        for uri in ["http://192.168.1.1/", "http://[::1]:8080/", "http://localhost:9/", "http://169.254.169.254/latest"] {
+            match send(uri).await {
+                Err(HttpError::DestinationIpProhibited) => {}
+                other => panic!("{uri}: expected DestinationIpProhibited, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_request_rejects_a_uri_without_a_host() {
+        match send("/no-authority").await {
+            Err(HttpError::HttpRequestUriInvalid) => {}
+            other => panic!("expected HttpRequestUriInvalid, got {other:?}"),
         }
     }
 }
@@ -3735,18 +3639,14 @@ pub fn load_plugins(registry: &mut NodeRegistry, plugin_dir: &Path) -> PluginLoa
     registry.seal_builtins();
 
     // SECURITY NOTICE: WASM plugins' outbound HTTP (wasi:http/outgoing-handler,
-    // both action and trigger plugins) is checked against the same SSRF policy
-    // as the Database and HTTP nodes before any request is sent (see
-    // `check_ssrf_uri`) — RFC 1918, loopback, link-local, and cloud metadata
-    // addresses are rejected. That check has the
-    // same DNS-rebinding TOCTOU gap documented on `nodes::util::check_host_ssrf`,
-    // and a plugin still runs with the full trust of whatever else this process
-    // can reach once a request clears it. Treat the plugin directory as a trust
-    // boundary equivalent to running arbitrary native code, and enforce
-    // network-level egress filtering as defence-in-depth for the TOCTOU gap in
-    // server/API deployments.
+    // both action and trigger plugins) resolves the host once, rejects any
+    // RFC 1918, loopback, link-local or cloud-metadata address, and connects to
+    // the validated addresses (see `plugin_http`). A plugin still runs with the
+    // full trust of whatever else this process can reach once a request clears
+    // that filter, so treat the plugin directory as a trust boundary equivalent
+    // to running arbitrary native code.
     tracing::warn!(
-        "plugin_loader: loading WASM plugins from '{}'. Outbound HTTP is SSRF-filtered (RFC1918/loopback/link-local/cloud-metadata blocked), but only load plugins from trusted sources — a DNS-rebinding TOCTOU gap remains; enforce network-level egress filtering as defence-in-depth.",
+        "plugin_loader: loading WASM plugins from '{}'. Outbound HTTP is SSRF-filtered and pinned to the validated address (RFC1918/loopback/link-local/cloud-metadata blocked), but only load plugins from trusted sources.",
         plugin_dir.display()
     );
 

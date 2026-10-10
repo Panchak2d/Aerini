@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput};
+use crate::nodes::util::{cfg_u64_opt, Replay};
 
 // ── Redis execution ───────────────────────────────────────────────────────────
 
@@ -22,11 +23,8 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
             "key is required for all Redis operations")),
     };
 
-    // Use redis::cmd() raw API for all operations — stable across crate versions.
-    // redis_cmd_with_retry handles connection caching and evict-and-retry on IoError.
-    // Explicit, ungated opt-in — see util.rs::check_db_url_ssrf's
-    // doc comment for why this is not gated behind __caller_is_admin the way
-    // allow_raw_sql is (that gate is never set true on desktop today).
+    // Not gated behind __caller_is_admin the way allow_raw_sql is: that gate is
+    // never set on desktop (see util.rs::check_db_url_ssrf).
     let ssrf_policy = if input.input["allow_local"].as_bool().unwrap_or(false) {
         crate::nodes::util::SsrfPolicy::AllowLocal
     } else {
@@ -37,7 +35,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
     }
     match operation.as_str() {
         "get" => {
-            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, || {
+            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("GET");
                 cmd.arg(&key);
                 cmd
@@ -49,9 +47,16 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         }
 
         "set" => {
-            let value = input.input["value"].as_str().unwrap_or("").to_string();
-            let ttl = input.input["expire"].as_u64();
-            match super::pool::redis_cmd_with_retry::<(), _>(&url, || {
+            let value = match scalar_arg(&input.input["value"]) {
+                Some(v) => v,
+                None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
+                    "value is required for set. Use an empty string to store an empty value.")),
+            };
+            let ttl = match cfg_u64_opt(&input.input["expire"], "expire") {
+                Ok(v) => v,
+                Err(e) => return NodeOutput::failure(e),
+            };
+            match super::pool::redis_cmd_with_retry::<(), _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("SET");
                 cmd.arg(&key).arg(&value);
                 if let Some(t) = ttl {
@@ -66,7 +71,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         }
 
         "del" => {
-            match super::pool::redis_cmd_with_retry::<i64, _>(&url, || {
+            match super::pool::redis_cmd_with_retry::<i64, _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("DEL");
                 cmd.arg(&key);
                 cmd
@@ -78,13 +83,13 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         }
 
         "lpush" | "rpush" => {
-            let value = match input.input["value"].as_str() {
-                Some(v) => v.to_string(),
+            let value = match scalar_arg(&input.input["value"]) {
+                Some(v) => v,
                 None    => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
                     "value is required for lpush and rpush")),
             };
             let cmd_name = if operation == "lpush" { "LPUSH" } else { "RPUSH" };
-            match super::pool::redis_cmd_with_retry::<i64, _>(&url, || {
+            match super::pool::redis_cmd_with_retry::<i64, _>(&url, ssrf_policy, Replay::Never, || {
                 let mut cmd = redis::cmd(cmd_name);
                 cmd.arg(&key).arg(&value);
                 cmd
@@ -97,7 +102,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
 
         "lpop" | "rpop" => {
             let cmd_name = if operation == "lpop" { "LPOP" } else { "RPOP" };
-            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, || {
+            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, ssrf_policy, Replay::Never, || {
                 let mut cmd = redis::cmd(cmd_name);
                 cmd.arg(&key);
                 cmd
@@ -114,7 +119,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
                 _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_FIELD",
                     "field is required for hget")),
             };
-            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, || {
+            match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("HGET");
                 cmd.arg(&key).arg(&field);
                 cmd
@@ -131,8 +136,12 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
                 _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_FIELD",
                     "field is required for hset")),
             };
-            let value = input.input["value"].as_str().unwrap_or("").to_string();
-            match super::pool::redis_cmd_with_retry::<(), _>(&url, || {
+            let value = match scalar_arg(&input.input["value"]) {
+                Some(v) => v,
+                None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
+                    "value is required for hset. Use an empty string to store an empty value.")),
+            };
+            match super::pool::redis_cmd_with_retry::<(), _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("HSET");
                 cmd.arg(&key).arg(&field).arg(&value);
                 cmd
@@ -147,5 +156,30 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
             "Unknown Redis operation '{}'. Valid: get, set, del, lpush, rpush, lpop, rpop, hget, hset",
             other
         ))),
+    }
+}
+
+fn scalar_arg(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar_arg;
+    use serde_json::json;
+
+    #[test]
+    fn scalar_arg_accepts_strings_numbers_and_bools_only() {
+        assert_eq!(scalar_arg(&json!("a")), Some("a".to_string()));
+        assert_eq!(scalar_arg(&json!("")), Some(String::new()));
+        assert_eq!(scalar_arg(&json!(42)), Some("42".to_string()));
+        assert_eq!(scalar_arg(&json!(true)), Some("true".to_string()));
+        assert_eq!(scalar_arg(&json!(null)), None);
+        assert_eq!(scalar_arg(&json!(["x"])), None);
     }
 }

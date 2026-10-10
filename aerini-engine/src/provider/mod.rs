@@ -176,6 +176,7 @@ impl ProviderRegistry {
 // ── Shared AI HTTP client ─────────────────────────────────────────────────────
 
 static SHARED_AI_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static SHARED_REMOTE_AI_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Process-wide HTTP client shared by all AI nodes.
 ///
@@ -185,19 +186,40 @@ static SHARED_AI_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// Settings chosen to satisfy all three prior clients:
 ///   - timeout: 120 s (consistent across all three)
 ///   - pool_max_idle_per_host: 20 (highest of the three; ai_agent reuses most)
-///   - redirects: disabled — SSRF checks validate the initial URL only;
-///     a redirect to an internal address would bypass the check
+///   - redirects: disabled — a redirect to another host would skip the
+///     checks made on the configured `base_url`
+///   - connections are filtered against the `AllowLocal` SSRF policy at
+///     connect time: loopback and private ranges stay reachable for local
+///     model servers, everything `AllowLocal` always blocks (link-local,
+///     cloud metadata, shared address space) is refused even if a hostname
+///     resolves there after the pre-check
+///
+/// Use [`shared_remote_ai_client`] for cloud-only providers.
 ///
 /// `gen_a1111` overrides the 120 s timeout per-request via
 /// `RequestBuilder::timeout()`, which supersedes the client-level timeout.
 pub fn shared_ai_client() -> reqwest::Client {
     SHARED_AI_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::nodes::util::guarded_client_builder(crate::nodes::util::SsrfPolicy::AllowLocal)
             .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(20)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("shared AI HTTP client init failed")
+    }).clone()
+}
+
+/// Same settings as [`shared_ai_client`] but connections are filtered against
+/// the `Strict` SSRF policy: for cloud image providers, whose endpoints and
+/// downloaded result URLs must never be a loopback or private address.
+pub fn shared_remote_ai_client() -> reqwest::Client {
+    SHARED_REMOTE_AI_CLIENT.get_or_init(|| {
+        crate::nodes::util::guarded_client_builder(crate::nodes::util::SsrfPolicy::Strict)
+            .timeout(std::time::Duration::from_secs(120))
+            .pool_max_idle_per_host(20)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("shared remote AI HTTP client init failed")
     }).clone()
 }
 

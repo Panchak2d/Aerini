@@ -169,3 +169,38 @@ describe("Canvas.zoomIn / zoomOut — output drawer overlap", () => {
     expect(fake.panY).toBeCloseTo(300 - 300 * nz, 5); // full 600px height available
   });
 });
+
+describe("Canvas fit/center/zoom — chat panel overlap", () => {
+  const nodes = new Map([
+    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
+    ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+  ]);
+
+  function mountChat(offsetWidth: number): void {
+    Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+    const chat = document.createElement("div");
+    chat.id = "chat-panel";
+    Object.defineProperty(chat, "offsetWidth", { value: offsetWidth });
+    document.body.appendChild(chat);
+  }
+  afterEach(() => { document.getElementById("chat-panel")?.remove(); });
+
+  it("fitToScreen fits into the 500px left of a 300px chat panel, centered there, not the full 800px", () => {
+    mountChat(300);
+    const fake = makeFakeCanvas({ nodes });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(fake.zoom).toBeCloseTo(340 / 620, 5);
+    expect(fake.panX).toBeCloseTo(250 - 310 * (340 / 620), 5);
+  });
+
+  it("centerOn and zoomIn anchor on the horizontal center of the visible region", () => {
+    mountChat(300);
+    const fake = makeFakeCanvas();
+    fake.centerOn(100, 50);
+    expect(fake.panX).toBeCloseTo(250 - 100, 5);
+    const zoomed = makeFakeCanvas();
+    Canvas.prototype.zoomIn.call(zoomed);
+    expect(zoomed.panX).toBeCloseTo(250 - 250 * (1 / 0.9), 5);
+  });
+});
+

@@ -490,6 +490,22 @@ impl WorkflowExecutor {
         ids
     }
 
+    /// The output that becomes `__direct_input`: the first incoming edge whose
+    /// upstream node produced one. With `succeeded` set (inside a loop body),
+    /// only upstream nodes in that set count, because a node skipped or failed
+    /// in this iteration still holds its previous iteration's output.
+    fn direct_input_for(
+        node_id:      &str,
+        workflow:     &Workflow,
+        node_outputs: &HashMap<String, Value>,
+        succeeded:    Option<&HashSet<String>>,
+    ) -> Option<Value> {
+        workflow.edges.iter()
+            .filter(|e| e.to_node == node_id)
+            .filter(|e| succeeded.is_none_or(|ok| ok.contains(&e.from_node)))
+            .find_map(|e| node_outputs.get(&e.from_node).cloned())
+    }
+
     pub(super) fn activate_successors(
         &self,
         node_id:      &str,
@@ -667,17 +683,21 @@ impl WorkflowExecutor {
                     );
                 }
 
-                // Inject direct upstream node output so Code node JS `input` = wired-in node's data.
-                // Use find_map over ALL incoming edges so we skip edges whose upstream node was
-                // skipped or has not yet produced output.  The previous find().and_then() pattern
-                // stopped at the first matching edge regardless of whether that node ran — if that
-                // edge's from_node wasn't in node_outputs (e.g. it was skipped, or edge ordering
-                // happened to put an inactive edge first), __direct_input was silently never set
-                // and the Code node received `input = {}` with no fields.
-                if let Some(upstream_output) = workflow.edges.iter()
-                    .filter(|e| e.to_node == node_def.id)
-                    .find_map(|e| ctx.node_outputs.get(&e.from_node).cloned())
-                {
+                // Wired-in node's output becomes the Code node's `input`.
+                let succeeded_upstream: Option<HashSet<String>> = if loop_iteration.is_some() {
+                    let s = state.read().await;
+                    let ids: HashSet<String> = workflow.edges.iter()
+                        .filter(|e| e.to_node == node_def.id)
+                        .filter(|e| matches!(s.node_status(&e.from_node), Some(NodeStatus::Succeeded)))
+                        .map(|e| e.from_node.clone())
+                        .collect();
+                    Some(ids)
+                } else {
+                    None
+                };
+                if let Some(upstream_output) = Self::direct_input_for(
+                    &node_def.id, workflow, &ctx.node_outputs, succeeded_upstream.as_ref(),
+                ) {
                     ctx.metadata.insert("__direct_input".to_string(), upstream_output);
                 }
 
@@ -1439,6 +1459,22 @@ mod tests {
              This means the executor's find_map fix is not working.",
             val
         );
+    }
+
+    #[test]
+    fn loop_body_direct_input_ignores_a_predecessor_that_did_not_succeed_this_iteration() {
+        let workflow = two_node_workflow();
+        let outputs: HashMap<String, serde_json::Value> =
+            HashMap::from([("n_upstream".to_string(), serde_json::json!({ "stale": true }))]);
+        let none: HashSet<String> = HashSet::new();
+        let ok: HashSet<String> = HashSet::from(["n_upstream".to_string()]);
+
+        let pick = |eligible: Option<&HashSet<String>>| {
+            WorkflowExecutor::direct_input_for("n_downstream", &workflow, &outputs, eligible)
+        };
+        assert_eq!(pick(None), Some(serde_json::json!({ "stale": true })));
+        assert_eq!(pick(Some(&ok)), Some(serde_json::json!({ "stale": true })));
+        assert_eq!(pick(Some(&none)), None);
     }
 
     // ── node stubs ────────────────────────────────────────────────────────
