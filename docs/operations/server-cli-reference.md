@@ -18,14 +18,14 @@ Runs one workflow exported from the desktop app (**Export → Export for Server*
 | `--allow-code` | | `false` | Enables Code (JS) nodes. Same startup-warning behavior as `--allow-shell` if the workflow has one and this is unset. |
 | `--allow-database` | | `false` | Enables Database nodes (PostgreSQL, MySQL, SQLite, Redis). Same startup-warning behavior if the workflow has one and this is unset. |
 | `--allow-legacy-run-secret` | | `false` | Lets the server start when the config's `run_secret` is a legacy BLAKE3 hash instead of argon2id. Without it, a legacy hash makes the server refuse to start. `serve`-only, since only `serve` has a `run_secret` at all. |
-| `--file-sandbox-dir <dir>` | | none | Restricts File node reads and writes to this directory tree. If the workflow has a File node and this is left unset, the server prints a startup warning and File nodes can reach any path the process can. `api` mode handles the unset case differently, see below. |
+| `--file-sandbox-dir <dir>` | | none | Restricts File and Save to Folder node reads and writes to this directory tree. If the workflow has a File node and this is left unset, the server prints a startup warning and File nodes can reach any path the process can. `api` mode handles the unset case differently, see below. |
 | `--i-acknowledge-partial-sandbox` | | `false` | `serve`-only. Required to start with `--allow-code --code-sandbox` on macOS, see [Platform behavior of `--code-sandbox`](#platform-behavior-of---code-sandbox) below. |
-| `--ssrf-firewall-acknowledged` | | `false` | Suppresses the startup warning about the [SSRF](../glossary.md#ssrf) DNS-rebinding gap when bound to a non-loopback address. Pass it only once a host-level egress firewall is actually in place. |
+| `--ssrf-firewall-acknowledged` | | `false` | Suppresses the startup warning about the [SSRF](../glossary.md#ssrf) remaining DNS-rebinding gap (Postgres and MySQL connections) when bound to a non-loopback address. Pass it only once a host-level egress firewall is actually in place. |
 | `--parallel-execution` | | `false` | Runs independent workflow branches concurrently instead of sequentially. |
 | `--max-concurrent-nodes <n>` | | `8` | Caps simultaneous nodes when `--parallel-execution` is set; ignored otherwise. A value below `1` is clamped to `1`, not rejected. |
 | `--max-workflow-duration-secs <secs>` | | none (no limit) | Server-level ceiling on one workflow execution, applied as `min(the workflow's own duration setting, this value)` when the workflow has one. A value outside 10 to 86400 (24 hours) is clamped to that range rather than rejected. |
 | `--code-sandbox` | | `false` | Applies ESM import restrictions to Code (JS) nodes, plus CPU/memory limits on Linux. See [Platform behavior of `--code-sandbox`](#platform-behavior-of---code-sandbox) below. |
-| `--max-code-memory-mb <mb>` | | `512` (Linux only) | Memory ceiling for a Code node's Node.js subprocess. Only takes effect with `--allow-code --code-sandbox` on Linux; no effect on macOS or Windows. |
+| `--max-code-memory-mb <mb>` | | `512` (Linux only) | Memory a sandboxed Code node's script may use. Aerini adds 2 GB of address space for Node.js's own startup on top (4 GB on Linux arm64, where the startup reservation has not been measured), so the process limit is this value plus that amount. Only takes effect with `--allow-code --code-sandbox` on Linux; no effect on macOS or Windows. |
 | `--plugin-dir <dir>` | | none | Directory of `.wasm` plugin nodes to load. A file that fails to load is skipped with a warning. `serve` reloads this directory on `SIGHUP` without restarting the process. |
 
 ## `api`
@@ -40,7 +40,7 @@ Runs the multi-workflow REST API, with bearer-token auth and no export package o
 | `--allow-origin <list>` | | none | Comma-separated additional origins allowed to call the API. Localhost origins (`http://localhost[:port]`, `http://127.0.0.1[:port]`, `http://[::1][:port]`) are always allowed regardless of this flag. |
 | `--allow-env-vars <list>` | | none | Comma-separated environment variable names a workflow may read via `{{$env.VAR}}`. Anything not listed resolves to an empty string. |
 | `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Same as `serve`'s `--bind`. |
-| `--file-sandbox-dir <dir>` | | `<data-dir>/files` | Restricts File node I/O to this directory. Unlike `serve`, leaving this unset doesn't just warn: the server creates `<data-dir>/files` and uses it as the sandbox automatically. |
+| `--file-sandbox-dir <dir>` | | `<data-dir>/files` | Restricts File and Save to Folder node I/O to this directory. Unlike `serve`, leaving this unset doesn't just warn: the server creates `<data-dir>/files` and uses it as the sandbox automatically. |
 | `--trusted-proxy-count <n>` | `AERINI_TRUSTED_PROXY_COUNT` | `0` | Same as `serve`'s. |
 | `--allow-shell` | | `false` | Enables Shell Command nodes. Unlike `serve`, this prints its startup warning banner whenever the flag itself is passed, regardless of whether any current workflow has a Shell Command node yet, since any token with `write` scope can create one later. |
 | `--allow-code` | | `false` | Enables Code (JS) nodes. Same always-on-when-passed warning pattern as `--allow-shell`. |
@@ -63,7 +63,7 @@ Most flags above are identical between the two subcommands. `--file-sandbox-dir`
 
 `--code-sandbox` behaves differently on each platform, for both subcommands:
 
-- **Linux**: full enforcement. An ESM loader blocks `fs`/`net`/`child_process`-style imports, `eval`/`new Function` are separately blocked, and `setrlimit` caps both CPU time and memory (`--max-code-memory-mb`, default 512 MB) on the Node.js subprocess.
+- **Linux**: full enforcement. An ESM loader blocks `fs`/`net`/`child_process`-style imports, `eval`/`new Function` are separately blocked, and `setrlimit` caps both CPU time and memory (`--max-code-memory-mb`, default 512 MB, plus 2 GB of address space for Node.js's own startup, 4 GB on arm64) on the Node.js subprocess.
 - **macOS**: partial. The ESM import restrictions and the `eval`/`new Function` block still apply, but `setrlimit` isn't available, so CPU and memory are uncapped and the per-node timeout is the only real ceiling. `serve` refuses to start with `--allow-code --code-sandbox` on macOS unless `--i-acknowledge-partial-sandbox` is also passed; `api` has no equivalent flag and only prints a warning before continuing.
 - **Windows**: neither mechanism exists. Nothing at startup stops you from combining `--allow-code --code-sandbox` on either subcommand, but the first Code node that actually tries to run fails with a `SANDBOX_NOT_SUPPORTED` error instead of running unsandboxed. Run without `--code-sandbox` on Windows, or deploy on Linux for real sandboxing.
 

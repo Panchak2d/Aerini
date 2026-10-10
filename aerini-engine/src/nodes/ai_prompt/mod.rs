@@ -14,7 +14,18 @@ pub(crate) use attachments::{
     ATTACHMENT_ONLY_PROMPT,
     SUPPORTED_ATTACHMENT_MIMES,
 };
-pub(crate) use shared::extract_provider_error;
+#[cfg(test)]
+pub(crate) use shared::spawn_sequence_mock;
+pub(crate) use gemini::gemini_model_id;
+pub(crate) use shared::{
+    extract_provider_error,
+    rejected_param,
+    RejectedParam,
+    is_official_openai,
+    model_or_default,
+    anthropic_text,
+    clamp_claude_temperature,
+};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -23,6 +34,7 @@ use tokio::time::{sleep, Duration};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::{cfg_f64_opt, cfg_u64_opt};
 
 pub struct AiPromptNode;
 
@@ -108,12 +120,24 @@ impl Node for AiPromptNode {
         // gemini.rs needs this to know whether the user actually configured a
         // system prompt, since a magic-string comparison can't tell that apart
         // from a user who explicitly typed the exact default sentence.
-        let system_provided = input.input["system"].as_str().is_some();
-        let mut system  = input.input["system"].as_str().unwrap_or("You are a helpful assistant.").to_string();
+        let system_provided = input.input["system"].as_str().is_some_and(|s| !s.trim().is_empty());
+        let mut system  = input.input["system"].as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("You are a helpful assistant.")
+            .to_string();
         let api_key     = input.input["api_key"].as_str().unwrap_or("").to_string();
-        let temperature = input.input["temperature"].as_f64().unwrap_or(0.7);
-        let max_tokens  = input.input["max_tokens"].as_u64().unwrap_or(2048);
-        let rate_limit  = input.input["rate_limit_rpm"].as_u64().unwrap_or(0);
+        let temperature = match cfg_f64_opt(&input.input["temperature"], "temperature") {
+            Ok(v) => v.unwrap_or(0.7),
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let max_tokens = match cfg_u64_opt(&input.input["max_tokens"], "max_tokens") {
+            Ok(v) => v.unwrap_or(2048),
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let rate_limit = match cfg_u64_opt(&input.input["rate_limit_rpm"], "rate_limit_rpm") {
+            Ok(v) => v.unwrap_or(0),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let user_url_raw = input.input["base_url"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("");
         let raw_provider = input.input["provider"].as_str().unwrap_or("auto");
@@ -144,7 +168,7 @@ impl Node for AiPromptNode {
             "gemini"    => "gemini-3.6-flash",
             _           => "gpt-5.6",
         };
-        let model = input.input["model"].as_str().unwrap_or(default_model).to_string();
+        let model = model_or_default(&input.input["model"], default_model);
 
         // AllowLocal (not Strict): this node's own schema advertises local-model
         // support (Ollama etc.), so loopback/private-range base_urls must be

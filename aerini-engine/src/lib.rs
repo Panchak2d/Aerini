@@ -53,6 +53,7 @@ pub mod model;
 pub mod node;
 pub mod nodes;
 pub mod perf_monitor;
+mod plugin_http;
 pub mod plugin_loader;
 pub mod provider;
 pub mod scheduler;

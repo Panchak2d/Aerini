@@ -127,8 +127,8 @@ The If / Condition node's Condition field (see [Nodes Reference](nodes.md), Logi
 
 That comparison step understands:
 
-- Numeric and string comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` (and bare `=` as another spelling of `==`). If both sides parse as numbers, it compares numerically; otherwise it compares the text case-insensitively.
-- `contains`: `{{Webhook.output.body.tags}} contains urgent`.
+- Numeric and string comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` (and bare `=` as another spelling of `==`). If both sides parse as numbers, it compares numerically; otherwise it compares the text case-insensitively. The condition is split at the first operator it finds, so the left side should not itself contain `>`, `<`, `=` or `!`.
+- `contains`: `{{Webhook.output.body.tags}} contains urgent`. Case-insensitive, and checked before the symbol operators, so a left side such as `a=b contains b` works. An empty left or right side is treated as empty text. The left side must not itself contain the word `contains` surrounded by spaces.
 - A bare value with no operator: `true`, `yes`, and `1` count as true; `false`, `no`, `0`, `null`, and an empty string count as false; anything else (including the literal text `undefined`) counts as true.
 
 So `{{HTTP Request.output.status}} == 200` first resolves to something like `200 == 200`, and only then gets compared. Write the condition as if you're describing the comparison in plain terms; you don't need `if()` or any of the functions above inside this field.

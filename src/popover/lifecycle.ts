@@ -3,6 +3,7 @@ import { REQUIRED_FIELDS, checkDangerousNodes } from "../validation";
 import { showConfirm } from "../confirm";
 import type { CanvasNode } from "../canvas/Node";
 import type { Canvas } from "../canvas/Canvas";
+import { visibleViewport } from "../canvas/viewport";
 import { listCredentials, getCredentialMetadata, getCredentialSecret } from "../ipc/credentials";
 import { listProviderModels } from "../ipc/providers";
 import { runWorkflow } from "../ipc/workflow";
@@ -167,17 +168,17 @@ export async function showPopover(
   // Another popover may have opened while we were awaiting metadata.
   if (myId !== _activePopoverId) return;
 
-  // Parse schema — fall back to the ALL_NODES descriptor registry if the saved
-  // node has an empty input_schema (happens when loaded from a .aerini file that
-  // was saved before the serializer included the full schema).
-  const schema  = node.data.input_schema as Record<string, unknown>;
-  let rawProps = (schema?.properties ?? {}) as Record<string, unknown>;
-  if (!Object.keys(rawProps).length) {
-    const desc = getNodeDescriptor(node.data.node_type_id);
-    if (desc) {
-      const ds = desc.input_schema as Record<string, unknown>;
-      rawProps = (ds?.properties ?? {}) as Record<string, unknown>;
-    }
+  // The registry descriptor is authoritative for every property it declares, so
+  // a field added after a workflow was saved (or an enum that gained values)
+  // still shows. Properties only the saved schema has (an uninstalled plugin's)
+  // follow, so they stay editable.
+  const schema = node.data.input_schema as Record<string, unknown>;
+  const savedProps = (schema?.properties ?? {}) as Record<string, unknown>;
+  const liveSchema = getNodeDescriptor(node.data.node_type_id)?.input_schema as Record<string, unknown> | undefined;
+  const liveProps = (liveSchema?.properties ?? {}) as Record<string, unknown>;
+  const rawProps: Record<string, unknown> = { ...liveProps };
+  for (const [k, v] of Object.entries(savedProps)) {
+    if (!(k in rawProps)) rawProps[k] = v;
   }
   const props   = rawProps as Record<string, PropSchema>;
 
@@ -462,12 +463,18 @@ function positionPopover(pop: HTMLElement, node: CanvasNode, canvasEl: HTMLCanva
   const r = canvasEl.getBoundingClientRect();
   const nodeRightSx = (node.data.position.x + 220) * canvas.zoom + canvas.panX + r.left;
   const nodeMidSy   = (node.data.position.y + node.height / 2) * canvas.zoom + canvas.panY + r.top;
-  const POP_W = 360, POP_MAX_H = 680, MARGIN = 12;
+  const MARGIN = 12;
+  // Measured, not hardcoded: width and max-height are owned by .node-popover
+  // in panels.css. offsetWidth ignores the open animation's scale transform.
+  const popW = pop.offsetWidth;
+  const cssMaxH = getComputedStyle(pop).maxHeight;
+  const popMaxH = cssMaxH.endsWith("px") ? parseFloat(cssMaxH) : pop.offsetHeight;
+  const rightBound = r.left + visibleViewport(r).width;
   let left = nodeRightSx + MARGIN;
   let top  = nodeMidSy - 140;
-  if (left + POP_W > window.innerWidth - MARGIN) left = nodeRightSx - POP_W - MARGIN * 2;
+  if (left + popW > rightBound - MARGIN) left = nodeRightSx - popW - MARGIN * 2;
   if (left < MARGIN) left = MARGIN;
-  if (top + POP_MAX_H > window.innerHeight - MARGIN) top = window.innerHeight - POP_MAX_H - MARGIN;
+  if (top + popMaxH > window.innerHeight - MARGIN) top = window.innerHeight - popMaxH - MARGIN;
   if (top < MARGIN) top = MARGIN;
   pop.style.left = `${left}px`; pop.style.top = `${top}px`; pop.style.transform = "none";
 }

@@ -31,7 +31,6 @@ export const NODE_IDS = {
   DELAY:          "delay",
   WAIT:           "wait",
   TRANSFORM:      "transform",
-  TRANSFORM_DATA: "transform_data",
   JSON_NODE:      "json",
   SET_VARIABLE:   "set_variable",
   GET_VARIABLE:   "get_variable",

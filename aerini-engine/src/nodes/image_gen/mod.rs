@@ -4,41 +4,48 @@
 //
 //   "gpt_image_1" / "dalle3" → GPT Image 1 (recommended OpenAI option)
 //     POST https://api.openai.com/v1/images/generations, model="gpt-image-1"
-//     n=1-10 native batch (one call). Returns data[].b64_json by default.
+//     n>1: one request per image, results merged (keeps each response under the
+//     10 MB cap). Returns data[].b64_json by default.
 //     size: 1024x1024 | 1536x1024 | 1024x1536 | auto  (different from DALL-E 3 sizes)
 //     quality: auto | low | medium | high
 //     "dalle3" alias → gpt-image-1. DALL-E 3 retired May 12 2026.
 // OpenAI API reference (developers.openai.com/api/reference), June 2026
 //
 //   "gpt_image_2" → GPT Image 2
-//     Same endpoint, model="gpt-image-2". n=1-8 native.
+//     Same endpoint, model="gpt-image-2". n>1: one request per image.
 //     size: arbitrary WxH divisible by 16 (ratio 1:3-3:1, max 2560x1440), or same presets.
 // OpenAI API reference (developers.openai.com/api/reference), June 2026
 //
-//   "imagen4" / "nano_banana" → NanoBanana (gemini-2.5-flash-image)
+//   "imagen4" / "nano_banana" → NanoBanana (Gemini image model from the `model` field:
+//     gemini-2.5-flash-image (default), gemini-nano-banana-2.1, gemini-3.1-flash-lite-image)
 //     POST https://generativelanguage.googleapis.com/v1beta/models/
-//          gemini-2.5-flash-image:generateContent
+//          {model}:generateContent
 //     Auth: x-goog-api-key header
 //     Body: {contents:[{parts:[{text}]}], generationConfig:{responseModalities:["IMAGE"],
 //            imageConfig:{aspectRatio}}}
 //     Response: candidates[0].content.parts[].inlineData.{data, mimeType}
-//     n>1: loop (no native batch). Partial success on failure (G4 pattern).
-//     "imagen4" alias preserved — Imagen 4 direct API shuts down Aug 17 2026.
-//     NOTE: Google now recommends gemini-3.1-flash-image over gemini-2.5-flash-image.
-//           API shapes identical. Upgrade = change model name in endpoint URL only.
-// Google AI developer docs (ai.google.dev/gemini-api/docs/image-generation),
-//               June 2026
+//     n>1: loop (no native batch). Partial success when only some images fail.
+//     output.source is the configured alias ("imagen4" or "nano_banana").
+//     Safety blocks and text-only replies arrive as HTTP 200 and become the named
+//     errors PROMPT_BLOCKED, IMAGE_BLOCKED and NO_IMAGE_RETURNED.
+//     "imagen4" alias preserved — the Imagen 4 direct API shut down Aug 17 2026.
+//     gemini-2.5-flash-image: Google's deprecations page (updated 2026-10-09) lists
+//     its earliest shutdown as March 15 2027, replacement gemini-3.1-flash-lite-image.
+//     Error replies map to named codes (INVALID_API_KEY, API_KEY_LEAKED, PROJECT_DENIED,
+//     API_KEY_RESTRICTED, PERMISSION_DENIED, REGION_NOT_SUPPORTED) by message text.
+// Google AI developer docs (ai.google.dev/gemini-api/docs/deprecations and
+//               /image-generation), October 2026
 //
 //   "flux_pro" → Black Forest Labs FLUX1.1 [pro]
 //     POST https://api.bfl.ai/v1/flux-pro-1.1
 //     Auth: x-key header. width/height: 256-1440, multiple of 32 (enforced here).
 //     ASYNC: POST -> {id, polling_url}. GET polling_url until "Ready" or terminal status.
-//     result.sample URL (expires 10 min) -> download -> base64. n>1: loop.
+//     result.sample URL (expires 10 min) -> download (3 tries) -> base64. n>1: loop.
 // docs.bfl.ml OpenAPI spec, June 2026
 //
 //   "flux_2_pro" → Black Forest Labs FLUX.2 [pro]
 //     POST https://api.bfl.ai/v1/flux-2-pro. Same async polling pattern.
-//     width/height: min 64, no multipleOf constraint.
+//     width/height: min 64 (enforced here).
 // docs.bfl.ml OpenAPI spec, June 2026
 //
 //   "a1111" → Automatic1111 / Stable Diffusion WebUI (local)
@@ -46,24 +53,26 @@
 //     Auth: optional HTTP Basic auth — URL credentials (user:pass@host) or
 //           separate username/password config fields (explicit fields take priority)
 //     Body: {prompt, negative_prompt, width, height, steps, cfg_scale, batch_size}
-//     Response: {images: [base64_string, ...]} — strips data: URI prefix if present
+//     Response: {images: [base64_string, ...]} — strips data: URI prefix if present;
+//     a leading grid image (batch_size > 1) is skipped using info.index_of_first_image
 //     n>1: batch_size (native batch, single API call). No api_key required.
 //     timeout_seconds (optional, default 300, clamped 10-1800): per-request HTTP
 //     timeout override. The shared_ai_client() default (120s) is too short for
 //     large batch_size / high step counts on local hardware -- this field lets the
-//     request run longer without raising the timeout for cloud providers sharing
-//     the same client.
+//     request run longer without raising the client-level timeout.
 // AUTOMATIC1111/stable-diffusion-webui wiki + API docs, June 2026
 //
 //   "comfyui" → ComfyUI local server (local)
 //     POST {base_url}/prompt with {"prompt": workflow_json} → {"prompt_id": "..."}
 //     Poll: GET {base_url}/history/{prompt_id} until status.completed == true
 //     Output: traverse outputs nodes, GET {base_url}/view?filename=...&subfolder=...&type=output
+//     Preview (type "temp") images are skipped when the workflow also saves images.
+//     n is ignored (a log line says so): the workflow decides how many images it saves.
 //     SSRF check: validated once on base_url (covers all derived /prompt, /history, /view URLs).
 //     No api_key required. Workflow JSON must be in ComfyUI API format (not UI format).
 // ComfyUI API reference (runflow.io/blog/comfyui-api-endpoints), June 2026
 //
-// Output (DATA CONTRACT - unchanged from v1):
+// Output (DATA CONTRACT):
 //   { "files": [{"filename":"...","data":"<raw b64>","mime_type":"image/..."}],
 //     "count": N, "source": "<provider-string>" }
 
@@ -82,11 +91,41 @@ use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 use self::openai::{gen_gpt_image, GptImageRequest};
-use self::nanobanana::gen_nano_banana;
+use self::nanobanana::{gemini_model_of, gen_nano_banana, GEMINI_MODELS};
 use self::flux::{gen_flux, FluxRequest};
 use self::a1111::{gen_a1111, A1111Params};
 use self::comfyui::gen_comfyui;
 use crate::nodes::ai_prompt::extract_port_attachments;
+use crate::nodes::util::{cfg_f64_opt, cfg_u64_opt};
+
+const VALID_PROVIDERS: [&str; 9] = [
+    "gpt_image_1", "gpt_image_2", "flux_pro", "flux_2_pro", "nano_banana",
+    "imagen4", "dalle3", "a1111", "comfyui",
+];
+
+const VALID_PROVIDER_HELP: &str = "gpt_image_1, gpt_image_2, flux_pro, flux_2_pro, nano_banana, imagen4 (->NanoBanana), dalle3 (->gpt-image-1), a1111, comfyui";
+
+fn unknown_provider(name: &str) -> NodeError {
+    NodeError::unrecoverable(
+        "UNKNOWN_PROVIDER",
+        format!("Unknown provider '{}'. Valid: {}", name, VALID_PROVIDER_HELP),
+    )
+}
+
+fn provider_of(cfg: &Value) -> Result<&str, NodeError> {
+    match cfg["provider"].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+        None => Err(NodeError::unrecoverable(
+            "MISSING_PROVIDER",
+            format!("provider is required. Valid: {}", VALID_PROVIDER_HELP),
+        )),
+        Some(p) if VALID_PROVIDERS.contains(&p) => Ok(p),
+        Some(p) => Err(unknown_provider(p)),
+    }
+}
+
+fn cfg_clamped_u64(cfg: &Value, key: &str, default: u64, lo: u64, hi: u64) -> Result<u64, NodeError> {
+    Ok(cfg_u64_opt(&cfg[key], key)?.unwrap_or(default).clamp(lo, hi))
+}
 
 pub struct ImageGenNode;
 
@@ -103,11 +142,11 @@ impl Node for ImageGenNode {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["prompt", "provider"],
+            "required": ["provider"],
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Image generation prompt"
+                    "description": "Image generation prompt. Required for every provider except comfyui, where the text lives in the workflow JSON."
                 },
                 "provider": {
                     "type": "string",
@@ -116,7 +155,7 @@ impl Node for ImageGenNode {
                 },
                 "n": {
                     "type": "number",
-                    "description": "Images to generate (1-4, default 1). GPT Image sends all in one call; NanoBanana and Flux loop per image."
+                    "description": "Images to generate (1-4, default 1). GPT Image, NanoBanana and Flux send one request per image; a1111 sends one batch. Not used by comfyui: the workflow decides."
                 },
                 "size": {
                     "type": "string",
@@ -127,17 +166,22 @@ impl Node for ImageGenNode {
                     "enum": ["auto", "low", "medium", "high"],
                     "description": "GPT Image only. Default: auto"
                 },
+                "model": {
+                    "type": "string",
+                    "enum": GEMINI_MODELS,
+                    "description": "NanoBanana / Gemini only. Default gemini-2.5-flash-image, which Google shuts down on March 15 2027. gemini-nano-banana-2.1 and gemini-3.1-flash-lite-image (1K images only) are Google's replacements; Google's docs do not confirm they work through this node's request, so a refusal comes back as an API error with Google's message."
+                },
                 "aspect_ratio": {
                     "type": "string",
                     "description": "NanoBanana / Gemini only. Supported: 1:1 1:4 1:8 2:3 3:2 3:4 4:1 4:3 4:5 5:4 8:1 9:16 16:9 21:9. Default: 1:1"
                 },
                 "width": {
                     "type": "number",
-                    "description": "Flux only. flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. Default: 1024"
+                    "description": "flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. a1111: 64-2048 rounded to nearest 8. Not used by other providers. Default: 1024 (a1111: 512)"
                 },
                 "height": {
                     "type": "number",
-                    "description": "Flux only. flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. Default: 768 (flux_pro) / 1024 (flux_2_pro)"
+                    "description": "flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. a1111: 64-2048 rounded to nearest 8. Not used by other providers. Default: 768 (flux_pro) / 1024 (flux_2_pro) / 512 (a1111)"
                 },
                 "api_key": {
                     "type": "string",
@@ -206,7 +250,10 @@ impl Node for ImageGenNode {
         let cfg = &input.input;
 
         // Resolve provider first so local providers can skip api_key and prompt requirements.
-        let provider = cfg["provider"].as_str().unwrap_or("gpt_image_1");
+        let provider = match provider_of(cfg) {
+            Ok(p)  => p,
+            Err(e) => return NodeOutput::failure(e),
+        };
         let is_local = matches!(provider, "a1111" | "comfyui");
 
         // comfyui: prompt not required (text is baked into the workflow JSON).
@@ -232,7 +279,10 @@ impl Node for ImageGenNode {
             String::new()
         };
 
-        let n = cfg["n"].as_u64().unwrap_or(1).clamp(1, 4) as usize;
+        let n = match cfg_clamped_u64(cfg, "n", 1, 1, 4) {
+            Ok(v) => v as usize,
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         // Reference images from the "Reference Images" input port.
         // Canvas injects {{SourceNode.output.files}} into config["reference_images_expr"].
@@ -242,8 +292,12 @@ impl Node for ImageGenNode {
             // -- NanoBanana / Gemini -----------------------------------------
             // "imagen4" is a legacy config alias preserved for saved-workflow compat.
             "imagen4" | "nano_banana" => {
+                let model = match gemini_model_of(cfg) {
+                    Ok(m)  => m,
+                    Err(e) => return NodeOutput::failure(e),
+                };
                 let aspect = cfg["aspect_ratio"].as_str().unwrap_or("1:1").to_string();
-                gen_nano_banana(crate::provider::shared_ai_client(), &prompt, n, &aspect, &api_key, &ref_images).await
+                gen_nano_banana(crate::provider::shared_remote_ai_client(), model, &prompt, n, &aspect, &api_key, &ref_images, provider).await
             }
 
             // -- OpenAI GPT Image 1 (recommended) ----------------------------
@@ -252,7 +306,7 @@ impl Node for ImageGenNode {
             "gpt_image_1" | "dalle3" => {
                 let size    = cfg["size"].as_str().unwrap_or("1024x1024").to_string();
                 let quality = cfg["quality"].as_str().unwrap_or("auto").to_string();
-                gen_gpt_image(crate::provider::shared_ai_client(), GptImageRequest {
+                gen_gpt_image(crate::provider::shared_remote_ai_client(), GptImageRequest {
                     model: "gpt-image-1", source: provider, prompt: &prompt, n, size: &size, quality: &quality, api_key: &api_key, ref_images: &ref_images,
                 }).await
             }
@@ -261,19 +315,25 @@ impl Node for ImageGenNode {
             "gpt_image_2" => {
                 let size    = cfg["size"].as_str().unwrap_or("1024x1024").to_string();
                 let quality = cfg["quality"].as_str().unwrap_or("auto").to_string();
-                gen_gpt_image(crate::provider::shared_ai_client(), GptImageRequest {
+                gen_gpt_image(crate::provider::shared_remote_ai_client(), GptImageRequest {
                     model: "gpt-image-2", source: provider, prompt: &prompt, n, size: &size, quality: &quality, api_key: &api_key, ref_images: &ref_images,
                 }).await
             }
 
             // -- BFL FLUX1.1 [pro] -------------------------------------------
             "flux_pro" => {
-                let raw_w = cfg["width"].as_u64().unwrap_or(1024).clamp(256, 1440) as u32;
-                let raw_h = cfg["height"].as_u64().unwrap_or(768).clamp(256, 1440) as u32;
+                let raw_w = match cfg_clamped_u64(cfg, "width", 1024, 256, 1440) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let raw_h = match cfg_clamped_u64(cfg, "height", 768, 256, 1440) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
                 // flux-pro-1.1 requires width and height as multiples of 32
-                let width  = ((raw_w / 32) * 32).max(256);
-                let height = ((raw_h / 32) * 32).max(256);
-                let mut out = gen_flux(crate::provider::shared_ai_client(), FluxRequest {
+                let width  = round_to_multiple(raw_w, 32);
+                let height = round_to_multiple(raw_h, 32);
+                let mut out = gen_flux(crate::provider::shared_remote_ai_client(), FluxRequest {
                     endpoint: "/v1/flux-pro-1.1", source: "flux_pro", prompt: &prompt, width, height, api_key: &api_key,
                 }, n).await;
                 if !ref_images.is_empty() {
@@ -284,9 +344,15 @@ impl Node for ImageGenNode {
 
             // -- BFL FLUX.2 [pro] --------------------------------------------
             "flux_2_pro" => {
-                let width  = cfg["width"].as_u64().unwrap_or(1024).clamp(64, 4096) as u32;
-                let height = cfg["height"].as_u64().unwrap_or(1024).clamp(64, 4096) as u32;
-                let mut out = gen_flux(crate::provider::shared_ai_client(), FluxRequest {
+                let width = match cfg_clamped_u64(cfg, "width", 1024, 64, 4096) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let height = match cfg_clamped_u64(cfg, "height", 1024, 64, 4096) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let mut out = gen_flux(crate::provider::shared_remote_ai_client(), FluxRequest {
                     endpoint: "/v1/flux-2-pro", source: "flux_2_pro", prompt: &prompt, width, height, api_key: &api_key,
                 }, n).await;
                 if !ref_images.is_empty() {
@@ -305,16 +371,39 @@ impl Node for ImageGenNode {
                     )),
                 };
                 let neg       = cfg["negative_prompt"].as_str().unwrap_or("").to_string();
-                let width     = cfg["width"].as_u64().unwrap_or(512).clamp(64, 2048) as u32;
-                let height    = cfg["height"].as_u64().unwrap_or(512).clamp(64, 2048) as u32;
-                let steps     = cfg["steps"].as_u64().unwrap_or(20).clamp(1, 150) as u32;
-                let cfg_scale = cfg["cfg_scale"].as_f64().unwrap_or(7.0);
+                let raw_w = match cfg_clamped_u64(cfg, "width", 512, 64, 2048) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let raw_h = match cfg_clamped_u64(cfg, "height", 512, 64, 2048) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let width  = round_to_multiple(raw_w, 8);
+                let height = round_to_multiple(raw_h, 8);
+                let size_note = ((width, height) != (raw_w, raw_h)).then(|| {
+                    format!("a1111 size {raw_w}x{raw_h} adjusted to {width}x{height} (multiple of 8)")
+                });
+                let steps = match cfg_clamped_u64(cfg, "steps", 20, 1, 150) {
+                    Ok(v) => v as u32,
+                    Err(e) => return NodeOutput::failure(e),
+                };
+                let cfg_scale = match cfg_f64_opt(&cfg["cfg_scale"], "cfg_scale") {
+                    Ok(v) => v.unwrap_or(7.0),
+                    Err(e) => return NodeOutput::failure(e),
+                };
                 let username  = cfg["username"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
                 let password  = cfg["password"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
-                let timeout_secs = cfg["timeout_seconds"].as_u64().unwrap_or(300).clamp(10, 1800);
+                let timeout_secs = match cfg_clamped_u64(cfg, "timeout_seconds", 300, 10, 1800) {
+                    Ok(v) => v,
+                    Err(e) => return NodeOutput::failure(e),
+                };
                 let mut out = gen_a1111(crate::provider::shared_ai_client(), A1111Params {
                     base_url, prompt, negative_prompt: neg, n, width, height, steps, cfg_scale, username, password, timeout_secs,
                 }).await;
+                if let Some(note) = size_note {
+                    out.logs.insert(0, note);
+                }
                 if !ref_images.is_empty() {
                     out.logs.insert(0, "[WARN] reference_images ignored: a1111 txt2img does not support image input. Use nano_banana, gpt_image_1, or gpt_image_2 for image editing.".to_string());
                 }
@@ -338,19 +427,96 @@ impl Node for ImageGenNode {
                     )),
                 };
                 let mut out = gen_comfyui(crate::provider::shared_ai_client(), &base_url, workflow).await;
+                if n > 1 {
+                    out.logs.insert(0, "[WARN] n ignored: comfyui returns the images its workflow saves. Set the batch size inside the workflow.".to_string());
+                }
                 if !ref_images.is_empty() {
                     out.logs.insert(0, "[WARN] reference_images ignored: comfyui does not support image input via this port. Embed image nodes directly in your ComfyUI workflow JSON.".to_string());
                 }
                 out
             }
 
-            other => NodeOutput::failure(NodeError::unrecoverable(
-                "UNKNOWN_PROVIDER",
-                format!(
-                    "Unknown provider '{}'. Valid: gpt_image_1, gpt_image_2, flux_pro, flux_2_pro, nano_banana, imagen4 (->NanoBanana), dalle3 (->gpt-image-1), a1111, comfyui",
-                    other
-                ),
-            )),
+            other => NodeOutput::failure(unknown_provider(other)),
         }
+    }
+}
+
+/// Nearest multiple of `step`; a tie rounds up.
+fn round_to_multiple(raw: u32, step: u32) -> u32 {
+    ((raw + step / 2) / step) * step
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sizes_round_to_the_nearest_multiple_and_ties_go_up() {
+        assert_eq!(round_to_multiple(515, 8), 512);
+        assert_eq!(round_to_multiple(516, 8), 520);
+        assert_eq!(round_to_multiple(512, 8), 512);
+        assert_eq!(round_to_multiple(64, 8), 64);
+        assert_eq!(round_to_multiple(1439, 32), 1440);
+        assert_eq!(round_to_multiple(1423, 32), 1408);
+        assert_eq!(round_to_multiple(1424, 32), 1440);
+        assert_eq!(round_to_multiple(1440, 32), 1440);
+    }
+
+    use super::*;
+    use crate::model::ExecutionContext;
+
+    async fn run(cfg: Value) -> NodeOutput {
+        ImageGenNode
+            .execute(NodeInput {
+                resolved_credentials: std::collections::HashMap::new(),
+                cancel_token: None,
+                node_id:      "test_node".to_string(),
+                workflow_id:  String::new(),
+                execution_id: "exec".to_string(),
+                input:        cfg,
+                context:      ExecutionContext::default(),
+            })
+            .await
+    }
+
+    fn code(out: &NodeOutput) -> String {
+        out.error.as_ref().expect("must fail").code.clone()
+    }
+
+    #[tokio::test]
+    async fn an_unknown_provider_is_reported_before_the_missing_key_and_names_the_valid_ones() {
+        let out = run(json!({ "provider": "dall-e", "prompt": "a cat" })).await;
+        assert_eq!(code(&out), "UNKNOWN_PROVIDER");
+        let e = out.error.unwrap();
+        assert!(!e.recoverable);
+        assert!(e.message.contains("dall-e") && e.message.contains("gpt_image_1") && e.message.contains("comfyui"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_blank_provider_fails_instead_of_defaulting() {
+        for cfg in [json!({ "prompt": "a cat", "api_key": "k" }), json!({ "provider": "  ", "prompt": "a cat", "api_key": "k" })] {
+            let out = run(cfg).await;
+            assert_eq!(code(&out), "MISSING_PROVIDER");
+            assert!(out.error.unwrap().message.contains("gpt_image_1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_known_provider_still_gets_the_prompt_and_key_checks() {
+        assert_eq!(code(&run(json!({ "provider": "flux_pro" })).await), "MISSING_PROMPT");
+        assert_eq!(code(&run(json!({ "provider": "flux_pro", "prompt": "a cat" })).await), "MISSING_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_gemini_model_fails_before_any_request_is_sent() {
+        let out = run(json!({ "provider": "nano_banana", "prompt": "a cat", "api_key": "k", "model": "gemini-9" })).await;
+        assert_eq!(code(&out), "UNKNOWN_MODEL");
+    }
+
+    #[test]
+    fn every_schema_provider_is_known_and_prompt_is_not_required_by_the_schema() {
+        let schema = ImageGenNode.input_schema();
+        let listed: Vec<&str> = schema["properties"]["provider"]["enum"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(listed.len(), VALID_PROVIDERS.len());
+        assert!(listed.iter().all(|p| VALID_PROVIDERS.contains(p)));
+        assert_eq!(schema["required"], json!(["provider"]));
     }
 }

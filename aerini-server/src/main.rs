@@ -134,7 +134,7 @@ enum Command {
         /// Suppress the SSRF firewall warning when the server is bound to a non-loopback
         /// address. Pass this flag only after configuring a host-level egress firewall that
         /// blocks outbound connections to RFC-1918, loopback, link-local, and cloud metadata
-        /// ranges (e.g. 169.254.169.254). See docs/security.md for recommended rules.
+        /// ranges (e.g. 169.254.169.254). See docs/guide/security.md for recommended rules.
         #[arg(long, default_value_t = false)]
         ssrf_firewall_acknowledged: bool,
 
@@ -247,7 +247,7 @@ enum Command {
         /// Suppress the SSRF firewall warning when the server is bound to a non-loopback
         /// address. Pass this flag only after configuring a host-level egress firewall that
         /// blocks outbound connections to RFC-1918, loopback, link-local, and cloud metadata
-        /// ranges (e.g. 169.254.169.254). See docs/security.md for recommended rules.
+        /// ranges (e.g. 169.254.169.254). See docs/guide/security.md for recommended rules.
         #[arg(long, default_value_t = false)]
         ssrf_firewall_acknowledged: bool,
 
@@ -569,7 +569,6 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     let has_shell_node    = dangerous_present.contains(&"shell_exec");
     let has_code_node     = dangerous_present.contains(&"code");
     let has_database_node = dangerous_present.contains(&"database");
-    let has_http_node  = workflow.nodes.iter().any(|n| n.node_type_id == "http_request");
     let has_file_node  = workflow.nodes.iter().any(|n| n.node_type_id == "file" || n.node_type_id == "save_to_folder");
     if has_file_node && file_sandbox_dir.is_none() {
         tracing::warn!(
@@ -598,31 +597,16 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
              side-channel in sqlx-mysql)."
         );
     }
-    if has_http_node {
-        // The HTTP Request node performs DNS pre-validation to block SSRF, but a
-        // TOCTOU window exists: a malicious DNS server can return an allowed IP
-        // during validation and a private IP (e.g. 169.254.169.254) on the real
-        // connect. Application-layer checks are defense-in-depth only.
-        // Required: configure a network-level egress firewall that blocks outbound
-        // connections to RFC-1918, loopback, link-local, and cloud metadata ranges.
-        // See docs/security.md for recommended iptables/nftables rules.
-        tracing::warn!(
-            "Workflow contains an HTTP Request node. The built-in SSRF protection has a \
-             DNS rebinding (TOCTOU) gap that cannot be closed at the application layer. \
-             Configure a network-level egress firewall to block connections to private, \
-             loopback, link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
-             See docs/security.md for details."
-        );
-    }
-
     if is_public_bind(&bind) && !ssrf_firewall_acknowledged {
         tracing::warn!(
             "aerini-server is bound to {} (non-loopback). \
-             The SSRF DNS pre-check has a TOCTOU gap that cannot be closed at the application layer — \
-             a malicious DNS server can bypass it. \
+             HTTP Request, AI, integration, Redis, Send Email, S3 and plugin HTTP check addresses when they \
+             connect, but Postgres and MySQL connections are only checked before they connect, \
+             so a malicious DNS server can bypass that check (DNS rebinding) unless the connection URL uses \
+             sslmode=verify-full (Postgres) or ssl-mode=VERIFY_IDENTITY (MySQL). \
              Configure a host-level egress firewall to block connections to RFC-1918, loopback, \
              link-local, and cloud metadata ranges (e.g. 169.254.169.254). \
-             See docs/security.md for recommended iptables/nftables rules. \
+             See docs/guide/security.md for recommended iptables/nftables rules. \
              Pass --ssrf-firewall-acknowledged to suppress this warning once the firewall is in place.",
             bind
         );
@@ -910,16 +894,17 @@ async fn api_mode(cfg: api_server::ServerConfig) {
     if is_public_bind(&bind) && !ssrf_firewall_acknowledged {
         eprintln!();
         eprintln!("┌─────────────────────────────────────────────────────────────────────┐");
-        eprintln!("│  WARNING: SSRF DNS rebinding (TOCTOU) — egress firewall required     │");
-        eprintln!("│                                                                       │");
-        eprintln!("│  The built-in SSRF DNS pre-check has a TOCTOU gap: a malicious DNS   │");
-        eprintln!("│  server can bypass it. This cannot be closed at the application      │");
-        eprintln!("│  layer. You MUST configure a host-level egress firewall that blocks  │");
-        eprintln!("│  outbound connections to RFC-1918, loopback, link-local, and cloud   │");
-        eprintln!("│  metadata ranges (e.g. 169.254.169.254).                             │");
-        eprintln!("│                                                                       │");
-        eprintln!("│  See docs/security.md for recommended iptables/nftables rules.       │");
-        eprintln!("│  Pass --ssrf-firewall-acknowledged to suppress this warning.         │");
+        eprintln!("│  WARNING: SSRF DNS rebinding (TOCTOU) — egress firewall required    │");
+        eprintln!("│                                                                     │");
+        eprintln!("│  HTTP Request, AI, integration, Redis, Send Email, S3 and plugin    │");
+        eprintln!("│  nodes check addresses when they connect. Postgres and MySQL        │");
+        eprintln!("│  connections are only checked beforehand, so a malicious DNS server │");
+        eprintln!("│  can bypass that check. Configure a host-level egress firewall that │");
+        eprintln!("│  blocks outbound connections to RFC-1918, loopback, link-local, and │");
+        eprintln!("│  cloud metadata ranges (e.g. 169.254.169.254).                      │");
+        eprintln!("│                                                                     │");
+        eprintln!("│  See docs/guide/security.md for recommended firewall rules.         │");
+        eprintln!("│  Pass --ssrf-firewall-acknowledged to suppress this warning.        │");
         eprintln!("└─────────────────────────────────────────────────────────────────────┘");
         eprintln!();
     }

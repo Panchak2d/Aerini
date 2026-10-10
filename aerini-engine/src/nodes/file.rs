@@ -1,12 +1,69 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::fs_sandbox;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
+const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
+
 pub struct FileNode;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Utf8,
+    Base64,
+}
+
+fn parse_encoding(v: &Value) -> Result<Encoding, NodeOutput> {
+    match v {
+        Value::Null => Ok(Encoding::Utf8),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "" | "utf8" => Ok(Encoding::Utf8),
+            "base64" => Ok(Encoding::Base64),
+            other => Err(NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_ENCODING",
+                format!("encoding must be 'utf8' or 'base64', got '{other}'"),
+            ))),
+        },
+        _ => Err(NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_ENCODING",
+            "encoding must be 'utf8' or 'base64'",
+        ))),
+    }
+}
+
+/// Bytes to write for `write` / `append`. An absent or null `content` is an
+/// error: treating it as empty would silently truncate the target on `write`.
+fn content_bytes(content: &Value, encoding: Encoding) -> Result<Vec<u8>, NodeOutput> {
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => {
+            return Err(NodeOutput::failure(NodeError::unrecoverable(
+                "MISSING_CONTENT",
+                "content is required for write and append (use an empty string for an empty file)",
+            )))
+        }
+        _ => {
+            return Err(NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_CONTENT",
+                "content must be text; convert objects and arrays to a string first",
+            )))
+        }
+    };
+    decode_write_content(&text, encoding).map_err(|e| {
+        NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_BASE64",
+            format!("content is not valid base64: {e}"),
+        ))
+    })
+}
 
 #[async_trait]
 impl Node for FileNode {
@@ -23,8 +80,8 @@ impl Node for FileNode {
             "properties": {
                 "operation": { "type": "string", "enum": ["read", "write", "append", "delete", "exists"] },
                 "path":      { "type": "string", "description": "Absolute or relative file path" },
-                "content":   { "type": "string", "description": "Content to write (write/append only)" },
-                "encoding":  { "type": "string", "enum": ["utf8", "base64"], "description": "Default: utf8" }
+                "content":   { "type": "string", "description": "Content to write (write/append only; required, use an empty string for an empty file)" },
+                "encoding":  { "type": "string", "enum": ["utf8", "base64"], "description": "Default: utf8. Reading a file that is not valid UTF-8 as utf8 fails; use base64 for binary files." }
             }
         })
     }
@@ -51,7 +108,7 @@ impl Node for FileNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_PATH", "path is required")),
         };
 
-        if std::path::Path::new(&raw_path)
+        if Path::new(&raw_path)
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
@@ -61,527 +118,398 @@ impl Node for FileNode {
             ));
         }
 
-        // In server mode the executor injects __file_sandbox_dir into context metadata.
-        // fs::canonicalize fully dereferences all symlinks and requires the target
-        // (or its parent, for write/append) to exist on disk. A symlink inside the
-        // sandbox whose ultimate target resolves outside is detected and rejected.
-        //
-        // Without a sandbox the raw_path is used unchanged — no behaviour change for
-        // desktop/no-sandbox deployments.
-        let path: String = if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
-            if let Some(sandbox_str) = sandbox_val.as_str() {
-                // Canonicalize the sandbox root itself so that starts_with comparisons
-                // work correctly even when the operator's --file-sandbox-dir path
-                // contains symlinks. Hard-fail if it can't be resolved — misconfiguration
-                // means we cannot make a correct containment decision.
-                let sandbox = match std::fs::canonicalize(sandbox_str) {
-                    Ok(p) => p,
-                    Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "INVALID_PATH",
-                        "Configured sandbox directory does not exist or cannot be resolved",
-                    )),
-                };
-
-                let abs: std::path::PathBuf = if raw_path.starts_with('/') {
-                    std::path::PathBuf::from(&raw_path)
-                } else {
-                    sandbox.join(&raw_path)
-                };
-
-                let outside = || NodeOutput::failure(NodeError::unrecoverable(
-                    "PATH_OUTSIDE_SANDBOX",
-                    format!("File access is restricted to '{}'", sandbox_str),
-                ));
-
-                match operation.as_str() {
-                    // write/append: the target file may not exist yet.
-                    // exists: the target may legitimately not exist (that's a valid,
-                    //   non-error "exists: false" result) — but the old lexical fallback
-                    //   here trusted an unresolved suffix past a symlinked *intermediate*
-                    // directory. All three now resolve through the same
-                    //   walk-up-to-nearest-existing-ancestor helper, which also lets
-                    //   write/append reach nested, not-yet-created directories inside the
-                    // sandbox — create_dir_all runs later, after this check.
-                    "write" | "append" | "exists" => {
-                        match resolve_within_sandbox(&sandbox, sandbox_str, &abs) {
-                            Ok(resolved) => resolved,
-                            Err(failure) => return failure,
-                        }
-                    }
-                    _ => {
-                        // read, delete: canonicalize the full path.
-                        // Returns INVALID_PATH if the file does not exist.
-                        match std::fs::canonicalize(&abs) {
-                            Ok(cp) if cp.starts_with(&sandbox) => {
-                                cp.to_string_lossy().into_owned()
-                            }
-                            Ok(_)  => return outside(),
-                            Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                                "INVALID_PATH",
-                                "Path does not exist or cannot be resolved",
-                            )),
-                        }
-                    }
-                }
-            } else {
-                raw_path
-            }
-        } else {
-            raw_path
+        let sandbox = match fs_sandbox::root_from_metadata(&input.context.metadata) {
+            Ok(root) => root,
+            Err(e) => return e.into_output("path", None),
         };
+        let path: PathBuf = match &sandbox {
+            None => PathBuf::from(&raw_path),
+            Some(root) if operation == "delete" => match resolve_entry(root, &raw_path) {
+                Ok(p) => p,
+                Err(failure) => return failure,
+            },
+            Some(root) => match fs_sandbox::resolve(root, Path::new(&raw_path)) {
+                Ok(p) => p,
+                Err(e) => return e.into_output("path", Some(root.as_path())),
+            },
+        };
+        let shown = path.to_string_lossy().into_owned();
 
         match operation.as_str() {
             "read" => {
-                const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
-                match fs::metadata(&path).await {
-                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable("READ_ERR", e.to_string())),
-                    Ok(meta) if meta.len() > MAX_READ_BYTES => {
-                        return NodeOutput::failure(NodeError::unrecoverable(
-                            "FILE_TOO_LARGE",
-                            format!(
-                                "File exceeds {}MB read limit ({} bytes). Use a streaming approach for large files.",
-                                MAX_READ_BYTES / (1024 * 1024),
-                                meta.len()
-                            ),
-                        ));
+                let encoding = match parse_encoding(&input.input["encoding"]) {
+                    Ok(e) => e,
+                    Err(failure) => return failure,
+                };
+                let bytes = match read_capped(&path).await {
+                    Ok(b) => b,
+                    Err(failure) => return failure,
+                };
+                let byte_len = bytes.len();
+                let content = match encoding {
+                    Encoding::Base64 => {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.encode(&bytes)
                     }
-                    Ok(_) => {}
-                }
-                match fs::read(&path).await {
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("READ_ERR", e.to_string())),
-                    Ok(bytes) => {
-                        let encoding = input.input["encoding"].as_str().unwrap_or("utf8");
-                        let content = if encoding == "base64" {
-                            use base64::Engine;
-                            base64::engine::general_purpose::STANDARD.encode(&bytes)
-                        } else {
-                            String::from_utf8_lossy(&bytes).to_string()
-                        };
-                        NodeOutput::success(json!({ "content": content, "bytes": bytes.len(), "path": path }))
-                    }
-                }
+                    Encoding::Utf8 => match String::from_utf8(bytes) {
+                        Ok(text) => text,
+                        Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
+                            "NOT_UTF8",
+                            "File is not valid UTF-8; set encoding to base64 to read binary content",
+                        )),
+                    },
+                };
+                NodeOutput::success(json!({ "content": content, "bytes": byte_len, "path": shown }))
             }
             "write" => {
-                let content = input.input["content"].as_str().unwrap_or("");
-                let encoding = input.input["encoding"].as_str().unwrap_or("utf8");
-                let bytes = match decode_write_content(content, encoding) {
-                    Ok(b) => b,
-                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "INVALID_BASE64",
-                        format!("content is not valid base64: {}", e),
-                    )),
+                let encoding = match parse_encoding(&input.input["encoding"]) {
+                    Ok(e) => e,
+                    Err(failure) => return failure,
                 };
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    if let Err(e) = fs::create_dir_all(parent).await {
-                        return NodeOutput::failure(NodeError::unrecoverable(
-                            "WRITE_ERR",
-                            format!("Cannot create directory '{}': {}", parent.display(), e),
-                        ));
-                    }
+                let bytes = match content_bytes(&input.input["content"], encoding) {
+                    Ok(b) => b,
+                    Err(failure) => return failure,
+                };
+                if let Err(failure) = ensure_parent_dir(&path, "WRITE_ERR").await {
+                    return failure;
                 }
                 match fs::write(&path, &bytes).await {
                     Err(e) => NodeOutput::failure(NodeError::unrecoverable("WRITE_ERR", e.to_string())),
-                    Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
+                    Ok(_)  => NodeOutput::success(json!({ "path": shown, "bytes": bytes.len() })),
                 }
             }
             "append" => {
-                use tokio::io::AsyncWriteExt;
-                let content = input.input["content"].as_str().unwrap_or("");
-                let encoding = input.input["encoding"].as_str().unwrap_or("utf8");
-                let bytes = match decode_write_content(content, encoding) {
-                    Ok(b) => b,
-                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "INVALID_BASE64",
-                        format!("content is not valid base64: {}", e),
-                    )),
+                let encoding = match parse_encoding(&input.input["encoding"]) {
+                    Ok(e) => e,
+                    Err(failure) => return failure,
                 };
-                // Append must create missing parent directories too, matching "write" above.
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    if let Err(e) = fs::create_dir_all(parent).await {
-                        return NodeOutput::failure(NodeError::unrecoverable(
-                            "APPEND_ERR",
-                            format!("Cannot create directory '{}': {}", parent.display(), e),
-                        ));
-                    }
+                let bytes = match content_bytes(&input.input["content"], encoding) {
+                    Ok(b) => b,
+                    Err(failure) => return failure,
+                };
+                if let Err(failure) = ensure_parent_dir(&path, "APPEND_ERR").await {
+                    return failure;
                 }
-                match tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await {
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                    Ok(mut f) => match f.write_all(&bytes).await {
-                        Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                        // tokio::fs::File's write_all can return before the write has
-                        // actually reached the OS; without an explicit flush, dropping
-                        // `f` here is not guaranteed to deliver the bytes (per tokio's
-                        // own docs). This flush is what "write" above gets for free
-                        // from fs::write's single atomic blocking call.
-                        Ok(_) => match f.flush().await {
-                            Err(e) => NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
-                            Ok(_)  => NodeOutput::success(json!({ "path": path, "bytes": bytes.len() })),
-                        }
-                    }
+                let mut file = match fs::OpenOptions::new().create(true).append(true).open(&path).await {
+                    Ok(f) => f,
+                    Err(e) => return NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string())),
+                };
+                // tokio's File can return from write_all before the bytes reach
+                // the OS, so the explicit flush is what guarantees delivery.
+                if let Err(e) = file.write_all(&bytes).await {
+                    return NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string()));
                 }
+                if let Err(e) = file.flush().await {
+                    return NodeOutput::failure(NodeError::unrecoverable("APPEND_ERR", e.to_string()));
+                }
+                NodeOutput::success(json!({ "path": shown, "bytes": bytes.len() }))
             }
-            "delete" => {
-                match fs::remove_file(&path).await {
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable("DELETE_ERR", e.to_string())),
-                    Ok(_)  => NodeOutput::success(json!({ "path": path, "deleted": true })),
-                }
-            }
+            "delete" => match fs::remove_file(&path).await {
+                Err(e) => NodeOutput::failure(NodeError::unrecoverable("DELETE_ERR", e.to_string())),
+                Ok(_)  => NodeOutput::success(json!({ "path": shown, "deleted": true })),
+            },
             "exists" => {
                 let exists = fs::try_exists(&path).await.unwrap_or(false);
-                NodeOutput::success(json!({ "exists": exists, "path": path }))
+                NodeOutput::success(json!({ "exists": exists, "path": shown }))
             }
             _ => NodeOutput::failure(NodeError::unrecoverable("INVALID_OP", format!("Unknown operation: {}", operation))),
         }
     }
 }
 
-/// Resolve `abs` to a canonical path guaranteed to be inside `sandbox`, even when
-/// `abs` (or trailing components of it) don't exist on disk yet.
-///
-/// Walks up to the nearest existing ancestor, canonicalizes *that* (dereferencing
-/// any symlink along the way — including a symlinked *intermediate* directory, not
-/// just the final component), verifies it is contained within `sandbox`, then
-/// rejoins the non-existent suffix lexically. That rejoin is safe: a path component
-/// that doesn't exist yet cannot itself be a symlink pointing elsewhere.
-///
-/// Mirrors save_to_folder.rs's canonical_parent/suffix pattern exactly — keep the
-/// two in sync if either changes.
-fn resolve_within_sandbox(
-    sandbox: &std::path::Path,
-    sandbox_str: &str,
-    abs: &std::path::Path,
-) -> Result<String, NodeOutput> {
-    let outside = || NodeOutput::failure(NodeError::unrecoverable(
-        "PATH_OUTSIDE_SANDBOX",
-        format!("File access is restricted to '{}'", sandbox_str),
-    ));
-
-    let mut check: &std::path::Path = abs;
-    let canonical_ancestor = loop {
-        match std::fs::canonicalize(check) {
-            Ok(p) => break p,
-            Err(_) => match check.parent() {
-                Some(p) => check = p,
-                None => return Err(NodeOutput::failure(NodeError::unrecoverable(
-                    "INVALID_PATH",
-                    "Path cannot be resolved to an existing ancestor",
-                ))),
-            },
-        }
-    };
-
-    if !canonical_ancestor.starts_with(sandbox) {
-        return Err(outside());
+/// Reads a regular file of at most `MAX_READ_BYTES`. The stat happens before the
+/// open so a FIFO or device node is refused instead of blocking or streaming
+/// forever, and the read itself is bounded in case the file grows meanwhile.
+async fn read_capped(path: &Path) -> Result<Vec<u8>, NodeOutput> {
+    let fail = |code: &str, msg: String| NodeOutput::failure(NodeError::unrecoverable(code, msg));
+    let meta = fs::metadata(path).await.map_err(|e| fail("READ_ERR", e.to_string()))?;
+    if !meta.is_file() {
+        return Err(fail("NOT_A_FILE", "path is not a regular file".to_string()));
     }
-
-    let suffix = match abs.strip_prefix(check) {
-        Ok(s) => s,
-        Err(_) => return Err(NodeOutput::failure(NodeError::unrecoverable(
-            "INVALID_PATH",
-            "Path could not be resolved relative to its existing ancestor",
-        ))),
+    let too_large = |size: String| {
+        fail(
+            "FILE_TOO_LARGE",
+            format!(
+                "File exceeds {}MB read limit ({} bytes). Use a streaming approach for large files.",
+                MAX_READ_BYTES / (1024 * 1024),
+                size
+            ),
+        )
     };
-
-    // raw_path already rejects any ".." up in execute() before this fn is ever
-    // reached, so suffix can't legitimately contain one — kept as defense in
-    // depth (matching save_to_folder.rs's own belt-and-suspenders check) rather
-    // than relying solely on that earlier, separate call site.
-    if suffix.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(outside());
+    if meta.len() > MAX_READ_BYTES {
+        return Err(too_large(meta.len().to_string()));
     }
-
-    Ok(canonical_ancestor.join(suffix).to_string_lossy().into_owned())
+    let file = fs::File::open(path).await.map_err(|e| fail("READ_ERR", e.to_string()))?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| fail("READ_ERR", e.to_string()))?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return Err(too_large(format!("more than {MAX_READ_BYTES}")));
+    }
+    Ok(bytes)
 }
 
-/// Decode `content` per `encoding` ("base64" or anything else = utf8 passthrough).
-/// Shared by the "write" and "append" arms so both honor `encoding` identically.
-fn decode_write_content(content: &str, encoding: &str) -> Result<Vec<u8>, String> {
-    if encoding == "base64" {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(content)
-            .map_err(|e| e.to_string())
-    } else {
-        Ok(content.as_bytes().to_vec())
+async fn ensure_parent_dir(path: &Path, code: &str) -> Result<(), NodeOutput> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::create_dir_all(parent).await.map_err(|e| {
+            NodeOutput::failure(NodeError::unrecoverable(
+                code,
+                format!("Cannot create directory '{}': {}", parent.display(), e),
+            ))
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Sandboxed delete targets the directory entry itself: the parent is resolved
+/// and the final name re-attached, so deleting a symlink removes the link and
+/// never the file it points to.
+fn resolve_entry(root: &Path, raw_path: &str) -> Result<PathBuf, NodeOutput> {
+    let requested = Path::new(raw_path);
+    let Some(name) = requested.file_name() else {
+        return Err(NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_PATH",
+            "path must name a file",
+        )));
+    };
+    let parent = requested.parent().unwrap_or_else(|| Path::new(""));
+    fs_sandbox::resolve(root, parent)
+        .map(|p| p.join(name))
+        .map_err(|e| e.into_output("path", Some(root)))
+}
+
+/// Decode `content` per `encoding`: base64, or utf8 passthrough.
+fn decode_write_content(content: &str, encoding: Encoding) -> Result<Vec<u8>, String> {
+    match encoding {
+        Encoding::Base64 => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .map_err(|e| e.to_string())
+        }
+        Encoding::Utf8 => Ok(content.as_bytes().to_vec()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ExecutionContext, NodeInput};
-    use crate::node::Node;
-    use serde_json::{json, Value};
+    use crate::model::ExecutionContext;
     use std::collections::HashMap;
 
-    /// A symlink inside the sandbox whose target resolves outside must be rejected.
-    /// The canonicalize-based check makes this detectable.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn symlink_inside_sandbox_is_rejected() {
-        let sandbox_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
-
-        // Target file lives outside the sandbox.
-        let target = outside_dir.path().join("secret.txt");
-        std::fs::write(&target, "secret data").unwrap();
-
-        // Symlink lives inside the sandbox but points outside.
-        let link = sandbox_dir.path().join("escape");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
+    fn input_with(cfg: Value, sandbox: Option<&Path>) -> NodeInput {
         let mut metadata: HashMap<String, Value> = HashMap::new();
-        metadata.insert(
-            "__file_sandbox_dir".to_string(),
-            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
-        );
-
-        let input = NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
+        if let Some(root) = sandbox {
+            metadata.insert(
+                fs_sandbox::SANDBOX_KEY.to_string(),
+                Value::String(root.to_str().unwrap().to_string()),
+            );
+        }
+        NodeInput {
+            resolved_credentials: HashMap::new(),
             cancel_token: None,
             node_id:      "test-node".to_string(),
             workflow_id:  "test-wf".to_string(),
             execution_id: "test-exec".to_string(),
-            input: json!({ "operation": "read", "path": "escape" }),
+            input: cfg,
             context: ExecutionContext {
                 variables:    HashMap::new(),
                 node_outputs: std::sync::Arc::new(HashMap::new()),
                 metadata,
-                ..Default::default()
-            },
-        };
-
-        let result = FileNode.execute(input).await;
-        assert!(!result.success, "Expected failure for symlink escaping sandbox");
-        let err = result.error.expect("Expected NodeError");
-        assert_eq!(
-            err.code, "PATH_OUTSIDE_SANDBOX",
-            "Expected PATH_OUTSIDE_SANDBOX, got: {}",
-            err.code
-        );
-    }
-
-    fn no_sandbox_input(op_json: Value) -> NodeInput {
-        NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
-            cancel_token: None,
-            node_id:      "test-node".to_string(),
-            workflow_id:  "test-wf".to_string(),
-            execution_id: "test-exec".to_string(),
-            input: op_json,
-            context: ExecutionContext {
-                variables:    HashMap::new(),
-                node_outputs: std::sync::Arc::new(HashMap::new()),
-                metadata:     HashMap::new(),
                 ..Default::default()
             },
         }
     }
 
-    // Normal case: base64-encoded, non-UTF8 binary content must round-trip
-    // through "write" as decoded bytes, not literal base64 text.
-    #[tokio::test]
-    async fn write_base64_encoding_decodes_before_write() {
-        use base64::Engine;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.bin");
-        let raw_bytes: &[u8] = &[0x00, 0xFF, 0x10, 0xAB, 0xCD, 0xEF];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_bytes);
-
-        let input = no_sandbox_input(json!({
-            "operation": "write",
-            "path": path.to_str().unwrap(),
-            "content": encoded,
-            "encoding": "base64"
-        }));
-
-        let result = FileNode.execute(input).await;
-        assert!(result.success, "write should succeed: {:?}", result.error);
-        assert_eq!(result.output.as_ref().unwrap()["bytes"], raw_bytes.len());
-
-        let on_disk = std::fs::read(&path).unwrap();
-        assert_eq!(
-            on_disk, raw_bytes,
-            "file must contain decoded binary bytes, not literal base64 text"
-        );
+    async fn run(cfg: Value) -> NodeOutput {
+        FileNode.execute(input_with(cfg, None)).await
     }
 
-    // Normal case: base64-encoded content must be decoded on "append" too.
-    #[tokio::test]
-    async fn append_base64_encoding_decodes_before_append() {
-        use base64::Engine;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.bin");
-        std::fs::write(&path, [0x01u8, 0x02]).unwrap();
-
-        let more: &[u8] = &[0xFE, 0xFF];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(more);
-        let input = no_sandbox_input(json!({
-            "operation": "append",
-            "path": path.to_str().unwrap(),
-            "content": encoded,
-            "encoding": "base64"
-        }));
-
-        let result = FileNode.execute(input).await;
-        assert!(result.success, "append should succeed: {:?}", result.error);
-
-        let on_disk = std::fs::read(&path).unwrap();
-        assert_eq!(on_disk, vec![0x01, 0x02, 0xFE, 0xFF]);
+    async fn run_sandboxed(root: &Path, cfg: Value) -> NodeOutput {
+        FileNode.execute(input_with(cfg, Some(root))).await
     }
 
-    // Edge case: malformed base64 content must fail cleanly, not silently
-    // write garbage or panic.
-    #[tokio::test]
-    async fn write_invalid_base64_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.bin");
-
-        let input = no_sandbox_input(json!({
-            "operation": "write",
-            "path": path.to_str().unwrap(),
-            "content": "not-valid-base64!!!",
-            "encoding": "base64"
-        }));
-
-        let result = FileNode.execute(input).await;
-        assert!(!result.success);
-        assert_eq!(result.error.unwrap().code, "INVALID_BASE64");
-        assert!(!path.exists(), "no file should be written on decode failure");
+    fn code(out: NodeOutput) -> String {
+        out.error.expect("expected a failure").code
     }
 
-    // Normal case: sandboxed write to a relative path whose parent directories
-    // don't exist yet must create them, matching desktop/no-sandbox behaviour,
-    // instead of failing with INVALID_PATH.
-    #[tokio::test]
-    async fn sandboxed_write_creates_missing_nested_parent_dirs() {
-        let sandbox_dir = tempfile::tempdir().unwrap();
-
-        let mut metadata: HashMap<String, Value> = HashMap::new();
-        metadata.insert(
-            "__file_sandbox_dir".to_string(),
-            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
-        );
-
-        let input = NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
-            cancel_token: None,
-            node_id:      "test-node".to_string(),
-            workflow_id:  "test-wf".to_string(),
-            execution_id: "test-exec".to_string(),
-            input: json!({
-                "operation": "write",
-                "path": "new/nested/file.txt",
-                "content": "hello"
-            }),
-            context: ExecutionContext {
-                variables:    HashMap::new(),
-                node_outputs: std::sync::Arc::new(HashMap::new()),
-                metadata,
-                ..Default::default()
-            },
-        };
-
-        let result = FileNode.execute(input).await;
-        assert!(result.success, "expected success, got: {:?}", result.error);
-        let on_disk = sandbox_dir.path().join("new/nested/file.txt");
-        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "hello");
-    }
-
-    // Edge case: a symlink inside the sandbox pointing outside it, used as an
-    // *intermediate* directory (the final path component under it does NOT
-    // exist), must be rejected by "exists" rather than falling back to a
-    // lexical starts_with check that trusts the unresolved suffix.
     #[cfg(unix)]
     #[tokio::test]
-    async fn sandboxed_exists_symlinked_intermediate_dir_is_rejected() {
-        let sandbox_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
+    async fn sandbox_refuses_symlinks_that_resolve_outside() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret data").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), sandbox.path().join("file_link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), sandbox.path().join("dir_link")).unwrap();
 
-        let link = sandbox_dir.path().join("escapelink");
-        std::os::unix::fs::symlink(outside_dir.path(), &link).unwrap();
+        let read = run_sandboxed(sandbox.path(), json!({ "operation": "read", "path": "file_link" })).await;
+        assert_eq!(code(read), "PATH_OUTSIDE_SANDBOX");
 
-        let mut metadata: HashMap<String, Value> = HashMap::new();
-        metadata.insert(
-            "__file_sandbox_dir".to_string(),
-            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
-        );
-
-        let input = NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
-            cancel_token: None,
-            node_id:      "test-node".to_string(),
-            workflow_id:  "test-wf".to_string(),
-            execution_id: "test-exec".to_string(),
-            // "nonexistent.txt" doesn't exist under the symlinked dir, so a full
-            // canonicalize(abs) fails; the check must not fall back to a lexical
-            // starts_with(sandbox) check that trusts the unresolved suffix.
-            input: json!({ "operation": "exists", "path": "escapelink/nonexistent.txt" }),
-            context: ExecutionContext {
-                variables:    HashMap::new(),
-                node_outputs: std::sync::Arc::new(HashMap::new()),
-                metadata,
-                ..Default::default()
-            },
-        };
-
-        let result = FileNode.execute(input).await;
-        assert!(!result.success, "expected rejection, got success: {:?}", result.output);
-        assert_eq!(result.error.unwrap().code, "PATH_OUTSIDE_SANDBOX");
+        let exists = run_sandboxed(sandbox.path(), json!({ "operation": "exists", "path": "dir_link/nonexistent.txt" })).await;
+        assert_eq!(code(exists), "PATH_OUTSIDE_SANDBOX");
     }
 
-    // Normal case, guards against over-rejection: a genuinely missing file
-    // inside a real (non-symlinked) sandboxed directory must still return
-    // exists:false, not an error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandbox_refuses_write_through_a_dangling_symlink() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("created_by_attacker.txt");
+        std::os::unix::fs::symlink(&victim, sandbox.path().join("trap")).unwrap();
+
+        for op in ["write", "append"] {
+            let out = run_sandboxed(
+                sandbox.path(),
+                json!({ "operation": op, "path": "trap", "content": "pwned" }),
+            )
+            .await;
+            assert_eq!(code(out), "INVALID_PATH", "{op} must be refused");
+        }
+        assert!(!victim.exists(), "nothing may be created outside the sandbox");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandboxed_delete_removes_the_link_not_its_target() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let keep = sandbox.path().join("keep.txt");
+        std::fs::write(&keep, "data").unwrap();
+        let link = sandbox.path().join("alias");
+        std::os::unix::fs::symlink(&keep, &link).unwrap();
+
+        let out = run_sandboxed(sandbox.path(), json!({ "operation": "delete", "path": "alias" })).await;
+        assert!(out.success, "{:?}", out.error);
+        assert!(keep.exists(), "the target must survive");
+        assert!(std::fs::symlink_metadata(&link).is_err(), "the link must be gone");
+    }
+
+    #[tokio::test]
+    async fn sandboxed_write_creates_missing_nested_parent_dirs() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let out = run_sandboxed(
+            sandbox.path(),
+            json!({ "operation": "write", "path": "new/nested/file.txt", "content": "hello" }),
+        )
+        .await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(std::fs::read_to_string(sandbox.path().join("new/nested/file.txt")).unwrap(), "hello");
+    }
+
     #[tokio::test]
     async fn sandboxed_exists_missing_file_in_real_dir_returns_false() {
-        let sandbox_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(sandbox_dir.path().join("realdir")).unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        std::fs::create_dir(sandbox.path().join("realdir")).unwrap();
+        let out = run_sandboxed(sandbox.path(), json!({ "operation": "exists", "path": "realdir/missing.txt" })).await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(out.output.unwrap()["exists"], false);
+    }
 
-        let mut metadata: HashMap<String, Value> = HashMap::new();
-        metadata.insert(
-            "__file_sandbox_dir".to_string(),
-            Value::String(sandbox_dir.path().to_str().unwrap().to_string()),
-        );
+    #[tokio::test]
+    async fn unusable_sandbox_root_fails_closed() {
+        let out = FileNode
+            .execute(input_with(
+                json!({ "operation": "exists", "path": "x" }),
+                Some(Path::new("/no/such/sandbox/root")),
+            ))
+            .await;
+        assert_eq!(code(out), "INVALID_PATH");
+    }
 
-        let input = NodeInput {
-            resolved_credentials: std::collections::HashMap::new(),
-            cancel_token: None,
-            node_id:      "test-node".to_string(),
-            workflow_id:  "test-wf".to_string(),
-            execution_id: "test-exec".to_string(),
-            input: json!({ "operation": "exists", "path": "realdir/missing.txt" }),
-            context: ExecutionContext {
-                variables:    HashMap::new(),
-                node_outputs: std::sync::Arc::new(HashMap::new()),
-                metadata,
-                ..Default::default()
-            },
-        };
+    #[tokio::test]
+    async fn write_and_append_decode_base64_and_reject_malformed_input() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        let encode = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
 
-        let result = FileNode.execute(input).await;
-        assert!(result.success, "expected success, got: {:?}", result.error);
-        assert_eq!(result.output.as_ref().unwrap()["exists"], false);
+        let w = run(json!({
+            "operation": "write", "path": path.to_str().unwrap(),
+            "content": encode(&[0x00, 0xFF, 0x10]), "encoding": "base64"
+        })).await;
+        assert!(w.success, "{:?}", w.error);
+        assert_eq!(w.output.unwrap()["bytes"], 3);
+
+        let a = run(json!({
+            "operation": "append", "path": path.to_str().unwrap(),
+            "content": encode(&[0xFE, 0xAB]), "encoding": "base64"
+        })).await;
+        assert!(a.success, "{:?}", a.error);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0x00, 0xFF, 0x10, 0xFE, 0xAB]);
+
+        let bad = run(json!({
+            "operation": "write", "path": path.to_str().unwrap(),
+            "content": "not-valid-base64!!!", "encoding": "base64"
+        })).await;
+        assert_eq!(code(bad), "INVALID_BASE64");
+        assert_eq!(std::fs::read(&path).unwrap().len(), 5, "a failed decode must not touch the file");
+    }
+
+    #[tokio::test]
+    async fn write_without_content_is_refused_and_leaves_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keep.txt");
+        std::fs::write(&path, "precious").unwrap();
+
+        for cfg in [
+            json!({ "operation": "write", "path": path.to_str().unwrap() }),
+            json!({ "operation": "write", "path": path.to_str().unwrap(), "content": null }),
+        ] {
+            assert_eq!(code(run(cfg).await), "MISSING_CONTENT");
+        }
+        let object = run(json!({ "operation": "append", "path": path.to_str().unwrap(), "content": { "a": 1 } })).await;
+        assert_eq!(code(object), "INVALID_CONTENT");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "precious");
+
+        let empty = run(json!({ "operation": "write", "path": path.to_str().unwrap(), "content": "" })).await;
+        assert!(empty.success, "an explicit empty string is a valid empty file");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        let number = run(json!({ "operation": "write", "path": path.to_str().unwrap(), "content": 42 })).await;
+        assert!(number.success, "{:?}", number.error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "42");
+    }
+
+    #[tokio::test]
+    async fn read_reports_binary_files_instead_of_corrupting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, [0xFFu8, 0xFE, 0x00, 0x41]).unwrap();
+        let p = path.to_str().unwrap();
+
+        assert_eq!(code(run(json!({ "operation": "read", "path": p })).await), "NOT_UTF8");
+
+        let b64 = run(json!({ "operation": "read", "path": p, "encoding": "base64" })).await;
+        let out = b64.output.expect("base64 read must succeed");
+        assert_eq!(out["content"], "//4AQQ==");
+        assert_eq!(out["bytes"], 4);
+
+        assert_eq!(code(run(json!({ "operation": "read", "path": p, "encoding": "hex" })).await), "INVALID_ENCODING");
+    }
+
+    #[tokio::test]
+    async fn read_refuses_directories_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(json!({ "operation": "read", "path": dir.path().to_str().unwrap() })).await;
+        assert_eq!(code(out), "NOT_A_FILE");
+
+        let big = dir.path().join("big.bin");
+        std::fs::File::create(&big).unwrap().set_len(MAX_READ_BYTES + 1).unwrap();
+        let out = run(json!({ "operation": "read", "path": big.to_str().unwrap() })).await;
+        assert_eq!(code(out), "FILE_TOO_LARGE");
     }
 
     #[tokio::test]
     async fn dots_inside_a_filename_are_allowed_but_parent_components_are_not() {
         let dir = tempfile::tempdir().unwrap();
         let ok_path = dir.path().join("report..final.txt");
-        let ok = FileNode.execute(no_sandbox_input(json!({
-            "operation": "write",
-            "path": ok_path.to_str().unwrap(),
-            "content": "x"
-        }))).await;
+        let ok = run(json!({ "operation": "write", "path": ok_path.to_str().unwrap(), "content": "x" })).await;
         assert!(ok.success, "a filename containing '..' is not traversal: {:?}", ok.error);
 
         let bad_path = format!("{}/sub/../escape.txt", dir.path().to_str().unwrap());
-        let bad = FileNode.execute(no_sandbox_input(json!({
-            "operation": "write",
-            "path": bad_path,
-            "content": "x"
-        }))).await;
-        assert_eq!(bad.error.unwrap().code, "INVALID_PATH");
+        let bad = run(json!({ "operation": "write", "path": bad_path, "content": "x" })).await;
+        assert_eq!(code(bad), "INVALID_PATH");
     }
 
     #[tokio::test]
@@ -591,11 +519,7 @@ mod tests {
         std::fs::write(&blocker, "a file, not a directory").unwrap();
         let target = blocker.join("child").join("out.txt");
 
-        let out = FileNode.execute(no_sandbox_input(json!({
-            "operation": "write",
-            "path": target.to_str().unwrap(),
-            "content": "x"
-        }))).await;
+        let out = run(json!({ "operation": "write", "path": target.to_str().unwrap(), "content": "x" })).await;
         let err = out.error.expect("write under a regular file must fail");
         assert_eq!(err.code, "WRITE_ERR");
         assert!(err.message.contains("Cannot create directory"), "got: {}", err.message);

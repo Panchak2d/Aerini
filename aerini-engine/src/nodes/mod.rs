@@ -13,6 +13,7 @@ pub mod delay;
 pub mod discord;
 pub mod email;
 pub mod file;
+pub(crate) mod fs_sandbox;
 pub mod github;
 pub mod google_sheets;
 pub mod http;
@@ -48,10 +49,14 @@ static SHARED_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::Onc
 
 /// Shared HTTP client for integration nodes with 30-second timeout.
 /// ai_prompt, ai_agent, image_gen, social_upload keep their own 120s clients.
-/// http.rs keeps its own client (SSRF-safe: redirect=none).
+/// http.rs keeps its own client (redirects disabled).
+///
+/// Connections are filtered against the Strict SSRF policy at connect time,
+/// including every redirect hop, so a vendor URL cannot be steered to an
+/// internal address.
 pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     SHARED_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        util::guarded_client_builder(util::SsrfPolicy::Strict)
             .timeout(std::time::Duration::from_secs(30))
             .user_agent(concat!("aerini-engine/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -69,8 +74,7 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 ///
 /// The frontend keeps its own UI-only list, `DANGEROUS_NODE_IDS` in
 /// `src/node-ids.ts` — the two crates share no build step, so keep them in
-/// sync by hand. `node-ids.ts` currently lists `file` instead of `database`;
-/// that is a separate, already-tracked frontend gap, not fixed here.
+/// sync by hand.
 pub const DANGEROUS_NODE_TYPE_IDS: &[&str] = &["shell_exec", "code", "database"];
 
 /// Returns every id from [`DANGEROUS_NODE_TYPE_IDS`] present in `nodes`, in

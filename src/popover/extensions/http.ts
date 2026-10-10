@@ -22,12 +22,11 @@ export function renderHttpAuthMode(ctx: ExtensionContext): void {
 
 export function renderHttpSsrfWarning(ctx: ExtensionContext): void {
   const note = document.createElement("div");
-  note.className = "popover-info-banner popover-info-banner--warn";
+  note.className = "popover-info-banner";
   note.innerHTML =
-    `<strong>SSRF protection caveat:</strong> Requests are blocked to private/loopback IPs, ` +
-    `but a DNS rebinding attack can bypass this check. In server deployments, configure a ` +
-    `network-level egress firewall to block outbound connections to RFC-1918, loopback, ` +
-    `link-local, and cloud metadata ranges (e.g. <code>169.254.169.254</code>). ` +
-    `See <strong>docs/security.md</strong> for recommended rules.`;
+    `<strong>SSRF protection:</strong> Requests to private, loopback, link-local, and cloud ` +
+    `metadata addresses (e.g. <code>169.254.169.254</code>) are blocked, including when a ` +
+    `hostname resolves to one, and redirects are not followed. ` +
+    `See <strong>docs/guide/security.md</strong> for details.`;
   ctx.body.appendChild(note);
 }

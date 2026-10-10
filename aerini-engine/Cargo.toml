@@ -38,9 +38,12 @@ reqwest = { version = "0.13", features = ["json", "rustls", "query", "form", "mu
 url     = "2"
 
 # Webhook node HTTP server (already transitive via reqwest; listed explicitly for clarity)
-hyper          = { version = "1", features = ["server", "http1"] }
+hyper          = { version = "1", features = ["server", "client", "http1"] }
 hyper-util     = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+# Streaming query rows (StreamExt::next); already in the tree through sqlx and reqwest
+futures-util = { version = "0.3", default-features = false }
 
 # Email node
 lettre = { version = "0.11.22", default-features = false, features = [
@@ -144,6 +147,13 @@ redis = { version = "1.0", features = ["tokio-comp"] }
 #   default-https-client     — modern rustls 0.23 TLS path (avoids RUSTSEC-2026-0099 legacy stack)
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 
+# Direct deps only to build the S3 client for custom (r2/minio) endpoints with a
+# connect-time SSRF DNS resolver (nodes/s3.rs). "rustls-aws-lc" is the crypto
+# mode aws-sdk-s3's "default-https-client" already enables, so the dependency
+# tree does not change; aws-smithy-runtime-api supplies the `ResolveDns` trait.
+aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-aws-lc"] }
+aws-smithy-runtime-api = "1"
+
 # WASM plugin system
 # component-model feature only on the sync engine — component-model-async
 # is scoped to the dedicated trigger engine below (sync WIT interface for
@@ -173,6 +183,15 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 wasmtime           = { version = "=49.0.2", features = ["component-model"] }
 wasmtime-wasi      = { version = "=49.0.2", features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "=49.0.2", features = ["p2", "p3"] }
+
+# plugin_http.rs needs these directly. They are declared the way
+# wasmtime-wasi-http 49.0.2 declares them (ring, no default features), so no
+# second crypto backend is pulled in. The tree also links aws-lc-rs, so
+# plugin_http.rs names the ring provider explicitly instead of relying on a
+# process-wide default.
+rustls        = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-rustls  = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots  = "1.0.7"
 
 # Filesystem watching (WIT `fs-watch` import backing, plugin_loader.rs's
 # FsWatchRegistry). Cross-platform: inotify (Linux), FSEvents (macOS),

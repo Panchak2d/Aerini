@@ -114,4 +114,18 @@ describe("popover -- custom-UI key exclusion is scoped to built-in nodes", () =>
     expect(genericLabels).not.toContain("folder path");
     expect(genericLabels).not.toContain("subfolders");
   });
+
+  it("a saved node whose schema predates a registry property still shows that field", async () => {
+    register("json", false, {
+      operation: { type: "string", enum: ["parse", "stringify"] },
+      source_node: { type: "string" },
+    });
+    const node = makeNode("json", { operation: "parse" }, {
+      type: "object",
+      properties: { operation: { type: "string", enum: ["parse", "stringify"] } },
+    });
+    await openPopover(node);
+
+    expect(fieldLabels()).toContain("Source Node");
+  });
 });

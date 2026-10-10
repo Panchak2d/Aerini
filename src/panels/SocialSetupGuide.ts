@@ -59,7 +59,7 @@ const PLATFORMS: PlatformDef[] = [
     label: "Instagram",
     icon:  "◈",
     warning:
-      "Instagram requires media to be hosted at a public URL. The Social Upload node cannot send local files directly to Instagram. Upload your media to a CDN or web server first, then pass the public URL as input.",
+      "Instagram requires media to be hosted at a public URL. The Social Upload node cannot send local files directly to Instagram. Upload your media to a CDN or web server first, then use the public URL as the file's data.",
     steps: [
       `Go to <a href="https://developers.facebook.com" target="_blank" rel="noopener noreferrer">developers.facebook.com</a> and log in with your Meta account.`,
       `Click <strong>My Apps → Create App</strong>. Choose <strong>Other</strong> as the use case, then <strong>Consumer</strong> as the app type.`,
@@ -67,12 +67,12 @@ const PLATFORMS: PlatformDef[] = [
       `Go to <strong>Instagram → API setup with Instagram login</strong>. Click <strong>Generate token</strong> to confirm your Instagram account is linked.`,
       `Go to <strong>App settings → Basic</strong>. Note your <strong>App ID</strong> (Client ID) and <strong>App Secret</strong> (Client Secret).`,
       `Under <strong>Instagram → Settings → Valid OAuth Redirect URIs</strong>, add exactly: <code class="ssg-copyable" data-value="${REDIRECT_URI_TOKEN}">${REDIRECT_URI_TOKEN}</code>`,
-      `Request the <strong>instagram_content_publish</strong> permission under <strong>App Review → Permissions and Features</strong>. For testing, add your Instagram account under <strong>Roles → Instagram Testers</strong>.`,
+      `Request the <strong>instagram_business_content_publish</strong> permission under <strong>App Review → Permissions and Features</strong>. For testing, add your Instagram account under <strong>Roles → Instagram Testers</strong>.`,
       `On the <strong>Social Upload</strong> node, set <strong>Platform</strong> to Instagram and paste your App ID and App Secret into the node's own Client ID / Client Secret fields.`,
     ],
     notes: [
       "Business or Creator accounts are required for content publishing. Personal accounts are not supported by the Instagram API.",
-      "The instagram_content_publish permission requires App Review approval before use with accounts other than your own test accounts.",
+      "The instagram_business_content_publish permission requires App Review approval before use with accounts other than your own test accounts.",
     ],
   },
   {

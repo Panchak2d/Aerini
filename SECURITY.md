@@ -46,3 +46,7 @@ researchers who report in good faith.
 In scope: the Aerini engine, server binary, Tauri desktop app, and official Docker image.
 
 Out of scope: third-party services integrated via nodes (Slack, Stripe, etc.).
+
+## Known limitations
+
+Postgres and MySQL connections are checked against the private-address block list only before they connect, so a DNS-rebinding attacker who controls a hostname's DNS answers may still redirect them to an internal address. The database library uses one host value both to dial and for TLS verification, so pinning the address would break certificate checks. Setting `sslmode=verify-full` (Postgres) or `ssl-mode=VERIFY_IDENTITY` (MySQL) in the connection URL makes the server prove it holds the configured name, so a rebound internal address fails the TLS handshake; the other modes, including the default, do not check the name. Every other outbound node, and `.wasm` plugin HTTP, checks the address again when it connects. If workflows from untrusted sources can run on a host, block outbound connections to private, loopback, link-local and cloud-metadata ranges with a host-level egress firewall. See [docs/guide/security.md](docs/guide/security.md#ssrf-protection).

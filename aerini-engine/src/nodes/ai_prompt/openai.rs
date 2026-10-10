@@ -4,7 +4,7 @@ use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_provider_error};
+use super::shared::{send_and_parse, extract_provider_error, error_output, rejected_param, RejectedParam, is_official_openai};
 
 // OpenAI Chat Completions — multimodal content blocks
 // Docs: developers.openai.com/api/docs/guides/images-vision and .../file-inputs
@@ -46,44 +46,81 @@ pub(super) async fn call_openai_compatible(
         json!(blocks)
     };
 
-    let body = json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user",   "content": user_content }
-        ],
-        "temperature": temperature,
-        "max_tokens":  max_tokens
-    });
+    let mut messages: Vec<Value> = Vec::new();
+    if !system.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": system }));
+    }
+    messages.push(json!({ "role": "user", "content": user_content }));
 
     let record = crate::provider::ProviderRegistry::global()
         .get(provider_id)
         .expect("call_openai_compatible is only dispatched for \"openai\" or \"local\", both always registered");
-    let req = crate::provider::ProviderRegistry::apply_auth(
-        record,
-        client.post(format!("{}/chat/completions", base_url))
-            .header("Content-Type", "application/json"),
-        api_key,
-    ).json(&body);
 
-    let (status, resp_json) = match send_and_parse(req).await {
-        Ok(v)  => v,
-        Err(e) => return e,
+    let mut send_temperature = true;
+    let mut token_key = if is_official_openai(base_url) { "max_completion_tokens" } else { "max_tokens" };
+    let mut swapped_token_key = false;
+    let mut notes: Vec<String> = Vec::new();
+
+    let (status, resp_json) = loop {
+        let mut body = json!({ "model": model, "messages": messages });
+        if send_temperature {
+            body["temperature"] = json!(temperature);
+        }
+        body[token_key] = json!(max_tokens);
+
+        let req = crate::provider::ProviderRegistry::apply_auth(
+            record,
+            client.post(format!("{}/chat/completions", base_url))
+                .header("Content-Type", "application/json"),
+            api_key,
+        ).json(&body);
+
+        let (status, resp_json) = match send_and_parse(req).await {
+            Ok(v)  => v,
+            Err(e) => return e,
+        };
+
+        match rejected_param(status, &resp_json) {
+            Some(RejectedParam::Temperature) if send_temperature => {
+                send_temperature = false;
+                notes.push(format!("Model '{model}' does not accept a temperature; sent without it"));
+            }
+            Some(RejectedParam::TokenLimit) if !swapped_token_key => {
+                swapped_token_key = true;
+                token_key = if token_key == "max_tokens" { "max_completion_tokens" } else { "max_tokens" };
+                notes.push(format!("Model '{model}' wants '{token_key}' for the token limit; resent with it"));
+            }
+            _ => break (status, resp_json),
+        }
     };
 
-    if let Some(msg) = extract_provider_error(&resp_json, "Unknown API error") {
-        return if status == 429 {
-            NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
-        } else {
-            NodeOutput::failure(NodeError::unrecoverable("API_ERROR", msg))
-        };
+    if let Some(mut out) = error_output(status, &resp_json, "Unknown API error") {
+        out.logs.extend(notes);
+        return out;
     }
 
-    let content    = resp_json["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+    let choice     = &resp_json["choices"][0];
+    let content    = choice["message"]["content"].as_str().unwrap_or("").to_string();
+    let finish     = choice["finish_reason"].as_str().unwrap_or("");
+    if content.is_empty() {
+        if let Some(refusal) = choice["message"]["refusal"].as_str().filter(|r| !r.is_empty()) {
+            return NodeOutput::failure(NodeError::unrecoverable("REFUSED", format!("The model refused the request: {refusal}")));
+        }
+        if finish == "length" {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "OUTPUT_TRUNCATED",
+                format!("The model used all {max_tokens} tokens before writing a reply (reasoning models count their thinking). Raise max_tokens."),
+            ));
+        }
+    }
+    if finish == "length" {
+        notes.push(format!("The reply was cut off at max_tokens ({max_tokens})"));
+    }
     let model_used = resp_json["model"].as_str().unwrap_or(model).to_string();
     let input_tok  = resp_json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let output_tok = resp_json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
 
+    notes.push(format!("AI responded ({} chars, {}in/{}out tokens)", content.len(), input_tok, output_tok));
     NodeOutput::success_with_logs(
         json!({
             "content":       content,
@@ -92,7 +129,7 @@ pub(super) async fn call_openai_compatible(
             "input_tokens":  input_tok,
             "output_tokens": output_tok
         }),
-        vec![format!("AI responded ({} chars, {}in/{}out tokens)", content.len(), input_tok, output_tok)],
+        notes,
     )
 }
 
@@ -221,6 +258,64 @@ mod backward_compat_tests {
             body, expected,
             "request body with no attachments must be byte-identical to the pre-attachment-era shape"
         );
+    }
+
+    const OK_REPLY: &str = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+    const TEMP_REJECTED: &str = r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported."}}"#;
+    const TOKENS_REJECTED: &str = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}"#;
+
+    async fn run_against(replies: Vec<(u16, &'static str)>, system: &str) -> (NodeOutput, Vec<Value>) {
+        let (base_url, bodies) = super::super::shared::spawn_sequence_mock(replies).await;
+        let out = call_openai_compatible(
+            reqwest::Client::new(), &base_url, "", "m", system, "hi",
+            0.7, 2048, &[], &[], "openai",
+        ).await;
+        let seen = bodies.lock().expect("mock lock")
+            .iter().map(|b| serde_json::from_str(b).expect("request body is JSON")).collect();
+        (out, seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temperature_the_model_refuses_is_dropped_and_the_call_repeated_once() {
+        let (out, bodies) = run_against(vec![(400, TEMP_REJECTED), (200, OK_REPLY)], "s").await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].get("temperature").is_some());
+        assert!(bodies[1].get("temperature").is_none());
+        assert!(out.logs.iter().any(|l| l.contains("temperature")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_limit_key_is_swapped_when_the_model_refuses_max_tokens() {
+        let (out, bodies) = run_against(vec![(400, TOKENS_REJECTED), (200, OK_REPLY)], "s").await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(bodies[0]["max_tokens"], 2048);
+        assert_eq!(bodies[1]["max_completion_tokens"], 2048);
+        assert!(bodies[1].get("max_tokens").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_that_repeats_is_not_retried_forever() {
+        let (out, bodies) = run_against(vec![(400, TEMP_REJECTED), (400, TEMP_REJECTED)], "s").await;
+        assert!(!out.success);
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(out.error.expect("error").code, "API_ERROR");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_reply_cut_off_by_the_token_limit_fails_with_a_clear_code() {
+        let reply = r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
+        let (out, _) = run_against(vec![(200, reply)], "s").await;
+        assert_eq!(out.error.expect("error").code, "OUTPUT_TRUNCATED");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blank_system_prompt_sends_no_system_message() {
+        let (out, bodies) = run_against(vec![(200, OK_REPLY)], "  ").await;
+        assert!(out.success);
+        let msgs = bodies[0]["messages"].as_array().expect("messages");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -119,11 +119,16 @@ impl Readiness<'_> {
         if let Some(&known) = memo.get(node_id) {
             return known;
         }
+        // A node with no wires into it is dead once nothing can route a failure
+        // to it; only a node reached by `on_failure` alone can be in that state.
+        let wires_resolved = match self.predecessors.get(node_id) {
+            Some(preds) if !preds.is_empty() => preds.iter().all(|p| self.is_resolved(p, memo)),
+            _ => self.failure_sources.contains_key(node_id),
+        };
         let unreachable = !self.active_nodes.contains(node_id)
             && !self.in_flight.contains(node_id)
             && !self.loop_managed.contains(node_id)
-            && self.predecessors.get(node_id)
-                .is_some_and(|preds| !preds.is_empty() && preds.iter().all(|p| self.is_resolved(p, memo)))
+            && wires_resolved
             && self.failure_sources.get(node_id)
                 .is_none_or(|sources| sources.iter().all(|s| self.is_resolved(s, memo)));
         memo.insert(node_id.to_string(), unreachable);
@@ -137,8 +142,6 @@ impl Readiness<'_> {
 /// Independent branches (nodes whose predecessors are all resolved, see
 /// [`Readiness`]) are spawned concurrently as tokio tasks, bounded by
 /// `max_concurrent_nodes`.
-///
-/// The sequential path in `run_inner` is untouched.
 pub(super) async fn run_inner_parallel(
     executor:          Arc<WorkflowExecutor>,
     workflow:          Arc<Workflow>,
@@ -970,6 +973,11 @@ mod tests {
         NodeOutput::success(serde_json::json!({ "id": input.node_id }))
     });
 
+    // Leaves through the `case_2` port, as a Switch does.
+    test_node!(SwitchCaseTwoNode, "parallel_switch_case_two_test", |_input| {
+        NodeOutput::success(serde_json::json!({ "port": "case_2" }))
+    });
+
     test_node!(SleepEchoNode, "parallel_sleep_echo_test", |input| {
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         NodeOutput::success(serde_json::json!({ "id": input.node_id }))
@@ -987,6 +995,7 @@ mod tests {
         registry.register(Arc::new(crate::nodes::merge::MergeNode));
         registry.register(Arc::new(BranchLeftNode));
         registry.register(Arc::new(EchoNode));
+        registry.register(Arc::new(SwitchCaseTwoNode));
         registry.register(Arc::new(SleepEchoNode));
         registry.register(Arc::new(SleepFailNode));
         registry
@@ -1139,5 +1148,147 @@ mod tests {
                 "n_recovery": { "id": "n_recovery" },
             })),
         );
+    }
+
+    #[tokio::test]
+    async fn merge_does_not_wait_for_an_on_failure_target_that_has_no_wire_into_it() {
+        for parallel in [false, true] {
+            let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+            let workflow = make_workflow(
+                "wf_merge_failure_only_target",
+                vec![
+                    make_node("n_a",        "parallel_echo_test"),
+                    make_node("n_b",        "parallel_echo_test"),
+                    make_node("n_recovery", "parallel_echo_test"),
+                    make_node("n_merge",    "merge"),
+                ],
+                vec![
+                    WorkflowEdge {
+                        on_failure: Some("n_recovery".to_string()),
+                        ..make_edge("n_a", "n_b")
+                    },
+                    make_edge("n_b", "n_merge"),
+                    make_edge("n_recovery", "n_merge"),
+                ],
+                parallel,
+            );
+
+            let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+            assert!(result.success, "parallel={parallel}: {:?}", result.error);
+            assert!(!result.node_outputs.contains_key("n_recovery"), "parallel={parallel}");
+            assert_eq!(
+                result.node_outputs.get("n_merge"),
+                Some(&serde_json::json!({ "n_b": { "id": "n_b" } })),
+                "parallel={parallel}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_untaken_cases_do_not_block_merge() {
+        for parallel in [false, true] {
+            let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+            let workflow = make_workflow(
+                "wf_merge_switch",
+                vec![
+                    make_node("n_switch", "parallel_switch_case_two_test"),
+                    make_node("n_c1",     "parallel_echo_test"),
+                    make_node("n_c2",     "parallel_echo_test"),
+                    make_node("n_c3",     "parallel_echo_test"),
+                    make_node("n_merge",  "merge"),
+                ],
+                vec![
+                    make_port_edge("n_switch", "case_1", "n_c1"),
+                    make_port_edge("n_switch", "case_2", "n_c2"),
+                    make_port_edge("n_switch", "case_3", "n_c3"),
+                    make_edge("n_c1", "n_merge"),
+                    make_edge("n_c2", "n_merge"),
+                    make_edge("n_c3", "n_merge"),
+                ],
+                parallel,
+            );
+
+            let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+            assert!(result.success, "parallel={parallel}: {:?}", result.error);
+            assert!(!result.node_outputs.contains_key("n_c1"), "parallel={parallel}");
+            assert!(!result.node_outputs.contains_key("n_c3"), "parallel={parallel}");
+            assert_eq!(
+                result.node_outputs.get("n_merge"),
+                Some(&serde_json::json!({ "n_c2": { "id": "n_c2" } })),
+                "parallel={parallel}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_after_on_error_route_does_not_stall() {
+        for parallel in [false, true] {
+            let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+            let workflow = make_workflow(
+                "wf_merge_on_error",
+                vec![
+                    make_node("n_fail",     "parallel_sleep_fail_test"),
+                    make_node("n_normal",   "parallel_echo_test"),
+                    make_node("n_recovery", "parallel_echo_test"),
+                    make_node("n_merge",    "merge"),
+                ],
+                vec![
+                    make_port_edge("n_fail", "on_error", "n_recovery"),
+                    make_port_edge("n_fail", "output", "n_normal"),
+                    make_edge("n_normal", "n_merge"),
+                    make_edge("n_recovery", "n_merge"),
+                ],
+                parallel,
+            );
+
+            let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+            assert!(result.success, "parallel={parallel}: {:?}", result.error);
+            assert!(!result.node_outputs.contains_key("n_normal"), "parallel={parallel}");
+            assert_eq!(
+                result.node_outputs.get("n_merge"),
+                Some(&serde_json::json!({ "n_recovery": { "id": "n_recovery" } })),
+                "parallel={parallel}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn join_after_all_branches_dead_does_not_run() {
+        for parallel in [false, true] {
+            let executor = WorkflowExecutor::new(Arc::new(merge_test_registry()), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+            let workflow = make_workflow(
+                "wf_merge_all_dead",
+                vec![
+                    make_node("n_branch", "parallel_branch_left_test"),
+                    make_node("n_live",   "parallel_echo_test"),
+                    make_node("n_dead_a", "parallel_echo_test"),
+                    make_node("n_dead_b", "parallel_echo_test"),
+                    make_node("n_merge",  "merge"),
+                ],
+                vec![
+                    make_port_edge("n_branch", "left", "n_live"),
+                    make_port_edge("n_branch", "right", "n_dead_a"),
+                    make_port_edge("n_branch", "other", "n_dead_b"),
+                    make_edge("n_dead_a", "n_merge"),
+                    make_edge("n_dead_b", "n_merge"),
+                ],
+                parallel,
+            );
+
+            let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+
+            assert!(result.success, "parallel={parallel}: {:?}", result.error);
+            assert!(result.node_outputs.contains_key("n_live"), "parallel={parallel}");
+            for id in ["n_dead_a", "n_dead_b", "n_merge"] {
+                assert!(!result.node_outputs.contains_key(id), "parallel={parallel}: {id} ran");
+            }
+        }
     }
 }
