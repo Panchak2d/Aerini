@@ -6,13 +6,25 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-use crate::nodes::util::scrub_url_in_error;
+use crate::nodes::util::{scrub_url_in_error, Replay, SsrfPolicy, SsrfRedisResolver};
+
+const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REDIS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Returns a BLAKE3 hex hash of the connection URL, used as the DashMap pool
 /// cache key. This prevents the plaintext URL (which may contain a password)
 /// from being stored as a map key in process memory.
 fn pool_key(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+/// A connection dialed under `AllowLocal` must not be reused by a `Strict` caller.
+fn redis_pool_key(url: &str, policy: SsrfPolicy) -> String {
+    match policy {
+        SsrfPolicy::Strict => pool_key(url),
+        SsrfPolicy::AllowLocal => format!("{}:local", pool_key(url)),
+    }
 }
 
 // ── Connection pool registries ────────────────────────────────────────────────
@@ -60,12 +72,16 @@ static REDIS_CONNS: Lazy<Mutex<HashMap<String, PoolEntry<redis::aio::Multiplexed
 /// - relative (must be absolute — prevents opening files relative to cwd)
 /// - missing a recognised SQLite extension (.db / .sqlite / .sqlite3)
 /// - containing path traversal sequences (..)
+/// - network (UNC) paths such as \\host\share, which make the OS open a network connection
 pub(super) fn validate_db_path(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
     if !p.is_absolute() {
         return Err(
             "db_path must be an absolute path. Example: /home/user/myapp.db".to_string()
         );
+    }
+    if path.starts_with("\\\\") || path.starts_with("//") {
+        return Err("db_path must be a local path, not a network (UNC) path.".to_string());
     }
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !matches!(ext, "db" | "sqlite" | "sqlite3") {
@@ -128,7 +144,9 @@ pub(super) async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
-    let pool = sqlx::PgPool::connect(url)
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(POOL_CONNECT_TIMEOUT)
+        .connect(url)
         .await
         .map_err(|e| scrub_url_in_error(&format!("Postgres connection failed: {}", e)))?;
     map.insert(key, PoolEntry { pool: pool.clone(), last_used: Instant::now() });
@@ -142,7 +160,9 @@ pub(super) async fn get_mysql_pool(url: &str) -> Result<sqlx::MySqlPool, String>
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
-    let pool = sqlx::MySqlPool::connect(url)
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .acquire_timeout(POOL_CONNECT_TIMEOUT)
+        .connect(url)
         .await
         .map_err(|e| scrub_url_in_error(&format!("MySQL connection failed: {}", e)))?;
     map.insert(key, PoolEntry { pool: pool.clone(), last_used: Instant::now() });
@@ -163,42 +183,66 @@ fn get_redis_client(url: &str) -> Result<redis::Client, String> {
 }
 
 /// Returns a cached MultiplexedConnection for `url`, creating one if absent.
-async fn get_redis_conn(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
-    let key = pool_key(url);
+async fn get_redis_conn(url: &str, policy: SsrfPolicy) -> Result<redis::aio::MultiplexedConnection, String> {
+    let key = redis_pool_key(url, policy);
     let mut map = REDIS_CONNS.lock().await;
     if let Some(entry) = map.get_mut(&key) {
         entry.last_used = Instant::now();
         return Ok(entry.pool.clone());
     }
     let client = get_redis_client(url)?;
-    let conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| scrub_url_in_error(&format!("Redis connection failed: {}", e)))?;
+    let config = redis::AsyncConnectionConfig::new().set_dns_resolver(SsrfRedisResolver(policy));
+    let conn = tokio::time::timeout(
+        REDIS_CONNECT_TIMEOUT,
+        client.get_multiplexed_async_connection_with_config(&config),
+    )
+    .await
+    .map_err(|_| "Redis connection failed: timed out".to_string())?
+    .map_err(|e| scrub_url_in_error(&format!("Redis connection failed: {}", e)))?;
     map.insert(key, PoolEntry { pool: conn.clone(), last_used: Instant::now() });
     Ok(conn)
 }
 
-/// Runs `build_cmd()` on a cached connection for `url`.
-/// On IoError: evicts the stale connection, reconnects, retries exactly once.
-pub(super) async fn redis_cmd_with_retry<T, F>(url: &str, build_cmd: F) -> Result<T, redis::RedisError>
+/// Runs `build_cmd()` on a cached connection for `url`, bounded by a command timeout.
+/// On IoError (including a timeout): evicts the stale connection. For
+/// `Replay::Safe` commands it then reconnects and retries exactly once; for
+/// `Replay::Never` commands (pushes and pops, which a second run would
+/// duplicate or repeat) the error is returned, because the first attempt may
+/// already have taken effect.
+pub(super) async fn redis_cmd_with_retry<T, F>(url: &str, policy: SsrfPolicy, replay: Replay, build_cmd: F) -> Result<T, redis::RedisError>
 where
     T: redis::FromRedisValue,
     F: Fn() -> redis::Cmd + Send,
 {
-    let mut conn = get_redis_conn(url).await.map_err(|e| {
+    let mut conn = get_redis_conn(url, policy).await.map_err(|e| {
         redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::NotConnected, e))
     })?;
 
-    match build_cmd().query_async::<T>(&mut conn).await {
+    match run_bounded::<T>(build_cmd(), &mut conn).await {
         Ok(val) => Ok(val),
         Err(e) if e.is_connection_dropped() || e.is_io_error() => {
-            REDIS_CONNS.lock().await.remove(&pool_key(url));
-            let mut fresh = get_redis_conn(url).await.map_err(|ce| {
+            REDIS_CONNS.lock().await.remove(&redis_pool_key(url, policy));
+            if replay == Replay::Never {
+                return Err(e);
+            }
+            let mut fresh = get_redis_conn(url, policy).await.map_err(|ce| {
                 redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::NotConnected, ce))
             })?;
-            build_cmd().query_async::<T>(&mut fresh).await
+            run_bounded::<T>(build_cmd(), &mut fresh).await
         }
         Err(e) => Err(e),
+    }
+}
+
+async fn run_bounded<T: redis::FromRedisValue>(
+    cmd: redis::Cmd,
+    conn: &mut redis::aio::MultiplexedConnection,
+) -> Result<T, redis::RedisError> {
+    match tokio::time::timeout(REDIS_COMMAND_TIMEOUT, cmd.query_async::<T>(conn)).await {
+        Ok(result) => result,
+        Err(_) => Err(redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "command timed out",
+        ))),
     }
 }

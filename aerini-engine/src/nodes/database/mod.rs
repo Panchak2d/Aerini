@@ -70,6 +70,10 @@ impl Node for DatabaseNode {
                     "type": "number",
                     "description": "Redis set: optional TTL in seconds. Omit for no expiry."
                 },
+                "allow_raw_sql": {
+                    "type": "boolean",
+                    "description": "SQL only. Default: false. When false, a query containing single-quoted string literals (or double-quoted ones on MySQL) is refused so values go through `?` and `params`. Only an admin caller (a server run with admin rights) can turn this on; the desktop app ignores it."
+                },
                 "allow_local": {
                     "type": "boolean",
                     "description": "Postgres / MySQL / Redis only. Default: false — connections to localhost, 127.0.0.1, and private-network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, etc.) are blocked (SSRF protection). Set true only when connection_url intentionally targets a database you run yourself on this machine or LAN."
@@ -364,7 +368,157 @@ pub(super) fn enforce_read_only_query(query: &str) -> Result<(), String> {
         (a bare SELECT, or a WITH clause whose CTE definitions and final statement \
         are all SELECT). Use the Execute operation for INSERT, UPDATE, DELETE, or \
         other write operations.";
+    scan_for_ambiguous_syntax(query).map_err(|_| REJECT_MSG.to_string())?;
     is_read_only_statement(query, 0).map_err(|_| REJECT_MSG.to_string())
+}
+
+/// Lexical pre-pass over the whole statement. The classifier above walks one
+/// dialect-neutral reading of the text, but PostgreSQL, MySQL and SQLite lex
+/// some constructs differently, and a construct that one reads as a comment
+/// or string and another as code can hide a write from the classifier. This
+/// pass rejects every such construct outright (fail closed) and also rejects
+/// `INTO` (PostgreSQL `SELECT INTO` creates a table; MySQL `INTO OUTFILE`
+/// writes a file) and a second statement after a `;`.
+///
+/// Rejected: `$tag$` dollar quotes, `#` comments, `--` not followed by
+/// whitespace, MySQL `/*! */` executable comments, nested `/* /* */ */`
+/// comments, a backslash inside a `'` or `"` literal (an escape in
+/// PostgreSQL `E''` strings and MySQL, a plain character elsewhere), the word
+/// `INTO`, and any text after a `;`.
+fn scan_for_ambiguous_syntax(query: &str) -> Result<(), ()> {
+    let b = query.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'\'' | b'"' | b'`' => {
+                let rest = &query[i + 1..];
+                let after = skip_quoted(rest, c as char)?;
+                let consumed = &rest[..rest.len() - after.len()];
+                if c != b'`' && consumed.contains('\\') {
+                    return Err(());
+                }
+                i = query.len() - after.len();
+            }
+            b'#' => return Err(()),
+            b';' => {
+                if !skip_ws_and_comments(&query[i + 1..]).is_empty() {
+                    return Err(());
+                }
+                i += 1;
+            }
+            b'$' => {
+                let after_identifier = i > 0
+                    && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'$');
+                let numbered_parameter = b.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+                if !after_identifier && !numbered_parameter {
+                    return Err(());
+                }
+                i += 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => match b.get(i + 2) {
+                None => return Ok(()),
+                Some(n) if n.is_ascii_whitespace() => {
+                    match query[i + 2..].find('\n') {
+                        Some(nl) => i += 2 + nl + 1,
+                        None => return Ok(()),
+                    }
+                }
+                Some(_) => return Err(()),
+            },
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let body = &query[i + 2..];
+                if body.starts_with('!') || body.starts_with("M!") {
+                    return Err(());
+                }
+                match body.find("*/") {
+                    None => return Ok(()),
+                    Some(end) => {
+                        if body[..end].contains("/*") {
+                            return Err(());
+                        }
+                        i += 2 + end + 2;
+                    }
+                }
+            }
+            _ if c.is_ascii_alphabetic() || c == b'_' => {
+                let mut j = i;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                if query[i..j].eq_ignore_ascii_case("INTO") {
+                    return Err(());
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Statements that would let a SQLite `execute` reach a file the node's path
+/// checks never saw: `ATTACH` and `DETACH`, and `VACUUM ... INTO`, which
+/// writes a copy of the database to any path (the filename may be a bound
+/// parameter, so the inline-value check cannot see it).
+pub(super) fn reject_path_escaping_statement(query: &str) -> Result<(), String> {
+    let (kw, rest) = take_word(query);
+    let blocked = kw.eq_ignore_ascii_case("ATTACH")
+        || kw.eq_ignore_ascii_case("DETACH")
+        || (kw.eq_ignore_ascii_case("VACUUM") && scan_for_ambiguous_syntax(rest).is_err());
+    if blocked {
+        return Err(
+            "ATTACH, DETACH and VACUUM INTO are not allowed: they open or write database \
+             files outside the db_path this node validated."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Upper bound on rows one Query operation returns.
+pub(super) const MAX_QUERY_ROWS: usize = 100_000;
+
+pub(super) fn row_limit_message() -> String {
+    format!(
+        "Query returned more than {} rows. Add a LIMIT, or select fewer rows per run.",
+        MAX_QUERY_ROWS
+    )
+}
+
+pub(super) fn undecodable_placeholder(type_name: &str) -> String {
+    format!("<{} not supported: cast it to text in the query>", type_name)
+}
+
+pub(super) fn unsupported_type_log(column: &str, type_name: &str) -> String {
+    format!(
+        "[UNSUPPORTED_TYPE] column '{}' is {}, which is not decoded; its values are returned \
+         as a placeholder. Cast it to text in the query.",
+        column, type_name
+    )
+}
+
+pub(super) fn f32_json(f: f32) -> Value {
+    format!("{}", f)
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .map_or(Value::Null, Value::Number)
+}
+
+/// MySQL reads `"text"` as a string literal by default, so an inlined value in
+/// double quotes escapes the single-quote check above.
+pub(super) fn check_double_quoted_literal(query: &str) -> Option<String> {
+    if query.contains('"') {
+        return Some(
+            "SQL INJECTION WARNING: This MySQL query contains double-quoted string literals. \
+             MySQL treats double quotes as strings, so inlined values can break out of them. \
+             Use `?` placeholders and the `params` array instead; quote identifiers with \
+             backticks."
+                .to_string(),
+        );
+    }
+    None
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -672,5 +826,90 @@ mod read_only_query_tests {
         }
         q.push_str(" SELECT 1");
         assert!(enforce_read_only_query(&q).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::{
+        check_double_quoted_literal, enforce_read_only_query, f32_json, reject_path_escaping_statement,
+        undecodable_placeholder,
+    };
+
+    #[test]
+    fn read_only_check_rejects_syntax_the_dialects_read_differently() {
+        let rejected = [
+            "WITH x AS (SELECT $a$ \" $a$), y AS (DELETE FROM t RETURNING 1) SELECT 1 FROM y -- \") SELECT 1",
+            "SELECT 1 FROM t WHERE a = E'\\'' AND b = 1 -- '",
+            "SELECT * INTO copy FROM t",
+            "SELECT 1 INTO OUTFILE \"/tmp/x\"",
+            "SELECT 1--1 INTO OUTFILE \"/tmp/x\"",
+            "SELECT 1 /*! INTO OUTFILE \"/tmp/x\" */",
+            "SELECT 1 /* a /* b */ \" */ INTO x FROM t -- \"",
+            "SELECT 1 # note",
+            "SELECT 1; DELETE FROM t",
+            "SELECT \"a\\\"b\" FROM t",
+        ];
+        for q in rejected {
+            assert!(enforce_read_only_query(q).is_err(), "should reject: {q}");
+        }
+    }
+
+    #[test]
+    fn read_only_check_accepts_plain_selects_with_comments_and_parameters() {
+        let accepted = [
+            "SELECT a, \"b c\" FROM t WHERE x = ? AND y = $1 -- trailing note\n",
+            "SELECT 1 /* inline */ FROM t;",
+            "WITH c AS (SELECT price$ FROM t) SELECT * FROM c;  -- done",
+        ];
+        for q in accepted {
+            assert!(enforce_read_only_query(q).is_ok(), "should accept: {q}");
+        }
+    }
+
+    #[test]
+    fn execute_rejects_statements_that_open_or_write_other_files() {
+        let rejected = [
+            "ATTACH DATABASE ? AS o",
+            "  /* x */ detach database o",
+            "VACUUM INTO ?",
+            "VACUUM main INTO '/tmp/copy.db'",
+        ];
+        for q in rejected {
+            assert!(reject_path_escaping_statement(q).is_err(), "should reject: {q}");
+        }
+        for q in ["VACUUM", "VACUUM main;", "INSERT INTO t VALUES (1)", "CREATE INDEX i ON t(a)"] {
+            assert!(reject_path_escaping_statement(q).is_ok(), "should accept: {q}");
+        }
+    }
+
+    #[test]
+    fn sqlite_execute_refuses_attach_with_a_bound_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let err = super::sqlite::sqlite_run_execute(
+            &conn,
+            "ATTACH DATABASE ? AS o",
+            &[serde_json::json!("/tmp/outside.db")],
+        )
+        .unwrap_err();
+        assert!(err.contains("not allowed"), "got: {err}");
+    }
+
+    #[test]
+    fn mysql_double_quoted_literal_is_flagged_but_backticks_are_not() {
+        assert!(check_double_quoted_literal("SELECT * FROM t WHERE a = \"x\"").is_some());
+        assert!(check_double_quoted_literal("SELECT `a` FROM t WHERE b = ?").is_none());
+    }
+
+    #[test]
+    fn unsupported_column_types_are_named_and_f32_keeps_its_short_form() {
+        assert!(undecodable_placeholder("NUMERIC").contains("NUMERIC"));
+        assert_eq!(f32_json(0.1), serde_json::json!(0.1));
+    }
+
+    #[test]
+    fn unc_db_path_is_rejected() {
+        let e = super::pool::validate_db_path("//host/share/x.db").unwrap_err();
+        assert!(e.contains("network"), "got: {e}");
     }
 }

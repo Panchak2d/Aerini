@@ -6,8 +6,29 @@ use std::sync::OnceLock;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::Replay;
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+const ALLOWED_METHODS: [&str; 7] = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"];
+
+fn parse_method(name: &str) -> Option<reqwest::Method> {
+    let upper = name.to_ascii_uppercase();
+    ALLOWED_METHODS
+        .contains(&upper.as_str())
+        .then(|| reqwest::Method::from_bytes(upper.as_bytes()).ok())
+        .flatten()
+}
+
+/// A repeated POST or PATCH can create or change something twice, so a
+/// timeout on either is never retried. The other methods are idempotent.
+fn replay_for_method(method: &reqwest::Method) -> Replay {
+    if *method == reqwest::Method::POST || *method == reqwest::Method::PATCH {
+        Replay::Never
+    } else {
+        Replay::Safe
+    }
+}
 
 // Single shared HTTP client for all HttpRequestNode executions.
 // reqwest::Client is Arc-backed — cloning is O(1) and all clones share
@@ -17,11 +38,13 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn shared_http_client() -> reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
-        // Redirects are disabled: check_ssrf() validates the initial URL only.
-        // A server at an allowed URL could otherwise redirect to an internal
-        // address (e.g. 169.254.169.254) and bypass the SSRF check.
+        // Connections are filtered against the Strict SSRF policy at connect
+        // time (see `guarded_client_builder`), so a hostname cannot pass the
+        // pre-check and then resolve to an internal address.
+        // Redirects are disabled: a server at an allowed URL could otherwise
+        // redirect to an internal address (e.g. 169.254.169.254).
         // Callers that need redirect support must handle it in workflow logic.
-        reqwest::Client::builder()
+        crate::nodes::util::guarded_client_builder(crate::nodes::util::SsrfPolicy::Strict)
             .timeout(std::time::Duration::from_secs(30))
             .pool_max_idle_per_host(10)
             .redirect(reqwest::redirect::Policy::none())
@@ -30,20 +53,13 @@ fn shared_http_client() -> reqwest::Client {
     }).clone()
 }
 
-/// SSRF protection with DNS pre-validation for domain-based URLs.
+/// Early SSRF check that gives a clear `SSRF_BLOCKED` error before a request
+/// is built.
 ///
-/// Static checks (scheme, IP literal, known-bad hostnames) run first.
-/// For domain URLs, the hostname is resolved via Tokio DNS and every returned
-/// IP is validated before the request is sent.
-///
-/// **TOCTOU gap:** a TOCTOU window exists between this DNS pre-check and the
-/// actual TCP connect. A malicious DNS server can return a public IP during
-/// validation and a private IP on the actual connection (DNS rebinding).
-/// This is unavoidable at the application layer — this check is defence-in-depth.
-///
-/// **Required mitigation:** configure a network-level egress firewall to block
-/// outbound TCP connections to private IP ranges. The application-layer check
-/// alone does not provide a complete security boundary.
+/// Static checks (scheme, IP literal, known-bad hostnames) run first. For
+/// domain URLs, the hostname is resolved and every returned IP is validated.
+/// The shared client repeats the address check when it connects, so a DNS
+/// answer that changes between this check and the connection is still refused.
 async fn check_ssrf(raw_url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(raw_url)
         .map_err(|e| format!("Invalid URL: {}", e))?;
@@ -101,7 +117,7 @@ impl Node for HttpRequestNode {
     fn display_name(&self) -> &'static str { "HTTP Request" }
     fn node_type(&self) -> NodeType { NodeType::Action }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Make an HTTP request to any URL. Supports GET, POST, PUT, DELETE, and custom headers and body." }
+    fn description(&self) -> &'static str { "Make an HTTP request to any URL. Supports GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE, and custom headers and body." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -109,7 +125,7 @@ impl Node for HttpRequestNode {
             "required": ["url", "method"],
             "properties": {
                 "url":     { "type": "string", "description": "Request URL" },
-                "method":  { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"] },
+                "method":  { "type": "string", "enum": ["GET","HEAD","OPTIONS","POST","PUT","PATCH","DELETE"] },
                 "headers": { "type": "object", "description": "Request headers" },
                 "body":    { "description": "Request body (for POST/PUT/PATCH)" },
                 "api_key": { "type": "string", "description": "Resolved from credentials" }
@@ -172,16 +188,14 @@ impl Node for HttpRequestNode {
 
         let client = shared_http_client();
 
-        let mut req = match method.as_str() {
-            "GET"    => client.get(&url),
-            "POST"   => client.post(&url),
-            "PUT"    => client.put(&url),
-            "PATCH"  => client.patch(&url),
-            "DELETE" => client.delete(&url),
-            _ => return NodeOutput::failure(
+        let parsed_method = match parse_method(&method) {
+            Some(m) => m,
+            None => return NodeOutput::failure(
                 NodeError::unrecoverable("INVALID_METHOD", format!("Unknown method: {}", method))
             ),
         };
+        let replay = replay_for_method(&parsed_method);
+        let mut req = client.request(parsed_method, &url);
 
         if let Some(headers_obj) = input.input["headers"].as_object() {
             for (k, v) in headers_obj {
@@ -297,7 +311,7 @@ impl Node for HttpRequestNode {
                     logs,
                 )
             }
-            Err(e) => super::util::http_err_output(&e),
+            Err(e) => super::util::http_err_output(replay, &e),
         }
     }
 }
@@ -307,6 +321,21 @@ impl Node for HttpRequestNode {
 mod tests {
     use super::*;
     use crate::model::ExecutionContext;
+
+    #[test]
+    fn only_post_and_patch_are_never_replayed() {
+        for (m, expected) in [
+            (reqwest::Method::GET, Replay::Safe),
+            (reqwest::Method::HEAD, Replay::Safe),
+            (reqwest::Method::OPTIONS, Replay::Safe),
+            (reqwest::Method::PUT, Replay::Safe),
+            (reqwest::Method::DELETE, Replay::Safe),
+            (reqwest::Method::POST, Replay::Never),
+            (reqwest::Method::PATCH, Replay::Never),
+        ] {
+            assert_eq!(replay_for_method(&m), expected, "{m}");
+        }
+    }
 
     #[test]
     fn repeated_response_headers_are_joined() {
@@ -437,6 +466,34 @@ mod tests {
         let auth_mode = "none";
         let adds_header = !matches!(auth_mode, "none");
         assert!(!adds_header, "auth_mode 'none' must not add an Authorization header");
+    }
+
+    #[test]
+    fn every_schema_method_parses_and_others_are_rejected() {
+        let node = HttpRequestNode;
+        let listed: Vec<String> = node.input_schema()["properties"]["method"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(listed, ALLOWED_METHODS);
+        for m in &listed {
+            assert_eq!(parse_method(m).unwrap().as_str(), m.as_str());
+        }
+        assert_eq!(parse_method("head"), Some(reqwest::Method::HEAD));
+        assert_eq!(parse_method("options"), Some(reqwest::Method::OPTIONS));
+        for bad in ["TRACE", "CONNECT", "", "GET /x", "PROPFIND"] {
+            assert!(parse_method(bad).is_none(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_method_returns_invalid_method_before_any_request() {
+        let out = HttpRequestNode
+            .execute(make_input(json!({ "url": "http://93.184.216.34/", "method": "TRACE" })))
+            .await;
+        assert_eq!(out.error.unwrap().code, "INVALID_METHOD");
     }
 
     #[test]

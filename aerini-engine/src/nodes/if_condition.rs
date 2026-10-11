@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
@@ -12,15 +13,28 @@ impl Node for IfConditionNode {
     fn display_name(&self) -> &'static str { "If / Condition" }
     fn node_type(&self) -> NodeType { NodeType::Logic }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Branch the workflow on a condition. True paths go to one output, false to another." }
+    fn description(&self) -> &'static str { "Branch the workflow on a condition. True paths go to one output, false to another. Set Left Value, Operator and Right Value, or write one Condition string. Text comparisons (==, !=, contains) ignore case; numbers compare numerically." }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
+                "lhs": {
+                    "type": "string",
+                    "description": "Left Value. With Operator and Right Value, replaces Condition: each side is kept whole, so a value that contains '>' or ' contains ' is not misread."
+                },
+                "op": {
+                    "type": "string",
+                    "enum": STRUCTURED_OPS,
+                    "description": "Operator for Left Value and Right Value. ==, != and contains ignore case; the others compare numbers."
+                },
+                "rhs": {
+                    "type": "string",
+                    "description": "Right Value."
+                },
                 "condition": {
                     "type": "string",
-                    "description": "Condition to evaluate. Examples: '{{temperature_2m}} > 20', '{{status}} == ok', '{{count}} >= 5'"
+                    "description": "Condition as one string, used when Left Value and Right Value are both blank. Examples: '{{temperature_2m}} > 20', '{{status}} == ok', '{{count}} >= 5', '{{tags}} contains urgent'. ==, != and contains ignore case."
                 }
             }
         })
@@ -59,6 +73,30 @@ impl Node for IfConditionNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
+        let (lhs, rhs) = (field_text(&input.input["lhs"]), field_text(&input.input["rhs"]));
+        if !lhs.is_empty() || !rhs.is_empty() {
+            let op = match field_text(&input.input["op"]) {
+                o if o.is_empty() => "==".to_string(),
+                o => o,
+            };
+            if !STRUCTURED_OPS.contains(&op.as_str()) {
+                return NodeOutput::failure(NodeError::unrecoverable(
+                    "INVALID_CONFIG",
+                    format!("op must be one of: {}", STRUCTURED_OPS.join(", ")),
+                ));
+            }
+            let result = compare(&op, &lhs, &rhs);
+            let condition = format!("{lhs} {op} {rhs}");
+            return NodeOutput::success_with_logs(
+                json!({
+                    "result": result,
+                    "branch": if result { "on_true" } else { "on_false" },
+                    "condition": condition,
+                }),
+                vec![format!("Condition '{}' = {}", condition, result)],
+            );
+        }
+
         let condition = match input.input["condition"].as_str() {
             Some(c) if !c.trim().is_empty() => c.to_string(),
             _ => {
@@ -86,40 +124,54 @@ impl Node for IfConditionNode {
 }
 
 
+const SYMBOL_OPS: [&str; 7] = [">=", "<=", "!=", "==", ">", "<", "="];
+
+/// Operators the Operator field offers.
+const STRUCTURED_OPS: [&str; 7] = ["==", "!=", ">", ">=", "<", "<=", "contains"];
+
+/// A config field as comparison text: strings are trimmed, numbers and bools
+/// are printed, anything else is empty.
+fn field_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `lhs op rhs` for an operator from `SYMBOL_OPS` or `contains`. Two numbers
+/// compare numerically; anything else compares as text, ignoring case.
+fn compare(op: &str, lhs: &str, rhs: &str) -> bool {
+    if op == "contains" {
+        return lhs.to_lowercase().contains(&rhs.to_lowercase());
+    }
+    if let (Some(l), Some(r)) = (parse_number(lhs), parse_number(rhs)) {
+        return match op {
+            ">=" => l >= r,
+            "<=" => l <= r,
+            "!=" => (l - r).abs() > f64::EPSILON,
+            ">"  => l > r,
+            "<"  => l < r,
+            _    => (l - r).abs() <= f64::EPSILON,
+        };
+    }
+    match op {
+        "==" | "=" => lhs.to_lowercase() == rhs.to_lowercase(),
+        "!="       => lhs.to_lowercase() != rhs.to_lowercase(),
+        _          => false,
+    }
+}
+
 fn evaluate(expr: &str) -> bool {
     let expr = expr.trim();
 
-    // Try operators in longest-first order to avoid partial matches
-    for op in &[">=", "<=", "!=", "==", ">", "<", "="] {
-        if let Some(pos) = expr.find(op) {
-            let lhs = expr[..pos].trim();
-            let rhs = expr[pos + op.len()..].trim()
-                .trim_matches('\'')
-                .trim_matches('"');
-
-            if let (Ok(l), Ok(r)) = (lhs.parse::<f64>(), rhs.parse::<f64>()) {
-                return match *op {
-                    ">=" => l >= r,
-                    "<=" => l <= r,
-                    "!=" => (l - r).abs() > f64::EPSILON,
-                    ">"  => l > r,
-                    "<"  => l < r,
-                    _    => (l - r).abs() <= f64::EPSILON,
-                };
-            }
-
-            return match *op {
-                "==" | "=" => lhs.to_lowercase() == rhs.to_lowercase(),
-                "!="       => lhs.to_lowercase() != rhs.to_lowercase(),
-                _          => false,
-            };
-        }
+    if let Some((lhs, rhs)) = split_contains(expr) {
+        return compare("contains", unquote(lhs), unquote(rhs));
     }
 
-    if let Some(pos) = expr.find(" contains ") {
-        let lhs = expr[..pos].trim().trim_matches('\'').trim_matches('"');
-        let rhs = expr[pos + 10..].trim().trim_matches('\'').trim_matches('"');
-        return lhs.contains(rhs);
+    if let Some((pos, op)) = find_symbol_operator(expr) {
+        return compare(op, unquote(&expr[..pos]), unquote(&expr[pos + op.len()..]));
     }
 
     match expr.to_lowercase().as_str() {
@@ -127,6 +179,41 @@ fn evaluate(expr: &str) -> bool {
         "false" | "no" | "0" | "null" | "" => false,
         other => other != "undefined",
     }
+}
+
+/// Splits on the first whitespace-delimited `contains`. A missing left or
+/// right side is an empty string, so an unset `{{value}}` does not fall
+/// through to the bare-value rule.
+fn split_contains(expr: &str) -> Option<(&str, &str)> {
+    if let Some(pos) = expr.find(" contains ") {
+        return Some((&expr[..pos], &expr[pos + " contains ".len()..]));
+    }
+    if let Some(rest) = expr.strip_prefix("contains ") {
+        return Some(("", rest));
+    }
+    expr.strip_suffix(" contains").map(|lhs| (lhs, ""))
+}
+
+/// The symbol operator that starts earliest in `expr`; at the same position
+/// the longest one wins (`>=` over `>`, `==` over `=`).
+fn find_symbol_operator(expr: &str) -> Option<(usize, &'static str)> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for op in SYMBOL_OPS {
+        if let Some(pos) = expr.find(op) {
+            if best.is_none_or(|(b, _)| pos < b) {
+                best = Some((pos, op));
+            }
+        }
+    }
+    best
+}
+
+fn unquote(s: &str) -> &str {
+    s.trim().trim_matches('\'').trim_matches('"')
+}
+
+fn parse_number(s: &str) -> Option<f64> {
+    s.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 #[cfg(test)]
@@ -174,11 +261,88 @@ mod tests {
     #[test]
     fn contains_miss()             { assert!(!evaluate("hello world contains xyz")); }
     #[test]
+    fn contains_ignores_case()     { assert!(evaluate("Hello World contains WORLD")); }
+    #[test]
+    fn contains_wins_over_symbol_in_value() {
+        assert!(evaluate("a=b contains b"));
+        assert!(evaluate("x>=1 contains >="));
+        assert!(!evaluate("a=b contains z"));
+    }
+    #[test]
+    fn contains_with_empty_side_does_not_fall_through() {
+        assert!(!evaluate("contains foo"));
+        assert!(evaluate("foo contains"));
+    }
+    #[test]
+    fn same_position_prefers_longest_operator() {
+        assert!(evaluate("5>=5"));
+        assert!(!evaluate("5>5"));
+        assert!(evaluate("5<=5"));
+        assert!(evaluate("10 = 10"));
+        assert!(!evaluate("a = a<b"));
+    }
+    #[test]
+    fn non_finite_words_compare_as_text() {
+        assert!(evaluate("nan == NaN"));
+        assert!(evaluate("inf == inf"));
+        assert!(!evaluate("nan > 1"));
+    }
+    #[test]
+    fn quoted_left_side_matches_unquoted_right() { assert!(evaluate("'paid' == paid")); }
+    #[test]
     fn bare_true_string()          { assert!(evaluate("true")); }
     #[test]
     fn bare_false_string()         { assert!(!evaluate("false")); }
     #[test]
     fn empty_string_false()        { assert!(!evaluate("")); }
+
+    // ── structured fields ──────────────────────────────────────────────────
+
+    #[test]
+    fn structured_sides_are_compared_whole_even_when_they_contain_operator_text() {
+        assert!(compare("==", "a=b", "A=B"));
+        assert!(compare("contains", "x contains y", "contains"));
+        assert!(compare(">=", "10", "9.5"));
+        assert!(!compare("<", "10", "9.5"));
+        assert!(compare("!=", "a>=b", "a>b"));
+        assert!(!compare(">", "abc", "abd"));
+    }
+
+    fn structured_input(fields: serde_json::Value) -> NodeInput {
+        let mut input = make_input("1 > 3");
+        input.input = fields;
+        input
+    }
+
+    #[tokio::test]
+    async fn structured_fields_replace_condition_only_when_a_side_is_set() {
+        let used = IfConditionNode
+            .execute(structured_input(json!({ "condition": "1 > 3", "lhs": "a=b", "op": "==", "rhs": "a=b" })))
+            .await;
+        assert_eq!(used.output.as_ref().unwrap()["branch"], "on_true");
+
+        let legacy = IfConditionNode
+            .execute(structured_input(json!({ "condition": "5 > 3", "lhs": "", "op": "==", "rhs": "" })))
+            .await;
+        assert_eq!(legacy.output.as_ref().unwrap()["branch"], "on_true");
+        assert_eq!(legacy.output.as_ref().unwrap()["condition"], "5 > 3");
+
+        let default_op = IfConditionNode
+            .execute(structured_input(json!({ "lhs": "Paid", "rhs": "paid" })))
+            .await;
+        assert_eq!(default_op.output.as_ref().unwrap()["branch"], "on_true");
+    }
+
+    #[tokio::test]
+    async fn unknown_structured_operator_fails_with_invalid_config() {
+        let out = IfConditionNode
+            .execute(structured_input(json!({ "lhs": "1", "op": "~=", "rhs": "1" })))
+            .await;
+        assert!(!out.success);
+        let err = out.error.expect("expected error");
+        assert_eq!(err.code, "INVALID_CONFIG");
+        assert!(!err.recoverable);
+    }
 
     // ── execute() output shape ─────────────────────────────────────────────
 

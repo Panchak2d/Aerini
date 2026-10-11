@@ -6,6 +6,18 @@ use crate::db::WorkflowDb;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::cfg_bool_opt;
+
+fn describe_value(value: &Value) -> String {
+    match value {
+        Value::Null      => "null".to_string(),
+        Value::Bool(_)   => "boolean".to_string(),
+        Value::Number(_) => "number".to_string(),
+        Value::String(s) => format!("string, {} bytes", s.len()),
+        Value::Array(a)  => format!("array, {} items", a.len()),
+        Value::Object(o) => format!("object, {} keys", o.len()),
+    }
+}
 
 pub struct SetVariableNode {
     /// None in serve mode (single-workflow daemon) — persist is a no-op there.
@@ -68,9 +80,12 @@ impl Node for SetVariableNode {
         };
 
         let value = input.input["value"].clone();
-        let persist = input.input["persist"].as_bool().unwrap_or(false);
+        let persist = match cfg_bool_opt(&input.input["persist"], "persist") {
+            Ok(v) => v.unwrap_or(false),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
-        let mut logs = vec![format!("Set '{}' = {}", key, value)];
+        let mut logs = vec![format!("Set '{}' ({})", key, describe_value(&value))];
 
         if persist {
             match self.db {
@@ -91,11 +106,13 @@ impl Node for SetVariableNode {
                     }).await;
                     match result {
                         Ok(Ok(())) => logs.push(format!("Persisted '{}' to DB", key)),
-                        Ok(Err(e)) => logs.push(format!(
-                            "Warning: failed to persist '{}' to DB: {}", key, e
+                        Ok(Err(e)) => return NodeOutput::failure(NodeError::unrecoverable(
+                            "DB_ERROR",
+                            format!("Failed to persist variable '{}' to DB: {}", key, e),
                         )),
-                        Err(e) => logs.push(format!(
-                            "Warning: DB task panicked persisting '{}': {}", key, e
+                        Err(e) => return NodeOutput::failure(NodeError::unrecoverable(
+                            "DB_TASK_PANIC",
+                            format!("DB task panicked persisting '{}': {}", key, e),
                         )),
                     }
                 }
@@ -177,21 +194,22 @@ impl Node for GetVariableNode {
         };
 
         let default = input.input.get("default").cloned();
-        let persist = input.input["persist"].as_bool().unwrap_or(false);
+        let persist = match cfg_bool_opt(&input.input["persist"], "persist") {
+            Ok(v) => v.unwrap_or(false),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         // Check in-run execution context — always, regardless of persist flag
         if let Some(v) = input.context.variables.get(&key) {
             return NodeOutput::success_with_logs(
                 json!({ "key": key, "value": v, "found": true }),
-                vec![format!("Got '{}' = {}", key, v)],
+                vec![format!("Got '{}' ({})", key, describe_value(v))],
             );
         }
 
         if persist {
             match self.db {
-                None => {
-                    // serve mode: warn, fall through to default
-                }
+                None => {}
                 Some(ref db) => {
                     let db_arc = Arc::clone(db);
                     let wf_id = input.workflow_id.clone();
@@ -204,7 +222,7 @@ impl Node for GetVariableNode {
                         Ok(Ok(Some(db_val))) => {
                             return NodeOutput::success_with_logs(
                                 json!({ "key": key, "value": db_val, "found": true }),
-                                vec![format!("Got '{}' from DB = {}", key, db_val)],
+                                vec![format!("Got '{}' from DB ({})", key, describe_value(&db_val))],
                             );
                         }
                         Ok(Ok(None)) => {}
@@ -229,8 +247,8 @@ impl Node for GetVariableNode {
             Some(ref d) if !d.is_null() => NodeOutput::success_with_logs(
                 json!({ "key": key, "value": d, "found": false }),
                 vec![format!(
-                    "Variable '{}' not found in this run — using configured default: {}",
-                    key, d
+                    "Variable '{}' not found in this run — using configured default ({})",
+                    key, describe_value(d)
                 )],
             ),
             _ => NodeOutput::success_with_logs(
@@ -341,6 +359,42 @@ mod tests {
         let out = node.execute(make_set_input("k", Value::Null, false)).await;
         assert!(out.success);
         assert_eq!(out.output.unwrap()["value"], Value::Null);
+    }
+
+    // ── persistence failure and log hygiene ─────────────────────────────────
+
+    #[tokio::test]
+    async fn set_persist_returns_failure_when_db_write_fails_without_leaking_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vars.db");
+        let db = Arc::new(crate::db::WorkflowDb::open(&path, 2).unwrap());
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DROP TABLE workflow_variables", [])
+            .unwrap();
+
+        let node = SetVariableNode { db: Some(db) };
+        let out = node.execute(make_set_input("tok", json!("s3cret-value"), true)).await;
+
+        assert!(!out.success, "a failed persist must not report success");
+        let err = out.error.unwrap();
+        assert_eq!(err.code, "DB_ERROR");
+        assert!(!err.message.contains("s3cret-value"), "message leaked the value: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn set_and_get_logs_describe_the_value_without_containing_it() {
+        let set = SetVariableNode { db: None }
+            .execute(make_set_input("tok", json!("s3cret-value"), false))
+            .await;
+        assert!(set.success);
+        assert!(set.logs.iter().all(|l| !l.contains("s3cret-value")), "set logs: {:?}", set.logs);
+
+        let mut vars = HashMap::new();
+        vars.insert("tok".to_string(), json!("s3cret-value"));
+        let get = GetVariableNode { db: None }.execute(make_get_input("tok", vars)).await;
+        assert!(get.success);
+        assert!(get.logs.iter().all(|l| !l.contains("s3cret-value")), "get logs: {:?}", get.logs);
     }
 
     // ── GetVariableNode ─────────────────────────────────────────────────────

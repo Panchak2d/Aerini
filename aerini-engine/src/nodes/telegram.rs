@@ -92,7 +92,7 @@ impl Node for TelegramNode {
                 }
             }
             Err(e) => {
-                super::util::http_err_output(&e)
+                super::util::http_err_output(super::util::Replay::Never, &e)
             }
         }
     }

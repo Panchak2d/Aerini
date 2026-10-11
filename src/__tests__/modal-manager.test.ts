@@ -212,6 +212,21 @@ describe("convertN8nWorkflow — Switch node case port mapping", () => {
   });
 });
 
+describe("convertN8nWorkflow — Gmail node type", () => {
+  it("maps n8n gmail to the registered email_send node id", () => {
+    registerNodeDescriptors([]);
+    initModals(() => {});
+
+    const out = convertN8nWorkflow({
+      name: "wf",
+      nodes: [n8nNode("Mail", "n8n-nodes-base.gmail"), n8nNode("Mail2", "n8n-nodes-base.emailSend")],
+      connections: {},
+    }) as { nodes: ConvertedNode[] };
+
+    expect(out.nodes.map(n => n.node_type_id)).toEqual(["email_send", "email_send"]);
+  });
+});
+
 describe("convertN8nWorkflow — non-branching node types (regression, unchanged behavior)", () => {
   it("still uses the real single output port id at index 0", () => {
     registerNodeDescriptors([HTTP_DESCRIPTOR]);
@@ -391,7 +406,7 @@ describe("convertN8nWorkflow — Switch node condition translation", () => {
     const out = convertN8nWorkflow(n8n) as ConvertedResult;
     const router = out.nodes.find(n => n.name === "Router")!;
     expect(router.config.field).toBe("tier");
-    expect(router.config.source_node).toBe("Fetch");
+    expect(router.config.source_node).toBe(out.nodes.find(n => n.name === "Fetch")!.id);
     expect(JSON.parse(router.config.cases as string)).toEqual([
       { match: "bronze", port: "case_1" },
       { match: "silver", port: "case_2" },

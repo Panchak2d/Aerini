@@ -159,10 +159,12 @@ The node appears in the canvas palette automatically. No other files require cha
   runs; the plaintext value is already in `input.input` like any other field, there is no
   `resolve_credential()` method to call. Never log or echo that value back into `logs` or
   an error message.
-- **SSRF:** `check_ssrf()` in `http.rs` is private to that module and isn't reachable from
-  a new node file directly. If your node makes outbound HTTP requests to a user-supplied
-  host, reimplement equivalent protection (scheme allowlist, IP-literal rejection, DNS
-  pre-resolution against private ranges).
+- **SSRF:** `check_ssrf()` in `http.rs` is private to that module. For a node that requests
+  a user-supplied host, build the client with `nodes::util::guarded_client_builder()` (it
+  filters addresses at connect time) and call `nodes::util::check_host_ssrf_from_url()` first
+  for a clear error. Classify a failed `send()` with `util::http_err_output(replay, &e)` or
+  `util::is_retryable_network_error(replay, &e)`; pass `Replay::Never` for a call that sends or
+  creates something, `Replay::Safe` for a read.
 
 ---
 

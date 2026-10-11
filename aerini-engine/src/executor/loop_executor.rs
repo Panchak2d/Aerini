@@ -36,9 +36,13 @@ impl WorkflowExecutor {
             let current = done_queue[di].clone();
             di += 1;
             for edge in &workflow.edges {
-                if edge.from_node == current && !done_set.contains(&edge.to_node) {
-                    done_set.insert(edge.to_node.clone());
-                    done_queue.push(edge.to_node.clone());
+                if edge.from_node != current {
+                    continue;
+                }
+                for next in std::iter::once(&edge.to_node).chain(edge.on_failure.as_ref()) {
+                    if done_set.insert(next.clone()) {
+                        done_queue.push(next.clone());
+                    }
                 }
             }
         }
@@ -61,12 +65,15 @@ impl WorkflowExecutor {
             let current = queue[i].clone();
             i += 1;
             for edge in &workflow.edges {
-                if edge.from_node == current
-                    && !body_set.contains(&edge.to_node)
-                    && !done_set.contains(&edge.to_node)
-                {
-                    body_set.insert(edge.to_node.clone());
-                    queue.push(edge.to_node.clone());
+                if edge.from_node != current {
+                    continue;
+                }
+                // An `on_failure` target belongs to the body of the node that routes to it.
+                for next in std::iter::once(&edge.to_node).chain(edge.on_failure.as_ref()) {
+                    if !body_set.contains(next) && !done_set.contains(next) {
+                        body_set.insert(next.clone());
+                        queue.push(next.clone());
+                    }
                 }
             }
         }
@@ -95,8 +102,10 @@ impl WorkflowExecutor {
         // above the node's own guard and only fires on a real executor bug.
         const MAX_LOOP_ITERATIONS: u64 = 10_001;
 
+        // Upper bound on the serialized size of `all_results` for one loop.
+        const MAX_LOOP_RESULTS_BYTES: usize = 256 * 1024 * 1024;
+
         // Build a local O(1) lookup map. Built once per loop execution — not per iteration.
-        // Replaces the O(n) Workflow::node() scan on every body node on every iteration.
         let node_map: HashMap<&str, &crate::model::WorkflowNode> =
             workflow.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
@@ -108,6 +117,17 @@ impl WorkflowExecutor {
             ))?;
 
         let body_nodes = self.collect_loop_body_nodes(loop_node_id, workflow, topo_order);
+
+        if let Some(inner) = body_nodes.iter().find(|id| {
+            node_map.get(id.as_str()).is_some_and(|n| n.node_type_id == "loop" && !n.disabled)
+        }) {
+            return Err(format!(
+                "Loop node '{}' contains another Loop node ('{}') in its body. Nested loops \
+                 are not supported: the inner loop would process only its first item. Move the \
+                 inner loop into a separate workflow, or flatten the data before the loop.",
+                loop_node_id, inner
+            ));
+        }
 
         // Direct loop_body successors of the loop node, these are the only body
         // nodes that unconditionally run every iteration. Everything else reachable
@@ -136,6 +156,8 @@ impl WorkflowExecutor {
 
         state.write().await.mark_running(loop_node_id);
         self.emit_node_status(&workflow.id, loop_node_id, "running");
+
+        let mut results_bytes: usize = 0;
 
         for iteration in 0..=MAX_LOOP_ITERATIONS {
             // Cancel check — exits the loop immediately between iterations.
@@ -393,8 +415,7 @@ impl WorkflowExecutor {
                     ));
                 }
 
-                // Track this iteration's result (overwrite — last body node wins,
-                // matching the original per-iteration key-collision semantics).
+                // Track this iteration's result (last body node wins).
                 if let Some(ref val) = body_output.output {
                     iteration_result = Some(val.clone());
                 }
@@ -430,10 +451,15 @@ impl WorkflowExecutor {
                 }
             }
 
-            // Push exactly one entry for this iteration (the last body node's
-            // output), preserving the original n-entries-total semantics while
-            // avoiding the O(k·n²) clone cost of the old loop_state-based approach.
+            // One entry per iteration: the last body node's output.
             if let Some(val) = iteration_result {
+                results_bytes = Self::add_result_bytes(results_bytes, &val, MAX_LOOP_RESULTS_BYTES)
+                    .ok_or_else(|| format!(
+                        "Loop node '{}': collected results exceed {} MB after {} iterations. \
+                         Return only the fields you need from the loop body, or process the \
+                         array in smaller batches.",
+                        loop_node_id, MAX_LOOP_RESULTS_BYTES / (1024 * 1024), iteration + 1
+                    ))?;
                 state.write().await.push_loop_result(loop_node_id, val);
             }
 
@@ -449,19 +475,9 @@ impl WorkflowExecutor {
         Err(format!("Loop node '{}': iteration limit logic error — this is a bug", loop_node_id))
     }
 
-    // routes a failing loop-body node's failure through the same
-    // two mechanisms a top-level node failure already gets in
-    // sequential.rs/parallel.rs — an `on_error`-port edge (activate_successors),
-    // falling back to a `WorkflowEdge.on_failure` pointer (the field
-    // executor/mod.rs::find_failure_route resolves via ExecutionGraph at the
-    // top level). Reimplemented directly against `workflow.edges` here rather
-    // than threading an `ExecutionGraph` into `execute_loop_node` — body nodes
-    // are ordinary members of `workflow.edges`, so a direct scan finds the same
-    // edges, and this keeps the logic self-contained inside loop_executor.rs
-    // rather than widening it into sequential.rs's and parallel.rs's call
-    // sites (the latter would additionally require Arc-wrapping
-    // ExecutionGraph to cross into parallel.rs's spawned per-loop tokio
-    // task).
+    // Routes a failing loop-body node's failure the way a top-level failure is
+    // routed: an `on_error`-port edge first, then a `WorkflowEdge.on_failure`
+    // pointer. Scans `workflow.edges` directly; body nodes are ordinary members.
     //
     // A routed target must itself be a loop-body node (`body_set` — the same
     // membership `collect_loop_body_nodes` already computed for this loop) to
@@ -476,6 +492,11 @@ impl WorkflowExecutor {
     // `continue` to the next body node instead of aborting the loop.
     // `routed == false` means any loop that does not wire on_error/on_failure
     // on its body nodes aborts on first failure.
+    fn add_result_bytes(total: usize, val: &serde_json::Value, cap: usize) -> Option<usize> {
+        let size = serde_json::to_vec(val).map_or(usize::MAX, |b| b.len());
+        total.checked_add(size).filter(|t| *t <= cap)
+    }
+
     pub(super) fn route_loop_body_failure(
         &self,
         body_id:     &str,
@@ -550,7 +571,7 @@ impl WorkflowExecutor {
     }
 }
 
-// ── Loop executor regression tests ───────────────────────────────────────────
+// ── Loop executor tests ───────────────────────────────────────────
 //
 // Harness note: a general executor test harness already exists in executor/mod.rs.
 // These tests live here because they are specific to loop execution semantics and
@@ -740,14 +761,60 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn nested_loop_in_body_fails_before_any_body_node_runs() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+
+        let workflow = loop_workflow_with_bodies(vec![("loop", false)]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(!result.success, "a nested loop must fail the run");
+        let err = result.error.expect("error field must be populated");
+        assert!(err.contains("Nested loops are not supported"), "got: {}", err);
+        assert!(!result.node_outputs.contains_key("body_0"), "inner loop must not have run");
+    }
+
+    #[tokio::test]
+    async fn disabled_loop_in_body_is_not_treated_as_nested() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode {
+            output: serde_json::json!({ "items": [1, 2] }),
+        }));
+        registry.register(Arc::new(LoopNode));
+
+        let workflow = loop_workflow_with_bodies(vec![("loop", true)]);
+
+        let result = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+    }
+
+    #[test]
+    fn result_byte_accounting_rejects_only_past_the_cap() {
+        let v = serde_json::json!("abcd");
+        let size = serde_json::to_vec(&v).unwrap().len();
+        assert_eq!(WorkflowExecutor::add_result_bytes(0, &v, size), Some(size));
+        assert_eq!(WorkflowExecutor::add_result_bytes(1, &v, size), None);
+        assert_eq!(WorkflowExecutor::add_result_bytes(usize::MAX, &v, usize::MAX), None);
+    }
+
     // ── Regression test 1: one entry per iteration, not per body node ─────────
     //
-    // Before the fix: each body node called push_loop_result, producing k×n
-    // entries (k=2 bodies, n=3 iterations → 6 entries). After the fix:
-    // overwrite-then-push-once per iteration → 3 entries, each equal to the
-    // last body node's output (whichever the executor's topo order puts last).
+    // k=2 bodies, n=3 iterations → 3 entries (not 6), each equal to the last
+    // body node's output (whichever the executor's topo order puts last).
     //
-    // The count assertion (len == 3, not 6) is the core regression check.
+    // The count assertion (len == 3, not 6) is the core check.
     // The value assertion confirms overwrite semantics: whichever body node ran
     // last wins every iteration consistently — we don't assert which one because
     // petgraph's toposort order between peers at the same depth is an
@@ -785,11 +852,11 @@ mod tests {
         let all_results = loop_out["all_results"].as_array()
             .expect("all_results must be an array");
 
-        // Primary regression check: 3 iterations → exactly 3 entries, not 6.
+        // 3 iterations → exactly 3 entries, not 6.
         assert_eq!(
             all_results.len(), 3,
             "expected one entry per iteration; got {} — \
-             likely regression: push_loop_result called per body node rather than per iteration",
+             push_loop_result must run per iteration, not per body node",
             all_results.len()
         );
 
@@ -1748,6 +1815,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn on_failure_target_with_no_wire_is_part_of_the_loop_body_and_ordered_after_its_source() {
+        let node = |id: &str| WorkflowNode {
+            id: id.to_string(),
+            node_type_id: "loop_body_order_test".to_string(),
+            node_type: NodeType::Utility,
+            name: id.to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let edge = |id: &str, from: &str, port: &str, to: &str, on_failure: Option<&str>| WorkflowEdge {
+            id: id.to_string(),
+            from_node: from.to_string(),
+            from_port: port.to_string(),
+            to_node: to.to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: on_failure.map(str::to_string),
+        };
+        let workflow = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf_loop_failure_target_body".to_string(),
+            name: "t".to_string(),
+            description: String::new(),
+            nodes: vec![node("recovery"), node("loop_node"), node("body"), node("after"), node("tail")],
+            edges: vec![
+                edge("e1", "loop_node", "loop_body", "body", None),
+                edge("e2", "body", "output", "tail", Some("recovery")),
+                edge("e3", "loop_node", "done", "after", None),
+            ],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+        let graph = crate::graph::ExecutionGraph::build(&workflow).expect("graph builds");
+        let executor = WorkflowExecutor::new(Arc::new(NodeRegistry::new()), Arc::new(NoopCreds));
+
+        let body = executor.collect_loop_body_nodes("loop_node", &workflow, &graph.topo_order);
+
+        assert!(body.contains(&"recovery".to_string()), "{body:?}");
+        let pos = |id: &str| body.iter().position(|n| n == id).unwrap();
+        assert!(pos("body") < pos("recovery"), "{body:?}");
+        assert!(!body.contains(&"after".to_string()));
+    }
+
     // ── WorkflowEdge.on_failure field routing ─────────
     //
     // Same scenario as above, but via the other mechanism top-level nodes get
@@ -1880,7 +2002,7 @@ mod tests {
         );
     }
 
-    // ── regression guard: unrouted failure still aborts the loop ──
+    // ── unrouted failure aborts the loop ──
     //
     // A body node with NEITHER an on_error edge NOR an on_failure field must
     // still abort the whole loop on its first failure.

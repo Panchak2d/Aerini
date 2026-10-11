@@ -5,6 +5,33 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
+/// Slack truncates `text` beyond 40,000 characters, so a longer message is
+/// refused instead of being posted cut short.
+const SLACK_MAX_TEXT_CHARS: usize = 40_000;
+const MAX_DETAIL_CHARS: usize = 500;
+
+fn text_too_long(text: &str) -> bool {
+    text.chars().count() > SLACK_MAX_TEXT_CHARS
+}
+
+/// The error code Slack returned, plus the scopes it names for
+/// `missing_scope` (`needed` and `provided`), each capped in length.
+fn slack_error_message(v: &Value) -> String {
+    let code = v["error"].as_str().unwrap_or("unknown_error");
+    let details: Vec<String> = ["needed", "provided"]
+        .iter()
+        .filter_map(|key| {
+            let value = v[*key].as_str().filter(|s| !s.is_empty())?;
+            Some(format!("{key}: {}", value.chars().take(MAX_DETAIL_CHARS).collect::<String>()))
+        })
+        .collect();
+    if details.is_empty() {
+        code.to_string()
+    } else {
+        format!("{code} ({})", details.join("; "))
+    }
+}
+
 pub struct SlackNode;
 
 #[async_trait]
@@ -49,6 +76,13 @@ impl Node for SlackNode {
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_TEXT", "text field is required")),
         };
 
+        if text_too_long(&text) {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "TEXT_TOO_LONG",
+                "text exceeds Slack's 40,000-character limit",
+            ));
+        }
+
         let api_key = match input.input["api_key"].as_str().filter(|s| !s.is_empty()) {
             Some(k) => k.to_string(),
             None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_TOKEN", "Slack Bot Token is required — add it via the credential store")),
@@ -74,8 +108,7 @@ impl Node for SlackNode {
                                 vec![format!("Slack message sent to {}", channel)],
                             )
                         } else {
-                            let err = v["error"].as_str().unwrap_or("unknown_error").to_string();
-                            NodeOutput::failure(super::util::provider_error(status, "SLACK_ERROR", err))
+                            NodeOutput::failure(super::util::provider_error(status, "SLACK_ERROR", slack_error_message(&v)))
                         }
                     }
                     Err(e) => NodeOutput::failure(super::util::provider_error(
@@ -86,9 +119,31 @@ impl Node for SlackNode {
                 }
             }
             Err(e) => {
-                super::util::http_err_output(&e)
+                super::util::http_err_output(super::util::Replay::Never, &e)
             }
         }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_limit_is_inclusive_at_40000_chars() {
+        assert!(!text_too_long(&"é".repeat(40_000)));
+        assert!(text_too_long(&"é".repeat(40_001)));
+    }
+
+    #[test]
+    fn missing_scope_error_names_the_scopes() {
+        let v = json!({ "ok": false, "error": "missing_scope", "needed": "chat:write", "provided": "channels:read" });
+        assert_eq!(slack_error_message(&v), "missing_scope (needed: chat:write; provided: channels:read)");
+    }
+
+    #[test]
+    fn plain_error_stays_the_bare_code() {
+        assert_eq!(slack_error_message(&json!({ "ok": false, "error": "channel_not_found" })), "channel_not_found");
+        assert_eq!(slack_error_message(&json!({ "ok": false })), "unknown_error");
+    }
+}

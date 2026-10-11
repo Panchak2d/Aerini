@@ -95,11 +95,13 @@ Running a local model instead of a hosted API (Ollama and similar) is covered in
 
 Four integrations use real OAuth 2.0 instead of a pasted key: **YouTube**, **Instagram**, and **TikTok** (all through the Social Upload node), plus **Google Sheets**. Aerini runs the whole exchange itself: it opens your browser to the provider's login page, listens on `http://127.0.0.1:42069/callback` for the response, and stores the resulting tokens in your OS keychain, refreshing them automatically before they expire.
 
+The sign-in waits 60 seconds for the response and ignores anything else that reaches that port (a stray request, or one with the wrong `state`), so it only ends on your login, a refusal (reported with the provider's reason), or the timeout. Two workflows that need the same login at once share a single sign-in. A refresh that fails for a passing reason (network error, provider outage, rate limit) keeps your stored tokens and fails that run with a retryable error; only a provider rejecting the stored credential (for example a revoked grant) discards it and starts a new sign-in. If the keychain refuses to save tokens (common on a headless Linux box), the run still works, a warning is logged, and the next run signs in again. Signing in needs a desktop and a browser on the machine running the workflow, so on a headless server sign in on the desktop app first.
+
 ### YouTube, Instagram, TikTok
 
 On a Social Upload node, open its **Platform Setup** section and click **Open Setup Guide**. It walks through each platform's developer console step by step: which product to enable, where to find your Client ID and Client Secret, and the exact redirect URI to register (it reads the live port Aerini will actually use, and warns you if 42069 is already taken by something else on your machine). A few things worth knowing going in:
 
-- **Instagram** requires your media to already be hosted at a public URL. Social Upload can't hand it a local file directly, upload to a CDN or web host first and pass that URL in.
+- **Instagram** requires your media to already be hosted at a public URL. Social Upload can't hand it a local file directly: upload to a CDN or web host first, and put that `http(s)` URL in the file's `data` field.
 - **TikTok** apps start in sandbox mode: posts are private and visible only to your own account until the app passes review.
 - **YouTube** apps start in Google's "Testing" status, capped at whatever test users you've added, until you submit for verification.
 

@@ -58,26 +58,17 @@ impl Node for OutputNode {
         let label = input.input["label"].as_str().unwrap_or("Result").to_string();
         let field = input.input["field"].as_str().unwrap_or("").to_string();
 
-        // source_node is schema-typed as a string (line 27), so a
-        // non-string, non-null value is a malformed config, not "unset" — it
-        // must not silently fall through to the merged-context fallback
-        // below, which is reserved for a genuinely absent/null source_node.
-        // Mirrors switch.rs's is_null/as_str/reject pattern. The fallback branch
-        // below uses ordered_node_outputs for deterministic iteration.
         let source_node_value = &input.input["source_node"];
         let source: Value = if source_node_value.is_null() {
-            // Use all context outputs merged, preferring the most recently
-            // completed node's output. Iterate in real completion order
-            // (context.execution_order, via ordered_node_outputs) — a raw
-            // HashMap iteration order is unspecified and would differ run to
-            // run for an identical workflow.
-            let mut last: Option<Value> = None;
-            for (id, val) in ordered_node_outputs(&input.context) {
-                if id != input.node_id {
-                    last = Some(val);
-                }
+            match input.context.metadata.get("__direct_input") {
+                Some(direct) => direct.clone(),
+                None => ordered_node_outputs(&input.context)
+                    .into_iter()
+                    .rev()
+                    .find(|(id, _)| *id != input.node_id)
+                    .map(|(_, val)| val)
+                    .unwrap_or_else(|| input.input.clone()),
             }
-            last.unwrap_or(input.input.clone())
         } else if let Some(src_id) = source_node_value.as_str() {
             input.context.node_outputs.get(src_id).cloned().unwrap_or(Value::Null)
         } else {
@@ -135,8 +126,7 @@ impl Node for OutputNode {
 }
 
 // ---------------------------------------------------------------------------
-// Tests cover the source_node validation requirement — not a full suite for
-// pre-existing logic.
+// Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -212,5 +202,56 @@ mod tests {
         assert!(out.success);
         assert_eq!(out.output.unwrap()["value"]["val"], json!("right"));
     }
-}
 
+    #[tokio::test]
+    async fn unset_source_node_prefers_connected_predecessor_over_latest_output() {
+        let mut outputs = HashMap::new();
+        outputs.insert("pred".to_string(), json!({ "val": "from-predecessor" }));
+        outputs.insert("unrelated".to_string(), json!({ "val": "from-other-branch" }));
+        let mut metadata = HashMap::new();
+        metadata.insert("__direct_input".to_string(), json!({ "val": "from-predecessor" }));
+        let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id: "test".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({}),
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata,
+                execution_order: Arc::new(vec!["pred".to_string(), "unrelated".to_string()]),
+            },
+        };
+        let out = OutputNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["value"]["val"], json!("from-predecessor"));
+    }
+
+    #[tokio::test]
+    async fn explicit_source_node_wins_over_connected_predecessor() {
+        let mut outputs = HashMap::new();
+        outputs.insert("pred".to_string(), json!({ "val": "from-predecessor" }));
+        outputs.insert("chosen".to_string(), json!({ "val": "from-source-node" }));
+        let mut metadata = HashMap::new();
+        metadata.insert("__direct_input".to_string(), json!({ "val": "from-predecessor" }));
+        let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id: "test".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({ "source_node": "chosen" }),
+            context: ExecutionContext {
+                variables: HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata,
+                ..Default::default()
+            },
+        };
+        let out = OutputNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(out.output.unwrap()["value"]["val"], json!("from-source-node"));
+    }
+}

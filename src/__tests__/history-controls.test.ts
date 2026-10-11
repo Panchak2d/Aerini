@@ -6,7 +6,7 @@ import type { HistoryState } from "../canvas/UndoManager";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), convertFileSrc: vi.fn((p: string) => p) }));
 
-import { bindHistoryControls } from "../toolbar";
+import { bindHistoryControls } from "../history-controls";
 
 const state = (o: Partial<HistoryState>): HistoryState =>
   ({ kind: "push", canUndo: false, canRedo: false, undoLabel: null, redoLabel: null, ...o });

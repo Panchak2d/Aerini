@@ -120,7 +120,6 @@ function isN8nWorkflow(obj: Record<string, unknown>): boolean {
 }
 
 const N8N_TYPE_MAP: Record<string, string> = {
-  // Already mapped — do not remove
   "n8n-nodes-base.manualTrigger":      NODE_IDS.MANUAL_TRIGGER,
   "n8n-nodes-base.webhook":            NODE_IDS.WEBHOOK,
   "n8n-nodes-base.scheduleTrigger":    NODE_IDS.SCHEDULE,
@@ -136,10 +135,10 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.stickyNote":         NODE_IDS.NOTE,
   "n8n-nodes-base.merge":              NODE_IDS.MERGE,
   "n8n-nodes-base.slack":              "slack",
-  "n8n-nodes-base.gmail":              "email",
+  "n8n-nodes-base.gmail":              NODE_IDS.EMAIL_SEND,
   "n8n-nodes-base.googleSheets":       "google_sheets",
-  "n8n-nodes-base.postgres":           "database",
-  "n8n-nodes-base.mySql":              "database",
+  "n8n-nodes-base.postgres":           NODE_IDS.DATABASE,
+  "n8n-nodes-base.mySql":              NODE_IDS.DATABASE,
   "n8n-nodes-base.redis":              "unsupported",
   "n8n-nodes-base.github":             "github",
   "n8n-nodes-base.notion":             "notion",
@@ -172,12 +171,14 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
   const conditionWarnings: string[] = [];
 
   const nodeIdMap   = new Map<string, string>(); // n8n name → aerini id
+  n8nNodes.forEach((n, idx) => {
+    nodeIdMap.set(String(n.name ?? `Node ${idx}`), `node_imported_${idx}`);
+  });
   const nodeTypeMap = new Map<string, string>(); // aerini id → aerini node_type_id (for edge port resolution below)
 
   const aeriniNodes = n8nNodes.map((n: Record<string, unknown>, idx: number) => {
     const aeriniId = `node_imported_${idx}`;
     const n8nName = String(n.name ?? `Node ${idx}`);
-    nodeIdMap.set(n8nName, aeriniId);
 
     const typeId = N8N_TYPE_MAP[String(n.type ?? "")] ?? "unsupported";
     nodeTypeMap.set(aeriniId, typeId);
@@ -200,7 +201,8 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
         if ("condition" in result) config = { condition: result.condition };
         else conditionWarnings.push(result.warning);
       } else {
-        const result = translateSwitchConfig(rawParams, sourceName, n8nName);
+        const sourceId = sourceName ? (nodeIdMap.get(sourceName) ?? null) : null;
+        const result = translateSwitchConfig(rawParams, sourceId, n8nName);
         if ("warning" in result) conditionWarnings.push(result.warning);
         else config = result;
       }
@@ -543,7 +545,7 @@ function translateIfCondition(params: Record<string, unknown>, sourceName: strin
  * n8n's legacy typeVersion-1 value1/rules.rules shape — not verified against
  * n8n's docs, deliberately not guessed at) is left untranslated.
  */
-function translateSwitchConfig(params: Record<string, unknown>, sourceName: string | null, n8nNodeName: string): SwitchTranslation {
+function translateSwitchConfig(params: Record<string, unknown>, sourceId: string | null, n8nNodeName: string): SwitchTranslation {
   const mode = typeof params.mode === "string" ? params.mode : "rules";
   if (mode !== "rules") {
     return { warning: `Switch node '${n8nNodeName}': uses '${mode}' mode (a JavaScript expression picks the output) — Aerini's Switch node can't run n8n expressions. Configure 'field'/'cases'/'source_node' manually.` };
@@ -556,7 +558,7 @@ function translateSwitchConfig(params: Record<string, unknown>, sourceName: stri
   if (values.length > 8) {
     return { warning: `Switch node '${n8nNodeName}': ${values.length} rules — Aerini's Switch node supports at most 8 cases. Configure manually.` };
   }
-  if (!sourceName) {
+  if (!sourceId) {
     return { warning: `Switch node '${n8nNodeName}': could not identify exactly one upstream node to read data from — configure 'field'/'cases'/'source_node' manually.` };
   }
 
@@ -596,5 +598,5 @@ function translateSwitchConfig(params: Record<string, unknown>, sourceName: stri
     cases.push({ match: matchValue, port: `case_${i + 1}` });
   }
 
-  return { field: sharedField as string, cases: JSON.stringify(cases), source_node: sourceName };
+  return { field: sharedField as string, cases: JSON.stringify(cases), source_node: sourceId };
 }

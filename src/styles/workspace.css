@@ -121,7 +121,8 @@ body.resizing-v #output-drawer { transition: none; }
 #minimap-canvas { position: absolute; bottom: 28px; right: 8px; width: 150px; height: 90px; background: color-mix(in srgb, var(--bg2) 92%, transparent); border: 1px solid var(--bd); border-radius: 6px; z-index: 10; cursor: crosshair; transition: border-color 120ms; }
 #minimap-canvas:hover { border-color: color-mix(in srgb, var(--blue) 30%, transparent); }
 
-#canvas-empty-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 5; }
+#canvas-empty-state { position: absolute; inset: 0 0 calc(var(--status-h) + var(--canvas-stat-h) + var(--drawer-inset, 0px)) 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 5; }
+body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }
 .empty-state-box { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; opacity: 1; }
 .empty-state-icon { display: block; color: var(--color-text-muted); margin-bottom: 8px; opacity: 0.6; }
 .empty-state-title { font-size: 17px; font-weight: 600; color: var(--color-text-primary); letter-spacing: -.25px; }

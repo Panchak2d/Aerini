@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
-use super::util::{ordered_node_outputs, traverse_dotpath};
+use super::util::{cfg_u64_opt, traverse_dotpath};
 
 /// Text Splitter node — splits long text into overlapping chunks suitable for AI processing.
 ///
@@ -21,13 +21,58 @@ pub struct TextSplitterNode;
 /// overlap configuration.
 const MAX_TEXT_CHARS: usize = 2_000_000;
 
+/// Hard cap on the number of chunks one run may return. A tiny `chunk_size` on
+/// a document near `MAX_TEXT_CHARS` would otherwise return millions of chunks.
+const MAX_CHUNKS: usize = 100_000;
+
+const MODES: [&str; 4] = ["chars", "words", "sentences", "paragraphs"];
+
+/// Terminators of scripts written without a space after the sentence mark.
+const CJK_TERMINATORS: [char; 4] = ['。', '！', '？', '｡'];
+
+/// Other Unicode Sentence_Terminal characters that are never a decimal point or
+/// an abbreviation dot: Arabic question mark and full stop, Armenian full stop,
+/// Devanagari danda and double danda, Myanmar section mark, Ethiopic full stop,
+/// Khmer khan, and the double and combined ! and ? marks. They end a sentence
+/// wherever they appear. The Greek question mark U+037E is left out: Unicode
+/// normalization turns it into the ASCII semicolon, so it cannot be told apart.
+const OTHER_TERMINATORS: [char; 12] = [
+    '\u{061F}', '\u{06D4}', '\u{0589}', '\u{0964}', '\u{0965}', '\u{104B}',
+    '\u{1362}', '\u{17D4}', '\u{203C}', '\u{2047}', '\u{2048}', '\u{2049}',
+];
+
+/// Abbreviations whose dot does not end a sentence, matched case-insensitively
+/// on the word just before the dot. Kept short on purpose: words such as `no`,
+/// `etc`, `inc` and `co` end sentences as often as they abbreviate, and `U.S.`,
+/// `a.m.` and `p.m.` often end one too.
+const ABBREVIATIONS: [&str; 28] = [
+    "mr", "mrs", "ms", "mx", "dr", "prof", "sr", "jr", "st", "mt", "vs", "cf", "capt", "col",
+    "gen", "lt", "sgt", "rev", "hon", "mme", "mlle", "sra", "srta", "herr", "fr", "approx",
+    "dept", "fig",
+];
+const DOTTED_ABBREVIATIONS: [&str; 6] = ["e.g", "i.e", "ph.d", "z.b", "d.h", "u.a"];
+
+/// Adds a non-empty chunk. Returns false once the list is past `MAX_CHUNKS`, so
+/// a splitter stops allocating chunks for a result that will be refused.
+fn push_chunk(chunks: &mut Vec<String>, chunk: String) -> bool {
+    if chunk.is_empty() {
+        return true;
+    }
+    chunks.push(chunk);
+    chunks.len() <= MAX_CHUNKS
+}
+
+fn is_cjk_letter(ch: char) -> bool {
+    matches!(ch as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+}
+
 #[async_trait]
 impl Node for TextSplitterNode {
     fn type_id(&self) -> &'static str { "text_splitter" }
     fn display_name(&self) -> &'static str { "Text Splitter" }
     fn node_type(&self) -> NodeType { NodeType::Ai }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Split a long text into smaller chunks by character count, token count, or paragraph boundaries." }
+    fn description(&self) -> &'static str { "Split a long text into smaller chunks by characters, words, sentences, or paragraphs." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -45,15 +90,15 @@ impl Node for TextSplitterNode {
                 },
                 "chunk_size": {
                     "type": "number",
-                    "description": "Maximum size of each chunk (in the unit specified by mode). Default: 1000 chars / 200 words / 5 sentences"
+                    "description": "Maximum size of each chunk (in the unit specified by mode), 1 or more. Default: 1000 chars / 200 words / 5 sentences / 3 paragraphs"
                 },
                 "overlap": {
                     "type": "number",
-                    "description": "How much each chunk overlaps with the previous one (same unit as chunk_size). Overlap helps AI maintain context. Default: 100"
+                    "description": "How much each chunk overlaps with the previous one (same unit as chunk_size). Overlap helps AI maintain context. Default: 100 chars / 20 words / 1 sentence / 0 paragraphs"
                 },
                 "source_field": {
                     "type": "string",
-                    "description": "Optional: dot-path to extract text from the input data, e.g. 'body' or 'content'"
+                    "description": "Optional: dot-path to a string field in the connected node's output, e.g. 'body' or 'content'. Fails if the field is not found. Overrides text."
                 }
             }
         })
@@ -81,28 +126,41 @@ impl Node for TextSplitterNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
-        // Resolve text — either from direct config or from a field in previous node output.
-        // Search upstream outputs in real completion order (via
-        // ordered_node_outputs), not the raw HashMap's unspecified order —
-        // otherwise which upstream node "wins" when two share a field name
-        // at source_field's path is non-deterministic across runs.
-        let text: String = input.input["source_field"]
-            .as_str()
-            .filter(|f| !f.is_empty())
-            .and_then(|field| {
-                ordered_node_outputs(&input.context).into_iter().find_map(|(_, v)| {
-                    let val = traverse_dotpath(&v, field);
-                    val.as_str().map(|s| s.to_string())
-                })
-            })
-            .unwrap_or_else(|| input.input["text"].as_str().unwrap_or("").to_string());
+        let source_field = input.input["source_field"].as_str().filter(|f| !f.is_empty());
+        let text: String = match source_field {
+            Some(field) => {
+                let found = match input.context.metadata.get("__direct_input") {
+                    Some(direct) => traverse_dotpath(direct, field),
+                    None => Value::Null,
+                };
+                match found {
+                    Value::String(s) => s,
+                    _ => return NodeOutput::failure(NodeError::unrecoverable(
+                        "SOURCE_FIELD_NOT_FOUND",
+                        format!(
+                            "source_field '{}' is not a string in the connected node's output (missing, null, or another type). Fix the field name, or clear source_field to use text.",
+                            field
+                        ),
+                    )),
+                }
+            }
+            None => input.input["text"].as_str().unwrap_or("").to_string(),
+        };
 
         if text.trim().is_empty() {
             return NodeOutput::failure(NodeError::unrecoverable("MISSING_TEXT",
-                "text is required. Either configure it directly or set source_field to extract it from a previous node."));
+                "text is required. Either configure it directly or set source_field to read it from the connected node."));
         }
 
-        let mode = input.input["mode"].as_str().unwrap_or("chars");
+        let mode = match input.input["mode"].as_str() {
+            None if input.input["mode"].is_null() => "chars",
+            Some(m) if m.trim().is_empty() => "chars",
+            Some(m) if MODES.contains(&m) => m,
+            _ => return NodeOutput::failure(NodeError::unrecoverable(
+                "UNKNOWN_MODE",
+                format!("Unknown mode {}. Valid modes: {}", input.input["mode"], MODES.join(", ")),
+            )),
+        };
         let total_chars = text.chars().count();
 
         if total_chars > MAX_TEXT_CHARS {
@@ -115,15 +173,26 @@ impl Node for TextSplitterNode {
             ));
         }
 
-        let chunk_size = input.input["chunk_size"].as_u64().unwrap_or(match mode {
-            "sentences" => 5, "paragraphs" => 3, "words" => 200, _ => 1000
-        }) as usize;
-        let mut overlap = input.input["overlap"].as_u64().unwrap_or(match mode {
-            "sentences" => 1, "paragraphs" => 0, "words" => 20, _ => 100
-        }) as usize;
+        let chunk_size = match cfg_u64_opt(&input.input["chunk_size"], "chunk_size") {
+            Ok(Some(0)) => return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_CONFIG",
+                "chunk_size must be a whole number, 1 or more",
+            )),
+            Ok(Some(v)) => v as usize,
+            Ok(None) => match mode {
+                "sentences" => 5, "paragraphs" => 3, "words" => 200, _ => 1000
+            },
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let mut overlap = match cfg_u64_opt(&input.input["overlap"], "overlap") {
+            Ok(v) => v.unwrap_or(match mode {
+                "sentences" => 1, "paragraphs" => 0, "words" => 20, _ => 100
+            }) as usize,
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let mut logs: Vec<String> = Vec::new();
-        if chunk_size > 0 && overlap >= chunk_size {
+        if overlap >= chunk_size {
             // If overlap >= chunk_size, split_by_*'s own `step = 1` fallback
             // would silently produce a chunk count approaching total_chars
             // for a large document, with no indication anything was wrong —
@@ -153,6 +222,15 @@ impl Node for TextSplitterNode {
         };
 
         let total_chunks = chunks.len();
+        if total_chunks > MAX_CHUNKS {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "TOO_MANY_CHUNKS",
+                format!(
+                    "Splitting would produce more than {} chunks. Raise chunk_size.",
+                    MAX_CHUNKS
+                ),
+            ));
+        }
         logs.push(format!("Split {} chars into {} chunks ({} mode)", total_chars, total_chunks, mode));
 
         NodeOutput::success_with_logs(
@@ -170,7 +248,6 @@ impl Node for TextSplitterNode {
 }
 
 fn split_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    if chunk_size == 0 { return vec![text.to_string()]; }
     let chars: Vec<char> = text.chars().collect();
     let mut chunks = Vec::new();
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };
@@ -178,76 +255,154 @@ fn split_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
     while start < chars.len() {
         let end = (start + chunk_size).min(chars.len());
         let chunk: String = chars[start..end].iter().collect();
-        chunks.push(chunk.trim().to_string());
+        if !push_chunk(&mut chunks, chunk.trim().to_string()) { break; }
         if end >= chars.len() { break; }
         start += step;
     }
-    chunks.into_iter().filter(|c| !c.is_empty()).collect()
+    chunks
 }
 
 fn split_by_words(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    if chunk_size == 0 { return vec![text.to_string()]; }
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut chunks = Vec::new();
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };
     let mut start = 0;
     while start < words.len() {
         let end = (start + chunk_size).min(words.len());
-        chunks.push(words[start..end].join(" "));
+        if !push_chunk(&mut chunks, words[start..end].join(" ")) { break; }
         if end >= words.len() { break; }
         start += step;
     }
-    chunks.into_iter().filter(|c| !c.is_empty()).collect()
+    chunks
+}
+
+fn is_sentence_terminator(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?') || CJK_TERMINATORS.contains(&ch) || OTHER_TERMINATORS.contains(&ch)
+}
+
+/// True when the dot at `dot` closes a known abbreviation (`Mrs.`, `e.g.`) or
+/// an initial (`J. K. Rowling`), so it does not end a sentence.
+fn dot_follows_abbreviation(chars: &[char], dot: usize) -> bool {
+    let mut start = dot;
+    while start > 0 && (chars[start - 1].is_alphabetic() || chars[start - 1] == '.') {
+        start -= 1;
+    }
+    if start == dot {
+        return false;
+    }
+    if start > 0 && !(chars[start - 1].is_whitespace() || matches!(chars[start - 1], '(' | '[' | '"' | '\'' | '“' | '‘')) {
+        return false;
+    }
+    let token: String = chars[start..dot].iter().flat_map(|c| c.to_lowercase()).collect();
+    if ABBREVIATIONS.contains(&token.as_str()) || DOTTED_ABBREVIATIONS.contains(&token.as_str()) {
+        return true;
+    }
+    let is_initial = dot - start == 1 && chars[start].is_uppercase();
+    is_initial
+        && chars[dot + 1..]
+            .iter()
+            .find(|c| !c.is_whitespace())
+            .is_some_and(|c| c.is_uppercase())
+}
+
+fn is_closing_mark(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | ')' | ']' | '”' | '’' | '」' | '』' | '）')
+}
+
+fn push_trimmed(out: &mut Vec<String>, chars: &[char]) {
+    let s: String = chars.iter().collect();
+    let s = s.trim();
+    if !s.is_empty() { out.push(s.to_string()); }
+}
+
+fn find_sentences(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_sentence_terminator(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < chars.len() && (is_sentence_terminator(chars[end]) || is_closing_mark(chars[end])) {
+            end += 1;
+        }
+        let cjk = chars[i..end].iter().any(|c| CJK_TERMINATORS.contains(c));
+        let unambiguous = cjk || chars[i..end].iter().any(|c| OTHER_TERMINATORS.contains(c));
+        let at_boundary = unambiguous || end == chars.len() || chars[end].is_whitespace() || is_cjk_letter(chars[end]);
+        let abbreviation = end == i + 1 && chars[i] == '.' && dot_follows_abbreviation(&chars, i);
+        if at_boundary && !abbreviation && (unambiguous || end - start > 3) {
+            push_trimmed(&mut sentences, &chars[start..end]);
+            start = end;
+        }
+        i = end;
+    }
+    push_trimmed(&mut sentences, &chars[start..]);
+    sentences
+}
+
+fn ends_with_cjk_terminator(sentence: &str) -> bool {
+    sentence
+        .trim_end_matches(is_closing_mark)
+        .chars()
+        .last()
+        .is_some_and(|c| CJK_TERMINATORS.contains(&c))
+}
+
+fn join_sentences(sentences: &[String]) -> String {
+    let mut out = String::new();
+    for (i, s) in sentences.iter().enumerate() {
+        if i > 0 && !ends_with_cjk_terminator(&sentences[i - 1]) { out.push(' '); }
+        out.push_str(s);
+    }
+    out
 }
 
 fn split_by_sentences(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    // Simple sentence splitter on . ! ?
-    let mut sentences: Vec<String> = Vec::new();
-    let mut sentence = String::new();
-    for ch in text.chars() {
-        sentence.push(ch);
-        if matches!(ch, '.' | '!' | '?') && sentence.len() > 3 {
-            let trimmed = sentence.trim().to_string();
-            if !trimmed.is_empty() { sentences.push(trimmed); }
-            sentence = String::new();
-        }
-    }
-    if !sentence.trim().is_empty() { sentences.push(sentence.trim().to_string()); }
-
-    if chunk_size == 0 { return sentences; }
+    let sentences = find_sentences(text);
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < sentences.len() {
         let end = (start + chunk_size).min(sentences.len());
-        chunks.push(sentences[start..end].join(" "));
+        if !push_chunk(&mut chunks, join_sentences(&sentences[start..end])) { break; }
         if end >= sentences.len() { break; }
         start += step;
     }
-    chunks.into_iter().filter(|c| !c.is_empty()).collect()
+    chunks
+}
+
+fn find_paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut lines: Vec<&str> = Vec::new();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if !lines.is_empty() {
+                paragraphs.push(lines.join("\n").trim().to_string());
+                lines.clear();
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+    paragraphs
 }
 
 fn split_by_paragraphs(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    let paragraphs: Vec<String> = text
-        .split("\n\n")
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-
-    if chunk_size == 0 || chunk_size >= paragraphs.len() {
-        return paragraphs;
-    }
-
+    let paragraphs = find_paragraphs(text);
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < paragraphs.len() {
         let end = (start + chunk_size).min(paragraphs.len());
-        chunks.push(paragraphs[start..end].join("\n\n"));
+        if !push_chunk(&mut chunks, paragraphs[start..end].join("\n\n")) { break; }
         if end >= paragraphs.len() { break; }
         start += step;
     }
-    chunks.into_iter().filter(|c| !c.is_empty()).collect()
+    chunks
 }
 
 // ---------------------------------------------------------------------------
@@ -275,9 +430,14 @@ mod tests {
 
     fn make_input_with_context(
         input: Value,
+        direct: Option<Value>,
         node_outputs: HashMap<String, Value>,
-        order: Vec<&str>,
     ) -> NodeInput {
+        let mut metadata = HashMap::new();
+        if let Some(d) = direct {
+            metadata.insert("__direct_input".to_string(), d);
+        }
+        let order = node_outputs.keys().cloned().collect();
         NodeInput {
             resolved_credentials: std::collections::HashMap::new(),
             cancel_token: None,
@@ -288,8 +448,8 @@ mod tests {
             context: ExecutionContext {
                 variables: HashMap::new(),
                 node_outputs: Arc::new(node_outputs),
-                metadata: HashMap::new(),
-                execution_order: Arc::new(order.into_iter().map(String::from).collect()),
+                metadata,
+                execution_order: Arc::new(order),
             },
         }
     }
@@ -319,37 +479,42 @@ mod tests {
     // ── source_field resolution ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn source_field_extracts_from_upstream_output() {
+    async fn source_field_reads_the_connected_input_not_another_nodes_output() {
         let mut outputs = HashMap::new();
-        outputs.insert("http".to_string(), json!({ "body": "hello from upstream" }));
+        outputs.insert("a_decoy".to_string(), json!({ "body": "wrong" }));
         let input = make_input_with_context(
             json!({ "mode": "chars", "chunk_size": 100, "overlap": 0, "source_field": "body" }),
+            Some(json!({ "body": "right" })),
             outputs,
-            vec!["http"],
-        );
-        let out = TextSplitterNode.execute(input).await;
-        assert!(out.success);
-        let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
-        assert_eq!(chunks[0].as_str().unwrap(), "hello from upstream");
-    }
-
-    #[tokio::test]
-    async fn source_field_deterministically_picks_first_completed_match() {
-        // two upstream nodes both carry a "body" field —
-        // resolution must be deterministic (first in execution_order),
-        // not whichever the raw HashMap happened to enumerate first.
-        let mut outputs = HashMap::new();
-        outputs.insert("z_second".to_string(), json!({ "body": "wrong" }));
-        outputs.insert("a_first".to_string(), json!({ "body": "right" }));
-        let input = make_input_with_context(
-            json!({ "mode": "chars", "chunk_size": 100, "overlap": 0, "source_field": "body" }),
-            outputs,
-            vec!["a_first", "z_second"],
         );
         let out = TextSplitterNode.execute(input).await;
         assert!(out.success);
         let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
         assert_eq!(chunks[0].as_str().unwrap(), "right");
+    }
+
+    #[tokio::test]
+    async fn source_field_that_is_not_found_fails_instead_of_using_text() {
+        let mut outputs = HashMap::new();
+        outputs.insert("other".to_string(), json!({ "body": "elsewhere" }));
+        let cases = [
+            Some(json!({ "body": "x" })),
+            Some(json!({ "body": 42 })),
+            None,
+        ];
+        for direct in cases {
+            let input = make_input_with_context(
+                json!({ "text": "fallback", "source_field": "body_text" }),
+                direct,
+                outputs.clone(),
+            );
+            let out = TextSplitterNode.execute(input).await;
+            assert!(!out.success);
+            let e = out.error.unwrap();
+            assert_eq!(e.code, "SOURCE_FIELD_NOT_FOUND");
+            assert!(!e.recoverable);
+            assert!(e.message.contains("body_text"), "{}", e.message);
+        }
     }
 
     // ── chars mode ─────────────────────────────────────────────────────────
@@ -547,17 +712,162 @@ mod tests {
         );
     }
 
-    // ── split_by_chars unit tests ───────────────────────────────────────────
+    // ── paragraphs mode ─────────────────────────────────────────────────────
 
-    #[test]
-    fn split_by_chars_zero_chunk_size_returns_whole() {
-        let chunks = split_by_chars("hello world", 0, 0);
-        assert_eq!(chunks, vec!["hello world"]);
+    #[tokio::test]
+    async fn paragraphs_mode_with_chunk_size_at_or_above_paragraph_count_gives_one_chunk() {
+        for cfg in [
+            json!({ "text": "One.\n\nTwo.", "mode": "paragraphs" }),
+            json!({ "text": "One.\n\nTwo.", "mode": "paragraphs", "chunk_size": 2, "overlap": 0 }),
+        ] {
+            let out = TextSplitterNode.execute(make_input(cfg)).await;
+            assert!(out.success);
+            let chunks = out.output.unwrap()["chunks"].as_array().unwrap().clone();
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].as_str().unwrap(), "One.\n\nTwo.");
+        }
+    }
+
+    #[tokio::test]
+    async fn paragraphs_mode_splits_on_crlf_and_on_blank_lines_holding_spaces_or_tabs() {
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": "A1\r\nA2\r\n\r\nB\n \t \nC",
+            "mode": "paragraphs",
+            "chunk_size": 1,
+            "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let chunks: Vec<String> = out.output.unwrap()["chunks"].as_array().unwrap()
+            .iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(chunks, vec!["A1\nA2", "B", "C"]);
+    }
+
+    // ── sentences mode ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sentences_mode_splits_cjk_terminators_without_adding_spaces() {
+        let text = "你好。世界！再见？";
+        let run = |chunk_size: u64| {
+            TextSplitterNode.execute(make_input(json!({
+                "text": text, "mode": "sentences", "chunk_size": chunk_size, "overlap": 0
+            })))
+        };
+        let one: Vec<String> = run(1).await.output.unwrap()["chunks"].as_array().unwrap()
+            .iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(one, vec!["你好。", "世界！", "再见？"]);
+        let two: Vec<String> = run(2).await.output.unwrap()["chunks"].as_array().unwrap()
+            .iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(two, vec!["你好。世界！", "再见？"]);
+    }
+
+    #[tokio::test]
+    async fn sentences_mode_does_not_split_inside_decimals_or_urls_and_keeps_closing_quotes() {
+        let text = "Pi is 3.14 today. See https://a.com/x?y=1 now. He said \"stop.\" Then left.";
+        let out = TextSplitterNode.execute(make_input(json!({
+            "text": text, "mode": "sentences", "chunk_size": 1, "overlap": 0
+        }))).await;
+        assert!(out.success);
+        let chunks: Vec<String> = out.output.unwrap()["chunks"].as_array().unwrap()
+            .iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(chunks, vec![
+            "Pi is 3.14 today.",
+            "See https://a.com/x?y=1 now.",
+            "He said \"stop.\"",
+            "Then left.",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn sentences_mode_short_sentence_guard_counts_characters_not_bytes() {
+        let count = |text: &'static str| async move {
+            let out = TextSplitterNode.execute(make_input(json!({
+                "text": text, "mode": "sentences", "chunk_size": 1, "overlap": 0
+            }))).await;
+            out.output.unwrap()["total_chunks"].as_u64().unwrap()
+        };
+        assert_eq!(count("El. Ca va.").await, count("Él. Ça va.").await);
+    }
+
+    // ── mode and limits ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_or_non_string_mode_fails_naming_the_valid_modes_and_blank_means_chars() {
+        for bad in [json!("token"), json!("Words"), json!(5)] {
+            let out = TextSplitterNode.execute(make_input(json!({ "text": "abc", "mode": bad }))).await;
+            assert!(!out.success);
+            let e = out.error.unwrap();
+            assert_eq!(e.code, "UNKNOWN_MODE");
+            assert!(!e.recoverable);
+            for valid in ["chars", "words", "sentences", "paragraphs"] {
+                assert!(e.message.contains(valid), "{}", e.message);
+            }
+        }
+        let out = TextSplitterNode.execute(make_input(json!({ "text": "abc", "mode": " " }))).await;
+        assert_eq!(out.output.unwrap()["mode"].as_str().unwrap(), "chars");
+    }
+
+    #[tokio::test]
+    async fn chunk_size_zero_fails_instead_of_meaning_no_split() {
+        for zero in [json!(0), json!("0")] {
+            let out = TextSplitterNode.execute(make_input(json!({ "text": "abc def", "chunk_size": zero }))).await;
+            assert!(!out.success);
+            let e = out.error.unwrap();
+            assert_eq!(e.code, "INVALID_CONFIG");
+            assert!(e.message.contains("chunk_size"), "{}", e.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn more_than_max_chunks_fails_cleanly_and_exactly_max_succeeds() {
+        let run = |n: usize| TextSplitterNode.execute(make_input(json!({
+            "text": "a".repeat(n), "mode": "chars", "chunk_size": 1, "overlap": 0
+        })));
+        assert!(run(MAX_CHUNKS).await.success);
+        let out = run(MAX_CHUNKS + 1).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "TOO_MANY_CHUNKS");
     }
 
     #[test]
-    fn split_by_words_zero_chunk_size_returns_whole() {
-        let chunks = split_by_words("a b c", 0, 0);
-        assert_eq!(chunks, vec!["a b c"]);
+    fn a_bare_carriage_return_is_a_line_break_in_paragraph_mode() {
+        assert_eq!(find_paragraphs("A1\rA2\r\rB"), ["A1\nA2", "B"]);
+        assert_eq!(find_paragraphs("A1\r\nA2\r\n\r\nB"), ["A1\nA2", "B"]);
+    }
+
+    #[test]
+    fn a_latin_terminator_directly_before_cjk_ends_the_sentence_but_a_decimal_does_not() {
+        assert_eq!(find_sentences("Hello world.你好世界"), ["Hello world.", "你好世界"]);
+        assert_eq!(find_sentences("Pi is 3.14 today."), ["Pi is 3.14 today."]);
+    }
+
+    #[test]
+    fn abbreviations_and_initials_do_not_end_a_sentence_but_ordinary_words_do() {
+        assert_eq!(find_sentences("Mrs. Smith left. Then Dr. Who? Yes."), ["Mrs. Smith left.", "Then Dr. Who?", "Yes."]);
+        assert_eq!(find_sentences("See e.g. this one. Done."), ["See e.g. this one.", "Done."]);
+        assert_eq!(find_sentences("J. K. Rowling wrote it. Fine."), ["J. K. Rowling wrote it.", "Fine."]);
+        assert_eq!(find_sentences("He said no. Then he left."), ["He said no.", "Then he left."]);
+        assert_eq!(find_sentences("We met (Prof. Lee) today. Ok."), ["We met (Prof. Lee) today.", "Ok."]);
+        assert_eq!(find_sentences("It was etc. Then more."), ["It was etc.", "Then more."]);
+    }
+
+    #[test]
+    fn other_script_terminators_end_a_sentence_and_are_joined_with_a_space() {
+        assert_eq!(find_sentences("كيف حالك؟ أنا بخير۔ شكرا"), ["كيف حالك؟", "أنا بخير۔", "شكرا"]);
+        assert_eq!(find_sentences("यह पहला है। यह दूसरा है॥ तीसरा"), ["यह पहला है।", "यह दूसरा है॥", "तीसरा"]);
+        assert_eq!(find_sentences("Really⁇ Yes‼ Fine"), ["Really⁇", "Yes‼", "Fine"]);
+        assert_eq!(join_sentences(&["यह पहला है।".to_string(), "दूसरा".to_string()]), "यह पहला है। दूसरा");
+    }
+
+    #[test]
+    fn whitespace_only_chunks_do_not_count_toward_the_chunk_cap() {
+        let mut chunks = Vec::new();
+        for _ in 0..(MAX_CHUNKS + 5) {
+            assert!(push_chunk(&mut chunks, String::new()));
+        }
+        assert!(chunks.is_empty());
+        for _ in 0..MAX_CHUNKS {
+            assert!(push_chunk(&mut chunks, "a".to_string()));
+        }
+        assert!(!push_chunk(&mut chunks, "a".to_string()));
     }
 }

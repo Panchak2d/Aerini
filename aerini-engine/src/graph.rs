@@ -3,13 +3,15 @@
 //! [`ExecutionGraph::build`] consumes a [`crate::model::Workflow`] and produces:
 //!
 //! - A `DiGraph<String, EdgeMeta>` (node IDs as weights).
-//! - A topological execution order (`topo_order`).
-//! - The set of entry nodes (nodes with no incoming edges).
+//! - A topological execution order (`topo_order`) in which an `on_failure` target comes
+//!   after the node that routes to it.
+//! - The set of entry nodes (no incoming edge and not an `on_failure` target).
 //!
 //! Errors returned by `build()`:
 //! - [`crate::error::EngineError::CycleDetected`] — workflow has a cycle.
 //! - [`crate::error::EngineError::UnknownNodeReference`] — an edge references a node ID
 //!   that does not exist in `workflow.nodes`.
+//! - [`crate::error::EngineError::UnreachableNode`] — a node no entry node can reach, by a wire or an `on_failure` route.
 //! - [`crate::error::EngineError::NoEntryNodes`] — every node has at least one incoming
 //!   edge; the executor would have no starting point.
 //!
@@ -95,10 +97,36 @@ impl ExecutionGraph {
             return Err(EngineError::CycleDetected(cycle_node));
         }
 
+        // `on_failure` targets are activated by the failing node without a wire between
+        // them, so ordering, entry detection and reachability all use the wires plus
+        // one failing-node -> target link per `on_failure` pointer.
+        let mut routed: DiGraph<(), ()> = DiGraph::with_capacity(graph.node_count(), graph.edge_count());
+        for _ in 0..graph.node_count() {
+            routed.add_node(());
+        }
+        for edge in &workflow.edges {
+            routed.update_edge(index_map[&edge.from_node], index_map[&edge.to_node], ());
+            if let Some(ref target) = edge.on_failure {
+                routed.update_edge(index_map[&edge.from_node], index_map[target], ());
+            }
+        }
+
+        let topo_indices = match toposort(&routed, None) {
+            Ok(v) => v,
+            Err(cycle) => return Err(EngineError::CycleDetected(format!(
+                "{} (an on_failure route points back to a node that runs before it)",
+                graph[cycle.node_id()]
+            ))),
+        };
+
+        let topo_order: Vec<String> = topo_indices.iter()
+            .map(|idx| graph[*idx].clone())
+            .collect();
+
         let entry_nodes: Vec<String> = workflow.nodes.iter()
             .filter(|n| {
                 let idx = index_map[&n.id];
-                graph.neighbors_directed(idx, petgraph::Direction::Incoming).count() == 0
+                routed.neighbors_directed(idx, petgraph::Direction::Incoming).count() == 0
             })
             .map(|n| n.id.clone())
             .collect();
@@ -107,23 +135,12 @@ impl ExecutionGraph {
             return Err(EngineError::NoEntryNodes);
         }
 
-        let reachable = Self::reachable_nodes(&graph, &index_map, &entry_nodes);
+        let reachable = Self::reachable_nodes(&routed, &index_map, &entry_nodes);
         for node in &workflow.nodes {
-            if !reachable.contains(&node.id) {
+            if !reachable.contains(&index_map[&node.id]) {
                 return Err(EngineError::UnreachableNode(node.id.clone()));
             }
         }
-
-        let topo_indices = match toposort(&graph, None) {
-            Ok(v) => v,
-            Err(_) => return Err(EngineError::CycleDetected(
-                "unexpected cycle detected during toposort — this is a bug, please report it".to_string()
-            )),
-        };
-
-        let topo_order = topo_indices.iter()
-            .map(|idx| graph[*idx].clone())
-            .collect();
 
         Ok(ExecutionGraph { graph, index_map, entry_nodes, topo_order })
     }
@@ -171,16 +188,15 @@ impl ExecutionGraph {
     }
 
     fn reachable_nodes(
-        graph: &DiGraph<String, EdgeMeta>,
+        graph: &DiGraph<(), ()>,
         index_map: &HashMap<String, NodeIndex>,
         entry_nodes: &[String],
-    ) -> HashSet<String> {
+    ) -> HashSet<NodeIndex> {
         let mut reachable = HashSet::new();
         for entry in entry_nodes {
-            let start = index_map[entry];
-            let mut bfs = Bfs::new(graph, start);
+            let mut bfs = Bfs::new(graph, index_map[entry]);
             while let Some(nx) = bfs.next(graph) {
-                reachable.insert(graph[nx].clone());
+                reachable.insert(nx);
             }
         }
         reachable
@@ -299,6 +315,40 @@ mod tests {
             max_concurrent_nodes: None,
             settings: Default::default(),
         }
+    }
+
+    #[test]
+    fn on_failure_target_runs_after_its_source_in_topological_order() {
+        let wf = test_workflow(
+            vec![test_node("r"), test_node("a"), test_node("b")],
+            vec![test_edge("e1", "a", "b", Some("r"))],
+        );
+        let g = ExecutionGraph::build(&wf).expect("graph should build");
+        let pos = |id: &str| g.topo_order.iter().position(|n| n == id).unwrap();
+        assert!(pos("a") < pos("r"));
+    }
+
+    #[test]
+    fn node_reached_only_by_on_failure_is_not_an_entry_node() {
+        let wf = test_workflow(
+            vec![test_node("recovery"), test_node("a"), test_node("b")],
+            vec![test_edge("e1", "a", "b", Some("recovery"))],
+        );
+        let g = ExecutionGraph::build(&wf).expect("graph should build");
+        assert_eq!(g.entry_nodes, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn on_failure_pointing_back_at_an_ancestor_is_a_cycle() {
+        let wf = test_workflow(
+            vec![test_node("s"), test_node("a"), test_node("b"), test_node("c")],
+            vec![
+                test_edge("e0", "s", "a", None),
+                test_edge("e1", "a", "b", None),
+                test_edge("e2", "b", "c", Some("a")),
+            ],
+        );
+        assert!(matches!(ExecutionGraph::build(&wf), Err(EngineError::CycleDetected(_))));
     }
 
     #[test]

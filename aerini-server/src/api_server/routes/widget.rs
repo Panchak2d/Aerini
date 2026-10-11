@@ -47,11 +47,7 @@ use std::time::Duration;
 
 use super::state::{internal_error, ApiState};
 
-/// `aerini-server/src/static/aerini-widget.js`, embedded at compile time —
-/// matches the `include_str!` convention `status_server.rs` uses for
-/// `STATUS_PAGE_CSS`/`STATUS_PAGE_SCRIPT` (those are inlined into an HTML
-/// page; this is a standalone JS response, so the serving code below is new
-/// rather than a verbatim copy of that pattern).
+/// `aerini-server/src/static/aerini-widget.js`, embedded at compile time.
 const AERINI_WIDGET_JS: &str = include_str!("../../static/aerini-widget.js");
 
 /// GET /aerini-widget.js — unauthenticated static asset. Browsers loading
@@ -84,6 +80,15 @@ fn relay_client() -> &'static reqwest::Client {
             .build()
             .expect("Failed to build widget relay HTTP client")
     })
+}
+
+/// `None` when `secret` holds characters an HTTP header value cannot carry
+/// (anything but visible ASCII and space, e.g. a line break).
+fn secret_header_value(secret: &str) -> Option<reqwest::header::HeaderValue> {
+    if !secret.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return None;
+    }
+    reqwest::header::HeaderValue::from_str(secret).ok()
 }
 
 #[derive(Deserialize)]
@@ -211,14 +216,22 @@ fn dangerous_node_block(nodes: &[aerini_engine::model::WorkflowNode]) -> Option<
 /// `127.0.0.1:<effective_port><path>` with the caller-supplied secret. The
 /// actual workflow result is NOT returned here — `webhook.rs` only ever
 /// acks "OK"; the result arrives later as a `scheduler-status` SSE event on
-/// `/api/events` (see `aerini-widget.js`, and the doc comment at the top of
-/// `ChatPanel.ts` for the same discrepancy already documented against the
-/// original plan).
+/// `/api/events` (see `aerini-widget.js`).
 pub async fn trigger_widget(
     State(s): State<ApiState>,
     Path(workflow_id): Path<String>,
     Json(b): Json<WidgetTriggerBody>,
 ) -> impl IntoResponse {
+    let Some(secret_header) = secret_header_value(&b.secret) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "the secret contains characters that cannot be sent in an HTTP header"
+            })),
+        )
+            .into_response();
+    };
+
     let (port, path, _secret) = match load_webhook_trigger(&s, &workflow_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
@@ -262,11 +275,7 @@ pub async fn trigger_widget(
     let target = format!("http://127.0.0.1:{}{}", port, path);
     let relay_result = relay_client()
         .post(&target)
-        // `.as_str()` rather than `&b.secret`: avoids depending on whether
-        // `&String` itself satisfies reqwest's `V: TryInto<HeaderValue>`
-        // bound (unconfirmed — `&str` definitely does, so this is the
-        // zero-ambiguity choice).
-        .header("x-webhook-secret", b.secret.as_str())
+        .header("x-webhook-secret", secret_header)
         .json(&b.body)
         .send()
         .await;
@@ -443,5 +452,22 @@ mod dangerous_node_gate_tests {
         let nodes = vec![node("n1", "webhook"), node("n2", "shell_exec")];
         let resp = dangerous_node_block(&nodes).expect("must block");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod secret_header_tests {
+    use super::secret_header_value;
+
+    #[test]
+    fn secret_header_value_accepts_visible_ascii() {
+        let v = secret_header_value("s3cr3t-Value_42").expect("plain secret is a valid header value");
+        assert_eq!(v.as_bytes(), b"s3cr3t-Value_42");
+    }
+
+    #[test]
+    fn secret_header_value_rejects_characters_a_header_cannot_carry() {
+        assert!(secret_header_value("line\nbreak").is_none());
+        assert!(secret_header_value("caf\u{e9}").is_none());
     }
 }

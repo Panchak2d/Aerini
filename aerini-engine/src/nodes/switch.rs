@@ -15,7 +15,7 @@ impl Node for SwitchNode {
     fn display_name(&self) -> &'static str { "Switch" }
     fn node_type(&self) -> NodeType { NodeType::Logic }
     fn version(&self) -> &'static str { "1.0.0" }
-    fn description(&self) -> &'static str { "Route the workflow to one of several branches based on a value match, like a switch statement." }
+    fn description(&self) -> &'static str { "Route the workflow to one of several branches based on a value match, like a switch statement. Matching is exact and case-sensitive; a field path can index arrays (items.0.status)." }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -24,7 +24,7 @@ impl Node for SwitchNode {
             "properties": {
                 "field": {
                     "type": "string",
-                    "description": "Field path to switch on, e.g. status or response.code"
+                    "description": "Field path to switch on, e.g. status or response.code or items.0.status"
                 },
                 "source_node": {
                     "type": "string",
@@ -32,7 +32,7 @@ impl Node for SwitchNode {
                 },
                 "cases": {
                     "type": "string",
-                    "description": "JSON array of cases: [{\"match\": \"ok\", \"port\": \"case_1\"}, ...]"
+                    "description": "JSON array of cases: [{\"match\": \"ok\", \"port\": \"case_1\"}, ...]. Matches are exact and case-sensitive."
                 },
                 "default_port": {
                     "type": "string",
@@ -766,5 +766,23 @@ mod tests {
         assert!(!out.success);
         assert_eq!(out.error.unwrap().code, "SOURCE_NOT_FOUND");
     }
-}
 
+    #[tokio::test]
+    async fn field_path_indexes_arrays() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({ "items": [{ "status": "ok" }, { "status": "error" }] }));
+        let cases = r#"[{"match":"ok","port":"case_1"},{"match":"error","port":"case_2"}]"#;
+        let out = SwitchNode.execute(make_input("items.1.status", cases, "src", outputs)).await;
+        assert!(out.success);
+        assert_eq!(out.output.as_ref().unwrap()["port"], "case_2");
+    }
+
+    #[tokio::test]
+    async fn matching_is_case_sensitive() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({ "status": "OK" }));
+        let cases = r#"[{"match":"ok","port":"case_1"}]"#;
+        let out = SwitchNode.execute(make_input("status", cases, "src", outputs)).await;
+        assert_eq!(out.output.as_ref().unwrap()["port"], "default");
+    }
+}

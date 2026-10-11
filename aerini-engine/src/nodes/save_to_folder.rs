@@ -13,23 +13,29 @@
 //
 // Dynamic ports: YES — implements is_dynamic_ports() + ports_from_config().
 //
-// Path traversal protection: all '/', '\', '..' stripped from every filename
-// before any path is constructed. folder_path is user-selected and not sanitized.
+// Names: path separators, NUL and trailing dots/spaces are stripped from every
+// filename and subfolder name before any path is built, and names that collide
+// within one run get a numeric suffix instead of overwriting each other.
+// folder_path itself is user-selected and not sanitized; under a server file
+// sandbox it, and every subfolder, must resolve inside the sandbox root.
 //
 // Writes: sequential, one file at a time, on the node's own async task — no
 // per-file spawn. Each file lands via a same-directory temp file + rename, so
 // an interrupted run leaves at most one stray temp file, never a truncated
 // file at its real target path.
 //
-// Output: { saved, count, folder, skipped, errors }
+// Output: { saved, count, folder, skipped, errors }. A run that writes nothing
+// and skips nothing fails with SAVE_FAILED.
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
+use super::fs_sandbox;
+use super::util::{cfg_bool_opt, decode_file_data, FilenameSet};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
@@ -101,82 +107,24 @@ impl Node for SaveToFolderNode {
             )),
         };
 
-        // Server mode: enforce __file_sandbox_dir if set, matching the same policy as FileNode.
-        // The resolved path produced below is what every subsequent operation (create_dir_all,
-        // file writes, the echoed "folder" output field) uses — raw_folder_path is never
-        // touched again after this block, mirroring file.rs's resolve-once pattern.
-        let folder_path: String = if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
-            if let Some(sandbox_str) = sandbox_val.as_str() {
-                // Canonicalize the sandbox root so symlinks in the operator-supplied path
-                // don't defeat the containment check.
-                let sandbox = match std::fs::canonicalize(sandbox_str) {
-                    Ok(p) => p,
-                    Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "INVALID_PATH",
-                        "Configured sandbox directory does not exist or cannot be resolved",
-                    )),
-                };
-                // Resolve relative paths against the canonical sandbox root.
-                let abs: std::path::PathBuf = if raw_folder_path.starts_with('/') {
-                    std::path::PathBuf::from(&raw_folder_path)
-                } else {
-                    sandbox.join(&raw_folder_path)
-                };
-                let outside = || NodeOutput::failure(NodeError::unrecoverable(
-                    "PATH_OUTSIDE_SANDBOX",
-                    format!("folder_path '{}' is outside the permitted sandbox directory '{}'",
-                        raw_folder_path, sandbox_str),
-                ));
-                // The target directory may not exist yet (create_dir_all runs later).
-                // Canonicalize the deepest existing ancestor and check containment.
-                // This also dereferences any symlinks inside the sandbox that point outside.
-                let mut check = abs.as_path();
-                let canonical_parent = loop {
-                    match std::fs::canonicalize(check) {
-                        Ok(p) => break p,
-                        Err(_) => match check.parent() {
-                            Some(p) => check = p,
-                            None => return NodeOutput::failure(NodeError::unrecoverable(
-                                "INVALID_PATH",
-                                "folder_path cannot be resolved to an existing ancestor",
-                            )),
-                        },
-                    }
-                };
-                if !canonical_parent.starts_with(&sandbox) {
-                    return outside();
-                }
-                // Rejoin whatever suffix of `abs` doesn't exist yet onto the canonicalized
-                // (symlink-dereferenced) existing ancestor, so the value threaded through to
-                // flat_mode/subfolder_mode is exactly the path just validated above, not the
-                // raw, unresolved folder_path string.
-                let suffix = match abs.strip_prefix(check) {
-                    Ok(s) => s,
-                    Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                        "INVALID_PATH",
-                        "folder_path could not be resolved relative to its existing ancestor",
-                    )),
-                };
-                // A ".." can only survive into suffix when the component it would walk back
-                // through never existed on disk (canonicalize couldn't resolve it away above),
-                // so its real target is unverified — reject rather than let create_dir_all/
-                // fs::write resolve it past the already-validated ancestor at write time.
-                if suffix.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                    return outside();
-                }
-                canonical_parent.join(suffix).to_string_lossy().into_owned()
-            } else {
-                raw_folder_path
-            }
-        } else {
-            raw_folder_path
+        let sandbox = match fs_sandbox::root_from_metadata(&input.context.metadata) {
+            Ok(root) => root,
+            Err(e) => return e.into_output("folder_path", None),
+        };
+        let folder_path: String = match &sandbox {
+            None => raw_folder_path,
+            Some(root) => match fs_sandbox::resolve(root, Path::new(&raw_folder_path)) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => return e.into_output(&format!("folder_path '{raw_folder_path}'"), Some(root.as_path())),
+            },
         };
 
-        let overwrite = cfg["overwrite"].as_bool().unwrap_or(true);
-        // Sanitize prefix: strip path separators to prevent directory traversal.
-        let raw_prefix = cfg["filename_prefix"].as_str().unwrap_or("").to_string();
-        let no_sep: String = raw_prefix.chars().filter(|&c| c != '/' && c != '\\').collect();
-        let prefix: String = truncate_to_byte_len(&no_sep, MAX_PREFIX_LEN).to_string();
+        let overwrite = match cfg_bool_opt(&cfg["overwrite"], "overwrite") {
+            Ok(v) => v.unwrap_or(true),
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let raw_prefix = cfg["filename_prefix"].as_str().unwrap_or("");
+        let prefix: String = truncate_to_byte_len(&strip_separators(raw_prefix), MAX_PREFIX_LEN).to_string();
 
         let subfolders = cfg["subfolders"].as_array().cloned().unwrap_or_default();
 
@@ -184,7 +132,7 @@ impl Node for SaveToFolderNode {
             let direct_input = input.context.metadata.get("__direct_input");
             flat_mode(cfg, direct_input, &folder_path, &prefix, overwrite).await
         } else {
-            subfolder_mode(&subfolders, &folder_path, &prefix, overwrite).await
+            subfolder_mode(&subfolders, &folder_path, sandbox.as_deref(), &prefix, overwrite).await
         }
     }
 }
@@ -207,7 +155,7 @@ async fn flat_mode(
     // by the executor as __direct_input (same fallback code_node.rs uses).
     if files.is_empty() {
         if let Some(direct) = direct_input {
-            files = extract_files_array(direct);
+            files = extract_files_array(direct.clone());
         }
     }
 
@@ -226,31 +174,23 @@ async fn flat_mode(
         ));
     }
 
-    let results = write_files(&files, &base, prefix, overwrite).await;
-    build_output(results, folder_path)
+    let results = write_files(&files, &base, prefix, overwrite, &mut FilenameSet::default()).await;
+    finish(results, folder_path, Vec::new())
 }
 
 async fn subfolder_mode(
     subfolders: &[Value],
     folder_path: &str,
+    sandbox: Option<&Path>,
     prefix: &str,
     overwrite: bool,
 ) -> NodeOutput {
     let mut all_results: Vec<Result<Value, Value>> = Vec::new();
     let mut logs: Vec<String> = Vec::new();
+    let mut names_by_dir: HashMap<String, FilenameSet> = HashMap::new();
 
     for sf in subfolders {
-        let sf_name      = sf["name"].as_str().unwrap_or("unnamed");
-        // Sanitize subfolder name the same way individual filenames are sanitized
-        // (sanitize_filename strips / \ and .. sequences). Without this, a
-        // name like "../../escape" resolves outside the sandbox after PathBuf::join.
-        let sf_name = {
-            let no_sep: String = sf_name.chars()
-                .filter(|&c| c != '/' && c != '\\')
-                .collect();
-            let no_dotdot = no_sep.split("..").collect::<Vec<_>>().join("");
-            if no_dotdot.trim().is_empty() { "unnamed".to_string() } else { no_dotdot }
-        };
+        let sf_name = sanitize_component(sf["name"].as_str().unwrap_or(""), "unnamed");
         let source_expr  = sf["source_expr"].as_str().unwrap_or("").trim();
 
         if source_expr.is_empty() {
@@ -258,12 +198,24 @@ async fn subfolder_mode(
             continue;
         }
 
-        let parsed = parse_source_expr(source_expr);
-        let files  = extract_files_array(&parsed);
+        let files = extract_files_array(parse_source_expr(source_expr));
 
-        // Create directory before the files.is_empty() guard so that configured
-        // subfolders always exist on disk even when upstream produces no output.
-        let target_dir = PathBuf::from(folder_path).join(&sf_name);
+        // The directory is created before the empty check so configured
+        // subfolders exist on disk even when upstream produces no output.
+        let joined = PathBuf::from(folder_path).join(&sf_name);
+        let target_dir = match sandbox {
+            Some(root) => match fs_sandbox::resolve(root, &joined) {
+                Ok(p) => p,
+                Err(_) => {
+                    all_results.push(Err(json!({
+                        "filename": format!("<{}/...>", sf_name),
+                        "reason": "Subfolder resolves outside the permitted directory"
+                    })));
+                    continue;
+                }
+            },
+            None => joined,
+        };
         if let Err(e) = fs::create_dir_all(&target_dir).await {
             all_results.push(Err(json!({
                 "filename": format!("<{}/...>", sf_name),
@@ -278,38 +230,12 @@ async fn subfolder_mode(
         }
 
         logs.push(format!("Subfolder '{}': {} file(s)", sf_name, files.len()));
-        let results = write_files(&files, &target_dir, prefix, overwrite).await;
+        let names = names_by_dir.entry(target_dir.to_string_lossy().to_lowercase()).or_default();
+        let results = write_files(&files, &target_dir, prefix, overwrite, names).await;
         all_results.extend(results);
     }
 
-    let (ok, errors): (Vec<_>, Vec<_>) = all_results.into_iter().partition(|r| r.is_ok());
-    let ok: Vec<Value>     = ok.into_iter().filter_map(|r| r.ok()).collect();
-    let mut errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
-    let (skipped_files, saved): (Vec<Value>, Vec<Value>) =
-        ok.into_iter().partition(|v| v["skipped"].as_bool().unwrap_or(false));
-    let count         = saved.len();
-    let skipped_count = skipped_files.len();
-
-    // Surface zero-output explicitly — prevents a green checkmark when nothing was written.
-    if count == 0 && errors.is_empty() && skipped_count == 0 {
-        errors.push(json!({
-            "filename": "<no input>",
-            "reason": "No files were saved — upstream produced no file output"
-        }));
-    }
-
-    if count == 0 && !errors.is_empty() {
-        return NodeOutput::failure(NodeError::unrecoverable(
-            "SAVE_FAILED",
-            format!("Save to Folder: no files were written. First error: {}",
-                errors[0]["reason"].as_str().unwrap_or("unknown")),
-        ));
-    }
-
-    NodeOutput::success_with_logs(
-        json!({ "saved": saved, "count": count, "folder": folder_path, "skipped": skipped_count, "errors": errors }),
-        logs,
-    )
+    finish(all_results, folder_path, logs)
 }
 
 // ── Port derivation ────────────────────────────────────────────────────────────
@@ -356,10 +282,11 @@ async fn write_files(
     dir: &Path,
     prefix: &str,
     overwrite: bool,
+    names: &mut FilenameSet,
 ) -> Vec<Result<Value, Value>> {
     let mut results = Vec::with_capacity(files.len());
     for file in files {
-        results.push(write_single_file(file, dir, prefix, overwrite).await);
+        results.push(write_single_file(file, dir, prefix, overwrite, names).await);
     }
     results
 }
@@ -369,18 +296,20 @@ async fn write_single_file(
     dir: &Path,
     prefix: &str,
     overwrite: bool,
+    names: &mut FilenameSet,
 ) -> Result<Value, Value> {
     let raw_name  = file["filename"].as_str().unwrap_or("file.bin");
     let sanitized = sanitize_filename(raw_name);
-    let filename  = if prefix.is_empty() {
-        sanitized.clone()
+    let wanted    = if prefix.is_empty() {
+        sanitized
     } else {
         format!("{}{}", prefix, sanitized)
     };
+    let filename = names.claim(&wanted, None);
 
     let path = dir.join(&filename);
 
-    if !overwrite && path.exists() {
+    if !overwrite && fs::try_exists(&path).await.unwrap_or(false) {
         return Ok(json!({
             "filename": filename,
             "path":     path.display().to_string(),
@@ -394,19 +323,18 @@ async fn write_single_file(
         None => return Err(json!({ "filename": filename, "reason": "missing data field" })),
     };
 
-    let bytes = match decode_base64(data_str) {
+    let bytes = match decode_file_data(data_str) {
         Ok(b)  => b,
         Err(e) => return Err(json!({ "filename": filename, "reason": e })),
     };
 
     let byte_count = bytes.len();
-    // Write to a same-directory temp name first, then rename onto the real path.
-    // `fs::write` on `path` directly would truncate an existing file before the
-    // new bytes land, so a write error (disk full, permissions) partway through
-    // would leave a corrupt file at `path`. rename() is a single directory-entry
-    // swap, so the visible file is always either the old complete one or the new
-    // complete one, never a truncated in-between state.
-    let tmp_path = dir.join(format!(".{}.{}.tmp", filename, Uuid::new_v4().simple()));
+    // `fs::write` straight onto `path` truncates an existing file before the new
+    // bytes land, so a failure partway through (disk full, permissions) would
+    // leave it corrupt. rename() is one directory-entry swap: the visible file
+    // is always the old complete one or the new complete one. The staging name
+    // is fixed-length so it can never exceed the OS component limit.
+    let tmp_path = dir.join(format!(".{}.tmp", Uuid::new_v4().simple()));
 
     if let Err(e) = fs::write(&tmp_path, &bytes).await {
         let _ = fs::remove_file(&tmp_path).await;
@@ -424,31 +352,49 @@ async fn write_single_file(
     }))
 }
 
-fn build_output(results: Vec<Result<Value, Value>>, folder: &str) -> NodeOutput {
+fn finish(results: Vec<Result<Value, Value>>, folder: &str, logs: Vec<String>) -> NodeOutput {
     let (ok, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
-    let ok: Vec<Value>     = ok.into_iter().filter_map(|r| r.ok()).collect();
-    let errors: Vec<Value> = errors.into_iter().map(|r| r.unwrap_err()).collect();
-    // Separate skipped files (overwrite=false, file existed) from actually written files.
+    let ok: Vec<Value>         = ok.into_iter().filter_map(|r| r.ok()).collect();
+    let mut errors: Vec<Value> = errors.into_iter().filter_map(|r| r.err()).collect();
     let (skipped, saved): (Vec<Value>, Vec<Value>) =
         ok.into_iter().partition(|v| v["skipped"].as_bool().unwrap_or(false));
     let count         = saved.len();
     let skipped_count = skipped.len();
-    NodeOutput::success(json!({
-        "saved":   saved,
-        "count":   count,
-        "folder":  folder,
-        "skipped": skipped_count,
-        "errors":  errors
-    }))
+
+    // Nothing written and nothing deliberately skipped must not look like a success.
+    if count == 0 && skipped_count == 0 {
+        if errors.is_empty() {
+            errors.push(json!({
+                "filename": "<no input>",
+                "reason": "No files were saved — upstream produced no file output"
+            }));
+        }
+        let first = &errors[0];
+        return NodeOutput::failure_with_logs(
+            NodeError::unrecoverable(
+                "SAVE_FAILED",
+                format!(
+                    "Save to Folder: no files were written ({} error(s)). First: {} — {}",
+                    errors.len(),
+                    first["filename"].as_str().unwrap_or("?"),
+                    first["reason"].as_str().unwrap_or("unknown"),
+                ),
+            ),
+            logs,
+        );
+    }
+
+    NodeOutput::success_with_logs(
+        json!({ "saved": saved, "count": count, "folder": folder, "skipped": skipped_count, "errors": errors }),
+        logs,
+    )
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-// write_single_file's staging name is `.{filename}.{uuid}.tmp` — 38 fixed
-// bytes (3 literal dots + "tmp" + a 32-hex-char UUID) plus `filename`
-// (prefix + this function's output). OS path-component limits sit at 255
-// bytes (NTFS/ext4/APFS), so len(prefix) + len(sanitized) must stay ≤ 217;
-// this cap leaves 50 bytes of headroom for filename_prefix (MAX_PREFIX_LEN).
+// Longest final filename is prefix (MAX_PREFIX_LEN) + sanitized name
+// (MAX_SANITIZED_LEN) = 217 bytes; a uniqueness suffix adds a few more and
+// stays well under the 255-byte component limit of NTFS/ext4/APFS.
 const MAX_SANITIZED_LEN: usize = 167;
 
 // filename_prefix resolves through the same expression pipeline as any other
@@ -456,45 +402,47 @@ const MAX_SANITIZED_LEN: usize = 167;
 // of MAX_SANITIZED_LEN.
 const MAX_PREFIX_LEN: usize = 50;
 
-/// Strip path separators, `..` sequences, null bytes, and Windows reserved device names
-/// from a filename, then cap the result to MAX_SANITIZED_LEN bytes (extension-preserving).
-/// An empty result falls back to "file.bin".
+/// Removes NUL and both path separators.
+fn strip_separators(name: &str) -> String {
+    name.chars().filter(|&c| c != '\0' && c != '/' && c != '\\').collect()
+}
+
 fn sanitize_filename(name: &str) -> String {
-    // Windows reserved device names. On Windows, CreateFile("NUL") silently discards
-    // all written data; CreateFile("CON") writes to the console. Block all 22 names
-    // regardless of extension or case so "NUL.txt" and "nul" are both rejected.
+    sanitize_component(name, "file.bin")
+}
+
+/// Turns arbitrary text into one safe path component: separators and NUL are
+/// removed, trailing dots and whitespace are dropped (Windows silently strips
+/// them, so they would otherwise make the reported path wrong), Windows
+/// reserved device names are replaced, and the length is capped while keeping
+/// the extension. A name that ends up empty becomes `fallback`.
+fn sanitize_component(name: &str, fallback: &str) -> String {
+    // On Windows, CreateFile("NUL") silently discards all written data and
+    // CreateFile("CON") writes to the console. All 22 names are blocked
+    // regardless of extension or case, so "NUL.txt" and "nul" are both rejected.
     const WINDOWS_RESERVED: &[&str] = &[
         "CON", "PRN", "AUX", "NUL",
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    // Stem (part before first '.') against reserved names, case-insensitively.
     let is_reserved = |s: &str| {
         let stem = s.split('.').next().unwrap_or("").to_uppercase();
         WINDOWS_RESERVED.contains(&stem.as_str())
     };
 
-    // Strip null bytes (cause ENAMETOOLONG / confusing OS errors), path separators,
-    // and .. sequences.
-    let cleaned: String = name.chars()
-        .filter(|&c| c != '\0' && c != '/' && c != '\\')
-        .collect();
-    let no_dotdot = cleaned.split("..").collect::<Vec<_>>().join("");
+    let stripped = strip_separators(name);
+    let cleaned = stripped.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
 
-    if no_dotdot.trim().is_empty() {
-        return "file.bin".to_string();
+    if cleaned.is_empty() || is_reserved(cleaned) {
+        return fallback.to_string();
     }
 
-    if is_reserved(&no_dotdot) {
-        return "file.bin".to_string();
-    }
-
-    let capped = cap_sanitized_length(&no_dotdot, MAX_SANITIZED_LEN);
-    // Re-check post-truncation: a truncated stem could coincidentally land on
-    // a reserved name if the untruncated original started with one followed
-    // by more text (e.g. "CON-notes-from-a-very-long-title...").
+    let capped = cap_sanitized_length(cleaned, MAX_SANITIZED_LEN);
+    // A truncated stem could coincidentally land on a reserved name if the
+    // untruncated original started with one followed by more text (e.g.
+    // "CON-notes-from-a-very-long-title...").
     if is_reserved(&capped) {
-        return "file.bin".to_string();
+        return fallback.to_string();
     }
 
     capped
@@ -519,9 +467,7 @@ fn cap_sanitized_length(name: &str, max_bytes: usize) -> String {
 }
 
 /// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8
-/// character. Steps back to the nearest char boundary by hand rather than
-/// `str::floor_char_boundary` (stable only since Rust 1.91) so this keeps
-/// working on whatever older toolchain this crate is built with.
+/// character, stepping back to the nearest char boundary.
 fn truncate_to_byte_len(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -531,18 +477,6 @@ fn truncate_to_byte_len(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
-}
-
-/// Decode base64. Strips a `data:<mime>;base64,` prefix if present.
-fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
-    let raw = if let Some(pos) = data.find(',') {
-        &data[pos + 1..]
-    } else {
-        data
-    };
-    general_purpose::STANDARD
-        .decode(raw.trim())
-        .map_err(|e| format!("base64 decode failed: {}", e))
 }
 
 /// Parse a resolved source_expr string into a Value.
@@ -560,17 +494,14 @@ fn parse_source_expr(expr: &str) -> Value {
 /// Extract a files array from a resolved media contract or bare files array.
 ///   { "files": [...], ... }  →  the files array
 ///   [...]                    →  the array itself
-fn extract_files_array(val: &Value) -> Vec<Value> {
+fn extract_files_array(val: Value) -> Vec<Value> {
     match val {
-        Value::Object(obj) => {
-            if let Some(Value::Array(files)) = obj.get("files") {
-                files.clone()
-            } else {
-                vec![]
-            }
-        }
-        Value::Array(arr) => arr.clone(),
-        _                 => vec![],
+        Value::Object(mut obj) => match obj.remove("files") {
+            Some(Value::Array(files)) => files,
+            _ => vec![],
+        },
+        Value::Array(arr) => arr,
+        _ => vec![],
     }
 }
 
@@ -582,11 +513,10 @@ fn extract_files_array(val: &Value) -> Vec<Value> {
 fn extract_config_files(val: &Value) -> Vec<Value> {
     match val {
         Value::Array(arr) => arr.clone(),
-        Value::String(s)  => extract_files_array(&parse_source_expr(s)),
+        Value::String(s)  => extract_files_array(parse_source_expr(s)),
         _                 => vec![],
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -608,12 +538,8 @@ mod tests {
 
     // ── sandbox containment ────────────────────────────────────
 
-    // With __file_sandbox_dir set and a RELATIVE folder_path, the write must land
-    // inside the sandbox — the actual write must use the sandbox-resolved path,
-    // not the raw, unresolved folder_path (which would resolve relative to the
-    // process's CWD instead of the sandbox root). This test exercises the full
-    // execute() path (not flat_mode directly) since the sandbox resolution
-    // lives there.
+    // A relative folder_path under a sandbox must be written inside the
+    // sandbox root, not relative to the process's working directory.
     #[tokio::test]
     async fn sandbox_relative_folder_path_writes_inside_sandbox() {
         let sandbox_dir = TempDir::new().unwrap();
@@ -728,8 +654,7 @@ mod tests {
             ]
         });
         let out = flat_mode(&cfg, None, path, "", true).await;
-        // build_output always returns success for flat_mode; errors live in output JSON.
-        assert!(out.success, "flat_mode must not panic on partial failure");
+        assert!(out.success, "a partial failure still succeeds; the errors are listed in the output");
         let o = out.output.unwrap();
         assert_eq!(o["count"], 1, "one file should succeed");
         assert_eq!(
@@ -741,8 +666,7 @@ mod tests {
         assert!(!dir.path().join("bad.txt").exists(), "bad file must not be created");
     }
 
-    // overwrite=true must replace an existing file's on-disk content — the write
-    // now lands via a temp file + rename rather than a direct in-place write.
+    // overwrite=true must replace an existing file's on-disk content.
     #[tokio::test]
     async fn flat_mode_overwrite_true_replaces_existing_file_content() {
         let dir = TempDir::new().unwrap();
@@ -799,7 +723,7 @@ mod tests {
             "name":        "images",
             "source_expr": source_expr,
         })];
-        let out = subfolder_mode(&subfolders, path, "", true).await;
+        let out = subfolder_mode(&subfolders, path, None, "", true).await;
         assert!(out.success, "{:?}", out.error);
         let o = out.output.unwrap();
         assert_eq!(o["count"], 1);
@@ -820,7 +744,7 @@ mod tests {
             "name":        "empty_sub",
             "source_expr": source_expr,
         })];
-        let out = subfolder_mode(&subfolders, path, "", true).await;
+        let out = subfolder_mode(&subfolders, path, None, "", true).await;
         // NodeOutput may be failure (SAVE_FAILED: no files written) — that is expected.
         // The critical assertion is that the directory was created before the guard fired.
         let subdir = dir.path().join("empty_sub");
@@ -923,5 +847,132 @@ mod tests {
             schema["properties"]["filename_prefix"]["maxLength"],
             json!(MAX_PREFIX_LEN)
         );
+    }
+
+    // ── names, sandbox, overwrite ─────────────────────────────────────────────
+
+    fn sandboxed_input(root: &Path, cfg: Value) -> NodeInput {
+        let mut input = exec_input("", "", "unused", "");
+        input.input = cfg;
+        input.context.metadata.insert(
+            fs_sandbox::SANDBOX_KEY.to_string(),
+            Value::String(root.to_str().unwrap().to_string()),
+        );
+        input
+    }
+
+    #[tokio::test]
+    async fn colliding_names_in_one_run_get_numeric_suffixes_instead_of_overwriting() {
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({
+            "files": [
+                file_entry("a.txt", "QUFB"),
+                file_entry("A.TXT", "QkJC"),
+                json!({ "data": "Z29vZA==" }),
+                json!({ "data": "aW1nLWRhdGE=" }),
+            ]
+        });
+        let out = flat_mode(&cfg, None, dir.path().to_str().unwrap(), "", true).await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(out.output.unwrap()["count"], 4);
+        let read = |n: &str| std::fs::read_to_string(dir.path().join(n)).unwrap();
+        assert_eq!(read("a.txt"), "AAA");
+        assert_eq!(read("A_2.TXT"), "BBB");
+        assert_eq!(read("file.bin"), "good");
+        assert_eq!(read("file_2.bin"), "img-data");
+    }
+
+    #[tokio::test]
+    async fn overwrite_given_as_text_is_honoured_and_garbage_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("out.txt"), "original").unwrap();
+
+        let mut input = exec_input(path, "", "out.txt", "QkJC");
+        input.input["overwrite"] = json!("false");
+        let out = SaveToFolderNode.execute(input).await;
+        assert!(out.success, "{:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!((o["count"].as_u64(), o["skipped"].as_u64()), (Some(0), Some(1)));
+        assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "original");
+
+        let mut input = exec_input(path, "", "out.txt", "QkJC");
+        input.input["overwrite"] = json!("maybe");
+        assert_eq!(SaveToFolderNode.execute(input).await.error.unwrap().code, "INVALID_CONFIG");
+        assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "original");
+    }
+
+    #[tokio::test]
+    async fn run_where_every_file_fails_is_a_failure_in_flat_mode_too() {
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({ "files": [json!({ "filename": "a.txt" }), file_entry("b.txt", "!!!")] });
+        let out = flat_mode(&cfg, None, dir.path().to_str().unwrap(), "", true).await;
+        assert_eq!(out.error.expect("must fail").code, "SAVE_FAILED");
+    }
+
+    #[tokio::test]
+    async fn data_uri_and_wrapped_base64_are_decoded() {
+        let dir = TempDir::new().unwrap();
+        let cfg = json!({ "files": [
+            file_entry("uri.txt", "data:text/plain;base64,SGVsbG8gV29ybGQ="),
+            file_entry("wrapped.txt", "SGVsbG8g\nV29ybGQ="),
+        ] });
+        let out = flat_mode(&cfg, None, dir.path().to_str().unwrap(), "", true).await;
+        assert!(out.success, "{:?}", out.error);
+        for name in ["uri.txt", "wrapped.txt"] {
+            assert_eq!(std::fs::read_to_string(dir.path().join(name)).unwrap(), "Hello World");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandbox_refuses_a_subfolder_that_is_a_symlink_out_of_it() {
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), sandbox.path().join("images")).unwrap();
+
+        let source_expr = serde_json::to_string(&json!([file_entry("img.txt", "aW1nLWRhdGE=")])).unwrap();
+        let input = sandboxed_input(sandbox.path(), json!({
+            "folder_path": ".",
+            "subfolders": [{ "id": "sf1", "name": "images", "source_expr": source_expr }],
+        }));
+        let out = SaveToFolderNode.execute(input).await;
+        assert_eq!(out.error.expect("must fail").code, "SAVE_FAILED");
+        assert!(!outside.path().join("img.txt").exists(), "nothing may land outside the sandbox");
+    }
+
+    #[tokio::test]
+    async fn sandbox_refuses_folder_paths_outside_the_root() {
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let input = sandboxed_input(sandbox.path(), json!({
+            "folder_path": outside.path().to_str().unwrap(),
+            "files": [file_entry("a.txt", "QUFB")],
+        }));
+        assert_eq!(SaveToFolderNode.execute(input).await.error.unwrap().code, "PATH_OUTSIDE_SANDBOX");
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    // ── sanitize_component ───────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_filename_keeps_inner_dots_and_replaces_unusable_names() {
+        let cases = [
+            ("report..final.txt", "report..final.txt"),
+            (".env", ".env"),
+            ("../../etc/passwd", "....etcpasswd"),
+            ("a.txt. ", "a.txt"),
+            (".", "file.bin"),
+            ("..", "file.bin"),
+            (" . ", "file.bin"),
+            ("", "file.bin"),
+            ("nul.txt", "file.bin"),
+            ("CON", "file.bin"),
+            ("a\0b/c.txt", "abc.txt"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_filename(input), expected, "input: {input:?}");
+        }
+        assert_eq!(sanitize_component("", "unnamed"), "unnamed");
     }
 }

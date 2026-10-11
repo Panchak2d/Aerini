@@ -4,23 +4,27 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
-use super::ai_prompt::{process_attachments, extract_port_attachments, ImageAttachment, DocAttachment, extract_provider_error, ATTACHMENT_ONLY_PROMPT};
+use super::util::{cfg_f64_opt, cfg_u64_opt};
+use super::ai_prompt::{
+    process_attachments, extract_port_attachments, ImageAttachment, DocAttachment,
+    extract_provider_error, ATTACHMENT_ONLY_PROMPT,
+    rejected_param, RejectedParam, is_official_openai, model_or_default,
+    anthropic_text, clamp_claude_temperature, gemini_model_id,
+};
 
-/// AI Agent node — autonomous ReAct loop (Reason → Act → Observe).
+/// AI Agent node: gives a model a goal and a set of tools and returns its answer.
 ///
-/// The agent is given a goal and a set of available tools (other node outputs or
-/// inline tool definitions). It reasons about what to do, takes an action, observes
-/// the result, and repeats until it decides it's done or hits max_iterations.
+/// The node makes one model call. It cannot run the tools it is given: when the
+/// model asks for one, the request comes back in `tool_calls` with
+/// `awaiting_tools` set, and the workflow's own nodes do the work. Inventing a
+/// tool result so the model could continue would let it act on made-up data and
+/// bill a call per round.
 ///
 /// **Provider behaviour:**
-/// - OpenAI / OpenAI-compatible: full ReAct loop with tool_calls. The agent can call
-///   tools across multiple iterations before returning a final answer.
-/// - Anthropic: pure reasoning mode — one pass only, no tool loop. Anthropic's
-///   tool_use response format is not used here; the agent reasons and returns a
-///   final answer in a single call. Connect the output to downstream nodes to
-///   take action on the result.
-/// - Gemini: full ReAct loop with functionCall/functionResponse. Uses
-///   generateContent with functionDeclarations. Supports multi-iteration tool loop.
+/// - OpenAI / OpenAI-compatible and Gemini: tool definitions are sent; the
+///   reply carries the text and any tool requests.
+/// - Anthropic: tools are not sent (its `tool_use` format is not used here); the
+///   model answers in a single pass.
 pub struct AiAgentNode;
 
 #[async_trait]
@@ -46,7 +50,7 @@ impl Node for AiAgentNode {
                 },
                 "tools": {
                     "type": "string",
-                    "description": "JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers. Anthropic runs in pure reasoning mode."
+                    "description": "JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers; the node returns the model's tool requests and does not run them. Anthropic ignores tools."
                 },
                 "context": {
                     "type": "string",
@@ -55,7 +59,7 @@ impl Node for AiAgentNode {
                 "provider": {
                     "type": "string",
                     "enum": ["openai", "anthropic", "gemini", "local", "auto"],
-                    "description": "AI provider. OpenAI/Gemini: full tool-calling ReAct loop. Anthropic: single reasoning pass, no tool loop."
+                    "description": "AI provider. OpenAI/Gemini: tool definitions are sent and tool requests returned. Anthropic: single reasoning pass, no tools."
                 },
                 "model": {
                     "type": "string",
@@ -72,11 +76,11 @@ impl Node for AiAgentNode {
                 },
                 "max_iterations": {
                     "type": "number",
-                    "description": "Maximum think-act-observe cycles (default: 5, max: 20). Ignored for Anthropic (always 1)."
+                    "description": "Not used: the agent makes one call. Kept so saved workflows still load."
                 },
                 "max_tokens": {
                     "type": "number",
-                    "description": "Maximum tokens per agent response (default: 2048). Higher values allow longer output per cycle but increase cost — total spend scales with max_iterations."
+                    "description": "Maximum tokens per agent response (default: 2048). Higher values allow longer output but increase cost."
                 },
                 "temperature": {
                     "type": "number",
@@ -91,10 +95,11 @@ impl Node for AiAgentNode {
             "type": "object",
             "properties": {
                 "result":        { "type": "string", "description": "Final answer or conclusion from the agent" },
-                "iterations":    { "type": "number", "description": "Number of reasoning cycles used" },
-                "tool_calls":    { "type": "array",  "description": "List of tools the agent called" },
+                "iterations":    { "type": "number", "description": "Always 1: the agent makes one model call" },
+                "tool_calls":    { "type": "array",  "description": "Tools the model asked for: {id, tool, arguments, parsed_arguments}. The node does not run them." },
+                "awaiting_tools":{ "type": "boolean","description": "True when the model asked for tools and has not given a final answer" },
                 "reasoning":     { "type": "array",  "description": "Step-by-step reasoning trace" },
-                "finished":      { "type": "boolean","description": "True if agent completed goal cleanly, false if hit max_iterations or response was truncated" },
+                "finished":      { "type": "boolean","description": "True if the model answered cleanly; false if it asked for tools or the reply was cut off" },
                 "truncated":     { "type": "boolean","description": "True if the provider cut off the response mid-generation (max_tokens hit). Raise max_tokens to fix." }
             }
         })
@@ -131,7 +136,7 @@ impl Node for AiAgentNode {
         // A file-only message resolves the goal expression to "". Readable
         // attachments stand in for the text; otherwise the goal stays required.
         let goal = match input.input["goal"].as_str() {
-            Some(g) if !g.is_empty() => g.to_string(),
+            Some(g) if !g.trim().is_empty() => g.to_string(),
             _ if pa.has_content() => ATTACHMENT_ONLY_PROMPT.to_string(),
             _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_GOAL", "goal is required")),
         };
@@ -166,7 +171,7 @@ impl Node for AiAgentNode {
             "gpt-5.6"
         };
 
-        let model   = input.input["model"].as_str().unwrap_or(default_model).to_string();
+        let model   = model_or_default(&input.input["model"], default_model);
         let api_key = input.input["api_key"].as_str().unwrap_or("").to_string();
 
         let base_url = crate::provider::ProviderRegistry::resolve_base_url(provider_id, user_url_raw);
@@ -179,20 +184,29 @@ impl Node for AiAgentNode {
             return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
         }
 
-        let max_iterations = input.input["max_iterations"].as_u64().unwrap_or(5).min(20) as usize;
-        let max_tokens     = input.input["max_tokens"].as_u64().unwrap_or(2048);
-        let temperature    = input.input["temperature"].as_f64().unwrap_or(0.3);
+        if let Err(e) = cfg_u64_opt(&input.input["max_iterations"], "max_iterations") {
+            return NodeOutput::failure(e);
+        }
+        let max_tokens = match cfg_u64_opt(&input.input["max_tokens"], "max_tokens") {
+            Ok(v) => v.unwrap_or(2048),
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let temperature = match cfg_f64_opt(&input.input["temperature"], "temperature") {
+            Ok(v) => v.unwrap_or(0.3),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let mut system = input.input["system"].as_str()
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or("You are a helpful AI agent. Complete the given goal step by step. When you have finished, provide a clear final answer.")
             .to_string();
 
         let context_str = input.input["context"].as_str().unwrap_or("").to_string();
 
-        let tools: Vec<Value> = input.input["tools"]
-            .as_str()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let tools = match parse_tools(&input.input["tools"]) {
+            Ok(t) => t,
+            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("INVALID_TOOLS", e)),
+        };
 
         let client = crate::provider::shared_ai_client();
 
@@ -209,25 +223,24 @@ impl Node for AiAgentNode {
             format!("Context:\n{}\n\nGoal:\n{}", context_str, goal)
         };
 
-        // Gemini uses a completely different message format — delegate to dedicated loop.
+        // Gemini uses a completely different message format, so it has its own function.
         if is_gemini {
             return run_gemini_agent(
                 client, base_url, api_key, model, system,
-                user_content, tools, max_iterations, max_tokens, temperature,
+                user_content, tools, max_tokens, temperature,
                 image_attachments, doc_attachments, attachment_warnings,
             ).await;
         }
 
         let mut messages: Vec<Value> = Vec::new();
-        // Attachment warnings surface here so they appear in every output's reasoning trace
-        // without needing to thread them through every return point in the loop.
+        // Attachment warnings go first in the reasoning trace.
         let mut reasoning_trace: Vec<String> = attachment_warnings
             .into_iter()
             .map(|w| format!("[Attachment Warning] {}", w))
             .collect();
-        let mut tool_calls_log: Vec<Value> = Vec::new();
-        let mut iterations = 0;
-
+        if is_anthropic && !tools.is_empty() {
+            reasoning_trace.push("[Warning] Tools are not sent to Anthropic models; the agent answers in one pass.".to_string());
+        }
         // Build the first user message. When attachments are present, the content
         // must use each provider's multimodal block format. When absent, a plain
         // string is used — identical to the pre-attachment-era shape.
@@ -262,143 +275,126 @@ impl Node for AiAgentNode {
         };
         messages.push(json!({ "role": "user", "content": first_content }));
 
-        loop {
-            if iterations >= max_iterations {
-                messages.push(json!({
-                    "role": "user",
-                    "content": "You have reached the maximum number of iterations. Please provide your best final answer based on what you've gathered so far."
-                }));
-            }
+        let response = if is_anthropic {
+            call_anthropic_agent(
+                &client, &base_url, &api_key, &model, &system,
+                &messages, temperature, max_tokens,
+            ).await
+        } else {
+            call_openai_agent(
+                &client, &base_url, &api_key, &model, &system,
+                &messages, &tools, temperature, max_tokens, provider_id,
+            ).await
+        };
+        let resp = match response {
+            Ok(r)  => r,
+            Err(e) => return e.into_node_output(),
+        };
 
-            let response = if is_anthropic {
-                call_anthropic_agent(
-                    &client, &base_url, &api_key, &model, &system,
-                    &messages, temperature, max_tokens,
-                ).await
-            } else {
-                call_openai_agent(
-                    &client, &base_url, &api_key, &model, &system,
-                    &messages, &tools, temperature, max_tokens, provider_id,
-                ).await
-            };
-
-            match response {
-                Err(e) => return e.into_node_output(),
-                Ok(resp) => {
-                    let (assistant_message, content, finish_reason) = if is_anthropic {
-                        let text = resp["content"][0]["text"].as_str().unwrap_or("").to_string();
-                        let stop = resp["stop_reason"].as_str().unwrap_or("end_turn").to_string();
-                        let msg = json!({ "role": "assistant", "content": text });
-                        (msg, text, stop)
-                    } else {
-                        let msg = resp["choices"][0]["message"].clone();
-                        let text = msg["content"].as_str().unwrap_or("").to_string();
-                        let stop = resp["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string();
-                        (msg, text, stop)
-                    };
-                    let finish_reason = finish_reason.as_str();
-                    let assistant_message = &assistant_message;
-
-                    messages.push(assistant_message.clone());
-
-                    if !content.is_empty() {
-                        reasoning_trace.push(format!("[Iteration {}] {}", iterations + 1, content));
-                    }
-
-                    let truncated = finish_reason == "length" || finish_reason == "max_tokens";
-
-                    if let Some(calls) = assistant_message["tool_calls"].as_array() {
-                        if calls.is_empty() || finish_reason == "stop" || iterations >= max_iterations {
-                            let finished = finish_reason == "stop" && !truncated && iterations < max_iterations;
-                            return NodeOutput::success_with_logs(
-                                json!({
-                                    "result": content,
-                                    "iterations": iterations + 1,
-                                    "tool_calls": tool_calls_log,
-                                    "reasoning": reasoning_trace,
-                                    "finished": finished,
-                                    "truncated": truncated
-                                }),
-                                vec![format!("Agent completed in {} iteration(s)", iterations + 1)],
-                            );
-                        }
-
-                        let mut tool_results = Vec::new();
-                        for call in calls {
-                            let tool_name = call["function"]["name"].as_str().unwrap_or("unknown");
-                            let tool_args = call["function"]["arguments"].as_str().unwrap_or("{}");
-                            let call_id   = call["id"].as_str().unwrap_or("call_0");
-
-                            tool_calls_log.push(json!({
-                                "tool": tool_name,
-                                "arguments": tool_args,
-                                "iteration": iterations + 1
-                            }));
-                            reasoning_trace.push(format!("[Tool Call] {} with args: {}", tool_name, tool_args));
-
-                            tool_results.push(json!({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": format!("Tool '{}' called with args: {}. (Tool execution is handled by the workflow — connect the agent's output to the appropriate nodes.)", tool_name, tool_args)
-                            }));
-                        }
-
-                        for result in tool_results {
-                            messages.push(result);
-                        }
-
-                        iterations += 1;
-                    } else {
-                        let finished = finish_reason == "stop" || finish_reason == "end_turn";
-                        return NodeOutput::success_with_logs(
-                            json!({
-                                "result": content,
-                                "iterations": iterations + 1,
-                                "tool_calls": tool_calls_log,
-                                "reasoning": reasoning_trace,
-                                "finished": finished,
-                                "truncated": truncated
-                            }),
-                            vec![format!("Agent completed in {} iteration(s)", iterations + 1)],
-                        );
-                    }
-
-                    if iterations >= max_iterations {
-                        break;
-                    }
+        let (content, finish_reason, requested): (String, String, Vec<RequestedTool>) = if is_anthropic {
+            (
+                anthropic_text(&resp),
+                resp["stop_reason"].as_str().unwrap_or("end_turn").to_string(),
+                Vec::new(),
+            )
+        } else {
+            let choice = &resp["choices"][0];
+            let calls = choice["message"]["tool_calls"].as_array()
+                .map(|calls| calls.iter().map(|c| RequestedTool {
+                    id:        c["id"].as_str().unwrap_or("").to_string(),
+                    name:      c["function"]["name"].as_str().unwrap_or("unknown").to_string(),
+                    arguments: c["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                }).collect())
+                .unwrap_or_default();
+            if choice["message"]["content"].as_str().unwrap_or("").is_empty() {
+                if let Some(refusal) = choice["message"]["refusal"].as_str().filter(|r| !r.is_empty()) {
+                    return NodeOutput::failure(NodeError::unrecoverable("REFUSED", format!("The model refused the request: {refusal}")));
                 }
             }
+            (
+                choice["message"]["content"].as_str().unwrap_or("").to_string(),
+                choice["finish_reason"].as_str().unwrap_or("stop").to_string(),
+                calls,
+            )
+        };
+        if is_anthropic && content.is_empty() && finish_reason == "refusal" {
+            return NodeOutput::failure(NodeError::unrecoverable("REFUSED", "The model declined to answer this request."));
         }
 
-        NodeOutput::success_with_logs(
-            json!({
-                "result": "Agent reached maximum iterations without a definitive conclusion.",
-                "iterations": max_iterations,
-                "tool_calls": tool_calls_log,
-                "reasoning": reasoning_trace,
-                "finished": false,
-                "truncated": false
-            }),
-            vec![format!("Agent stopped after {} iterations (limit reached)", max_iterations)],
-        )
+        let truncated = finish_reason == "length" || finish_reason == "max_tokens";
+        if truncated && content.is_empty() && requested.is_empty() {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "OUTPUT_TRUNCATED",
+                format!("The model used all {max_tokens} tokens before writing a reply (reasoning models count their thinking). Raise max_tokens."),
+            ));
+        }
+        let finished = matches!(finish_reason.as_str(), "stop" | "end_turn") && !truncated && requested.is_empty();
+        agent_output(content, requested, reasoning_trace, finished, truncated)
     }
+}
+
+/// A tool the model asked for. The node cannot run it: the request goes to the
+/// workflow in the output, so the nodes that do the work stay visible and
+/// under the user's control.
+struct RequestedTool {
+    id:        String,
+    name:      String,
+    arguments: String,
+}
+
+fn agent_output(
+    content: String,
+    requested: Vec<RequestedTool>,
+    mut reasoning: Vec<String>,
+    finished: bool,
+    truncated: bool,
+) -> NodeOutput {
+    if !content.is_empty() {
+        reasoning.push(format!("[Reply] {}", content));
+    }
+    let awaiting_tools = !requested.is_empty();
+    let tool_calls: Vec<Value> = requested.iter().map(|t| {
+        reasoning.push(format!("[Tool Call] {} with args: {}", t.name, t.arguments));
+        let parsed = serde_json::from_str::<Value>(&t.arguments).unwrap_or(Value::Null);
+        json!({ "id": t.id, "tool": t.name, "arguments": t.arguments, "parsed_arguments": parsed })
+    }).collect();
+    let log = if awaiting_tools {
+        format!("Agent requested {} tool call(s); it does not run tools, route them with the workflow", tool_calls.len())
+    } else {
+        "Agent replied".to_string()
+    };
+    NodeOutput::success_with_logs(
+        json!({
+            "result":         content,
+            "iterations":     1,
+            "tool_calls":     tool_calls,
+            "awaiting_tools": awaiting_tools,
+            "reasoning":      reasoning,
+            "finished":       finished,
+            "truncated":      truncated
+        }),
+        vec![log],
+    )
 }
 
 // ── API error classification ──────────────────────────────────────────
 //
 // `call_gemini_agent`/`call_openai_agent`/`call_anthropic_agent` duplicate
 // ai_prompt/shared.rs's send_and_parse request/response shape (send, cap-read,
-// parse) plus each ai_prompt provider file's own inline 429/529 status check,
-// and carry the same recoverable/unrecoverable distinction ai_prompt already
-// has: a timed-out/connection-failed send, or an HTTP 429 (Anthropic also 529,
-// matching ai_prompt/anthropic.rs) is Recoverable; every other failure (auth,
-// bad request, oversized/unparseable body) stays Unrecoverable. Both call
-// sites below must preserve this distinction rather than wrapping every
-// error in `NodeError::unrecoverable` regardless of cause — a rate-limited
-// Agent node must stay retry-eligible like the otherwise-identical Prompt
-// node hitting the same API.
+// parse) and carry the same recoverable/unrecoverable distinction ai_prompt
+// has: a timed-out/connection-failed send, an HTTP 429 or 529 (rate limited,
+// overloaded) and a 502/503/504 gateway failure are Recoverable, including
+// when the body is not JSON (a proxy's HTML error page); every other failure
+// (auth, bad request, oversized body, a non-JSON body on any other status)
+// stays Unrecoverable. A model call creates nothing, so repeating it after a
+// gateway failure can at most bill twice. Every call site below must go
+// through `agent_status_error` rather than wrapping every error in
+// `NodeError::unrecoverable` regardless of cause: a rate-limited Agent node
+// must stay retry-eligible like the otherwise-identical Prompt node hitting
+// the same API.
 enum AgentApiError {
     Recoverable(String),
+    Unavailable(String),
     Unrecoverable(String),
 }
 
@@ -408,11 +404,28 @@ impl AgentApiError {
             AgentApiError::Recoverable(msg) => {
                 NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
             }
+            AgentApiError::Unavailable(msg) => {
+                NodeOutput::failure(NodeError::recoverable("UPSTREAM_UNAVAILABLE", msg))
+            }
             AgentApiError::Unrecoverable(msg) => {
                 NodeOutput::failure(NodeError::unrecoverable("API_ERROR", msg))
             }
         }
     }
+}
+
+fn agent_status_error(status: u16, msg: String) -> AgentApiError {
+    match status {
+        429 | 529 => AgentApiError::Recoverable(msg),
+        502..=504 => AgentApiError::Unavailable(msg),
+        _ => AgentApiError::Unrecoverable(msg),
+    }
+}
+
+/// The failure message for a provider response, or `None` for a good one. A
+/// 4xx/5xx status with no `error` field is a failure, not an empty success.
+fn agent_response_error(status: u16, json: &Value, default: &str) -> Option<String> {
+    extract_provider_error(json, default).or_else(|| (status >= 400).then(|| format!("{default} (HTTP {status})")))
 }
 
 // ── Gemini agent loop ────────────────────────────────────────────────────────
@@ -436,7 +449,6 @@ async fn run_gemini_agent(
     system: String,
     user_content: String,
     tools: Vec<Value>,
-    max_iterations: usize,
     max_tokens: u64,
     temperature: f64,
     image_attachments: Vec<ImageAttachment>,
@@ -457,128 +469,56 @@ async fn run_gemini_agent(
     for (mime, data, _filename) in &doc_attachments {
         first_parts.push(json!({ "inline_data": { "mime_type": mime, "data": data } }));
     }
-    let mut contents: Vec<Value> = vec![
-        json!({ "role": "user", "parts": first_parts }),
-    ];
-    let mut reasoning_trace: Vec<String> = attachment_warnings
+    let contents: Vec<Value> = vec![json!({ "role": "user", "parts": first_parts })];
+    let reasoning_trace: Vec<String> = attachment_warnings
         .into_iter()
         .map(|w| format!("[Attachment Warning] {}", w))
         .collect();
-    let mut tool_calls_log: Vec<Value> = Vec::new();
-    let mut iterations = 0;
 
-    loop {
-        if iterations >= max_iterations {
-            contents.push(json!({
-                "role": "user",
-                "parts": [{ "text": "You have reached the maximum number of iterations. Please provide your best final answer based on what you have gathered so far." }]
-            }));
-        }
+    let resp = match call_gemini_agent(
+        &client, &base_url, &api_key, &model, &system,
+        &contents, &tools, temperature, max_tokens,
+    ).await {
+        Ok(r)  => r,
+        Err(e) => return e.into_node_output(),
+    };
 
-        let resp = match call_gemini_agent(
-            &client, &base_url, &api_key, &model, &system,
-            &contents, &tools, temperature, max_tokens,
-        ).await {
-            Ok(r)  => r,
-            Err(e) => return e.into_node_output(),
-        };
-
-        // Push the full model content block verbatim into history for multi-turn continuity.
-        let model_content = resp["candidates"][0]["content"].clone();
-        if model_content.is_null() {
-            return NodeOutput::failure(NodeError::unrecoverable(
-                "GEMINI_NO_CONTENT",
-                "Gemini returned no content — request may have been blocked by safety filters.",
-            ));
-        }
-        contents.push(model_content.clone());
-
-        let finish_reason = resp["candidates"][0]["finishReason"]
-            .as_str()
-            .unwrap_or("STOP");
-
-        let empty_parts = vec![];
-        let parts = model_content["parts"].as_array().unwrap_or(&empty_parts);
-
-        let text_content: String = parts.iter()
-            .filter_map(|p| p["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let func_calls: Vec<&Value> = parts.iter()
-            .filter(|p| !p["functionCall"].is_null())
-            .collect();
-
-        if !text_content.is_empty() {
-            reasoning_trace.push(format!("[Iteration {}] {}", iterations + 1, text_content));
-        }
-
-        // Done: no function calls, finish signal, or iteration limit reached
-        if func_calls.is_empty() || finish_reason == "STOP" || iterations >= max_iterations {
-            let result = if text_content.is_empty() {
-                "Agent completed without a text response.".to_string()
-            } else {
-                text_content
-            };
-            return NodeOutput::success_with_logs(
-                json!({
-                    "result":     result,
-                    "iterations": iterations + 1,
-                    "tool_calls": tool_calls_log,
-                    "reasoning":  reasoning_trace,
-                    "finished":   finish_reason == "STOP",
-                    "truncated":  finish_reason == "MAX_TOKENS"
-                }),
-                vec![format!("Gemini agent completed in {} iteration(s)", iterations + 1)],
-            );
-        }
-
-        // Build functionResponse parts for next turn.
-        // Gemini tool results: role:"user", parts:[{functionResponse:{name, response}}]
-        let mut response_parts: Vec<Value> = Vec::new();
-        for fc in &func_calls {
-            let fn_name = fc["functionCall"]["name"].as_str().unwrap_or("unknown");
-            let fn_args = &fc["functionCall"]["args"];
-
-            tool_calls_log.push(json!({
-                "tool":      fn_name,
-                "arguments": fn_args.to_string(),
-                "iteration": iterations + 1
-            }));
-            reasoning_trace.push(format!("[Tool Call] {} with args: {}", fn_name, fn_args));
-
-            response_parts.push(json!({
-                "functionResponse": {
-                    "name": fn_name,
-                    "response": {
-                        "result": format!(
-                            "Function '{}' called with args: {}. (Tool execution is handled by the workflow — connect the agent's output to the appropriate nodes.)",
-                            fn_name, fn_args
-                        )
-                    }
-                }
-            }));
-        }
-
-        contents.push(json!({ "role": "user", "parts": response_parts }));
-        iterations += 1;
-
-        if iterations >= max_iterations {
-            break;
-        }
+    let model_content = &resp["candidates"][0]["content"];
+    if model_content.is_null() {
+        return NodeOutput::failure(NodeError::unrecoverable(
+            "GEMINI_NO_CONTENT",
+            "Gemini returned no content — request may have been blocked by safety filters.",
+        ));
     }
+    let finish_reason = resp["candidates"][0]["finishReason"].as_str().unwrap_or("STOP");
+    let empty_parts = vec![];
+    let parts = model_content["parts"].as_array().unwrap_or(&empty_parts);
 
-    NodeOutput::success_with_logs(
-        json!({
-            "result":     "Agent reached maximum iterations without a definitive conclusion.",
-            "iterations": max_iterations,
-            "tool_calls": tool_calls_log,
-            "reasoning":  reasoning_trace,
-            "finished":   false,
-            "truncated":  false
-        }),
-        vec![format!("Gemini agent stopped after {} iterations (limit reached)", max_iterations)],
-    )
+    let text_content: String = parts.iter()
+        .filter(|p| p["thought"] != true)
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let requested: Vec<RequestedTool> = parts.iter()
+        .filter(|p| !p["functionCall"].is_null())
+        .map(|p| RequestedTool {
+            id:        p["functionCall"]["id"].as_str().unwrap_or("").to_string(),
+            name:      p["functionCall"]["name"].as_str().unwrap_or("unknown").to_string(),
+            arguments: p["functionCall"]["args"].to_string(),
+        })
+        .collect();
+
+    let truncated = finish_reason == "MAX_TOKENS";
+    if text_content.is_empty() && requested.is_empty() && finish_reason != "STOP" {
+        return NodeOutput::failure(NodeError::unrecoverable(
+            "GEMINI_NO_CONTENT",
+            format!("Gemini returned no text ({finish_reason}). Check max_tokens and the safety filters."),
+        ));
+    }
+    // Gemini reports STOP on a reply that carries functionCall parts.
+    let finished = finish_reason == "STOP" && requested.is_empty();
+    agent_output(text_content, requested, reasoning_trace, finished, truncated)
 }
 
 // Gemini generateContent HTTP call.
@@ -599,7 +539,7 @@ async fn call_gemini_agent(
     temperature: f64,
     max_tokens: u64,
 ) -> Result<Value, AgentApiError> {
-    let endpoint = format!("{}/models/{}:generateContent", base_url, model);
+    let endpoint = format!("{}/models/{}:generateContent", base_url, gemini_model_id(model));
 
     let mut body = json!({
         "contents": contents,
@@ -632,7 +572,7 @@ async fn call_gemini_agent(
         .send()
         .await
         .map_err(|e| {
-            let recoverable = e.is_timeout() || e.is_connect();
+            let recoverable = super::util::is_retryable_network_error(super::util::Replay::Safe, &e);
             if recoverable {
                 AgentApiError::Recoverable(super::util::reqwest_err_msg(&e))
             } else {
@@ -643,15 +583,10 @@ async fn call_gemini_agent(
     let status = response.status().as_u16();
     let json: Value = crate::nodes::util::read_json_response_capped(response)
         .await
-        .map_err(AgentApiError::Unrecoverable)?;
+        .map_err(|e| agent_status_error(status, e))?;
 
-    if let Some(msg) = extract_provider_error(&json, "Unknown Gemini API error") {
-        // Matches ai_prompt/gemini.rs's own 429-only recoverable check.
-        return Err(if status == 429 {
-            AgentApiError::Recoverable(msg)
-        } else {
-            AgentApiError::Unrecoverable(msg)
-        });
+    if let Some(msg) = agent_response_error(status, &json, "Unknown Gemini API error") {
+        return Err(agent_status_error(status, msg));
     }
 
     Ok(json)
@@ -672,20 +607,11 @@ async fn call_openai_agent(
     max_tokens: u64,
     provider_id: &str,
 ) -> Result<Value, AgentApiError> {
-    let mut all_messages = vec![json!({ "role": "system", "content": system })];
-    all_messages.extend_from_slice(messages);
-
-    let mut body = json!({
-        "model": model,
-        "messages": all_messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens
-    });
-
-    if !tools.is_empty() {
-        body["tools"] = json!(tools);
-        body["tool_choice"] = json!("auto");
+    let mut all_messages: Vec<Value> = Vec::new();
+    if !system.trim().is_empty() {
+        all_messages.push(json!({ "role": "system", "content": system }));
     }
+    all_messages.extend_from_slice(messages);
 
     // provider_id reaches here from an unvalidated request field (schema
     // enum enforcement is non-strict by default), unlike ai_prompt/mod.rs's
@@ -697,37 +623,94 @@ async fn call_openai_agent(
         .get(provider_id)
         .or_else(|| registry.get("openai"))
         .expect("openai always registered");
-    let req = crate::provider::ProviderRegistry::apply_auth(
-        record,
-        client.post(format!("{}/chat/completions", base_url))
-            .header("Content-Type", "application/json"),
-        api_key,
-    ).json(&body);
 
-    let response = req.send().await.map_err(|e| {
-        let recoverable = e.is_timeout() || e.is_connect();
-        if recoverable {
-            AgentApiError::Recoverable(super::util::reqwest_err_msg(&e))
-        } else {
-            AgentApiError::Unrecoverable(super::util::reqwest_err_msg(&e))
+    let mut send_temperature = true;
+    let mut token_key = if is_official_openai(base_url) { "max_completion_tokens" } else { "max_tokens" };
+    let mut swapped_token_key = false;
+
+    loop {
+        let mut body = json!({ "model": model, "messages": all_messages });
+        if send_temperature {
+            body["temperature"] = json!(temperature);
         }
-    })?;
+        body[token_key] = json!(max_tokens);
+        if !tools.is_empty() {
+            body["tools"] = json!(openai_tools(tools));
+            body["tool_choice"] = json!("auto");
+        }
 
-    let status = response.status().as_u16();
-    let json: Value = crate::nodes::util::read_json_response_capped(response)
-        .await
-        .map_err(AgentApiError::Unrecoverable)?;
+        let req = crate::provider::ProviderRegistry::apply_auth(
+            record,
+            client.post(format!("{}/chat/completions", base_url))
+                .header("Content-Type", "application/json"),
+            api_key,
+        ).json(&body);
 
-    if let Some(msg) = extract_provider_error(&json, "Unknown API error") {
-        // Matches ai_prompt/openai.rs's own 429-only recoverable check.
-        return Err(if status == 429 {
-            AgentApiError::Recoverable(msg)
-        } else {
-            AgentApiError::Unrecoverable(msg)
-        });
+        let response = req.send().await.map_err(send_error)?;
+        let status = response.status().as_u16();
+        let json: Value = crate::nodes::util::read_json_response_capped(response)
+            .await
+            .map_err(|e| agent_status_error(status, e))?;
+
+        match rejected_param(status, &json) {
+            Some(RejectedParam::Temperature) if send_temperature => {
+                send_temperature = false;
+                continue;
+            }
+            Some(RejectedParam::TokenLimit) if !swapped_token_key => {
+                swapped_token_key = true;
+                token_key = if token_key == "max_tokens" { "max_completion_tokens" } else { "max_tokens" };
+                continue;
+            }
+            _ => {}
+        }
+
+        if let Some(msg) = agent_response_error(status, &json, "Unknown API error") {
+            return Err(agent_status_error(status, msg));
+        }
+        return Ok(json);
     }
+}
 
-    Ok(json)
+fn send_error(e: reqwest::Error) -> AgentApiError {
+    let msg = super::util::reqwest_err_msg(&e);
+    if super::util::is_retryable_network_error(super::util::Replay::Safe, &e) {
+        AgentApiError::Recoverable(msg)
+    } else {
+        AgentApiError::Unrecoverable(msg)
+    }
+}
+
+/// Parses the Tools field into `{name, description, parameters}` entries. It
+/// takes the documented flat shape and the OpenAI `{type, function}` shape, as
+/// JSON text or an array, and rejects anything else instead of running the
+/// agent with no tools.
+fn parse_tools(raw: &Value) -> Result<Vec<Value>, String> {
+    let list: Vec<Value> = match raw {
+        Value::Null => return Ok(Vec::new()),
+        Value::String(s) if s.trim().is_empty() => return Ok(Vec::new()),
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Array(a)) => a,
+            Ok(_) => return Err("tools must be a JSON array of tool definitions".to_string()),
+            Err(e) => return Err(format!("tools is not valid JSON: {e}")),
+        },
+        Value::Array(a) => a.clone(),
+        _ => return Err("tools must be a JSON array of tool definitions".to_string()),
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for (i, tool) in list.iter().enumerate() {
+        let def = if tool["function"].is_object() { &tool["function"] } else { tool };
+        match def["name"].as_str().map(str::trim) {
+            Some(n) if !n.is_empty() => out.push(def.clone()),
+            _ => return Err(format!("tools[{i}] needs a non-empty \"name\"")),
+        }
+    }
+    Ok(out)
+}
+
+/// The OpenAI chat-completions shape of parsed tools: each one under `function`.
+fn openai_tools(tools: &[Value]) -> Vec<Value> {
+    tools.iter().map(|t| json!({ "type": "function", "function": t })).collect()
 }
 
 // ── Anthropic agent call ──────────────────────────────────────────────────────
@@ -750,49 +733,47 @@ async fn call_anthropic_agent(
     temperature: f64,
     max_tokens: u64,
 ) -> Result<Value, AgentApiError> {
-    let body = serde_json::json!({
-        "model": model,
-        "system": system,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens
-    });
-
     let record = crate::provider::ProviderRegistry::global()
         .get("anthropic")
         .expect("anthropic always registered");
-    // registry-managed: auth header
-    let req = crate::provider::ProviderRegistry::apply_auth(
-        record,
-        client.post(format!("{}/v1/messages", base_url))
-            .header("Content-Type", "application/json"),
-        api_key,
-    ).json(&body);
+    let temperature = clamp_claude_temperature(temperature);
+    let mut send_temperature = true;
 
-    let response = req.send().await.map_err(|e| {
-        let recoverable = e.is_timeout() || e.is_connect();
-        if recoverable {
-            AgentApiError::Recoverable(super::util::reqwest_err_msg(&e))
-        } else {
-            AgentApiError::Unrecoverable(super::util::reqwest_err_msg(&e))
-        }
-    })?;
-
-    let status = response.status().as_u16();
-    let json: Value = crate::nodes::util::read_json_response_capped(response)
-        .await
-        .map_err(AgentApiError::Unrecoverable)?;
-
-    if let Some(msg) = extract_provider_error(&json, "Unknown Anthropic API error") {
-        // Matches ai_prompt/anthropic.rs's own 429-or-529 recoverable check.
-        return Err(if status == 429 || status == 529 {
-            AgentApiError::Recoverable(msg)
-        } else {
-            AgentApiError::Unrecoverable(msg)
+    loop {
+        let mut body = json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens
         });
-    }
+        if !system.trim().is_empty() {
+            body["system"] = json!(system);
+        }
+        if send_temperature {
+            body["temperature"] = json!(temperature);
+        }
 
-    Ok(json)
+        let req = crate::provider::ProviderRegistry::apply_auth(
+            record,
+            client.post(format!("{}/v1/messages", base_url))
+                .header("Content-Type", "application/json"),
+            api_key,
+        ).json(&body);
+
+        let response = req.send().await.map_err(send_error)?;
+        let status = response.status().as_u16();
+        let json: Value = crate::nodes::util::read_json_response_capped(response)
+            .await
+            .map_err(|e| agent_status_error(status, e))?;
+
+        if send_temperature && rejected_param(status, &json) == Some(RejectedParam::Temperature) {
+            send_temperature = false;
+            continue;
+        }
+        if let Some(msg) = agent_response_error(status, &json, "Unknown Anthropic API error") {
+            return Err(agent_status_error(status, msg));
+        }
+        return Ok(json);
+    }
 }
 
 #[cfg(test)]
@@ -1103,6 +1084,32 @@ mod tests {
         assert_eq!(err.code, "API_ERROR");
     }
 
+    /// A gateway failure on a model call is retry-eligible (the call creates
+    /// nothing); a plain 500 is not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_503_is_recoverable_500_is_not() {
+        let unavailable_url = spawn_status_mock(
+            "503 Service Unavailable",
+            r#"{"error":{"message":"upstream unavailable"}}"#,
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "openai", "base_url": unavailable_url
+        }))).await;
+        let err = out.error.expect("expected a NodeError");
+        assert!(err.recoverable, "503 must be recoverable, got: {:?}", err);
+        assert_eq!(err.code, "UPSTREAM_UNAVAILABLE");
+
+        let server_error_url = spawn_status_mock(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"boom"}}"#,
+        ).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "say hi", "provider": "openai", "base_url": server_error_url
+        }))).await;
+        let err = out.error.expect("expected a NodeError");
+        assert!(!err.recoverable, "500 must stay unrecoverable, got: {:?}", err);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn omitted_model_defaults_to_current_gemini_flash() {
         let (base_url, rx) = spawn_capturing_mock(
@@ -1119,5 +1126,65 @@ mod tests {
             req.request_line
         );
     }
-}
+    #[test]
+    fn tools_field_accepts_flat_and_function_shapes_and_rejects_the_rest() {
+        let flat = json!(r#"[{"name":"a","description":"d","parameters":{}}]"#);
+        let wrapped = json!([{ "type": "function", "function": { "name": "b" } }]);
+        assert_eq!(parse_tools(&flat).unwrap()[0]["name"], "a");
+        assert_eq!(parse_tools(&wrapped).unwrap()[0]["name"], "b");
+        assert!(parse_tools(&Value::Null).unwrap().is_empty());
+        assert!(parse_tools(&json!("  ")).unwrap().is_empty());
+        assert!(parse_tools(&json!("not json")).is_err());
+        assert!(parse_tools(&json!(r#"{"name":"a"}"#)).is_err());
+        assert!(parse_tools(&json!([{ "description": "no name" }])).is_err());
+    }
 
+    #[test]
+    fn openai_tools_are_wrapped_under_function() {
+        let wrapped = openai_tools(&[json!({ "name": "a" })]);
+        assert_eq!(wrapped[0]["type"], "function");
+        assert_eq!(wrapped[0]["function"]["name"], "a");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_request_is_returned_to_the_workflow_after_one_call() {
+        let tool_reply = r#"{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let (base_url, bodies) = crate::nodes::ai_prompt::spawn_sequence_mock(vec![(200, tool_reply)]).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "g", "provider": "openai", "base_url": base_url, "api_key": "k",
+            "tools": r#"[{"name":"lookup","description":"d","parameters":{"type":"object","properties":{}}}]"#
+        }))).await;
+        assert!(out.success, "{:?}", out.error);
+        let output = out.output.expect("output");
+        assert_eq!(output["awaiting_tools"], true);
+        assert_eq!(output["finished"], false);
+        assert_eq!(output["iterations"], 1);
+        assert_eq!(output["tool_calls"][0]["tool"], "lookup");
+        assert_eq!(output["tool_calls"][0]["parsed_arguments"]["q"], "x");
+        let seen = bodies.lock().expect("mock lock");
+        assert_eq!(seen.len(), 1);
+        let first: Value = serde_json::from_str(&seen[0]).expect("json");
+        assert_eq!(first["tools"][0]["type"], "function");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plain_reply_is_a_finished_answer_with_no_tool_requests() {
+        let reply = r#"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#;
+        let (base_url, _) = crate::nodes::ai_prompt::spawn_sequence_mock(vec![(200, reply)]).await;
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "g", "provider": "openai", "base_url": base_url, "api_key": "k"
+        }))).await;
+        let output = out.output.expect("output");
+        assert_eq!(output["result"], "done");
+        assert_eq!(output["finished"], true);
+        assert_eq!(output["awaiting_tools"], false);
+    }
+
+    #[tokio::test]
+    async fn malformed_tools_fail_before_any_request() {
+        let out = AiAgentNode.execute(make_input(json!({
+            "goal": "g", "provider": "openai", "tools": "not json"
+        }))).await;
+        assert_eq!(out.error.expect("error").code, "INVALID_TOOLS");
+    }
+}

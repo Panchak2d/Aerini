@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
-use super::util::traverse_dotpath;
+use super::util::{cfg_u64_opt, traverse_dotpath};
 
 /// Loop node — iterates over an array, emitting one item at a time.
 ///
@@ -175,14 +175,12 @@ impl Node for LoopNode {
             ));
         }
 
-        // Optional user cap on how many items this loop actually processes.
-        // Absent, zero, or a non-positive/non-integer value all mean "no
-        // limit" (the pre-existing default). A set value can only lower the
-        // effective bound — it's clamped to the array's own (already-capped)
-        // length, never raised past the ARRAY_TOO_LARGE check above.
-        let total = match input.input["max_iterations"].as_u64() {
-            Some(m) if m > 0 => raw_total.min(m as usize),
-            _ => raw_total,
+        // Absent, zero, or unparseable max_iterations means no limit. A set
+        // value can only lower the bound, never raise it past the array length.
+        let total = match cfg_u64_opt(&input.input["max_iterations"], "max_iterations") {
+            Ok(Some(m)) if m > 0 => raw_total.min(m as usize),
+            Ok(_) => raw_total,
+            Err(e) => return NodeOutput::failure(e),
         };
 
         if total == 0 {
@@ -210,9 +208,10 @@ impl Node for LoopNode {
             } else {
                 format!("Loop complete: processed {} items", total)
             };
+            let processed: Vec<Value> = items.into_iter().take(total).collect();
             return NodeOutput::success_with_logs(
                 json!({
-                    "items": items,
+                    "items": processed,
                     "total": total,
                     "all_results": [],
                     "done": true,
@@ -249,8 +248,7 @@ impl Node for LoopNode {
 }
 
 // ---------------------------------------------------------------------------
-// Tests cover the source_node validation requirement — not a full suite for
-// pre-existing logic.
+// Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -540,5 +538,32 @@ mod tests {
         let data = out.output.unwrap();
         assert_eq!(data["total"], json!(3));
     }
-}
 
+    #[tokio::test]
+    async fn done_output_items_are_truncated_to_total_when_max_iterations_caps() {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": [10, 20, 30, 40, 50] }));
+        let mut metadata = HashMap::new();
+        metadata.insert("__loop_test_index".to_string(), json!(2));
+        let input = NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input:        json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 2 }),
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata,
+                ..Default::default()
+            },
+        };
+        let out = LoopNode.execute(input).await;
+        assert!(out.success, "expected success, got: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["done"], json!(true));
+        assert_eq!(data["items"], json!([10, 20]));
+        assert_eq!(data["items"].as_array().unwrap().len() as u64, data["total"].as_u64().unwrap());
+    }
+}

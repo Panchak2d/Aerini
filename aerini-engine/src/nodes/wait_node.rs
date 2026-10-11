@@ -5,14 +5,16 @@ use tokio::time::{sleep, Duration};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
-use super::util::traverse_dotpath;
+use super::util::{cfg_f64_opt, traverse_dotpath};
 
 /// Wait node — pauses the workflow for a fixed duration, or checks a field once.
 ///
 /// Modes:
 ///   duration  — simple delay (like Delay node but with a timeout output port)
 ///   condition — checks `field` against `expected` once, immediately. A match leaves
-///               through `output`; a mismatch leaves through `timed_out`.
+///               through `output`; a mismatch leaves through `timed_out`. Numbers,
+///               numeric strings and `true`/`false` compare loosely (`"200"` matches
+///               `200`); a missing or null field never matches.
 ///               `poll_interval_secs` and `timeout_secs` are still accepted so saved
 ///               workflows load, but have no effect: `context.node_outputs` is fixed
 ///               when the node starts, so waiting could never change the result.
@@ -45,7 +47,7 @@ impl Node for WaitNode {
                     "description": "Dot-path into upstream node outputs to check, e.g. 'node_http.status' (condition mode)."
                 },
                 "expected": {
-                    "description": "Value the field must equal to leave through Done (condition mode)."
+                    "description": "Value the field must equal to leave through Done (condition mode). \"200\" matches 200 and \"true\" matches true; a missing or null field never matches."
                 },
                 "poll_interval_secs": {
                     "type": "number",
@@ -87,8 +89,10 @@ impl Node for WaitNode {
 
         match mode {
             "duration" => {
-                let secs = input.input["duration_secs"].as_f64().unwrap_or(5.0)
-                    .clamp(0.0, 3600.0);
+                let secs = match cfg_f64_opt(&input.input["duration_secs"], "duration_secs") {
+            Ok(v) => v.unwrap_or(5.0).clamp(0.0, 3600.0),
+            Err(e) => return NodeOutput::failure(e),
+        };
                 let ms = (secs * 1000.0) as u64;
                 sleep(Duration::from_millis(ms)).await;
                 NodeOutput::success_with_logs(
@@ -110,7 +114,7 @@ impl Node for WaitNode {
                 let context_val = json!(input.context.node_outputs);
                 let current = traverse_dotpath(&context_val, &field);
 
-                if current == expected {
+                if !current.is_null() && loosely_equal(&current, &expected) {
                     return NodeOutput::success_with_logs(
                         json!({ "waited_ms": 0, "timed_out": false, "mode": "condition", "matched_value": current }),
                         vec![format!("Condition met: {} == {:?}", field, expected)],
@@ -130,6 +134,19 @@ impl Node for WaitNode {
                 "INVALID_MODE", format!("Unknown mode: '{}'. Use 'duration' or 'condition'.", other)
             )),
         }
+    }
+}
+
+fn loosely_equal(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Number(n), Value::String(s)) | (Value::String(s), Value::Number(n)) => {
+            s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).is_some_and(|v| Some(v) == n.as_f64())
+        }
+        (Value::Bool(b), Value::String(s)) | (Value::String(s), Value::Bool(b)) => {
+            s.trim().eq_ignore_ascii_case(if *b { "true" } else { "false" })
+        }
+        _ => actual == expected,
     }
 }
 
@@ -212,5 +229,58 @@ mod tests {
             "output"
         );
     }
-}
 
+    fn condition_input(field_value: Option<Value>, expected: Value) -> NodeInput {
+        let mut input = make_input(json!({
+            "mode": "condition",
+            "field": "n.v",
+            "expected": expected
+        }));
+        if let Some(v) = field_value {
+            input.context.node_outputs = std::sync::Arc::new(std::collections::HashMap::from([
+                ("n".to_string(), json!({ "v": v })),
+            ]));
+        }
+        input
+    }
+
+    #[tokio::test]
+    async fn condition_compares_loosely_across_string_number_bool() {
+        let cases = [
+            (json!(200), json!("200")),
+            (json!("200"), json!(200)),
+            (json!(200.0), json!(200)),
+            (json!(true), json!("TRUE")),
+            (json!("false"), json!(false)),
+            (json!("ok"), json!("ok")),
+        ];
+        for (actual, expected) in cases {
+            let out = WaitNode.execute(condition_input(Some(actual.clone()), expected.clone())).await;
+            assert_eq!(out.output.as_ref().unwrap()["timed_out"], json!(false), "{actual} vs {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn condition_loose_compare_still_rejects_different_values() {
+        let cases = [
+            (json!(200), json!("201")),
+            (json!("abc"), json!(0)),
+            (json!(true), json!("no")),
+            (json!("OK"), json!("ok")),
+        ];
+        for (actual, expected) in cases {
+            let out = WaitNode.execute(condition_input(Some(actual.clone()), expected.clone())).await;
+            assert_eq!(out.output.as_ref().unwrap()["timed_out"], json!(true), "{actual} vs {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn condition_missing_field_times_out_even_when_expected_is_unset() {
+        let out = WaitNode.execute(condition_input(None, Value::Null)).await;
+        assert!(out.success);
+        assert_eq!(out.output.as_ref().unwrap()["timed_out"], json!(true));
+
+        let out = WaitNode.execute(condition_input(Some(Value::Null), Value::Null)).await;
+        assert_eq!(out.output.as_ref().unwrap()["timed_out"], json!(true));
+    }
+}

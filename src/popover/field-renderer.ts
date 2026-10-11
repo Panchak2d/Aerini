@@ -36,6 +36,11 @@ export interface PropSchema {
    *  this on its own schema; nothing node-id-specific is needed on the
    *  host side to support a new one. */
   "x-aerini-path-picker"?: "file" | "directory" | "file-or-directory";
+  /** Renders a string field as a multi-line text box. Use it for a field
+   *  holding JSON or long text whose name is not in `MULTILINE_KEYS` — the
+   *  flag is per schema, so another node's field of the same name is not
+   *  affected. */
+  "x-aerini-multiline"?: true;
 }
 
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
@@ -78,6 +83,7 @@ function formatLabel(key: string): string {
     item_var: "Item Variable", index_var: "Index Variable", chunk_size: "Chunk Size",
     input_text: "Input Text", run_at: "Run At (ISO timestamp)", interval_secs: "Interval (seconds)",
     max_messages: "Max Messages", max_iterations: "Max Iterations", session_id: "Session ID",
+    lhs: "Left Value", op: "Operator", rhs: "Right Value",
   };
   if (OVERRIDES[key]) return OVERRIDES[key];
   return key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())
@@ -696,7 +702,7 @@ export function storedValueFitsField(prop: PropSchema, value: unknown): boolean 
 }
 
 /** Render one config field. Checks: cron key → model-picker flag → AI-node
- *  base_url → path-picker flag → enum → multiline key → array (string/enum
+ *  base_url → path-picker flag → enum → multiline flag or key → array (string/enum
  *  items) → type dispatch table → text fallback. Order is load-bearing — do
  *  not reorder. */
 function renderField(
@@ -710,7 +716,7 @@ function renderField(
   if (key === "base_url" && AI_NODE_IDS.has(node.data.node_type_id)) return renderBaseUrlField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   if (prop["x-aerini-path-picker"]) return renderPathPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   if (prop.enum)            return renderEnumField(key, prop, cur, node, onChange, syncRequired);
-  if (MULTILINE_KEYS.includes(key)) return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
+  if (prop["x-aerini-multiline"] || MULTILINE_KEYS.includes(key)) return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   // Array-of-object fields (items.type === "object", e.g. Collect Files'
   // "sources") are excluded here on purpose — those get a bespoke
   // node-configs extension via CUSTOM_UI_KEYS instead, and there's no

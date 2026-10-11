@@ -11,7 +11,7 @@ use crate::node::Node;
 ///   "source_node": "node_id",        // which node's output to pull from
 ///   "mappings": [
 ///     { "from": "/body/user/name", "to": "username" },
-///     { "from": "/body/user/email", "to": "email" }
+///     { "from": "$", "to": "everything" }
 ///   ]
 /// }
 pub struct TransformNode;
@@ -36,7 +36,7 @@ impl Node for TransformNode {
                         "type": "object",
                         "required": ["from", "to"],
                         "properties": {
-                            "from": { "type": "string", "description": "JSON pointer into source" },
+                            "from": { "type": "string", "description": "JSON pointer into source, or $ for the whole source output" },
                             "to":   { "type": "string", "description": "Key in output object" }
                         }
                     }
@@ -119,14 +119,15 @@ impl Node for TransformNode {
     }
 }
 
-/// Resolve a JSON pointer like "/body/user/name" against a Value.
+/// Resolve a JSON pointer like "/body/user/name" against a Value. The token
+/// `$` (never a valid pointer start) addresses the whole value.
 fn resolve_pointer<'a>(value: &'a Value, pointer: &str) -> Option<&'a Value> {
-    if pointer.is_empty() || pointer == "/" {
+    if pointer.is_empty() || pointer == "$" {
         return Some(value);
     }
 
     let mut current = value;
-    for part in pointer.trim_start_matches('/').split('/') {
+    for part in pointer.strip_prefix('/').unwrap_or(pointer).split('/') {
         // Unescape JSON pointer tokens
         let key = part.replace("~1", "/").replace("~0", "~");
         current = match current {
@@ -170,6 +171,28 @@ mod tests {
     }
 
     // ── Happy path ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dollar_mapping_copies_the_whole_source_output_next_to_pointer_mappings() {
+        let mut outputs = HashMap::new();
+        outputs.insert("src".to_string(), json!({ "a": 1, "b": { "c": 2 } }));
+        let input = make_input(
+            json!({
+                "source_node": "src",
+                "mappings": [
+                    { "from": "$", "to": "all" },
+                    { "from": "/b/c", "to": "c" }
+                ]
+            }),
+            outputs,
+        );
+        let out = TransformNode.execute(input).await;
+        assert!(out.success);
+        assert_eq!(
+            out.output.unwrap(),
+            json!({ "all": { "a": 1, "b": { "c": 2 } }, "c": 2 })
+        );
+    }
 
     #[tokio::test]
     async fn single_mapping_from_pointer() {
@@ -378,9 +401,17 @@ mod tests {
     // ── resolve_pointer unit tests ──────────────────────────────────────────
 
     #[test]
-    fn resolve_pointer_root_returns_whole_value() {
-        let val = json!({ "a": 1 });
-        assert_eq!(resolve_pointer(&val, "/"), Some(&val));
+    fn resolve_pointer_slash_addresses_the_empty_string_key() {
+        let with_key = json!({ "": 7, "a": 1 });
+        assert_eq!(resolve_pointer(&with_key, "/"), Some(&json!(7)));
+        let without_key = json!({ "a": 1 });
+        assert_eq!(resolve_pointer(&without_key, "/"), None);
+    }
+
+    #[test]
+    fn resolve_pointer_double_leading_slash_descends_through_the_empty_key() {
+        let val = json!({ "": { "a": 1 }, "a": 2 });
+        assert_eq!(resolve_pointer(&val, "//a"), Some(&json!(1)));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::cfg_u64_opt;
 
 pub struct ScheduleNode;
 
@@ -66,7 +67,10 @@ impl Node for ScheduleNode {
 
         match mode.as_str() {
             "interval" => {
-                let secs = input.input["interval_secs"].as_u64().unwrap_or(60).max(10);
+                let secs = match cfg_u64_opt(&input.input["interval_secs"], "interval_secs") {
+            Ok(v) => v.unwrap_or(60).max(10),
+            Err(e) => return NodeOutput::failure(e),
+        };
                 NodeOutput::success(json!({
                     "triggered_at": chrono::Utc::now().to_rfc3339(),
                     "mode": "interval",

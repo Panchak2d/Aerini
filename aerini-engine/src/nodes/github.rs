@@ -166,14 +166,15 @@ impl Node for GitHubNode {
                             ))
                         }
                     }
-                    Err(e) => NodeOutput::failure(NodeError::unrecoverable(
+                    Err(e) => NodeOutput::failure(super::util::provider_error(
+                        status,
                         "PARSE_ERROR",
                         format!("HTTP {}: could not parse GitHub response: {}", status, e),
                     )),
                 }
             }
             Err(e) => {
-                super::util::http_err_output(&e)
+                super::util::http_err_output(super::util::Replay::Never, &e)
             }
         }
     }

@@ -4,16 +4,22 @@ use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_provider_error};
+use super::shared::{send_and_parse, extract_provider_error, error_output};
 
 // Gemini
 // Docs: https://ai.google.dev/api/generate-content
 // Auth: x-goog-api-key (applied via ProviderRegistry::apply_auth)
 // Endpoint: POST {base_url}/models/{model}:generateContent
 // Body: { contents: [{ role, parts: [{text}] }], systemInstruction: { parts: [{text}] }, generationConfig }
-// Response: candidates[0].content.parts[0].text
+// Response: candidates[0].content.parts[].text
 // Inline data: { "inline_data": { "mime_type": <mime>, "data": <b64> } } — same shape for images and PDFs.
 // ai.google.dev/gemini-api/docs, June 2026.
+
+/// The model id as it goes in the URL: the `models/` prefix Google's own list
+/// shows is accepted in the field and not doubled.
+pub(crate) fn gemini_model_id(model: &str) -> &str {
+    model.strip_prefix("models/").unwrap_or(model)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn call_gemini(
@@ -36,7 +42,7 @@ pub(super) async fn call_gemini(
         ));
     }
 
-    let endpoint = format!("{}/models/{}:generateContent", base_url, model);
+    let endpoint = format!("{}/models/{}:generateContent", base_url, gemini_model_id(model));
 
     let mut parts: Vec<Value> = vec![json!({ "text": prompt })];
     for (mime, data) in image_attachments {
@@ -89,18 +95,37 @@ pub(super) async fn call_gemini(
     };
 
     // Gemini error: { "error": { "code": 400, "message": "...", "status": "..." } }
-    if let Some(msg) = extract_provider_error(&resp_json, "Unknown Gemini error") {
-        return if status == 429 {
-            NodeOutput::failure(NodeError::recoverable("RATE_LIMITED", msg))
-        } else {
-            NodeOutput::failure(NodeError::unrecoverable("API_ERROR", msg))
-        };
+    if let Some(out) = error_output(status, &resp_json, "Unknown Gemini error") {
+        return out;
     }
 
-    let content = resp_json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let candidate = &resp_json["candidates"][0];
+    let content: String = candidate["content"]["parts"]
+        .as_array()
+        .map(|parts| {
+            parts.iter()
+                .filter(|p| p["thought"] != true)
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    if content.is_empty() {
+        if let Some(reason) = resp_json["promptFeedback"]["blockReason"].as_str() {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "GEMINI_NO_CONTENT",
+                format!("Gemini blocked the prompt ({reason})."),
+            ));
+        }
+        let finish = candidate["finishReason"].as_str().unwrap_or("");
+        if candidate.is_null() || (finish != "STOP" && !finish.is_empty()) {
+            let why = if candidate.is_null() { "no candidates".to_string() } else { finish.to_string() };
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "GEMINI_NO_CONTENT",
+                format!("Gemini returned no text ({why}). Check max_tokens and the safety filters."),
+            ));
+        }
+    }
 
     let model_used = resp_json["modelVersion"].as_str().unwrap_or(model).to_string();
     let input_tok  = resp_json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);

@@ -12,19 +12,7 @@ import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
 import { getCanvasColors } from "./theme-colors";
 import { getNodeDescriptor } from "./node-registry";
-
-/** #output-drawer is a `position: fixed` overlay (workspace.css) — it sits on
- * top of #canvas without shrinking #canvas's own box, so a canvas element's
- * getBoundingClientRect() alone still reports full height even while the
- * drawer visually covers the bottom of it. Returns how much of `r`, measured
- * from its own top edge, is actually unobstructed by the drawer. */
-function unobstructedHeight(r: DOMRect): number {
-  const drawer = document.getElementById("output-drawer");
-  if (!drawer || drawer.classList.contains("hidden")) return r.height;
-  const dr = drawer.getBoundingClientRect();
-  if (dr.right <= r.left || dr.left >= r.right) return r.height;
-  return Math.max(0, Math.min(r.bottom, dr.top) - r.top);
-}
+import { visibleViewport } from "./viewport";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -318,14 +306,15 @@ export class Canvas {
       this.wasEmpty = isEmpty;
     }
 
-    this.minimap.draw(W, H);
+    const vp = this.nodes.size ? visibleViewport(this.el.getBoundingClientRect()) : { width: W, height: H };
+    this.minimap.draw(vp.width, vp.height);
   }
 
   // Screen-space tooltip for a hovered node whose name is truncated.
   private drawNodeTooltips(): void {
     const ctx = this.ctx;
     const dpr = this.dpr;
-    const W   = this.el.getBoundingClientRect().width;
+    const W   = visibleViewport(this.el.getBoundingClientRect()).width;
 
     for (const n of this.nodes.values()) {
       if (!n.hovered) continue;
@@ -1016,8 +1005,9 @@ export class Canvas {
     if (!nodes.length || !this.el) return;
     const r = this.el.getBoundingClientRect();
     if (!(r.width > 0 && r.height > 0)) return;
-    const x0 = -this.panX / this.zoom, x1 = (r.width - this.panX) / this.zoom;
-    const y0 = -this.panY / this.zoom, y1 = (unobstructedHeight(r) - this.panY) / this.zoom;
+    const vp = visibleViewport(r);
+    const x0 = -this.panX / this.zoom, x1 = (vp.width  - this.panX) / this.zoom;
+    const y0 = -this.panY / this.zoom, y1 = (vp.height - this.panY) / this.zoom;
     const visible = nodes.some(n => {
       const p = n.data.position;
       return p.x + NODE_WIDTH > x0 && p.x < x1 && p.y + n.height > y0 && p.y < y1;
@@ -1053,10 +1043,13 @@ export class Canvas {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
-  placeNode(desc: NodeDescriptor, sx: number, sy: number): CanvasNode {
-    const { x, y } = this.s2w(sx, sy);
-    const r = this.el.getBoundingClientRect();
-    const atCenter = Math.abs(sx - r.width / 2) < 30 && Math.abs(sy - r.height / 2) < 30;
+  /** Omitting sx/sy places at the center of the visible (unobstructed) canvas. */
+  placeNode(desc: NodeDescriptor, sx?: number, sy?: number): CanvasNode {
+    const vp = visibleViewport(this.el.getBoundingClientRect());
+    const cx = vp.width / 2, cy = vp.height / 2;
+    const screenX = sx ?? cx, screenY = sy ?? cy;
+    const { x, y } = this.s2w(screenX, screenY);
+    const atCenter = Math.abs(screenX - cx) < 30 && Math.abs(screenY - cy) < 30;
     let px = x - NODE_WIDTH / 2, py = y - 20;
 
     if (atCenter && this.nodes.size > 0) {
@@ -1086,9 +1079,9 @@ export class Canvas {
   }
 
   centerOn(wx: number, wy: number) {
-    const r = this.el.getBoundingClientRect();
-    this.panX = r.width / 2 - wx * this.zoom;
-    this.panY = unobstructedHeight(r) / 2 - wy * this.zoom;
+    const vp = visibleViewport(this.el.getBoundingClientRect());
+    this.panX = vp.width  / 2 - wx * this.zoom;
+    this.panY = vp.height / 2 - wy * this.zoom;
   }
 
   setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) { n.status = s; if (s === "success") n.missingRequired = false; } }
@@ -1103,14 +1096,15 @@ export class Canvas {
     if (!this.nodes.size) return;
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
     for (const n of this.nodes.values()) { mnX = Math.min(mnX, n.data.position.x); mnY = Math.min(mnY, n.data.position.y); mxX = Math.max(mxX, n.data.position.x + NODE_WIDTH); mxY = Math.max(mxY, n.data.position.y + n.height); }
-    const r   = this.el.getBoundingClientRect(), pad = 80;
-    // Floor guards against the drawer covering nearly the whole canvas on a
-    // short viewport (e.g. maximized drawer at 70vh) driving the height term
-    // to zero/negative, which would invert the zoom instead of just fitting
-    // tighter than usual.
-    const h   = Math.max(unobstructedHeight(r), pad * 2 + 40);
-    this.zoom = Math.min((r.width - pad * 2) / ((mxX - mnX) || 1), (h - pad * 2) / ((mxY - mnY) || 1), 1.2);
-    this.panX = r.width / 2 - ((mnX + mxX) / 2) * this.zoom;
+    const vp  = visibleViewport(this.el.getBoundingClientRect()), pad = 80;
+    // Floor guards against the drawer or chat panel covering nearly the whole
+    // canvas on a small viewport driving a term to zero/negative, which would
+    // invert the zoom instead of just fitting tighter than usual.
+    const minSpan = pad * 2 + 40;
+    const w   = Math.max(vp.width,  minSpan);
+    const h   = Math.max(vp.height, minSpan);
+    this.zoom = Math.min((w - pad * 2) / ((mxX - mnX) || 1), (h - pad * 2) / ((mxY - mnY) || 1), 1.2);
+    this.panX = w / 2 - ((mnX + mxX) / 2) * this.zoom;
     this.panY = h / 2 - ((mnY + mxY) / 2) * this.zoom;
     // Notify zoom-hint and viewport-persistence listeners, same as onWheel
     // does after every zoom change -- fitToScreen is just another way the
@@ -1125,8 +1119,8 @@ export class Canvas {
    * cursor position (a button click has no cursor-over-canvas position to
    * anchor on). No new zoom math — mirrors the existing formula exactly. */
   private zoomAtCenter(factor: number) {
-    const r = this.el.getBoundingClientRect();
-    const cx = r.width / 2, cy = unobstructedHeight(r) / 2;
+    const vp = visibleViewport(this.el.getBoundingClientRect());
+    const cx = vp.width / 2, cy = vp.height / 2;
     const { x: wx, y: wy } = this.s2w(cx, cy);
     const nz = Math.min(this.MAX_ZOOM, Math.max(this.MIN_ZOOM, this.zoom * factor));
     this.panX = cx - wx * nz;

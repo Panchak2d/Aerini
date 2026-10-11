@@ -36,13 +36,13 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
                 "SQL_INJECTION_BLOCKED",
                 "Query contains single-quoted string literals that may indicate \
                 inline expression substitution. Use `?` placeholders and the `params` \
-                array instead. To allow raw SQL (advanced/trusted use only), set \
-                `allow_raw_sql: true` in the node config.",
+                array instead. Raw SQL can only be enabled by an admin caller (a server \
+                run with admin rights); it is not available in the desktop app.",
             ));
         }
         warn!(
             workflow_id = %input.workflow_id,
-            query = %query,
+            query_len = query.len(),
             "SQL_INJECTION_WARNING: query contains single-quoted literals with allow_raw_sql=true. \
             Ensure no untrusted input is inlined."
         );
@@ -146,6 +146,7 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
 }
 
 pub(super) fn sqlite_run_execute(conn: &Connection, query: &str, params: &[Value]) -> Result<Value, String> {
+    super::reject_path_escaping_statement(query)?;
     let sql_params = sqlite_bind_params(params)?;
     let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|b| b.as_ref()).collect();
     let rows_affected = conn.execute(query, refs.as_slice())
@@ -168,8 +169,7 @@ pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value])
     let column_names: Vec<String> = stmt.column_names()
         .iter().map(|s| s.to_string()).collect();
     let cols = column_names.clone();
-    // Collect rows into Result — errors surface instead of being silently dropped.
-    let rows: Vec<Value> = stmt
+    let mapped = stmt
         .query_map(refs.as_slice(), move |row| {
             let mut obj = serde_json::Map::new();
             for (i, col) in cols.iter().enumerate() {
@@ -189,9 +189,14 @@ pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value])
             }
             Ok(Value::Object(obj))
         })
-        .map_err(|e| format!("Query execution failed: {}", e))?
-        .collect::<Result<Vec<Value>, rusqlite::Error>>()
-        .map_err(|e| format!("Row read error: {}", e))?;
+        .map_err(|e| format!("Query execution failed: {}", e))?;
+    let mut rows: Vec<Value> = Vec::new();
+    for row in mapped {
+        if rows.len() >= super::MAX_QUERY_ROWS {
+            return Err(super::row_limit_message());
+        }
+        rows.push(row.map_err(|e| format!("Row read error: {}", e))?);
+    }
     Ok(json!({
         "rows": rows,
         "rows_affected": 0,

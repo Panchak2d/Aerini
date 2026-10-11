@@ -104,33 +104,53 @@ pub(super) async fn mysql_run_query(pool: &sqlx::MySqlPool, query: &str, params:
     for p in params {
         q = mysql_bind_one(q, p);
     }
-    match q.fetch_all(pool).await {
-        Err(e) => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
-            format!("Query failed: {}", e))),
-        Ok(rows) => {
-            use sqlx::{Column, Row};
-            let column_names: Vec<String> = rows.first()
-                .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-                .unwrap_or_default();
-            let json_rows: Vec<Value> = rows.iter().map(|row| {
-                let mut obj = serde_json::Map::new();
-                for (i, col) in row.columns().iter().enumerate() {
-                    obj.insert(col.name().to_string(), decode_mysql_value(row, i));
-                }
-                Value::Object(obj)
-            }).collect();
-            let count = json_rows.len();
-            NodeOutput::success_with_logs(
-                json!({
-                    "rows": json_rows,
-                    "rows_affected": 0,
-                    "last_insert_id": 0,
-                    "columns": column_names
-                }),
-                vec![format!("Query returned {} row(s)", count)],
-            )
+    use futures_util::StreamExt;
+    use sqlx::{Column, Row};
+    let mut stream = q.fetch(pool);
+    let mut column_names: Vec<String> = Vec::new();
+    let mut json_rows: Vec<Value> = Vec::new();
+    let mut unsupported: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    while let Some(item) = stream.next().await {
+        let row = match item {
+            Ok(r) => r,
+            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
+                format!("Query failed: {}", e))),
+        };
+        if json_rows.len() >= super::MAX_QUERY_ROWS {
+            return NodeOutput::failure(NodeError::unrecoverable("ROW_LIMIT_EXCEEDED",
+                super::row_limit_message()));
         }
+        if column_names.is_empty() {
+            column_names = row.columns().iter().map(|c| c.name().to_string()).collect();
+        }
+        let mut obj = serde_json::Map::new();
+        for (i, col) in row.columns().iter().enumerate() {
+            let value = match decode_mysql_value(&row, i) {
+                Ok(v) => v,
+                Err(type_name) => {
+                    let placeholder = Value::String(super::undecodable_placeholder(&type_name));
+                    unsupported.entry(col.name().to_string()).or_insert(type_name);
+                    placeholder
+                }
+            };
+            obj.insert(col.name().to_string(), value);
+        }
+        json_rows.push(Value::Object(obj));
     }
+    let count = json_rows.len();
+    let mut logs = vec![format!("Query returned {} row(s)", count)];
+    for (column, type_name) in &unsupported {
+        logs.push(super::unsupported_type_log(column, type_name));
+    }
+    NodeOutput::success_with_logs(
+        json!({
+            "rows": json_rows,
+            "rows_affected": 0,
+            "last_insert_id": 0,
+            "columns": column_names
+        }),
+        logs,
+    )
 }
 
 fn mysql_bind_one<'q>(
@@ -149,21 +169,32 @@ fn mysql_bind_one<'q>(
     }
 }
 
-fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> Value {
-    use sqlx::Row;
-    if let Ok(opt) = row.try_get::<Option<i64>, _>(i) {
-        return opt.map(|v| json!(v)).unwrap_or(Value::Null);
+/// `Err(type_name)` when the column holds a non-NULL value of a type this node
+/// does not decode (DECIMAL, dates and times, JSON, binary, ...).
+fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> Result<Value, String> {
+    use sqlx::{Column, Row, TypeInfo, ValueRef};
+    if let Ok(v) = row.try_get::<Option<i64>, _>(i) {
+        return Ok(v.map_or(Value::Null, |n| json!(n)));
     }
-    if let Ok(opt) = row.try_get::<Option<f64>, _>(i) {
-        return opt.map(|v| json!(v)).unwrap_or(Value::Null);
+    if let Ok(v) = row.try_get::<Option<u64>, _>(i) {
+        return Ok(v.map_or(Value::Null, |n| json!(n)));
     }
-    if let Ok(opt) = row.try_get::<Option<bool>, _>(i) {
-        return opt.map(|v| json!(v)).unwrap_or(Value::Null);
+    if let Ok(v) = row.try_get::<Option<f64>, _>(i) {
+        return Ok(v.map_or(Value::Null, |n| json!(n)));
     }
-    if let Ok(opt) = row.try_get::<Option<String>, _>(i) {
-        return opt.map(|v| json!(v)).unwrap_or(Value::Null);
+    if let Ok(v) = row.try_get::<Option<f32>, _>(i) {
+        return Ok(v.map_or(Value::Null, super::f32_json));
     }
-    Value::Null
+    if let Ok(v) = row.try_get::<Option<bool>, _>(i) {
+        return Ok(v.map_or(Value::Null, |b| json!(b)));
+    }
+    if let Ok(v) = row.try_get::<Option<String>, _>(i) {
+        return Ok(v.map_or(Value::Null, |s| json!(s)));
+    }
+    if row.try_get_raw(i).map(|r| r.is_null()).unwrap_or(false) {
+        return Ok(Value::Null);
+    }
+    Err(row.columns()[i].type_info().name().to_string())
 }
 
 #[cfg(test)]

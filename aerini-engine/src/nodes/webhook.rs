@@ -19,6 +19,7 @@ use dashmap::DashSet;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use super::util::{cfg_bool_opt, cfg_u64_opt};
 
 /// Global registry of ports currently held by active Webhook nodes.
 /// Prevents two concurrent workflows from binding the same port and producing
@@ -265,8 +266,14 @@ impl Node for WebhookNode {
         let _port_guard = scopeguard::guard((), |_| { ACTIVE_PORTS.remove(&port); });
         let method             = normalize_method(input.input["method"].as_str());
         let secret             = input.input["secret"].as_str().unwrap_or("").to_string();
-        let validate_timestamp = input.input["validate_timestamp"].as_bool().unwrap_or(false);
-        let timeout_secs       = clamp_timeout_secs(input.input["timeout_secs"].as_u64().unwrap_or(60));
+        let validate_timestamp = match cfg_bool_opt(&input.input["validate_timestamp"], "validate_timestamp") {
+            Ok(v) => v.unwrap_or(false),
+            Err(e) => return NodeOutput::failure(e),
+        };
+        let timeout_secs = match cfg_u64_opt(&input.input["timeout_secs"], "timeout_secs") {
+            Ok(v) => clamp_timeout_secs(v.unwrap_or(60)),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let (tx, rx) = oneshot::channel::<Result<Value, String>>();
 

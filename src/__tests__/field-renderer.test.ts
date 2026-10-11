@@ -465,3 +465,28 @@ describe("field-renderer — path picker", () => {
     expect(ctx.node.data.config["path"]).toBe("/already/set"); // untouched by the cancel
   });
 });
+
+describe("field-renderer — JSON text fields", () => {
+  it("normal case: an untyped field flagged x-aerini-multiline (Sheets values, Notion properties) is a multiline box that stores what is typed as text", () => {
+    for (const key of ["values", "properties"]) {
+      const node = makeNode("n1");
+      const ctx = makeCtx(node);
+      renderConfigFieldsLoop(ctx, [[key, { description: "JSON", "x-aerini-multiline": true }]], []);
+
+      const ta = ctx.body.querySelector("textarea") as HTMLTextAreaElement;
+      expect(ta, key).not.toBeNull();
+      ta.value = '[["a","b"]]';
+      ta.dispatchEvent(new Event("input"));
+      expect(node.data.config[key], key).toBe('[["a","b"]]');
+    }
+  });
+
+  it("edge case: another node's field named values or properties, without the flag, is not multiline", () => {
+    for (const key of ["values", "properties"]) {
+      const ctx = makeCtx(makeNode("n1"));
+      renderConfigFieldsLoop(ctx, [[key, { type: "string", description: "plain" }]], []);
+      expect(ctx.body.querySelector("textarea"), key).toBeNull();
+      expect(ctx.body.querySelector("input"), key).not.toBeNull();
+    }
+  });
+});

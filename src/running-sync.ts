@@ -2,7 +2,7 @@ import { NODE_IDS } from "./node-ids";
 import { canonicalJson } from "./canonical-json";
 
 interface GraphNode { id: string; node_type_id: string; config: unknown }
-interface GraphEdge { from_node: string; to_node: string }
+interface GraphEdge { from_node: string; to_node: string; on_failure?: string | null }
 
 /**
  * Identity of the part of a workflow the scheduler freezes when it starts a
@@ -15,7 +15,11 @@ export function triggerFingerprint(nodes: Iterable<GraphNode>, edges: Iterable<G
   const real = Array.from(nodes).filter(n => n.node_type_id !== NODE_IDS.NOTE);
   const ids = new Set(real.map(n => n.id));
   const hasIncoming = new Set<string>();
-  for (const e of edges) if (ids.has(e.from_node) && ids.has(e.to_node)) hasIncoming.add(e.to_node);
+  for (const e of edges) {
+    if (!ids.has(e.from_node)) continue;
+    if (ids.has(e.to_node)) hasIncoming.add(e.to_node);
+    if (e.on_failure && ids.has(e.on_failure)) hasIncoming.add(e.on_failure);
+  }
   const entry = real.find(n => !hasIncoming.has(n.id));
   return entry ? `${entry.node_type_id}:${canonicalJson(entry.config ?? {})}` : null;
 }

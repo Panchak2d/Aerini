@@ -25,17 +25,19 @@
 //     auth    https://www.tiktok.com/v2/auth/authorize/
 //     token   https://open.tiktokapis.com/v2/oauth/token/
 //     scope   video.publish
-// Google Sheets (added, Jul 2026 — developers.google.com/workspace/sheets/api/scopes):
+//   Google Sheets:
 //     auth    https://accounts.google.com/o/oauth2/v2/auth
-//     token   https://oauth2.googleapis.com/token   (Google's generic token endpoint — shared with YouTube)
+//     token   https://oauth2.googleapis.com/token   (shared with YouTube)
 //     scope   https://www.googleapis.com/auth/spreadsheets
 //
 // `google_sheets.rs` goes through this same store/refresh/full-flow pipeline
-// as a fourth platform, "google_sheets", reusing the existing Google
-// token-exchange/refresh functions (they don't hardcode a scope — only
-// `build_auth_url` does) — see `get_tokens`. This avoids a raw,
-// manually-pasted access token with no refresh path (~1h expiry, then a
-// silent 401).
+// as a fourth platform, "google_sheets", reusing the Google token-exchange and
+// refresh functions (they hardcode no scope; only `build_auth_url` does).
+//
+// Refresh policy: a refresh that fails because the provider rejected the stored
+// credential discards it and starts the interactive flow; a refresh that fails
+// for any other reason (network, 5xx, 429, unreadable reply) keeps the stored
+// tokens and returns the error, so a transient outage never costs a login.
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -131,13 +133,18 @@ async fn save_tokens(platform: &str, client_id: &str, tokens: &StoredTokens) {
         Ok(j) => j,
         Err(_) => return,
     };
-    tokio::task::spawn_blocking(move || {
-        if let Ok(entry) = keyring::Entry::new(&svc, &user) {
-            let _ = entry.set_password(&json);
-        }
+    let stored = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let entry = keyring::Entry::new(&svc, &user).map_err(|e| e.to_string())?;
+        entry.set_password(&json).map_err(|e| e.to_string())
     })
-    .await
-    .ok();
+    .await;
+    match stored {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "OAuth tokens for {platform} could not be saved to the OS keychain ({e}); the next run will have to sign in again"
+        ),
+        Err(_) => tracing::warn!("OAuth token save task for {platform} did not finish"),
+    }
 }
 
 pub async fn clear_tokens(platform: &str, client_id: &str) {
@@ -247,31 +254,53 @@ async fn refresh_tokens_youtube(
     Ok(new_tokens)
 }
 
+/// Classifies a failed token-endpoint reply. 429 and 5xx are transient; any
+/// other failure (including `invalid_grant` and `invalid_client`) means the
+/// provider rejected what was sent, so retrying cannot help.
+fn endpoint_failure(provider: &str, status: u16, body: &Value) -> NodeError {
+    let desc = body["error_description"]
+        .as_str()
+        .or_else(|| body["error"].as_str())
+        .or_else(|| body["error_message"].as_str())
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("request failed");
+    let desc: String = desc.chars().take(300).collect();
+    let message = format!("{provider} OAuth: {desc}");
+    if status == 429 || (500..600).contains(&status) {
+        NodeError::recoverable("OAUTH_TOKEN_EXCHANGE_FAILED", message)
+    } else {
+        NodeError::unrecoverable(
+            "OAUTH_TOKEN_EXCHANGE_FAILED",
+            format!("{message}. Re-authenticate in node settings."),
+        )
+    }
+}
+
+/// True when the provider refused the stored credential itself, as opposed to
+/// the refresh merely not completing.
+fn requires_reauth(e: &NodeError) -> bool {
+    matches!(e.code.as_str(), "OAUTH_NO_REFRESH_TOKEN") || (e.code == "OAUTH_TOKEN_EXCHANGE_FAILED" && !e.recoverable)
+}
+
+/// Reads a token-endpoint reply. A failure status with an unreadable body (an
+/// HTML gateway page) is still classified by its status.
+async fn read_token_reply(resp: reqwest::Response, provider: &str) -> Result<Value, NodeError> {
+    let status = resp.status();
+    let parsed = crate::nodes::util::read_json_response_capped(resp).await;
+    if !status.is_success() {
+        return Err(endpoint_failure(provider, status.as_u16(), &parsed.unwrap_or(Value::Null)));
+    }
+    parsed.map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))
+}
+
+fn expiry_after(expires_in: u64) -> u64 {
+    now_secs().saturating_add(expires_in)
+}
+
 async fn parse_google_token_response(
     resp: reqwest::Response,
 ) -> Result<StoredTokens, NodeError> {
-    let status = resp.status();
-    let body: Value = crate::nodes::util::read_json_response_capped(resp)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
-
-    if !status.is_success() {
-        let err_desc = body["error_description"]
-            .as_str()
-            .or_else(|| body["error"].as_str())
-            .unwrap_or("Token exchange failed");
-        if status.as_u16() == 401 {
-            return Err(NodeError::unrecoverable(
-                "OAUTH_INVALID_TOKEN",
-                format!("Google OAuth: {}. Re-authenticate in node settings.", err_desc),
-            ));
-        }
-        return Err(NodeError::recoverable(
-            "OAUTH_TOKEN_EXCHANGE_FAILED",
-            format!("Google OAuth error: {}", err_desc),
-        ));
-    }
-
+    let body = read_token_reply(resp, "Google").await?;
     let access_token = body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in response"))?
@@ -282,7 +311,7 @@ async fn parse_google_token_response(
     Ok(StoredTokens {
         access_token,
         refresh_token,
-        expires_at: now_secs() + expires_in,
+        expires_at: expiry_after(expires_in),
     })
 }
 
@@ -309,14 +338,7 @@ async fn exchange_code_instagram(
         .await
         .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
-    if !short_resp.status().is_success() {
-        let body: Value = crate::nodes::util::read_json_response_capped(short_resp).await.unwrap_or(Value::Null);
-        let msg = body["error_message"].as_str().unwrap_or("Token exchange failed");
-        return Err(NodeError::unrecoverable("OAUTH_TOKEN_EXCHANGE_FAILED", format!("Instagram: {}", msg)));
-    }
-    let short_body: Value = crate::nodes::util::read_json_response_capped(short_resp)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
+    let short_body = read_token_reply(short_resp, "Instagram").await?;
     let short_token = short_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram response"))?;
@@ -333,14 +355,7 @@ async fn exchange_code_instagram(
         .await
         .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
-    if !ll_resp.status().is_success() {
-        let body: Value = crate::nodes::util::read_json_response_capped(ll_resp).await.unwrap_or(Value::Null);
-        let msg = body["error"]["message"].as_str().unwrap_or("Long-lived token exchange failed");
-        return Err(NodeError::unrecoverable("OAUTH_TOKEN_EXCHANGE_FAILED", format!("Instagram: {}", msg)));
-    }
-    let ll_body: Value = crate::nodes::util::read_json_response_capped(ll_resp)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
+    let ll_body = read_token_reply(ll_resp, "Instagram").await?;
     let ll_token = ll_body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No long-lived access_token from Instagram"))?
@@ -349,7 +364,7 @@ async fn exchange_code_instagram(
     Ok(StoredTokens {
         access_token: ll_token,
         refresh_token: None,
-        expires_at: now_secs() + INSTAGRAM_LL_EXPIRY_SECS,
+        expires_at: expiry_after(INSTAGRAM_LL_EXPIRY_SECS),
     })
 }
 
@@ -364,15 +379,7 @@ async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens,
         .await
         .map_err(|e| NodeError::recoverable("OAUTH_NETWORK_ERROR", crate::nodes::util::reqwest_err_msg(&e)))?;
 
-    if !resp.status().is_success() {
-        return Err(NodeError::unrecoverable(
-            "OAUTH_REFRESH_FAILED",
-            "Instagram token refresh failed — re-authenticate in node settings.",
-        ));
-    }
-    let body: Value = crate::nodes::util::read_json_response_capped(resp)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
+    let body = read_token_reply(resp, "Instagram").await?;
     let new_token = body["access_token"]
         .as_str()
         .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in Instagram refresh response"))?
@@ -381,7 +388,7 @@ async fn refresh_tokens_instagram(stored: &StoredTokens) -> Result<StoredTokens,
     Ok(StoredTokens {
         access_token: new_token,
         refresh_token: None,
-        expires_at: now_secs() + INSTAGRAM_LL_EXPIRY_SECS,
+        expires_at: expiry_after(INSTAGRAM_LL_EXPIRY_SECS),
     })
 }
 
@@ -440,33 +447,21 @@ async fn refresh_tokens_tiktok(
 async fn parse_tiktok_token_response(
     resp: reqwest::Response,
 ) -> Result<StoredTokens, NodeError> {
-    let status = resp.status();
-    let body: Value = crate::nodes::util::read_json_response_capped(resp)
-        .await
-        .map_err(|e| NodeError::unrecoverable("OAUTH_PARSE_ERROR", e))?;
+    let status = resp.status().as_u16();
+    let body = read_token_reply(resp, "TikTok").await?;
 
-    if !status.is_success() {
-        let msg = body["error_description"]
-            .as_str()
-            .or_else(|| body["error"].as_str())
-            .unwrap_or("Token exchange failed");
-        return Err(NodeError::unrecoverable(
-            "OAUTH_TOKEN_EXCHANGE_FAILED",
-            format!("TikTok OAuth: {}", msg),
-        ));
-    }
-
-    let access_token = body["access_token"]
-        .as_str()
-        .ok_or_else(|| NodeError::unrecoverable("OAUTH_PARSE_ERROR", "No access_token in TikTok response"))?
-        .to_string();
+    // The endpoint documents its error body but not an HTTP status for it, so
+    // a reply without an access token is a failure whatever the status was.
+    let Some(access_token) = body["access_token"].as_str().filter(|t| !t.is_empty()) else {
+        return Err(endpoint_failure("TikTok", status.max(400), &body));
+    };
     let refresh_token = body["refresh_token"].as_str().map(str::to_string);
     let expires_in = body["expires_in"].as_u64().unwrap_or(TIKTOK_ACCESS_EXPIRY_SECS);
 
     Ok(StoredTokens {
-        access_token,
+        access_token: access_token.to_string(),
         refresh_token,
-        expires_at: now_secs() + expires_in,
+        expires_at: expiry_after(expires_in),
     })
 }
 
@@ -474,6 +469,8 @@ async fn parse_tiktok_token_response(
 
 fn build_auth_url(platform: &str, client_id: &str, state: &str, redirect_uri: &str) -> String {
     let redirect = pct_encode(redirect_uri);
+    let client_id = pct_encode(client_id);
+    let state = pct_encode(state);
     match platform {
         "youtube" => format!(
             "https://accounts.google.com/o/oauth2/v2/auth\
@@ -529,18 +526,48 @@ fn pct_encode(s: &str) -> String {
 
 // ── Browser launch (no new deps — std::process::Command) ─────────────────────
 
-fn open_browser(url: &str) {
+/// Opens `url` in the default browser. The Windows launcher is `rundll32`, not
+/// `cmd /C start`: cmd treats the `&` between query parameters as a command
+/// separator and would cut the URL after the first parameter.
+fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let mut command = {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no browser launcher for this platform"));
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
 }
 
 // ── Local OAuth callback listener (closed on every exit path) ─────────────
 
-/// Waits for a single OAuth callback on an already-bound `TcpListener`.
+/// Waits for the OAuth callback on an already-bound `TcpListener`.
 /// The caller owns the listener; it is dropped when this function returns.
 async fn listen_for_callback(
     listener: &TcpListener,
@@ -548,7 +575,7 @@ async fn listen_for_callback(
 ) -> Result<String, NodeError> {
     let result = timeout(
         Duration::from_secs(CALLBACK_TIMEOUT_SECS),
-        accept_one_callback(listener, expected_state),
+        accept_callback(listener, expected_state),
     )
     .await;
 
@@ -565,78 +592,112 @@ async fn listen_for_callback(
     }
 }
 
-async fn accept_one_callback(
+/// Keeps accepting connections until one carries a valid callback. Anything
+/// else (a favicon request, a port scan, a request with the wrong `state`)
+/// gets an error page and is ignored, so a stray connection can neither end
+/// the login nor be mistaken for it; only the overall timeout ends the wait.
+async fn accept_callback(
     listener: &TcpListener,
     expected_state: &str,
 ) -> Result<String, NodeError> {
-    let (mut stream, _) = listener.accept().await.map_err(|e| {
-        NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())
-    })?;
+    loop {
+        let (mut stream, _) = listener.accept().await.map_err(|e| {
+            NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string())
+        })?;
+        let request = match timeout(Duration::from_secs(5), read_request_head(&mut stream)).await {
+            Ok(Some(r)) => r,
+            _ => continue,
+        };
+        let (status_line, page, outcome) = classify_callback(&request, expected_state);
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: text/html; charset=UTF-8\r\n\
+            Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{}",
+            page.len(),
+            page
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        if let Some(result) = outcome {
+            return result;
+        }
+    }
+}
 
-    // Read until the full HTTP headers are present (terminated by \r\n\r\n).
-    // A single read() may return a partial request if the browser's TCP packets
-    // arrive in multiple chunks — which is common when the redirect URL is long
-    // (Google auth codes + User-Agent + Accept headers can exceed 4 KB).
-    // Cap at 16 KB: no legitimate OAuth redirect request needs more.
+/// Reads up to the end of the HTTP request head, capped at 16 KB (no
+/// legitimate OAuth redirect needs more). `None` when nothing usable arrived.
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
-    const MAX_HEADER_BYTES: usize = 16 * 1024;
     loop {
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| NodeError::unrecoverable("OAUTH_LISTENER_ERROR", e.to_string()))?;
+        let n = stream.read(&mut tmp).await.ok()?;
         if n == 0 {
-            break; // connection closed
+            break;
         }
         buf.extend_from_slice(&tmp[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break; // full headers received
-        }
-        if buf.len() >= MAX_HEADER_BYTES {
-            break; // safety cap
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= MAX_HEADER_BYTES {
+            break;
         }
     }
-    let request = String::from_utf8_lossy(&buf);
+    if buf.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+}
 
-    // Extract query string from "GET /callback?code=xxx&state=yyy HTTP/1.1"
-    let params = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|path| path.split_once('?').map(|(_, qs)| qs))
-        .unwrap_or("");
+type CallbackDecision = (&'static str, &'static str, Option<Result<String, NodeError>>);
 
-    let code = extract_query_param(params, "code")
-        .map(|c| c.trim_end_matches("#_").to_string()); // Instagram appends #_ to auth codes
-    let state = extract_query_param(params, "state");
+const PAGE_OK: &str = "<html><body style='font-family:sans-serif;padding:2rem'>\
+    <h2>Authentication successful</h2>\
+    <p>You can close this tab and return to Aerini.</p></body></html>";
+const PAGE_FAILED: &str = "<html><body style='font-family:sans-serif;padding:2rem'>\
+    <h2>Authentication failed</h2>\
+    <p>Return to Aerini for details and try again.</p></body></html>";
+const PAGE_NOT_FOUND: &str = "<html><body>Not found</body></html>";
 
-    // Always write the success page, even on error, so the browser isn't hung.
-    let body = "<html><body style='font-family:sans-serif;padding:2rem'>\
-        <h2>Authentication successful</h2>\
-        <p>You can close this tab and return to Aerini.</p></body></html>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\
-        Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
+/// Decides what to answer a request on the callback port and whether it ends
+/// the wait. Only a `GET /callback` whose `state` matches can end it.
+fn classify_callback(request: &str, expected_state: &str) -> CallbackDecision {
+    let mut parts = request.lines().next().unwrap_or("").split_whitespace();
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if method != "GET" || path != "/callback" {
+        return ("404 Not Found", PAGE_NOT_FOUND, None);
+    }
 
-    let state_matches = match state.as_deref() {
-        Some(s) => constant_time_eq(s, expected_state),
-        None => false,
-    };
+    let state_matches = extract_query_param(query, "state")
+        .is_some_and(|s| constant_time_eq(&s, expected_state));
     if !state_matches {
-        return Err(NodeError::unrecoverable(
-            "OAUTH_STATE_MISMATCH",
-            "OAuth state parameter mismatch — possible CSRF. Retry.",
-        ));
+        return ("400 Bad Request", PAGE_FAILED, None);
     }
 
-    code.ok_or_else(|| {
-        NodeError::unrecoverable("OAUTH_NO_CODE", "No authorization code in OAuth callback.")
-    })
+    if let Some(error) = extract_query_param(query, "error") {
+        let detail = extract_query_param(query, "error_description").unwrap_or_default();
+        let message: String = format!("The provider reported '{error}'. {detail}").chars().take(300).collect();
+        return (
+            "200 OK",
+            PAGE_FAILED,
+            Some(Err(NodeError::unrecoverable("OAUTH_DENIED", message.trim().to_string()))),
+        );
+    }
+
+    match extract_query_param(query, "code") {
+        // Instagram appends #_ to auth codes.
+        Some(code) if !code.is_empty() => (
+            "200 OK",
+            PAGE_OK,
+            Some(Ok(code.trim_end_matches("#_").to_string())),
+        ),
+        _ => (
+            "200 OK",
+            PAGE_FAILED,
+            Some(Err(NodeError::unrecoverable(
+                "OAUTH_NO_CODE",
+                "No authorization code in OAuth callback.",
+            ))),
+        ),
+    }
 }
 
 /// Constant-time equality check, used to compare the OAuth CSRF `state` value
@@ -661,20 +722,35 @@ fn extract_query_param(qs: &str, key: &str) -> Option<String> {
 }
 
 fn pct_decode(s: &str) -> String {
-    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let h1 = chars.next().unwrap_or('0');
-            let h2 = chars.next().unwrap_or('0');
-            if let Ok(b) = u8::from_str_radix(&format!("{}{}", h1, h2), 16) {
-                bytes.push(b);
+    let raw = s.as_bytes();
+    let mut bytes: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'%' => {
+                let escaped = raw
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match escaped {
+                    Some(b) => {
+                        bytes.push(b);
+                        i += 3;
+                    }
+                    None => {
+                        bytes.push(b'%');
+                        i += 1;
+                    }
+                }
             }
-        } else if c == '+' {
-            bytes.push(b' ');
-        } else {
-            let mut buf = [0u8; 4];
-            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            b'+' => {
+                bytes.push(b' ');
+                i += 1;
+            }
+            b => {
+                bytes.push(b);
+                i += 1;
+            }
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
@@ -737,9 +813,15 @@ async fn run_full_oauth_flow(
         ));
     }
 
-    open_browser(&auth_url);
+    if let Err(e) = open_browser(&auth_url) {
+        return Err(NodeError::unrecoverable(
+            "OAUTH_BROWSER_UNAVAILABLE",
+            format!(
+                "Could not open a browser on this machine ({e}). Sign in from a machine with a desktop and a browser."
+            ),
+        ));
+    }
 
-    // `listener` is RAII — dropped (closed) after listen_for_callback returns.
     let code = listen_for_callback(&listener, &state).await?;
     drop(listener);
 
@@ -758,64 +840,54 @@ async fn run_full_oauth_flow(
 /// Obtain a valid access token for the given platform credential.
 ///
 /// Flow:
-/// 1. Load stored tokens from OS keychain.
-/// 2. If access token is valid (not expired): return it.
-/// 3. If expired and refresh available: refresh under per-credential mutex.
-///    Re-read keychain after acquiring lock — another caller may have already refreshed.
-/// 4. If no stored tokens or refresh fails: run full OAuth flow (browser → callback → exchange).
+/// 1. Return the stored access token if it is not near expiry.
+/// 2. Otherwise take the per-credential lock and re-read the keychain, since
+///    another caller may have refreshed or signed in while this one waited.
+/// 3. Refresh if a stored token exists. A transient failure returns the error
+///    and keeps the stored tokens; a rejected credential discards them.
+/// 4. With no usable tokens, run the full OAuth flow (browser → callback →
+///    exchange) while still holding the lock, so concurrent callers share one
+///    sign-in instead of each opening a browser.
 pub async fn get_tokens(
     platform: &str,
     client_id: &str,
     client_secret: &str,
 ) -> Result<OAuthTokens, NodeError> {
-    let now = now_secs();
+    let fresh_enough = |t: &StoredTokens| t.expires_at > now_secs().saturating_add(EXPIRY_MARGIN_SECS);
 
-    // ── 1. Try stored tokens ──────────────────────────────────────────────────
     if let Some(stored) = load_tokens(platform, client_id).await {
-        if stored.expires_at > now + EXPIRY_MARGIN_SECS {
+        if fresh_enough(&stored) {
             return Ok(OAuthTokens { access_token: stored.access_token });
-        }
-
-        // ── 2. Token expired — refresh under mutex ───────────────────────
-        let lock = refresh_lock(platform, client_id);
-        let _guard = lock.lock().await;
-
-        // Re-read after acquiring — another waiter may have already refreshed.
-        if let Some(fresh) = load_tokens(platform, client_id).await {
-            if fresh.expires_at > now + EXPIRY_MARGIN_SECS {
-                return Ok(OAuthTokens { access_token: fresh.access_token });
-            }
-            // Still expired; this holder refreshes.
-            match refresh_tokens(platform, client_id, client_secret, &fresh).await {
-                Ok(new_tokens) => {
-                    save_tokens(platform, client_id, &new_tokens).await;
-                    return Ok(OAuthTokens { access_token: new_tokens.access_token });
-                }
-                Err(_) => {
-                    // Refresh failed — fall through to full OAuth flow.
-                    clear_tokens(platform, client_id).await;
-                }
-            }
         }
     }
 
-    // ── 3. No tokens or refresh failed — full OAuth flow ─────────────────────
+    let lock = refresh_lock(platform, client_id);
+    let _guard = lock.lock().await;
+
+    if let Some(stored) = load_tokens(platform, client_id).await {
+        if fresh_enough(&stored) {
+            return Ok(OAuthTokens { access_token: stored.access_token });
+        }
+        match refresh_tokens(platform, client_id, client_secret, &stored).await {
+            Ok(new_tokens) => {
+                save_tokens(platform, client_id, &new_tokens).await;
+                return Ok(OAuthTokens { access_token: new_tokens.access_token });
+            }
+            Err(e) if !requires_reauth(&e) => return Err(e),
+            Err(_) => clear_tokens(platform, client_id).await,
+        }
+    }
+
     let tokens = run_full_oauth_flow(platform, client_id, client_secret).await?;
     save_tokens(platform, client_id, &tokens).await;
     Ok(OAuthTokens { access_token: tokens.access_token })
 }
 
 // ── Tests ───────────────────────────────────────
-//
-// exchange_code/refresh_tokens's "google_sheets" match arms are thin
-// delegations to the pre-existing, already-network-tested youtube functions
-// (no new logic of their own) — verified by manual trace only, since this file
-// has no HTTP-mock test infrastructure to exercise them against. What *is* new
-// logic — the URL a user is told to register, and the live-port probe — is
-// unit-tested below.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn constant_time_eq_matches_for_equal_strings() {
@@ -876,5 +948,122 @@ mod tests {
             .await
             .expect("probe should succeed once 42069 is free");
         assert_eq!(preferred_port, OAUTH_PORT);
+    }
+
+    fn is_ok_with(decision: &CallbackDecision, code: &str) -> bool {
+        matches!(&decision.2, Some(Ok(c)) if c == code) && decision.0.starts_with("200")
+    }
+
+    #[test]
+    fn only_a_get_callback_with_the_right_state_can_end_the_wait() {
+        let req = |line: &str| format!("{line} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+
+        assert!(is_ok_with(&classify_callback(&req("GET /callback?code=abc%2F1&state=S1"), "S1"), "abc/1"));
+        assert!(is_ok_with(&classify_callback(&req("GET /callback?state=S1&code=x%23_"), "S1"), "x"));
+
+        let ignored = [
+            "GET /favicon.ico",
+            "POST /callback?code=abc&state=S1",
+            "GET /callback?code=abc&state=WRONG",
+            "GET /callback?code=abc",
+            "GET /callback?error=access_denied&state=WRONG",
+            "",
+        ];
+        for line in ignored {
+            let (status, _, outcome) = classify_callback(&req(line), "S1");
+            assert!(outcome.is_none(), "{line:?} must not end the wait");
+            assert!(status.starts_with('4'), "{line:?} -> {status}");
+        }
+
+        let denied = classify_callback(&req("GET /callback?error=access_denied&error_description=User+said+no&state=S1"), "S1");
+        let err = denied.2.unwrap().unwrap_err();
+        assert_eq!(err.code, "OAUTH_DENIED");
+        assert!(err.message.contains("access_denied") && err.message.contains("User said no"), "{}", err.message);
+        assert_eq!(denied.1, PAGE_FAILED, "a refused login must not show the success page");
+
+        let no_code = classify_callback(&req("GET /callback?state=S1"), "S1");
+        assert_eq!(no_code.2.unwrap().unwrap_err().code, "OAUTH_NO_CODE");
+    }
+
+    async fn send(port: u16, request: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        stream.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn stray_connections_do_not_consume_the_single_callback() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let waiting = tokio::spawn(async move { accept_callback(&listener, "S1").await });
+
+        let favicon = send(port, "GET /favicon.ico HTTP/1.1\r\n\r\n").await;
+        assert!(favicon.starts_with("HTTP/1.1 404"), "{favicon}");
+        let forged = send(port, "GET /callback?code=evil&state=guess HTTP/1.1\r\n\r\n").await;
+        assert!(forged.starts_with("HTTP/1.1 400") && forged.contains("Authentication failed"), "{forged}");
+        let silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        drop(silent);
+        assert!(!waiting.is_finished(), "the wait must survive stray requests");
+
+        let real = send(port, "GET /callback?code=GOOD&state=S1 HTTP/1.1\r\n\r\n").await;
+        assert!(real.starts_with("HTTP/1.1 200") && real.contains("Authentication successful"), "{real}");
+        assert_eq!(waiting.await.unwrap().unwrap(), "GOOD");
+    }
+
+    #[test]
+    fn token_endpoint_failures_are_classified_by_status_and_reauth_is_narrow() {
+        let body = json!({ "error": "invalid_grant", "error_description": "Token has been revoked." });
+        let cases = [
+            (400, true),
+            (401, true),
+            (403, true),
+            (429, false),
+            (500, false),
+            (503, false),
+        ];
+        for (status, reauth) in cases {
+            let e = endpoint_failure("Google", status, &body);
+            assert_eq!(e.recoverable, !reauth, "status {status}");
+            assert_eq!(requires_reauth(&e), reauth, "status {status}");
+            assert!(e.message.contains("Token has been revoked."));
+        }
+        assert!(endpoint_failure("Google", 400, &body).message.contains("Re-authenticate"));
+        assert!(endpoint_failure("Instagram", 502, &Value::Null).message.contains("request failed"));
+        let ig = json!({ "error": { "message": "Invalid OAuth access token", "code": 190 } });
+        assert!(endpoint_failure("Instagram", 400, &ig).message.contains("Invalid OAuth access token"));
+
+        for code in ["OAUTH_PARSE_ERROR", "OAUTH_NETWORK_ERROR", "OAUTH_LISTENER_ERROR"] {
+            assert!(!requires_reauth(&NodeError::unrecoverable(code, "x")), "{code} must keep the stored tokens");
+        }
+        assert!(requires_reauth(&NodeError::unrecoverable("OAUTH_NO_REFRESH_TOKEN", "x")));
+    }
+
+    #[test]
+    fn percent_decoding_keeps_malformed_escapes_literal() {
+        let cases = [
+            ("a%2Fb", "a/b"),
+            ("a+b", "a b"),
+            ("100%", "100%"),
+            ("%zz", "%zz"),
+            ("%4", "%4"),
+            ("%E2%9C%93", "\u{2713}"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(pct_decode(input), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn auth_url_encodes_client_id_so_it_cannot_inject_parameters() {
+        let url = build_auth_url("youtube", "id&scope=evil#frag", "s", "http://127.0.0.1:1/callback");
+        assert!(url.contains("client_id=id%26scope%3Devil%23frag&"), "{url}");
+        assert_eq!(url.matches("scope=").count(), 1);
+    }
+
+    #[test]
+    fn expiry_arithmetic_saturates_on_hostile_lifetimes() {
+        assert_eq!(expiry_after(u64::MAX), u64::MAX);
     }
 }

@@ -750,7 +750,7 @@ fn claim_webhook_port(
 pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
     let has_incoming: std::collections::HashSet<&str> = workflow.edges
         .iter()
-        .map(|e| e.to_node.as_str())
+        .flat_map(|e| std::iter::once(e.to_node.as_str()).chain(e.on_failure.as_deref()))
         .collect();
 
     let entry_nodes: Vec<_> = workflow.nodes.iter()
@@ -986,5 +986,49 @@ mod tests {
             None,
             "a claim rejected by the OS-level probe must not insert into the registry"
         );
+    }
+    #[test]
+    fn on_failure_target_listed_first_is_not_mistaken_for_the_trigger() {
+        use crate::migration::CURRENT_VERSION;
+        use crate::model::{NodeType, Workflow, WorkflowEdge, WorkflowNode};
+
+        let node = |id: &str, type_id: &str| WorkflowNode {
+            id: id.to_string(),
+            node_type_id: type_id.to_string(),
+            node_type: NodeType::Utility,
+            name: id.to_string(),
+            config: serde_json::json!({}),
+            credentials: HashMap::new(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        };
+        let wf = Workflow {
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf".to_string(),
+            name: "wf".to_string(),
+            description: String::new(),
+            nodes: vec![node("recovery", "http"), node("start", "manual_trigger"), node("work", "http")],
+            edges: vec![WorkflowEdge {
+                id: "e1".to_string(),
+                from_node: "start".to_string(),
+                from_port: "output".to_string(),
+                to_node: "work".to_string(),
+                to_port: "input".to_string(),
+                condition: None,
+                on_success: None,
+                on_failure: Some("recovery".to_string()),
+            }],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+        assert!(matches!(extract_trigger(&wf), Ok(TriggerKind::Manual)));
     }
 }

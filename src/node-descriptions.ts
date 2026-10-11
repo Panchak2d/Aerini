@@ -8,5 +8,4 @@
  */
 export const NODE_DESCRIPTION_FALLBACK: Readonly<Record<string, string>> = {
   note:           "A text annotation on the canvas. No inputs or outputs — does not affect workflow execution.",
-  transform_data: "Apply a series of transformation steps to reshape or filter an object or array.",
 };

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::process::Command;
@@ -8,6 +8,26 @@ use tokio::process::Command;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+
+use super::shell::failure_stderr;
+use super::util::{cfg_u64_opt, drain_capped, kill_group_on_drop, FloodLimit, Keep, OUTPUT_CAP_BYTES, OUTPUT_FLOOD_BYTES};
+
+#[cfg(target_os = "linux")]
+const DEFAULT_CODE_MEMORY_MB: u64 = 512;
+#[cfg(target_os = "linux")]
+const MAX_CODE_MEMORY_MB: u64 = 16_384;
+/// Address space Node.js reserves at startup regardless of what the script uses.
+/// Node 24 aborts at startup with less than about 1.1 GB of RLIMIT_AS and peaks near 1.3 GB.
+#[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
+const NODE_ADDRESS_SPACE_OVERHEAD_MB: u64 = 2048;
+/// Not measured on aarch64. RLIMIT_AS caps address space, not memory in use, so too much
+/// headroom only loosens the cap on runaway allocations while too little aborts every
+/// sandboxed Code node at startup; hence double the x86_64 figure.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const NODE_ADDRESS_SPACE_OVERHEAD_MB: u64 = 4096;
+
+/// How much of the end of stderr is kept; failure messages show less than this.
+const STDERR_KEEP_BYTES: usize = 64 * 1024;
 
 static NODE_BIN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 /// Guards the macOS partial-sandbox warning so it fires once per process, not once per execution.
@@ -93,6 +113,12 @@ export async function resolve(specifier, context, nextResolve) {
 /// call `process.binding('spawn_sync').spawn(...)` to execute arbitrary OS commands with
 /// the host process's own privileges. No sandboxed workflow snippet has a legitimate use
 /// for any of the three, so they are removed unconditionally rather than name-filtered.
+/// Node writes to a pipe asynchronously on Unix: a write the pipe cannot take is queued in
+/// Node's memory, and anything still queued is lost when the script calls `process.exit()`. Blocking mode
+/// makes each write wait for this process to read it, so a script cannot grow Node's memory faster than it
+/// is drained and a failing script's last stderr lines always arrive.
+const STDIO_BLOCKING: &str = "for (const s of [process.stdout, process.stderr]) { try { s._handle?.setBlocking?.(true); } catch {} }\n";
+
 const SANDBOX_GLOBALS_HARDENING: &str = r#"delete globalThis.fetch;
 delete globalThis.WebSocket;
 delete globalThis.XMLHttpRequest;
@@ -160,7 +186,7 @@ impl Node for CodeNode {
                 },
                 "timeout_secs": {
                     "type": "number",
-                    "description": "Max execution time in seconds (default 10, max 60)"
+                    "description": "Max execution time in seconds (1 to 60, default 10)"
                 }
             }
         })
@@ -171,7 +197,8 @@ impl Node for CodeNode {
             "type": "object",
             "properties": {
                 "result":           { "description": "Value passed to output()" },
-                "stdout":           { "type": "string" },
+                "stdout":           { "type": "string", "description": "Text the code printed, such as console.log output" },
+                "truncated":        { "type": "boolean", "description": "True when printed output exceeded 10 MB and only the last 10 MB is kept" },
                 "duration_ms":      { "type": "number" },
                 "_sandbox_partial": {
                     "type": "boolean",
@@ -194,6 +221,13 @@ impl Node for CodeNode {
     }
 
     async fn execute(&self, input: NodeInput) -> NodeOutput {
+        self.execute_with(input, None).await
+    }
+}
+
+impl CodeNode {
+    /// `node_bin` overrides the bundled-runtime lookup; tests use it to supply a Node.js binary.
+    async fn execute_with(&self, input: NodeInput, node_bin: Option<&Path>) -> NodeOutput {
         if input.context.metadata.get("__code_disabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
@@ -212,8 +246,10 @@ impl Node for CodeNode {
             ),
         };
 
-        let timeout_secs = input.input["timeout_secs"]
-            .as_u64().unwrap_or(10).min(60);
+        let timeout_secs = match cfg_u64_opt(&input.input["timeout_secs"], "timeout_secs") {
+            Ok(v) => v.unwrap_or(10).clamp(1, 60),
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let sandbox_enabled = input.context.metadata.get("__code_sandbox")
             .and_then(|v| v.as_bool())
@@ -246,13 +282,14 @@ impl Node for CodeNode {
         let empty_obj = serde_json::Value::Object(Default::default());
         let direct_input = input.context.metadata.get("__direct_input").unwrap_or(&empty_obj);
         let name_outputs = input.context.metadata.get("__node_name_outputs").unwrap_or(&empty_obj);
+        let marker = format!("__AERINI_RESULT_{}__", uuid::Uuid::new_v4().simple());
         let wrapper = format!(r#"
 // input   — output of the directly-wired upstream node.
 //   HTTP Request: {{ status, body, headers }}   e.g. input.body.id
 //   Schedule:     {{ triggered_at, mode, interval_secs }}
 // context — all upstream outputs keyed by node name.
 //   e.g. context["HTTP Request"].body.id
-{}const input   = {};
+{}{}const input   = {};
 const context = {};
 let   __result  = undefined;
 
@@ -262,12 +299,13 @@ function output(v) {{ __result = v; }}
 (async () => {{
   {}
 }})().then(() => {{
-  process.stdout.write(JSON.stringify({{ ok: true, result: __result ?? null }}));
+  process.stdout.write("\n{marker}" + JSON.stringify({{ ok: true, result: __result ?? null }}) + "\n");
 }}).catch(err => {{
-  process.stdout.write(JSON.stringify({{ ok: false, error: err.message ?? String(err) }}));
+  process.stdout.write("\n{marker}" + JSON.stringify({{ ok: false, error: err?.message ?? String(err) }}) + "\n");
 }});
 "#,
             sandbox_globals_hardening,
+            STDIO_BLOCKING,
             serde_json::to_string(direct_input).unwrap_or_else(|_| "{}".to_string()),
             serde_json::to_string(name_outputs).unwrap_or_else(|_| "{}".to_string()),
             code,
@@ -276,11 +314,14 @@ function output(v) {{ __result = v; }}
         let start = std::time::Instant::now();
 
         // Resolve the bundled node binary once per process lifetime; cached via OnceLock.
-        let node_bin = match NODE_BIN.get_or_init(resolve_node_bin) {
-            Ok(path) => path,
-            Err(msg) => return NodeOutput::failure(
-                NodeError::unrecoverable("NODE_NOT_FOUND", msg.clone())
-            ),
+        let node_bin = match node_bin {
+            Some(path) => path,
+            None => match NODE_BIN.get_or_init(resolve_node_bin) {
+                Ok(path) => path.as_path(),
+                Err(msg) => return NodeOutput::failure(
+                    NodeError::unrecoverable("NODE_NOT_FOUND", msg.clone())
+                ),
+            },
         };
 
         // In sandbox mode, write the loader to a temp file.
@@ -353,19 +394,16 @@ function output(v) {{ __result = v; }}
            .stderr(Stdio::piped());
 
         // Apply OS-level resource limits on Linux in sandbox mode.
-        // RLIMIT_AS (virtual address space): configurable via __code_max_memory_mb (default 512 MB).
-        // RLIMIT_CPU (CPU seconds): timeout_secs + 5 — backstop for busy-loops.
+        // RLIMIT_AS: see sandbox_address_space_limit. RLIMIT_CPU: timeout_secs + 5, a backstop for busy-loops.
         // Safety: pre_exec runs between fork() and exec(). setrlimit(2) is listed
         // in POSIX as async-signal-safe. No allocations are made in the closure.
         #[cfg(target_os = "linux")]
         let spawn_result = if sandbox_enabled {
             let cpu_limit = (timeout_secs + 5) as libc::rlim_t;
-            let mem_limit = input.context.metadata.get("__code_max_memory_mb")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(512)
-                .min(16_384) // cap at 16 TB — prevents u64 overflow on * 1024 * 1024
-                * 1024 * 1024;
-            let mem_limit = mem_limit as libc::rlim_t;
+            let configured_mb = input.context.metadata.get("__code_max_memory_mb")
+                .and_then(|v| v.as_u64());
+            let mem_limit = libc::rlim_t::try_from(sandbox_address_space_limit(configured_mb))
+                .unwrap_or(libc::rlim_t::MAX);
             unsafe {
                 cmd.pre_exec(move || {
                     let r1 = libc::setrlimit(libc::RLIMIT_CPU, &libc::rlimit {
@@ -444,50 +482,56 @@ function output(v) {{ __result = v; }}
                 )
             ),
         };
-        let group_guard = super::util::kill_group_on_drop(child.id());
+        let group_guard = kill_group_on_drop(child.id());
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(wrapper.as_bytes()).await;
         }
 
-        const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MB per stream
+        // The result sits at the end of stdout, so the tail is kept when printed output overflows the cap.
+        // stderr only ever feeds failure messages, which show its last few KB.
+        let flood = FloodLimit::new(OUTPUT_FLOOD_BYTES);
         let mut stdout_task = tokio::spawn({
-            use tokio::io::AsyncReadExt;
-            let mut pipe = child.stdout.take();
-            async move {
-                let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe {
-                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
-                }
-                buf
-            }
+            let (reader, flood) = (child.stdout.take(), flood.clone());
+            async move { drain_capped(reader, OUTPUT_CAP_BYTES, Keep::Tail, &flood).await }
         });
         let mut stderr_task = tokio::spawn({
-            use tokio::io::AsyncReadExt;
-            let mut pipe = child.stderr.take();
-            async move {
-                let mut buf = Vec::new();
-                if let Some(ref mut h) = pipe {
-                    let _ = h.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).await;
-                }
-                buf
-            }
+            let (reader, flood) = (child.stderr.take(), flood.clone());
+            async move { drain_capped(reader, STDERR_KEEP_BYTES, Keep::Tail, &flood).await }
         });
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             async {
-                let status = child.wait().await;
+                let status = tokio::select! {
+                    s = child.wait() => s,
+                    _ = flood.tripped() => return None,
+                };
                 let stdout_bytes = (&mut stdout_task).await.unwrap_or_default();
                 let stderr_bytes = (&mut stderr_task).await.unwrap_or_default();
-                (status, stdout_bytes, stderr_bytes)
+                if stdout_bytes.flooded || stderr_bytes.flooded { return None; }
+                Some((status, stdout_bytes, stderr_bytes))
             },
         ).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
+            Ok(None) => {
+                drop(group_guard);
+                let _ = child.kill().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                NodeOutput::failure(NodeError::unrecoverable(
+                    "OUTPUT_FLOOD",
+                    format!(
+                        "Code wrote more than {} MB to one output stream and was stopped. \
+                         Print less, or return the data with output().",
+                        OUTPUT_FLOOD_BYTES / (1024 * 1024)
+                    ),
+                ))
+            }
             Err(_) => {
                 drop(group_guard);
                 let _ = child.kill().await;
@@ -497,28 +541,37 @@ function output(v) {{ __result = v; }}
                     NodeError::unrecoverable("TIMEOUT", format!("Code exceeded {}s timeout", timeout_secs))
                 )
             }
-            Ok((Err(e), _, _)) => {
+            Ok(Some((Err(e), _, _))) => {
                 group_guard.disarm();
                 stdout_task.abort();
                 stderr_task.abort();
                 NodeOutput::failure(NodeError::unrecoverable("EXEC_ERROR", e.to_string()))
             }
-            Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
+            Ok(Some((Ok(status), stdout_cap, stderr_cap))) => {
                 group_guard.disarm();
-                let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-                let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+                let stdout = String::from_utf8_lossy(&stdout_cap.bytes).to_string();
+                let stderr = failure_stderr(String::from_utf8_lossy(&stderr_cap.bytes).trim());
 
-                if !status.success() && stdout.is_empty() {
-                    return NodeOutput::failure(
+                let Some((printed, envelope)) = split_result(&stdout, &marker) else {
+                    return NodeOutput::failure(if !status.success() {
                         NodeError::unrecoverable("RUNTIME_ERROR",
                             if stderr.is_empty() { "Code exited with non-zero status".to_string() }
                             else { stderr }
                         )
-                    );
-                }
+                    } else if stdout_cap.truncated {
+                        NodeError::unrecoverable("RESULT_TOO_LARGE",
+                            "The result and printed output together exceeded 10 MB, so the result was cut off. \
+                             Return a smaller value from output() or print less."
+                        )
+                    } else {
+                        NodeError::unrecoverable("NO_RESULT",
+                            "Code ended without returning a result. If it calls process.exit(), remove that call: \
+                             output(value) is only delivered when the script finishes on its own."
+                        )
+                    });
+                };
 
-                // Parse the JSON output written by the wrapper
-                match serde_json::from_str::<Value>(stdout.trim()) {
+                match serde_json::from_str::<Value>(envelope) {
                     Err(_) => NodeOutput::failure(
                         NodeError::unrecoverable("PARSE_ERROR",
                             format!("Could not parse code output. stderr: {}", stderr)
@@ -533,7 +586,7 @@ function output(v) {{ __result = v; }}
                                 || raw_msg.contains("ERR_REQUIRE_ESM")
                             {
                                 format!(
-                                    "{}\\n\\nNote: Code nodes run as ES modules. \
+                                    "{}\n\nNote: Code nodes run as ES modules. \
                                      Use `import` instead of `require()`. \
                                      Example: import fs from 'fs/promises'; \
                                      Only built-in Node.js modules are available — \
@@ -550,7 +603,8 @@ function output(v) {{ __result = v; }}
                         let result_val = parsed["result"].clone();
                         let mut out = json!({
                             "result":      result_val,
-                            "stdout":      stdout,
+                            "stdout":      printed,
+                            "truncated":   stdout_cap.truncated,
                             "duration_ms": duration_ms
                         });
                         if sandbox_partial {
@@ -565,6 +619,23 @@ function output(v) {{ __result = v; }}
             }
         }
     }
+}
+
+/// Splits captured stdout at the last result marker into the text the code printed
+/// and the JSON envelope that follows. `None` when the marker is absent.
+fn split_result<'a>(stdout: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
+    let at = stdout.rfind(marker)?;
+    let printed = &stdout[..at];
+    let printed = printed.strip_suffix('\n').unwrap_or(printed);
+    Some((printed, stdout[at + marker.len()..].trim()))
+}
+
+/// RLIMIT_AS for a sandboxed Code node: the memory the script may use plus the
+/// address space Node.js itself reserves at startup.
+#[cfg(target_os = "linux")]
+fn sandbox_address_space_limit(configured_mb: Option<u64>) -> u64 {
+    let script_mb = configured_mb.unwrap_or(DEFAULT_CODE_MEMORY_MB).min(MAX_CODE_MEMORY_MB);
+    (script_mb + NODE_ADDRESS_SPACE_OVERHEAD_MB) * 1024 * 1024
 }
 
 // ── Node binary resolution ───────────────────────────────────────────────────────
@@ -807,5 +878,150 @@ mod tests {
         assert!(!out.success);
         let err = out.error.expect("expected NodeError");
         assert_eq!(err.code, "MISSING_CODE");
+    }
+
+    macro_rules! require_node {
+        () => {
+            match test_node_bin() {
+                Some(path) => path,
+                None => {
+                    eprintln!("skipped: no Node.js binary (set AERINI_NODE_BIN)");
+                    return;
+                }
+            }
+        };
+    }
+
+    fn test_node_bin() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("AERINI_NODE_BIN").filter(|p| !p.is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+        std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+            .then(|| PathBuf::from("node"))
+    }
+
+    async fn run_code(node: &Path, config: Value, metadata: HashMap<String, Value>) -> NodeOutput {
+        let input = NodeInput {
+            resolved_credentials: HashMap::new(),
+            cancel_token: None,
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: config,
+            context: ExecutionContext { metadata, ..Default::default() },
+        };
+        CodeNode.execute_with(input, Some(node)).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failure_message_shows_a_redacted_tail_of_stderr_not_all_of_it() {
+        let node = require_node!();
+        let code = "console.error('x'.repeat(300000)); \
+                    console.error('cannot reach postgres://app:hunter2@db/prod'); \
+                    console.error('real error'); process.exit(1);";
+        let out = run_code(&node, json!({ "code": code }), HashMap::new()).await;
+        let err = out.error.expect("expected NodeError");
+        assert_eq!(err.code, "RUNTIME_ERROR");
+        assert!(err.message.len() < 5_000, "len {}", err.message.len());
+        assert!(!err.message.contains("hunter2"), "got: {}", err.message);
+        assert!(err.message.contains("[REDACTED]"), "got: {}", err.message);
+        assert!(err.message.trim_end().ends_with("real error"), "got: {}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_output_is_stopped_with_output_flood_before_the_timeout() {
+        let node = require_node!();
+        let started = std::time::Instant::now();
+        let code = "const chunk = 'x'.repeat(65536); while (true) process.stdout.write(chunk);";
+        let out = run_code(&node, json!({ "code": code, "timeout_secs": 60 }), HashMap::new()).await;
+        let err = out.error.expect("expected NodeError");
+        assert_eq!(err.code, "OUTPUT_FLOOD", "{}", err.message);
+        assert!(started.elapsed() < std::time::Duration::from_secs(45));
+    }
+
+    #[tokio::test]
+    async fn printing_before_and_after_output_keeps_the_result_and_the_printed_text() {
+        let node = require_node!();
+        let code = "console.log('before'); output({ a: 1 }); console.log('after');";
+        let out = run_code(&node, json!({ "code": code }), HashMap::new()).await;
+        assert!(out.success, "{:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!(o["result"], json!({ "a": 1 }));
+        assert_eq!(o["stdout"], "before\nafter\n");
+        assert_eq!(o["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn exiting_before_the_script_ends_reports_no_result() {
+        let node = require_node!();
+        let out = run_code(&node, json!({ "code": "output(1); process.exit(0);" }), HashMap::new()).await;
+        let err = out.error.expect("expected NodeError");
+        assert_eq!(err.code, "NO_RESULT");
+        assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn printed_output_beyond_the_cap_keeps_the_result_and_flags_truncated() {
+        let node = require_node!();
+        let code = "console.log('x'.repeat(11 * 1024 * 1024)); output(7);";
+        let out = run_code(&node, json!({ "code": code, "timeout_secs": 30 }), HashMap::new()).await;
+        assert!(out.success, "{:?}", out.error);
+        let o = out.output.unwrap();
+        assert_eq!(o["result"], 7);
+        assert_eq!(o["truncated"], true);
+        assert!(o["stdout"].as_str().unwrap().len() <= OUTPUT_CAP_BYTES);
+    }
+
+    #[tokio::test]
+    async fn result_beyond_the_cap_reports_result_too_large() {
+        let node = require_node!();
+        let code = "output('x'.repeat(11 * 1024 * 1024));";
+        let out = run_code(&node, json!({ "code": code, "timeout_secs": 30 }), HashMap::new()).await;
+        assert_eq!(out.error.map(|e| e.code), Some("RESULT_TOO_LARGE".to_string()));
+    }
+
+    #[tokio::test]
+    async fn thrown_values_become_runtime_errors() {
+        let node = require_node!();
+        for (code, want) in [("throw new Error('boom')", "boom"), ("throw null", "null")] {
+            let out = run_code(&node, json!({ "code": code }), HashMap::new()).await;
+            let err = out.error.expect("expected NodeError");
+            assert_eq!(err.code, "RUNTIME_ERROR", "{code}");
+            assert_eq!(err.message, want, "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_of_zero_is_raised_to_one_second() {
+        let node = require_node!();
+        let code = "await new Promise(r => setTimeout(r, 100)); output(1);";
+        let out = run_code(&node, json!({ "code": code, "timeout_secs": 0 }), HashMap::new()).await;
+        assert!(out.success, "{:?}", out.error);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_node_starts_within_the_address_space_limit() {
+        let node = require_node!();
+        let mut metadata = HashMap::new();
+        metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
+        let out = run_code(&node, json!({ "code": "output(1 + 1);" }), metadata).await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(out.output.unwrap()["result"], 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_address_space_limit_adds_runtime_overhead_and_caps_configured_memory() {
+        let mib = 1024 * 1024;
+        let overhead: u64 = if cfg!(target_arch = "aarch64") { 4096 } else { 2048 };
+        assert_eq!(sandbox_address_space_limit(None), (512 + overhead) * mib);
+        assert_eq!(sandbox_address_space_limit(Some(100)), (100 + overhead) * mib);
+        assert_eq!(sandbox_address_space_limit(Some(u64::MAX)), (16_384 + overhead) * mib);
     }
 }

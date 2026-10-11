@@ -14,12 +14,13 @@ use super::shared::{network_err, strip_data_uri_prefix};
 // Optional HTTP Basic auth: URL-embedded credentials (user:pass@host) OR
 // separate username/password config fields (explicit fields take priority).
 // Response images may carry a data: URI prefix -- stripped via strip_data_uri_prefix.
+// With batch_size > 1 and the return_grid option on (the default), the response
+// lists the grid image first; info.index_of_first_image says where the real
+// images start, and the entries before it are skipped.
 // timeout_secs overrides the shared_ai_client()'s 120s default for this request
 // only (RequestBuilder::timeout supersedes ClientBuilder::timeout, reqwest VERIFIED
 // behavior) -- local batch generation can legitimately exceed 120s.
 
-// Bundles gen_a1111's per-request fields -- clippy::too_many_arguments
-// (max 7) was exceeded (12 args).
 pub(super) struct A1111Params {
     pub(super) base_url:        String,
     pub(super) prompt:          String,
@@ -32,6 +33,17 @@ pub(super) struct A1111Params {
     pub(super) username:        Option<String>,
     pub(super) password:        Option<String>,
     pub(super) timeout_secs:    u64,
+}
+
+fn first_real_image_index(json: &Value, images_len: usize) -> usize {
+    let info = match &json["info"] {
+        Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    match info["index_of_first_image"].as_u64() {
+        Some(i) if (i as usize) < images_len => i as usize,
+        _ => 0,
+    }
 }
 
 pub(super) async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOutput {
@@ -92,7 +104,7 @@ pub(super) async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOu
     let status = resp.status().as_u16();
     let json: Value = match read_json_response_capped(resp).await {
         Ok(v)  => v,
-        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("PARSE_ERROR", e)),
+        Err(e) => return NodeOutput::failure(crate::nodes::util::provider_error(status, "PARSE_ERROR", e)),
     };
 
     if status >= 400 {
@@ -120,6 +132,12 @@ pub(super) async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOu
 
     let mut files: Vec<Value>  = Vec::new();
     let mut logs:  Vec<String> = Vec::new();
+
+    let first = first_real_image_index(&json, images.len());
+    if first > 0 {
+        logs.push(format!("A1111 grid image skipped ({} entries before the first real image)", first));
+    }
+    let images = &images[first..];
 
     for (i, item) in images.iter().enumerate() {
         match item.as_str() {
@@ -152,4 +170,25 @@ pub(super) async fn gen_a1111(client: reqwest::Client, p: A1111Params) -> NodeOu
         json!({ "files": files, "count": files.len(), "source": "a1111" }),
         logs,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_entries_before_index_of_first_image_are_skipped() {
+        let json = json!({ "images": ["grid", "a", "b"], "info": "{\"index_of_first_image\": 1}" });
+        assert_eq!(first_real_image_index(&json, 3), 1);
+        let as_object = json!({ "images": ["grid", "a"], "info": { "index_of_first_image": 1 } });
+        assert_eq!(first_real_image_index(&as_object, 2), 1);
+    }
+
+    #[test]
+    fn missing_unreadable_or_out_of_range_info_skips_nothing() {
+        for info in [json!(null), json!("not json"), json!("{}"), json!("{\"index_of_first_image\": 0}"), json!("{\"index_of_first_image\": 5}")] {
+            let json = json!({ "images": ["a", "b"], "info": info });
+            assert_eq!(first_real_image_index(&json, 2), 0, "{}", json["info"]);
+        }
+    }
 }
