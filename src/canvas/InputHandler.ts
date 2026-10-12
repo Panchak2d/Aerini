@@ -36,6 +36,8 @@ export class InputHandler {
   reconnEdge:  { conn: Connector } | null = null;
   portPress:   PortPress | null = null;
   moveGroup:   Connector[] | null = null;
+  /** The wire whose delete button is pressed and awaiting release. */
+  wireDeletePress: Connector | null = null;
 
   isCutting = false;
   cutPath: { x: number; y: number }[] = [];
@@ -110,6 +112,7 @@ export class InputHandler {
     }
     if (e.key === "Escape") {
       this.portPress = null; this.moveGroup = null;
+      this.wireDeletePress = null; c.deleteHandleHot = false;
       this.reconnEdge = null;
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       c.pendingInsert = null; c.insertGhost = null;
@@ -174,9 +177,13 @@ export class InputHandler {
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);
 
+    this.wireDeletePress = null;
     if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; c.el.style.cursor = "crosshair"; return; }
     if (e.button === 1) { this.startPan(sx, sy); return; }
     if (e.button !== 0) return;
+
+    const deleteTarget = c.deleteHandleAt(wx, wy);
+    if (deleteTarget) { this.wireDeletePress = deleteTarget; return; }
 
     // Pressing a port only arms it; nothing happens until the pointer travels
     // PORT_DRAG_THRESHOLD, and a release before that is a click.
@@ -277,10 +284,34 @@ export class InputHandler {
     return true;
   }
 
+  /**
+   * Hovers the wire under the pointer, unless a node is there. Hover is held
+   * while the pointer is on the visible delete button, which can sit outside
+   * the wire's own hit tolerance.
+   */
+  private updateWireHover(wx: number, wy: number): void {
+    const c = this.canvas;
+    if (c.deleteHandleAt(wx, wy)) return;
+    let next: Connector | null = null;
+    let overNode = false;
+    for (const n of c.nodes.values()) if (n.containsPoint(wx, wy)) { overNode = true; break; }
+    if (!overNode) {
+      for (const conn of c.connectors.values()) {
+        if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) { next = conn; break; }
+      }
+    }
+    c.setHoveredConn(next);
+  }
+
+  private clearWireHover(): void {
+    this.canvas.setHoveredConn(null);
+    this.canvas.deleteHandleHot = false;
+  }
+
   onMove(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._move(e, sx, sy); }
 
   onWinMove(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.el.getBoundingClientRect();
     this._move(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -296,6 +327,13 @@ export class InputHandler {
       c.el.style.cursor = "grabbing"; return;
     }
     if (this.isCutting) { this.cutPath.push({ x: wx, y: wy }); return; }
+
+    if (this.wireDeletePress) {
+      const over = c.deleteHandleAt(wx, wy) === this.wireDeletePress;
+      c.deleteHandleHot = over;
+      c.el.style.cursor = over ? "pointer" : "default";
+      return;
+    }
 
     if (this.portPress && !this.promotePortPress(sx, sy, wx, wy)) return;
 
@@ -332,6 +370,13 @@ export class InputHandler {
       return;
     }
 
+    this.updateWireHover(wx, wy);
+    c.deleteHandleHot = !!c.deleteHandleAt(wx, wy);
+    if (c.deleteHandleHot) {
+      for (const n of c.nodes.values()) n.hovered = false;
+      c.el.style.cursor = "pointer"; return;
+    }
+
     if (c.wireHandleAt(wx, wy)) { c.el.style.cursor = "grab"; return; }
 
     let any = false;
@@ -349,7 +394,7 @@ export class InputHandler {
   onUp(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._up(e, sx, sy); }
 
   onWinUp(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.el.getBoundingClientRect();
     this._up(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -357,6 +402,15 @@ export class InputHandler {
   _up(_e: MouseEvent, sx: number, sy: number): void {
     const c = this.canvas;
     const { x: wx, y: wy } = c.s2w(sx, sy);
+
+    if (this.wireDeletePress) {
+      const pressed = this.wireDeletePress;
+      this.wireDeletePress = null;
+      if (c.deleteHandleAt(wx, wy) === pressed) c.deleteConnector(pressed);
+      c.deleteHandleHot = false;
+      c.el.style.cursor = "default";
+      return;
+    }
 
     if (c.pendingInsert && sx >= 0 && sy >= 0) {
       c.placeNode(c.pendingInsert, sx, sy);
@@ -435,12 +489,18 @@ export class InputHandler {
   }
 
   /** True while a drag, wire pull, box-select, pan or cut is in progress. */
-  isGestureActive(): boolean {
+  isDragActive(): boolean {
     return !!(this.draggingNode || this.pendingConn || this.reconnEdge || this.portPress || this.moveGroup
       || this.isCutting || this.isBoxSel || this.isPanning);
   }
 
+  /** `isDragActive`, plus a pressed wire delete button. */
+  isGestureActive(): boolean {
+    return this.isDragActive() || !!this.wireDeletePress;
+  }
+
   onLeave(): void {
+    this.clearWireHover();
     if (!this.isPanning && !this.draggingNode && !this.isCutting)
       for (const n of this.canvas.nodes.values()) n.hovered = false;
   }
@@ -490,6 +550,7 @@ export class InputHandler {
   onWheel(e: WheelEvent): void {
     e.preventDefault();
     const c = this.canvas;
+    this.clearWireHover();
     const r = c.el.getBoundingClientRect();
     const sx = e.clientX - r.left, sy = e.clientY - r.top;
     const { x: wx, y: wy } = c.s2w(sx, sy);

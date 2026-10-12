@@ -103,6 +103,26 @@ jobs:
           diff aerini-engine/wit/node.wit examples/plugin-template/trigger-example/wit/node.wit || \
             (echo "ERROR: examples/plugin-template/trigger-example/wit/node.wit is stale — copy aerini-engine/wit/node.wit over it and commit" && exit 1)
 
+  release-scripts:
+    name: Release scripts and updater config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the release scripts
+        run: python3 -I -m unittest discover -s scripts/tests
+
+      - name: Check the updater configuration
+        if: github.repository == 'Panchak2d/aerini'
+        run: python3 -I scripts/verify-updater-config.py "$GITHUB_REPOSITORY"
+
+      - name: Lint the release shell scripts
+        run: shellcheck scripts/publish-updater-manifest.sh scripts/verify-release-tag.sh
+
   trigger-example-build:
     name: Trigger example plugin builds for wasm32-wasip2
     runs-on: ubuntu-latest
@@ -259,10 +279,7 @@ jobs:
 
       # Full `tauri build` (not vite:build) — this is the check the desktop binary
       # itself, not just the frontend bundle, actually compiles and packages on
-      # every platform it ships for. The updater signing key is required because
-      # createUpdaterArtifacts is on; nothing here is uploaded or published.
+      # every platform it ships for. Unsigned: the updater signing key lives only in
+      # the `release` environment, so pull requests (including forks) never see it.
       - name: Build desktop app
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run build
+        run: npm run build:unsigned

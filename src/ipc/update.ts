@@ -49,6 +49,20 @@ export const installUpdate = (force = false): Promise<InstallOutcome> =>
 export const cancelUpdateDownload = (): Promise<void> =>
   invoke<void>("cancel_update_download");
 
+/**
+ * The opt-in launch check. Resolves null when the setting is off, when this
+ * launch already checked, or when the check failed; it never rejects with a
+ * user-facing error.
+ */
+export const startupUpdateCheck = (): Promise<UpdateCheckResult | null> =>
+  invoke<UpdateCheckResult | null>("startup_update_check");
+
+export const getUpdateCheckOnStartup = (): Promise<boolean> =>
+  invoke<boolean>("get_update_check_on_startup");
+
+export const setUpdateCheckOnStartup = (enabled: boolean): Promise<void> =>
+  invoke<void>("set_update_check_on_startup", { enabled });
+
 /** Result of the previous install attempt; returned once, then null. */
 export const takeUpdateNotice = (): Promise<UpdateNotice | null> =>
   invoke<UpdateNotice | null>("take_update_notice");

@@ -80,6 +80,8 @@ The desktop app also writes `ports` and `dynamic_ports` into every saved node ob
 
 `max_attempts: 1` means no automatic retry. A node with side effects, an email send or an HTTP POST, only retries on its own if a workflow author raises this above 1 from the Retry UI.
 
+The engine clamps `max_attempts` to between 1 and 10 when it runs a node, and the Retry attempts field in the desktop app stops at 10 to match.
+
 ## Connections
 
 A connection is the line drawn from one node's output to another's input; the JSON key for the array holding them is `edges`, and each entry below is one connection.

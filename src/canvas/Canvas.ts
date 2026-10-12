@@ -1,5 +1,5 @@
 import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, PORT_RADIUS, roundedRect } from "./Node";
-import { Connector, newConnectorId, type PendingConnector } from "./Connector";
+import { Connector, newConnectorId, WIRE_DELETE_RADIUS, WIRE_DELETE_HIT_RADIUS, type PendingConnector } from "./Connector";
 import { serialize } from "./CanvasSerializer";
 import { NODE_IDS } from "../node-ids";
 import type { NodeDescriptor } from "../ipc/workflow";
@@ -10,7 +10,7 @@ import { Minimap } from "./Minimap";
 import { SnapEngine } from "./SnapEngine";
 import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
-import { getCanvasColors } from "./theme-colors";
+import { getCanvasColors, tintOver } from "./theme-colors";
 import { getNodeDescriptor } from "./node-registry";
 import { visibleViewport } from "./viewport";
 
@@ -47,6 +47,9 @@ export class Canvas {
   selectedNodes: Set<string> = new Set();
   selectedNode:  CanvasNode | null = null;
   selectedConn:  Connector  | null = null;
+  hoveredConn:   Connector  | null = null;
+  /** True while the pointer is over the wire delete button. */
+  deleteHandleHot = false;
 
   private emptyEl: HTMLElement | null = null;
   private wasEmpty: boolean | null = null;
@@ -130,6 +133,8 @@ export class Canvas {
     const ctx = this.ctx;
     const ih  = this.input;
 
+    if (this.hoveredConn && (ih.isDragActive() || this.connectors.get(this.hoveredConn.data.id) !== this.hoveredConn)) this.setHoveredConn(null);
+
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.setTransform(dpr * this.zoom, 0, 0, dpr * this.zoom, this.panX * dpr, this.panY * dpr);
@@ -212,6 +217,8 @@ export class Canvas {
     const overfedPorts = this.overfedFromCounts(inCount);
     for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts, overfedPorts);
 
+    this.drawWireDeleteButton();
+
     // ── Output port connection-count badges ───────────────────────────
     for (const [key, cnt] of outCount) {
       if (cnt < 2) continue;
@@ -246,6 +253,7 @@ export class Canvas {
 
     // Hover tooltip for nodes with truncated names
     this.drawNodeTooltips();
+    this.drawWireDeleteTooltip();
 
     // Draw ghost
     if (this.pendingInsert && this.insertGhost) {
@@ -363,6 +371,69 @@ export class Canvas {
     }
   }
 
+  private drawWireDeleteButton(): void {
+    const target = this.deleteHandleTarget();
+    if (!target) return;
+    const ctx = this.ctx;
+    const colors = getCanvasColors();
+    const hot = this.deleteHandleHot;
+    const z = this.zoom;
+    const arm = 3 / z;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(target.x, target.y, WIRE_DELETE_RADIUS / z, 0, Math.PI * 2);
+    ctx.fillStyle = hot ? tintOver(colors.error, colors.surface2, 0.16) : colors.surface2;
+    ctx.fill();
+    ctx.lineWidth   = 1.5 / z;
+    ctx.strokeStyle = hot ? colors.error : colors.wire;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(target.x - arm, target.y - arm); ctx.lineTo(target.x + arm, target.y + arm);
+    ctx.moveTo(target.x - arm, target.y + arm); ctx.lineTo(target.x + arm, target.y - arm);
+    ctx.strokeStyle = hot ? colors.error : colors.textSecondary;
+    ctx.lineCap     = "round";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawWireDeleteTooltip(): void {
+    const target = this.deleteHandleTarget();
+    if (!target || !this.deleteHandleHot) return;
+    const ctx = this.ctx;
+    const dpr = this.dpr;
+    const W   = visibleViewport(this.el.getBoundingClientRect()).width;
+    const colors = getCanvasColors();
+    const sx = target.x * this.zoom + this.panX;
+    const sy = target.y * this.zoom + this.panY;
+
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+    const label = "Delete wire";
+    const padX = 8, padY = 4, gap = 6;
+    const boxW = ctx.measureText(label).width + padX * 2;
+    const boxH = 11 + padY * 2;
+    const bx = Math.max(4, Math.min(sx - boxW / 2, W - boxW - 4));
+    const above = sy - WIRE_DELETE_RADIUS - gap - boxH;
+    const by = above >= 4 ? above : sy + WIRE_DELETE_RADIUS + gap;
+
+    ctx.beginPath();
+    roundedRect(ctx, bx, by, boxW, boxH, 4);
+    ctx.fillStyle = colors.surface3;
+    ctx.fill();
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = colors.textPrimary;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, bx + padX, by + boxH / 2);
+    ctx.restore();
+  }
+
   // ── Events ────────────────────────────────────────────────────────────────
 
   private bind() {
@@ -443,6 +514,34 @@ export class Canvas {
     if (!conn) return null;
     const tp = this.nodes.get(conn.data.to_node)?.ports.find(p => p.id === conn.data.to_port && p.isInput);
     return tp && Math.hypot(wx - tp.x, wy - tp.y) < PORT_RADIUS + 8 ? conn : null;
+  }
+
+  setHoveredConn(conn: Connector | null): void {
+    if (this.hoveredConn === conn) return;
+    if (this.hoveredConn) this.hoveredConn.hovered = false;
+    if (conn) conn.hovered = true;
+    this.hoveredConn = conn;
+    this.deleteHandleHot = false;
+  }
+
+  /**
+   * The wire that currently shows a delete button and where the button sits,
+   * or null. The hovered wire wins over the selected one. No button shows
+   * during a drag, pan, cut or box-select, or too near either end of the wire,
+   * where it would collide with the end handle.
+   */
+  deleteHandleTarget(): { conn: Connector; x: number; y: number } | null {
+    const isLive = (c: Connector | null): c is Connector => !!c && this.connectors.get(c.data.id) === c;
+    const conn = isLive(this.hoveredConn) ? this.hoveredConn : isLive(this.selectedConn) ? this.selectedConn : null;
+    if (!conn || this.input?.isDragActive?.()) return null;
+    const clearance = (WIRE_DELETE_HIT_RADIUS + PORT_RADIUS + 8) / this.zoom;
+    const at = conn.deleteButtonAnchor(this.nodes, clearance);
+    return at && { conn, x: at.x, y: at.y };
+  }
+
+  deleteHandleAt(wx: number, wy: number): Connector | null {
+    const target = this.deleteHandleTarget();
+    return target && Math.hypot(wx - target.x, wy - target.y) < WIRE_DELETE_HIT_RADIUS / this.zoom ? target.conn : null;
   }
 
   /** Every wire feeding an input port. */
@@ -964,6 +1063,7 @@ export class Canvas {
     if (this.connectors.get(conn.data.id) !== conn) return;
     this.removeGraphParts([], [conn], "Delete wire");
     if (this.selectedConn === conn) { conn.selected = false; this.selectedConn = null; }
+    if (this.hoveredConn === conn) this.setHoveredConn(null);
     this.onCanvasChanged?.();
   }
 

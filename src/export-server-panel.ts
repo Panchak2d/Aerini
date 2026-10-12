@@ -402,7 +402,7 @@ function showRunSecretBanner(container: Element | null, secret: string): void {
       It is <strong>not stored in the zip</strong> — only its hash is. Copy it now.
     </div>
     <div class="esp-run-secret-row">
-      <code class="esp-run-secret-value">${secret}</code>
+      <code class="esp-run-secret-value">${escapeHtml(secret)}</code>
       <button class="esp-run-secret-copy" type="button">Copy</button>
     </div>`;
 

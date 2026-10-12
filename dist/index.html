@@ -6,9 +6,9 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-Q7BD1ECl.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-D1B0lLgB.js">
-  <link rel="stylesheet" crossorigin href="./assets/style-Dx4xPrrb.css">
+  <script type="module" crossorigin src="./assets/index-BLgZmCk1.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-DEW3gkfv.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-Cdz4MPHN.css">
 </head>
 <body>
 
@@ -476,7 +476,7 @@
   <!-- ── Confirm modal (replaces window.confirm which is suppressed in Tauri) ── -->
   <div id="confirm-modal" class="hidden">
     <div class="confirm-backdrop"></div>
-    <div class="confirm-box">
+    <div class="confirm-box" role="alertdialog" aria-modal="true" aria-describedby="confirm-message">
       <div class="confirm-icon confirm-icon--danger"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
       <div class="confirm-icon confirm-icon--neutral hidden"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg></div>
       <div class="confirm-message" id="confirm-message">Are you sure?</div>
@@ -531,7 +531,7 @@
             <div class="shortcut-keys"><kbd>Ctrl/Cmd+drag</kbd></div>
           </div>
           <div class="shortcut-row">
-            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Click the wire, then press Delete, or right-click it</span></div>
+            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Hover the wire and click &times;, click it and press Delete, or right-click it</span></div>
             <div class="shortcut-keys"><kbd>Del</kbd></div>
           </div>
         </div>
@@ -608,7 +608,7 @@
           <div class="settings-row">
             <div>
               <div class="settings-label">Launch at login</div>
-              <div class="settings-desc">Start Aerini automatically when you log in — workflows with Schedule, Webhook, or trigger-plugin triggers will run in the background immediately</div>
+              <div class="settings-desc">Start Aerini in the system tray when you log in, without opening its window — workflows with Schedule, Webhook, or trigger-plugin triggers will run in the background immediately</div>
             </div>
             <input type="checkbox" id="setting-autostart" class="settings-toggle" />
           </div>
@@ -652,7 +652,7 @@
           <div class="settings-row" id="update-row">
             <div class="update-row-body">
               <div class="settings-label" id="update-label">Updates</div>
-              <div class="settings-desc" id="update-check-status" role="status" aria-live="polite" aria-atomic="true">Checks GitHub for a newer release only when you click. Nothing is checked in the background.</div>
+              <div class="settings-desc" id="update-check-status" role="status" aria-live="polite" aria-atomic="true">Checks GitHub for a newer release when you click, or once when Aerini starts if you turn that on below. Nothing else is checked in the background.</div>
               <div class="update-progress-wrap" id="update-progress-wrap" hidden>
                 <progress class="update-progress" id="update-progress" max="100" aria-labelledby="update-label"></progress>
                 <span class="update-percent" id="update-percent" aria-hidden="true"></span>
@@ -663,6 +663,13 @@
               <button id="btn-install-update" class="btn-sm btn-sm-primary" hidden>Install and restart</button>
               <button id="btn-check-updates" class="btn-sm">Check for Updates</button>
             </div>
+          </div>
+          <div class="settings-row" id="update-startup-row">
+            <div>
+              <div class="settings-label">Check on startup</div>
+              <div class="settings-desc">Off by default. When on, Aerini makes one request to GitHub each time it starts to see whether a newer release exists. It only tells you; installing always needs your click. A change takes effect the next time Aerini starts.</div>
+            </div>
+            <input type="checkbox" id="setting-update-startup" class="settings-toggle" />
           </div>
         </div>
       </div>

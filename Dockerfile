@@ -97,7 +97,7 @@ ENV AERINI_BIND=0.0.0.0
 EXPOSE 7700
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/local/bin/wget", "-qO-", "http://localhost:7700/api/health"]
+    CMD ["/usr/local/bin/wget", "-qO-", "http://127.0.0.1:7700/api/health"]
 
 ENTRYPOINT ["/usr/local/bin/aerini-server"]
 

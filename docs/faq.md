@@ -6,7 +6,7 @@ If something in Aerini isn't working the way you expect, this isn't the right pa
 
 ## Does Aerini collect any telemetry or send data anywhere on its own?
 
-No telemetry, analytics, or crash reports of any kind, and nothing runs in the background to phone home. The only outbound connection Aerini's own interface makes without you asking for it is loading one font, Inter, from Google Fonts over HTTPS. Checking for app updates is a separate, one-click action you take yourself (see below), not something that happens automatically. Anything else that leaves your machine (an HTTP Request node calling an API, an email node sending mail) only happens because a node you configured is the one doing it. See [Security](guide/security.md) for the full model.
+No telemetry, analytics, or crash reports of any kind, and nothing runs in the background to phone home. The only outbound connection Aerini's own interface makes without you asking for it is loading one font, Inter, from Google Fonts over HTTPS. Checking for app updates is a separate action: by default you click for it yourself (see below), and the only way it happens on its own is the **Check on startup** setting, which is off unless you turn it on (see below). Anything else that leaves your machine (an HTTP Request node calling an API, an email node sending mail) only happens because a node you configured is the one doing it. See [Security](guide/security.md) for the full model.
 
 ## Does Aerini work without an internet connection?
 
@@ -42,7 +42,7 @@ Yes. The toolbar's Export menu can save the current workflow as a `.aerini` file
 
 ## How do I update Aerini?
 
-Open Settings, find Updates under About, and click Check for Updates. If a newer release exists, click Install and restart: Aerini downloads it, verifies its signature, installs it, and restarts, with your workflows, credentials, and settings kept. Nothing is checked or downloaded unless you click, and Aerini asks first if a workflow is running. If Aerini can't update itself (for example when it's running from a macOS disk image), it links you to the release page instead. Aerini 0.4.1 and earlier have no in-app updater, so install the first release that has one by hand; see [Installation](getting-started/installation.md) for the steps for your OS. Details are in [Updating](operations/updating.md).
+Open Settings, find Updates under About, and click Check for Updates. If a newer release exists, click Install and restart: Aerini downloads it, verifies its signature, installs it, and restarts, with your workflows, credentials, and settings kept. Nothing is downloaded unless you click, and by default nothing is checked unless you click either. If you turn on **Check on startup** in the same place, Aerini makes one request to GitHub each time it launches to see whether a newer release exists, and only tells you; installing still needs your click. Aerini asks first if a workflow is running. If Aerini can't update itself (for example when it's running from a macOS disk image), it links you to the release page instead. Aerini 0.4.1 and earlier have no in-app updater, so install the first release that has one by hand; see [Installation](getting-started/installation.md) for the steps for your OS. Details are in [Updating](operations/updating.md).
 
 ## Is Aerini free to use?
 

@@ -2,7 +2,7 @@
 
 The desktop app's frontend never touches the filesystem, a database, or the Rust engine directly. Every one of those operations crosses through Tauri's IPC bridge as a named command, registered once in `src-tauri/src/lib.rs`'s `invoke_handler!` list. This page is the exhaustive list: every registered command, its parameters, what it returns, and where in the frontend it's actually called from. It assumes you've read [Architecture](architecture.md), specifically the [Tauri shell](architecture.md#the-tauri-shell-src-tauri) section this page is the detail behind.
 
-77 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 14 commands declared directly in `lib.rs` that don't belong to any one domain.
+80 commands are registered today, spread across eleven modules under `src-tauri/src/commands/` (`workflow`, `chat`, `credentials`, `oauth`, `scheduler`, `export`, `plugins`, `providers`, `memory`, `performance`, `update`) plus 14 commands declared directly in `lib.rs` that don't belong to any one domain.
 
 ## Conventions
 
@@ -195,7 +195,7 @@ Two more commands the Plugins settings panel depends on, `pick_folder_dialog` an
 
 ## Update
 
-`update.rs` (762 lines), four commands. All four are wrapped in `src/ipc/update.ts` and driven by `src/update-ui.ts`, which owns the Settings → About → Updates row.
+`update.rs` (845 lines), seven commands. All seven are wrapped in `src/ipc/update.ts` and driven by `src/update-ui.ts`, which owns the Settings → About → Updates row.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
@@ -203,8 +203,11 @@ Two more commands the Plugins settings panel depends on, `pick_folder_dialog` an
 | `install_update` | `force: Option<bool>` | `Result<InstallOutcome, String>` | `installUpdate`, called from `src/update-ui.ts` |
 | `cancel_update_download` | none | `Result<(), String>` | `cancelUpdateDownload`, called from `src/update-ui.ts` |
 | `take_update_notice` | none | `Option<UpdateNotice>` | `takeUpdateNotice`, called from `src/update-ui.ts` at startup |
+| `startup_update_check` | none | `Result<Option<UpdateCheckResult>, String>` | `startupUpdateCheck`, called from `src/update-ui.ts` at startup |
+| `get_update_check_on_startup` | none | `Result<bool, String>` | `getUpdateCheckOnStartup`, called from `src/update-ui.ts` at startup |
+| `set_update_check_on_startup` | `enabled: bool` | `Result<(), String>` | `setUpdateCheckOnStartup`, called from the Check on startup toggle in `src/update-ui.ts` |
 
-User-triggered only; nothing polls or schedules any of these. The updater is `tauri-plugin-updater`, registered Rust-side only: no `updater:*` permission is granted to the webview, and the webview never supplies a URL or version. It can only ask to check, install what the last check found, or cancel.
+Nothing polls or schedules any of these. Every command except `startup_update_check` runs only because the user acted; `startup_update_check` runs once per launch, only while the Check on startup setting is on. The updater is `tauri-plugin-updater`, registered Rust-side only: no `updater:*` permission is granted to the webview, and the webview never supplies a URL or version. It can only ask to check, install what the last check found, or cancel.
 
 **`check_for_update`** reads the manifest at the endpoint in `tauri.conf.json` (`plugins.updater.endpoints`) with a 15 second timeout. `UpdateCheckResult` is `{ current_version, available, latest_version, install_support, release_url }`. `latest_version` is `null` unless an update is available. `release_url` is built from constants plus the version, never taken from the manifest. `install_support` is `{ kind: "supported", admin_prompt }` or `{ kind: "manual", reason, message }`; `manual` means the UI should offer the release page instead of an install button. The reasons are `unknown_install` (no installer type was stamped into the binary), `appimage_missing`, `appimage_not_writable`, `macos_translocated`, `macos_disk_image`, and `no_release_for_platform` (the manifest announces a newer version but has no entry for this platform and installer type). The update handle from a successful check is kept in managed state and replaced by every later check.
 
@@ -213,6 +216,8 @@ User-triggered only; nothing polls or schedules any of these. The updater is `ta
 **`cancel_update_download`** cancels a running download; when nothing is downloading it discards a kept download. It rejects once installation has started.
 
 **`take_update_notice`** returns the outcome of the previous install attempt exactly once: `{ kind: "installed" | "incomplete", version }`. The install writes `.update-pending` in the app data directory just before handing over to the installer; the next startup reads and deletes it, ignoring a marker older than 24 hours. It is a pulled command rather than an event because an event emitted during startup can fire before the page has registered a listener.
+
+**`startup_update_check`** is the opt-in launch check. It reads the `update_check_on_startup` setting from the app database itself (the webview supplies nothing), and returns `null` when the setting is not `"true"`, when this launch has already used its one check, or when the check fails for any reason; it never returns an error. Otherwise it returns the same `UpdateCheckResult` as `check_for_update` and keeps the found update for `install_update`. It shares the single-flight guard with `check_for_update`. **`get_update_check_on_startup`** and **`set_update_check_on_startup`** read and write that setting as a boolean, so the key lives only in Rust. The setting defaults to off and a change applies from the next launch.
 
 The endpoint serves a static manifest, so which platforms can update in-app depends on which platform entries that manifest lists.
 
@@ -232,7 +237,7 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
-| `show_main_window` | none (takes a `tauri::Window`) | `Result<(), String>` | `app.ts`, called once the frontend has painted its first real frame |
+| `show_main_window` | none (takes a `tauri::Window`) | `Result<(), String>` | `app.ts`, called once the frontend has painted its first real frame. Does nothing when the app was launched with `--minimized` and `take_update_notice` has no result to show; the tray's Open Aerini shows the window then |
 | `read_text_file` | `path: String` | `Result<String, String>` | `drag-drop.ts` |
 | `save_file_dialog` | `content: String`, `filename: String` | `Result<String, String>` | `workflow-manager.ts` |
 | `save_export_zip` | `zip_path: String`, `filename: String` | `Result<String, String>` | `export-server-panel.ts`, `toolbar.ts` |

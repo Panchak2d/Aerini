@@ -6,8 +6,8 @@ export default defineConfig({
   build: {
     outDir: "../dist",
     emptyOutDir: true,
-    // P31 hotfix: Vite code-splits CSS per dynamically-imported chunk (the
-    // lazy ChatPanel/BgJobsPanel modules from P29/P30) and injects it via a
+    // Vite would otherwise code-split CSS per dynamically-imported chunk (the
+    // lazy ChatPanel/BgJobsPanel modules) and inject it via a
     // runtime <style> tag. tauri.conf.json's CSP (style-src 'self', no
     // 'unsafe-inline') blocks those injections, so the chunk's CSS silently
     // fails to apply — e.g. .zone-header/.zone-title loses its flex layout

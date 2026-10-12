@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use aerini_engine::db::WorkflowDb;
 use aerini_engine::scheduler::SchedulerDaemon;
 use serde::{Deserialize, Serialize};
 use tauri::utils::config::BundleType;
@@ -30,6 +31,7 @@ const RUN_DRAIN_POLL: Duration = Duration::from_millis(50);
 
 const PROGRESS_EVENT: &str = "update-progress";
 const MARKER_FILE: &str = ".update-pending";
+const STARTUP_CHECK_SETTING: &str = "update_check_on_startup";
 const MARKER_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 /// Release page for one version. Built from constants plus a character-checked
@@ -306,6 +308,9 @@ impl Drop for PhaseGuard {
 
 pub struct UpdateState {
     marker_path: PathBuf,
+    /// Set the first time a startup check is allowed to run, so a launch makes
+    /// at most one such request no matter how often the webview asks.
+    startup_check_ran: AtomicBool,
     /// Set by the Windows pre-exit hook once background jobs were stopped, so a
     /// failed launch of the installer can re-arm them.
     jobs_stopped: Arc<AtomicBool>,
@@ -316,6 +321,7 @@ impl UpdateState {
     pub fn new(marker_path: PathBuf, notice: Option<UpdateNotice>) -> Self {
         Self {
             marker_path,
+            startup_check_ran: AtomicBool::new(false),
             jobs_stopped: Arc::new(AtomicBool::new(false)),
             inner: Arc::new(Mutex::new(Inner {
                 phase: Phase::Idle,
@@ -348,6 +354,12 @@ impl UpdateState {
         let mut g = self.lock();
         g.pending = None;
         g.staged = None;
+    }
+
+    /// True for the first call per launch made while the stored setting is
+    /// `"true"`. A disabled setting does not use up the launch's one check.
+    fn claim_startup_check(&self, setting: Option<&str>) -> bool {
+        setting == Some("true") && !self.startup_check_ran.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -501,6 +513,10 @@ pub async fn check_for_update(
     app: AppHandle,
     state: tauri::State<'_, UpdateState>,
 ) -> Result<UpdateCheckResult, String> {
+    perform_check(&app, &state).await
+}
+
+async fn perform_check(app: &AppHandle, state: &UpdateState) -> Result<UpdateCheckResult, String> {
     let _guard = state.begin(Phase::Checking)?;
     let current = app.package_info().version.to_string();
 
@@ -531,7 +547,7 @@ pub async fn check_for_update(
         .build()
         .map_err(|e| user_message(&e))?;
 
-    let support = current_install_support(&app);
+    let support = current_install_support(app);
     match updater.check().await {
         Ok(Some(update)) => {
             let latest = update.version.clone();
@@ -561,6 +577,57 @@ pub async fn check_for_update(
             }
         }
         Err(e) => Err(user_message(&e)),
+    }
+}
+
+async fn read_startup_setting(db: &Arc<WorkflowDb>) -> Option<String> {
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(move || db.get_setting(STARTUP_CHECK_SETTING))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+}
+
+#[tauri::command]
+pub async fn get_update_check_on_startup(
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<bool, String> {
+    Ok(read_startup_setting(&db).await.as_deref() == Some("true"))
+}
+
+#[tauri::command]
+pub async fn set_update_check_on_startup(
+    enabled: bool,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<(), String> {
+    let db = Arc::clone(&db);
+    let value = if enabled { "true" } else { "false" };
+    tokio::task::spawn_blocking(move || db.set_setting(STARTUP_CHECK_SETTING, value))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The opt-in launch check. Reads the stored setting itself, so the webview
+/// cannot force a check on someone who never enabled it, and allows one check
+/// per launch. Returns `None` when disabled, already done, or on any failure:
+/// an unattended check never reports errors.
+#[tauri::command]
+pub async fn startup_update_check(
+    app: AppHandle,
+    state: tauri::State<'_, UpdateState>,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<Option<UpdateCheckResult>, String> {
+    let setting = read_startup_setting(&db).await;
+    if !state.claim_startup_check(setting.as_deref()) {
+        return Ok(None);
+    }
+    match perform_check(&app, &state).await {
+        Ok(result) => Ok(Some(result)),
+        Err(e) => {
+            tracing::debug!(error = %e, "startup update check failed");
+            Ok(None)
+        }
     }
 }
 
@@ -666,6 +733,22 @@ pub fn take_update_notice(state: tauri::State<'_, UpdateState>) -> Option<Update
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_check_needs_the_setting_and_does_not_burn_the_launch_when_off() {
+        let state = UpdateState::new(PathBuf::from("unused"), None);
+        for off in [None, Some("false"), Some("TRUE"), Some("")] {
+            assert!(!state.claim_startup_check(off), "{off:?} must not enable the check");
+        }
+        assert!(state.claim_startup_check(Some("true")));
+    }
+
+    #[test]
+    fn startup_check_is_granted_once_per_launch() {
+        let state = UpdateState::new(PathBuf::from("unused"), None);
+        assert!(state.claim_startup_check(Some("true")));
+        assert!(!state.claim_startup_check(Some("true")));
+    }
 
     const SUPPORTED_PLAIN: InstallSupport = InstallSupport::Supported { admin_prompt: false };
     const SUPPORTED_ADMIN: InstallSupport = InstallSupport::Supported { admin_prompt: true };

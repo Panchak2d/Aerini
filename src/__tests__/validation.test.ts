@@ -66,6 +66,14 @@ describe("validateWorkflow — email_send required fields", () => {
   });
 });
 
+describe("validateWorkflow — disabled nodes", () => {
+  it("does not demand required fields from a node the engine skips", () => {
+    const node = makeNode("n1", "email_send", {});
+    node.disabled = true;
+    expect(validateWorkflow(canvasOf(node))).toEqual([]);
+  });
+});
+
 describe("validateWorkflow — database, db_type-conditional required fields", () => {
   it("sqlite (default): requires db_path + query, not connection_url", () => {
     const missing = makeNode("n1", "database", {});

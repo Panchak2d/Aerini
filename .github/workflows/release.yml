@@ -1,5 +1,4 @@
-for any design decisions: do whatever will give the best result [focus on user experience, maintainability, security and scalability].
-Research and think properly to ensure you take the best approach.name: Release
+name: Release
 
 on:
   push:
@@ -32,8 +31,16 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: bash scripts/verify-release-tag.sh "$TAG"
 
+      - name: Check the updater configuration
+        run: python3 -I scripts/verify-updater-config.py "$GITHUB_REPOSITORY"
+
+      - name: Test the release scripts
+        run: python3 -I -m unittest discover -s scripts/tests
+
   release:
     needs: verify
+    # Holds the updater signing key; requires a reviewer's approval before any build runs.
+    environment: release
     permissions:
       contents: write
     strategy:
@@ -107,6 +114,27 @@ jobs:
             **macOS note:** the build is unsigned. On first launch, right-click the app → Open → Open to bypass the Gatekeeper warning.
           releaseDraft: true
           prerelease: ${{ needs.verify.outputs.prerelease == 'true' }}
+          uploadUpdaterJson: false
+
+  manifest:
+    name: Publish updater manifest
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No signing key here: the manifest only lists what the build jobs already signed.
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/publish-updater-manifest.sh "$GITHUB_REPOSITORY" "$TAG"
 
   docker:
     name: Publish container image

@@ -143,8 +143,8 @@ pub(super) async fn run_job_loop(
             }
             loop {
                 if shutting_down.load(Ordering::SeqCst) { break; }
-                let next = Utc::now()
-                    .checked_add_signed(chrono::Duration::seconds(secs as i64))
+                let next = super::delta_from_secs(secs)
+                    .and_then(|d| Utc::now().checked_add_signed(d))
                     .unwrap_or_else(Utc::now);
                 update_next_run_async(&db, &workflow_id, &next).await;
                 emit_waiting_async(&event_sink, &db, &workflow_id, Some(next)).await;
@@ -183,8 +183,8 @@ pub(super) async fn run_job_loop(
                         break;
                     }
                 };
-                let next = now
-                    .checked_add_signed(chrono::Duration::seconds(delay_secs as i64))
+                let next = super::delta_from_secs(delay_secs)
+                    .and_then(|d| now.checked_add_signed(d))
                     .unwrap_or(now);
                 update_next_run_async(&db, &workflow_id, &next).await;
                 emit_waiting_async(&event_sink, &db, &workflow_id, Some(next)).await;

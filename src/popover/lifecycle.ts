@@ -32,6 +32,9 @@ import {
 
 // ── Extension registry ────────────────────────────────────────────────────────
 
+// The engine clamps retry.max_attempts to 1..=10 at execution; the UI must not store more.
+const MAX_RETRY_ATTEMPTS = 10;
+
 const NODE_CONFIG_EXTENSIONS: Partial<Record<string, NodeConfigExtension>> = {
   [NODE_IDS.AI_PROMPT]:      { beforeFields: renderAiCostWarning, afterFields: renderAiAttachments },
   [NODE_IDS.AI_AGENT]:       { beforeFields: renderAiCostWarning },
@@ -377,11 +380,15 @@ export async function showPopover(
   body.appendChild(mkSection("Reliability"));
   body.appendChild(mkField("Retry attempts", () => {
     const inp = mk<HTMLInputElement>("input");
-    inp.type = "number"; inp.min = "1"; inp.max = "10"; inp.autocomplete = "off";
+    inp.type = "number"; inp.min = "1"; inp.max = String(MAX_RETRY_ATTEMPTS); inp.autocomplete = "off";
     inp.value = String(node.data.retry.max_attempts);
     inp.addEventListener("input", () => {
-      const v = parseInt(inp.value);
-      if (!isNaN(v) && v >= 1) { node.data.retry.max_attempts = v; onChange(); }
+      const v = parseInt(inp.value, 10);
+      if (isNaN(v) || v < 1) return;
+      const capped = Math.min(v, MAX_RETRY_ATTEMPTS);
+      if (capped !== v) inp.value = String(capped);
+      node.data.retry.max_attempts = capped;
+      onChange();
     });
     return inp;
   }, "1 = no retry"));

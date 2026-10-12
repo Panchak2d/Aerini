@@ -353,7 +353,8 @@ mod ordered_node_outputs_tests {
 /// source the caller doesn't control.
 ///
 /// Azure IMDS, link-local (including the 169.254.169.254 cloud metadata
-/// address), RFC 6598 shared address space, broadcast, documentation,
+/// address), RFC 6598 shared address space, IETF protocol assignments
+/// (192.0.0.0/24), broadcast, documentation,
 /// unspecified, and multicast all remain blocked unconditionally under either
 /// policy -- none of those are legitimate targets for a self-hosted local
 /// server.
@@ -373,7 +374,8 @@ impl SsrfPolicy {
 ///
 /// Rejects (always, both policies): link-local, broadcast, documentation,
 /// multicast, `0.0.0.0/8`, reserved `240.0.0.0/4`, RFC 6598 shared address
-/// space (100.64.0.0/10), and the Azure IMDS endpoint (168.63.129.16).
+/// space (100.64.0.0/10), IETF protocol assignments (192.0.0.0/24), and the
+/// Azure IMDS endpoint (168.63.129.16).
 /// Under `Strict`, also rejects loopback and RFC 1918 private addresses;
 /// `AllowLocal` permits those.
 ///
@@ -400,7 +402,10 @@ fn ipv4_blocked(v4: std::net::Ipv4Addr, allow_local: bool) -> bool {
         || first & 0xF0 == 0xF0
         // RFC 6598 shared address space (100.64.0.0/10); is_private() only
         // covers RFC 1918.
-        || u32::from(v4) & 0xFFC0_0000 == 0x6440_0000;
+        || u32::from(v4) & 0xFFC0_0000 == 0x6440_0000
+        // IETF protocol assignments (192.0.0.0/24, RFC 6890): never a public
+        // target, and home of Oracle Cloud's metadata address 192.0.0.192.
+        || u32::from(v4) & 0xFFFF_FF00 == 0xC000_0000;
     always_blocked || (!allow_local && (v4.is_loopback() || v4.is_private()))
 }
 
@@ -1965,6 +1970,32 @@ mod rfc6598_tests {
     fn rfc6598_ipv4_mapped_blocked() {
         // ::ffff:100.64.0.1 — IPv4-mapped form of RFC 6598 address (hex: 6440:0001)
         assert!(check_ssrf_ip(v6("::ffff:6440:0001"), SsrfPolicy::Strict).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ietf_protocol_assignment_tests {
+    use super::{check_ssrf_ip, SsrfPolicy};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
+
+    #[test]
+    fn oracle_cloud_metadata_blocked_under_both_policies() {
+        assert!(check_ssrf_ip(v4(192, 0, 0, 192), SsrfPolicy::Strict).is_err());
+        assert!(check_ssrf_ip(v4(192, 0, 0, 192), SsrfPolicy::AllowLocal).is_err());
+    }
+    #[test]
+    fn block_edges_are_exact() {
+        assert!(check_ssrf_ip(v4(192, 0, 0, 0), SsrfPolicy::Strict).is_err());
+        assert!(check_ssrf_ip(v4(192, 0, 0, 255), SsrfPolicy::Strict).is_err());
+        assert!(check_ssrf_ip(v4(191, 255, 255, 255), SsrfPolicy::Strict).is_ok());
+        assert!(check_ssrf_ip(v4(192, 0, 1, 0), SsrfPolicy::Strict).is_ok());
+    }
+    #[test]
+    fn ipv4_mapped_form_blocked() {
+        let mapped = IpAddr::V6("::ffff:c000:00c0".parse::<Ipv6Addr>().unwrap());
+        assert!(check_ssrf_ip(mapped, SsrfPolicy::Strict).is_err());
     }
 }
 

@@ -2,6 +2,7 @@ import { showConfirm } from "./confirm";
 import { isTauri } from "./utils";
 import {
   checkForUpdate, installUpdate, cancelUpdateDownload, takeUpdateNotice, listenUpdateProgress,
+  startupUpdateCheck, getUpdateCheckOnStartup, setUpdateCheckOnStartup,
 } from "./ipc/update";
 import type { InstallOutcome, UpdateCheckResult } from "./ipc/update";
 
@@ -68,7 +69,7 @@ export function stateFromCheck(r: UpdateCheckResult): UpdateState {
 }
 
 const IDLE_TEXT =
-  "Checks GitHub for a newer release only when you click. Nothing is checked in the background.";
+  "Checks GitHub for a newer release when you click, or once when Aerini starts if you turn that on below. Nothing else is checked in the background.";
 
 export function viewFor(state: UpdateState): UpdateView {
   const base: UpdateView = {
@@ -170,6 +171,13 @@ export function applyView(els: UpdateEls, view: UpdateView): void {
   els.checkBtn.disabled = view.checkDisabled;
 }
 
+/** Message for an unattended check that found something; `null` means stay quiet. */
+export function startupToast(state: UpdateState): string | null {
+  return state.kind === "available" || state.kind === "manual"
+    ? `${fmtVersion(state.latest)} is available. Open Settings > About to update.`
+    : null;
+}
+
 function runningMessage(scheduled: number, manual: number): string {
   const parts: string[] = [];
   if (scheduled > 0) parts.push(`${scheduled} background ${scheduled === 1 ? "run" : "runs"}`);
@@ -202,10 +210,13 @@ function lookupEls(): UpdateEls | null {
 
 export function bindUpdateUi({ toast, hasUnsaved }: UpdateUiDeps): void {
   const row = document.getElementById("update-row");
+  const startupRow = document.getElementById("update-startup-row");
+  const startupToggle = document.getElementById("setting-update-startup") as HTMLInputElement | null;
   const els = lookupEls();
   if (!row || !els) return;
   if (!isTauri()) {
     row.hidden = true;
+    if (startupRow) startupRow.hidden = true;
     return;
   }
 
@@ -302,17 +313,65 @@ export function bindUpdateUi({ toast, hasUnsaved }: UpdateUiDeps): void {
     else set({ ...s, downloaded: p.downloaded, total: p.total });
   }).catch(console.error);
 
-  takeUpdateNotice()
-    .then((notice) => {
-      if (!notice) return;
-      const v = fmtVersion(notice.version);
-      if (notice.kind === "installed") {
-        toast(`Updated to ${v}`, "success");
-        return;
+  async function runStartupCheck(): Promise<void> {
+    if (current().kind !== "idle") return;
+    set({ kind: "checking" });
+    let result: UpdateCheckResult | null = null;
+    try {
+      result = await startupUpdateCheck();
+    } catch {
+      // An unattended check never reports a failure.
+    }
+    if (!result) {
+      set({ kind: "idle" });
+      return;
+    }
+    const next = stateFromCheck(result);
+    set(next);
+    const note = startupToast(next);
+    if (note) toast(note, "info");
+  }
+
+  if (startupToggle) {
+    startupToggle.addEventListener("change", async () => {
+      const enabled = startupToggle.checked;
+      try {
+        await setUpdateCheckOnStartup(enabled);
+        toast(
+          enabled ? "Aerini will check for updates each time it starts" : "Startup update check turned off",
+          "success",
+        );
+      } catch (err) {
+        toast(`Could not save the setting: ${errorText(err)}`, "error");
+        startupToggle.checked = !enabled;
       }
-      const message = `The update to ${v} did not finish installing. Click Check for Updates to try again.`;
-      toast(message, "error");
-      set({ kind: "error", message, releaseUrl: RELEASES_URL });
-    })
-    .catch(() => {});
+    });
+  }
+
+  async function start(): Promise<void> {
+    try {
+      const notice = await takeUpdateNotice();
+      if (notice) {
+        const v = fmtVersion(notice.version);
+        if (notice.kind === "installed") {
+          toast(`Updated to ${v}`, "success");
+        } else {
+          const message = `The update to ${v} did not finish installing. Click Check for Updates to try again.`;
+          toast(message, "error");
+          set({ kind: "error", message, releaseUrl: RELEASES_URL });
+        }
+      }
+    } catch {
+      // Missing notice is not worth surfacing.
+    }
+    let enabled = false;
+    try {
+      enabled = await getUpdateCheckOnStartup();
+    } catch {
+      // Unreadable setting counts as off.
+    }
+    if (startupToggle) startupToggle.checked = enabled;
+    if (enabled) await runStartupCheck();
+  }
+  void start();
 }
