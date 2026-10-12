@@ -222,9 +222,10 @@ impl SchedulerDaemon {
     }
 
     /// Set a server-level ceiling on workflow execution time for all jobs run by this scheduler.
-    /// Passed through to `WorkflowExecutor::with_server_max_duration_secs`.
+    /// Passed through to `WorkflowExecutor::with_server_max_duration_secs`; values are clamped
+    /// to 10..=86400 seconds, the same range the executor applies.
     pub fn with_server_max_duration_secs(mut self, secs: Option<u64>) -> Self {
-        self.server_max_duration_secs = secs;
+        self.server_max_duration_secs = secs.map(|s| s.clamp(10, 86400));
         self
     }
 
@@ -453,11 +454,11 @@ impl SchedulerDaemon {
         let trigger: TriggerKind = serde_json::from_str(&row.trigger_kind).ok()?;
         match trigger {
             TriggerKind::Interval { secs } => {
-                Utc::now().checked_add_signed(chrono::Duration::seconds(secs as i64))
+                delta_from_secs(secs).and_then(|d| Utc::now().checked_add_signed(d))
             }
             TriggerKind::Cron { ref expr } => {
                 let delay = next_cron_delay_secs(expr, &Utc::now()).ok()?;
-                Utc::now().checked_add_signed(chrono::Duration::seconds(delay as i64))
+                delta_from_secs(delay).and_then(|d| Utc::now().checked_add_signed(d))
             }
             TriggerKind::Once { run_at } => Some(run_at),
             TriggerKind::Webhook { .. } | TriggerKind::Manual | TriggerKind::Plugin { .. } => None,
@@ -820,6 +821,12 @@ pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
     }
 }
 
+/// `None` when `secs` is beyond what `chrono::Duration` can hold, where
+/// `chrono::Duration::seconds` would panic instead.
+fn delta_from_secs(secs: u64) -> Option<chrono::Duration> {
+    chrono::Duration::try_seconds(i64::try_from(secs).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,6 +872,39 @@ mod tests {
             Ok(self.rows.get(workflow_id).cloned())
         }
         fn load_workflow_json(&self, _workflow_id: &str) -> Result<Option<String>, String> { Ok(None) }
+    }
+
+    struct NoCreds;
+    #[async_trait::async_trait]
+    impl CredentialResolver for NoCreds {
+        async fn resolve(&self, _id: &str) -> Result<String, crate::executor::CredentialResolveError> {
+            Err(crate::executor::CredentialResolveError::NotFound)
+        }
+    }
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn emit(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    #[test]
+    fn delta_from_secs_rejects_values_chrono_cannot_hold() {
+        assert_eq!(delta_from_secs(90), Some(chrono::Duration::seconds(90)));
+        assert_eq!(delta_from_secs(i64::MAX as u64), None);
+        assert_eq!(delta_from_secs(u64::MAX), None);
+    }
+
+    #[test]
+    fn server_max_duration_is_clamped_to_the_executor_range() {
+        let daemon = || SchedulerDaemon::new(
+            Arc::new(MockDb::with_row("wf-a", "Workflow A")),
+            Arc::new(Reloadable::new(NodeRegistry::new())),
+            Arc::new(NoCreds),
+            Arc::new(NullSink),
+        );
+        assert_eq!(daemon().with_server_max_duration_secs(Some(u64::MAX)).server_max_duration_secs, Some(86400));
+        assert_eq!(daemon().with_server_max_duration_secs(Some(1)).server_max_duration_secs, Some(10));
+        assert_eq!(daemon().with_server_max_duration_secs(None).server_max_duration_secs, None);
     }
 
     #[test]

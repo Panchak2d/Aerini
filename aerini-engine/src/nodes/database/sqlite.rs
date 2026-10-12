@@ -5,6 +5,7 @@ use tracing::warn;
 
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput};
+use crate::nodes::fs_sandbox;
 use crate::nodes::util::OnDrop;
 
 pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
@@ -52,46 +53,18 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         return NodeOutput::failure(NodeError::unrecoverable("INVALID_PATH", e));
     }
 
-    if let Some(sandbox_val) = input.context.metadata.get("__file_sandbox_dir") {
-        if let Some(sandbox_str) = sandbox_val.as_str() {
-            // Canonicalize the sandbox root so symlinks in the configured path
-            // don't defeat the containment check.
-            let sandbox = match std::fs::canonicalize(sandbox_str) {
-                Ok(p) => p,
-                Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                    "INVALID_PATH",
-                    "Configured sandbox directory does not exist or cannot be resolved",
-                )),
-            };
-            // Resolve the canonical db path. SQLite creates the file on first open,
-            // so the file may not exist yet. Strategy mirrors file.rs write mode:
-            // 1. Try full canonicalize — handles existing files and dereferences symlinks
-            //    (catches sandbox/escape.db -> /external.db).
-            // 2. On failure (file not yet on disk), canonicalize the parent directory
-            //    and rejoin the filename — the parent must exist.
-            let db_path_buf = std::path::PathBuf::from(&db_path);
-            let canonical_db = match std::fs::canonicalize(&db_path_buf) {
-                Ok(p) => p,
-                Err(_) => {
-                    let parent = db_path_buf.parent().unwrap_or_else(|| std::path::Path::new("."));
-                    let fname  = db_path_buf.file_name().unwrap_or_default();
-                    match std::fs::canonicalize(parent) {
-                        Ok(cp) => cp.join(fname),
-                        Err(_) => return NodeOutput::failure(NodeError::unrecoverable(
-                            "INVALID_PATH",
-                            "Database file's parent directory does not exist or cannot be resolved",
-                        )),
-                    }
-                }
-            };
-            if !canonical_db.starts_with(&sandbox) {
-                return NodeOutput::failure(NodeError::unrecoverable(
-                    "PATH_OUTSIDE_SANDBOX",
-                    format!("Database access is restricted to '{}'", sandbox_str),
-                ));
-            }
-        }
-    }
+    // Open the resolved path on Unix so the path that was checked is the path SQLite
+    // opens. Windows keeps the caller's path: SQLite's handling of the verbatim
+    // `\\?\` prefix on canonical Windows paths is unverified.
+    let db_path = match fs_sandbox::root_from_metadata(&input.context.metadata) {
+        Err(e) => return e.into_output("Database path", None),
+        Ok(None) => db_path,
+        Ok(Some(root)) => match fs_sandbox::resolve(&root, std::path::Path::new(&db_path)) {
+            Ok(resolved) if cfg!(unix) => resolved.to_string_lossy().into_owned(),
+            Ok(_) => db_path,
+            Err(e) => return e.into_output("Database path", Some(&root)),
+        },
+    };
 
     let pool = match super::pool::get_sqlite_pool(&db_path) {
         Ok(p)  => p,
@@ -341,5 +314,85 @@ mod interrupt_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(released, "connection was never returned to the pool after the future was dropped");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sandbox_tests {
+    use super::execute_sqlite;
+    use crate::model::{ExecutionContext, NodeInput, NodeOutput};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    async fn run(sandbox: Value, db_path: &Path) -> NodeOutput {
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert("__file_sandbox_dir".to_string(), sandbox);
+        execute_sqlite(NodeInput {
+            node_id: "n".to_string(),
+            workflow_id: "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input: json!({
+                "db_path": db_path.to_string_lossy(),
+                "operation": "execute",
+                "query": "CREATE TABLE IF NOT EXISTS t (x INTEGER)"
+            }),
+            resolved_credentials: HashMap::new(),
+            context: ExecutionContext { metadata, ..Default::default() },
+            cancel_token: None,
+        })
+        .await
+    }
+
+    fn root_value(root: &Path) -> Value {
+        Value::String(root.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn dangling_symlink_cannot_create_a_database_outside_the_sandbox() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("created_by_attacker.db");
+        let trap = sandbox.path().join("trap.db");
+        std::os::unix::fs::symlink(&victim, &trap).unwrap();
+
+        let out = run(root_value(sandbox.path()), &trap).await;
+
+        assert_eq!(out.error.expect("must be refused").code, "INVALID_PATH");
+        assert!(!victim.exists(), "nothing may be created outside the sandbox");
+    }
+
+    #[tokio::test]
+    async fn database_inside_the_sandbox_still_opens_and_is_created() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let db = sandbox.path().join("ok.db");
+
+        let out = run(root_value(sandbox.path()), &db).await;
+
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert!(db.exists());
+    }
+
+    #[tokio::test]
+    async fn database_outside_the_sandbox_is_refused() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let db = outside.path().join("elsewhere.db");
+
+        let out = run(root_value(sandbox.path()), &db).await;
+
+        assert_eq!(out.error.expect("must be refused").code, "PATH_OUTSIDE_SANDBOX");
+        assert!(!db.exists());
+    }
+
+    #[tokio::test]
+    async fn a_non_string_sandbox_setting_fails_closed() {
+        let outside = tempfile::tempdir().unwrap();
+        let db = outside.path().join("any.db");
+
+        let out = run(json!(true), &db).await;
+
+        assert_eq!(out.error.expect("must be refused").code, "INVALID_PATH");
+        assert!(!db.exists());
     }
 }

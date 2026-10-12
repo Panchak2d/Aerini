@@ -12,6 +12,13 @@ export interface ConnectorData {
   on_failure: string | null;
 }
 
+/** Screen pixels; the delete button keeps this size at every zoom. */
+export const WIRE_DELETE_RADIUS = 10;
+export const WIRE_DELETE_HIT_RADIUS = 12;
+export const WIRE_DELETE_T = 0.5;
+/** Used instead of WIRE_DELETE_T on a wire with a success/failure pill, which sits at the midpoint. */
+export const WIRE_DELETE_T_BRANCHED = 0.35;
+
 export class Connector {
   data:        ConnectorData;
   selected     = false;
@@ -185,6 +192,27 @@ export class Connector {
                      wy - bez(fp.y,fp.y,   tp.y,   tp.y,t)) < tol) return true;
     }
     return false;
+  }
+
+  /**
+   * Where the delete button sits on this wire, in world space. Null when an
+   * endpoint cannot be resolved, or when the anchor lies within `clearance`
+   * of either end port.
+   */
+  deleteButtonAnchor(nodes: Map<string, CanvasNode>, clearance = 0): { x: number; y: number } | null {
+    const fn = nodes.get(this.data.from_node);
+    const tn = nodes.get(this.data.to_node);
+    if (!fn || !tn) return null;
+    const fp = fn.ports.find(p => p.id === this.data.from_port && !p.isInput);
+    const tp = tn.ports.find(p => p.id === this.data.to_port  &&  p.isInput);
+    if (!fp || !tp) return null;
+    const cp = Math.max(Math.abs(tp.x - fp.x) * 0.55, 80);
+    const branched = this.data.on_success !== null || this.data.on_failure !== null;
+    const t = branched ? WIRE_DELETE_T_BRANCHED : WIRE_DELETE_T;
+    const x = bez(fp.x, fp.x + cp, tp.x - cp, tp.x, t);
+    const y = bez(fp.y, fp.y, tp.y, tp.y, t);
+    if (Math.hypot(x - fp.x, y - fp.y) < clearance || Math.hypot(x - tp.x, y - tp.y) < clearance) return null;
+    return { x, y };
   }
 
   toWorkflowEdge(): object {

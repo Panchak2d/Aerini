@@ -22,8 +22,8 @@
 //                   ?uploadType=resumable&part=snippet,status  (Location header),
 //              then PUT the bytes to that session URL
 //   Instagram: GET  https://graph.instagram.com/{version}/me
-//              POST {graph}/{ig_user_id}/media, GET {graph}/{container}?fields=status_code,
-//              POST {graph}/{ig_user_id}/media_publish
+//              POST {graph}/{profile_id}/media, GET {graph}/{container}?fields=status_code,
+//              POST {graph}/{profile_id}/media_publish
 //   TikTok:    POST https://open.tiktokapis.com/v2/post/publish/video/init/
 //              PUT  {upload_url}  (returned by init, Content-Range per chunk)
 //              POST https://open.tiktokapis.com/v2/post/publish/status/fetch/
@@ -388,8 +388,8 @@ impl Node for SocialUploadNode {
             Err(e) => return NodeOutput::failure(e),
         };
 
-        let instagram_user = if plan.platform == Platform::Instagram {
-            match instagram_user_id(&tokens.access_token).await {
+        let instagram_profile = if plan.platform == Platform::Instagram {
+            match instagram_profile_id(&tokens.access_token).await {
                 Ok(id) => Some(id),
                 Err(e) => {
                     discard_rejected_tokens(&plan, &[&e]).await;
@@ -406,10 +406,12 @@ impl Node for SocialUploadNode {
         for file in &plan.files {
             let result = match plan.platform {
                 Platform::YouTube => upload_to_youtube(file, &plan, &tokens.access_token).await,
-                Platform::Instagram => {
-                    let user_id = instagram_user.as_deref().unwrap_or_default();
-                    upload_to_instagram(file, &plan, user_id, &tokens.access_token).await
-                }
+                Platform::Instagram => match instagram_profile.as_deref() {
+                    Some(profile_id) => {
+                        upload_to_instagram(file, &plan, profile_id, &tokens.access_token).await
+                    }
+                    None => Err(parse_error("Instagram", "account id")),
+                },
                 Platform::TikTok => upload_to_tiktok(file, &plan, &tokens.access_token).await,
             };
             match result {
@@ -847,7 +849,7 @@ async fn instagram_request(req: reqwest::RequestBuilder) -> Result<Value, Upload
 
 /// The professional account id the access token belongs to; every publishing
 /// call is addressed to it.
-async fn instagram_user_id(access_token: &str) -> Result<String, UploadError> {
+async fn instagram_profile_id(access_token: &str) -> Result<String, UploadError> {
     let body = instagram_request(
         UPLOAD_CLIENT
             .get(format!("{INSTAGRAM_GRAPH}/me"))
@@ -855,7 +857,9 @@ async fn instagram_user_id(access_token: &str) -> Result<String, UploadError> {
     )
     .await?;
     graph_id(
-        scalar_text(&body["user_id"]).or_else(|| scalar_text(&body["id"])),
+        scalar_text(&body["user_id"])
+            .or_else(|| scalar_text(&body["id"]))
+            .or_else(|| scalar_text(&body["data"][0]["user_id"])),
         "account id",
     )
 }
@@ -863,7 +867,7 @@ async fn instagram_user_id(access_token: &str) -> Result<String, UploadError> {
 async fn upload_to_instagram(
     file: &FileSpec,
     plan: &Plan,
-    user_id: &str,
+    profile_id: &str,
     access_token: &str,
 ) -> Result<Value, UploadError> {
     let (media_url, kind) = instagram_target(file)?;
@@ -880,7 +884,7 @@ async fn upload_to_instagram(
         }
     }
     let created = instagram_request(
-        UPLOAD_CLIENT.post(format!("{INSTAGRAM_GRAPH}/{user_id}/media")).form(&params),
+        UPLOAD_CLIENT.post(format!("{INSTAGRAM_GRAPH}/{profile_id}/media")).form(&params),
     )
     .await?;
     let container = graph_id(scalar_text(&created["id"]), "media container id")?;
@@ -900,7 +904,7 @@ async fn upload_to_instagram(
 
     let published = instagram_request(
         UPLOAD_CLIENT
-            .post(format!("{INSTAGRAM_GRAPH}/{user_id}/media_publish"))
+            .post(format!("{INSTAGRAM_GRAPH}/{profile_id}/media_publish"))
             .form(&[("creation_id", container.as_str()), ("access_token", access_token)]),
     )
     .await?;

@@ -124,6 +124,10 @@ async fn run_notifier(mut cmd: Command, name: &str, timeout: Duration) -> Result
     if waited.is_err() {
         let _ = child.kill().await;
     }
+    if matches!(&waited, Ok(Ok(status)) if status.success()) {
+        drain.abort();
+        return Ok(());
+    }
     let captured = tokio::time::timeout(Duration::from_millis(500), &mut drain)
         .await
         .ok()

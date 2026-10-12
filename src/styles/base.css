@@ -60,7 +60,7 @@ input[type="datetime-local"] { color-scheme: dark; }
 
 .hidden { display: none !important; }
 
-/* Screen-reader-only: visually hidden but announced by AT (P31).
+/* Screen-reader-only: visually hidden but announced by AT.
    position:fixed (not absolute) so it is removed from grid flow entirely —
    body is display:grid and absolutely-positioned grid children can still be
    placed in the grid area in WebKit, producing a visible 1px block. */

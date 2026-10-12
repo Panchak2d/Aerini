@@ -34,7 +34,7 @@ Runs the multi-workflow REST API, with bearer-token auth and no export package o
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--token <token>` | `AERINI_TOKEN` | auto-generated | Bearer token for API auth. If you set one, it must be at least 32 characters, the server exits with an error otherwise. Left unset, the server generates a 43-character token, prints it once to stderr, and grants it all three [scopes](../glossary.md#scoped-token) (`read`, `write`, `admin`). |
+| `--token <token>` | `AERINI_TOKEN` | auto-generated | Bearer token for API auth. If you set one, it must be at least 32 characters, the server exits with an error otherwise. Left unset on a first run (no tokens exist yet), the server generates a 43-character token, prints it once to stderr, and grants it all three [scopes](../glossary.md#scoped-token) (`read`, `write`, `admin`). On later restarts it keeps the tokens already stored and prints nothing, so save the first one. |
 | `--port <port>` | `AERINI_PORT` | `7700` | Port to listen on. Unlike `serve`'s `--port`, this one is env-backed and always has a default. |
 | `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Directory for the SQLite database and the token/credential key file. `~` or a leading `~/` expands to your home directory (`$HOME`, or `USERPROFILE` on Windows when `HOME` is unset); `~name/...` is used as written. The server exits with an error if it needs a home directory and can't find one. |
 | `--allow-origin <list>` | | none | Comma-separated additional origins allowed to call the API. Localhost origins (`http://localhost[:port]`, `http://127.0.0.1[:port]`, `http://[::1][:port]`) are always allowed regardless of this flag. |
@@ -58,6 +58,10 @@ Runs the multi-workflow REST API, with bearer-token auth and no export package o
 | `--plugin-dir <dir>` | | none | Same purpose as `serve`'s. `api` mode reloads plugins through `POST /api/plugins/reload` (see [Server API Reference](server-api-reference.md)) instead of `SIGHUP`. |
 
 Most flags above are identical between the two subcommands. `--file-sandbox-dir` is the one that isn't: `serve` warns and leaves File nodes unrestricted when it's absent, `api` sandboxes to a directory under `--data-dir` automatically. `--port`, `--token`, `--data-dir`, `--allow-origin`, `--allow-env-vars`, `--keychain`, `--db-pool-size`, `--max-concurrent-runs`, and `--max-queue-wait-secs` exist only on `api`. `--config`, `--allow-legacy-run-secret`, and `--i-acknowledge-partial-sandbox` exist only on `serve`.
+
+## Logging
+
+Both subcommands log at `info` by default. Set `RUST_LOG` to change the level or filter by module (for example `RUST_LOG=debug`); a value that doesn't parse falls back to `info`. Set `AERINI_LOG_FORMAT=json` to emit one JSON object per log line for a log shipper; any other value keeps the default human-readable format.
 
 ## Platform behavior of `--code-sandbox`
 

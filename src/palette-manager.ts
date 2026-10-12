@@ -411,7 +411,7 @@ function renderPaletteResults(q: string): void {
 
 function highlightPalette(): void {
   document.querySelectorAll<HTMLElement>(".palette-result").forEach(el =>
-    el.classList.toggle("active", parseInt(el.dataset.idx ?? "-1") === paletteActive)
+    el.classList.toggle("active", parseInt(el.dataset.idx ?? "-1", 10) === paletteActive)
   );
 }
 

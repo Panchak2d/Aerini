@@ -37,6 +37,7 @@ export function validateWorkflow(canvas: Canvas): string[] {
   }
 
   for (const node of nodes.values()) {
+    if (node.disabled) continue;
     if (node.data.node_type_id === NODE_IDS.DATABASE) {
       const dbType = String(node.data.config["db_type"] ?? "sqlite");
       const dbRequired =

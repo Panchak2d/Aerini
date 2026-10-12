@@ -4,7 +4,7 @@ This page covers three separate things: updating the desktop app, updating a sel
 
 ## Desktop app
 
-Open **Settings**, find **Updates** under **About**, and click **Check for Updates**. Aerini never checks on its own: there's no startup check, no background poller, and no scheduled interval. It contacts GitHub for an update only when you click the button.
+Open **Settings**, find **Updates** under **About**, and click **Check for Updates**. By default Aerini never checks on its own: no background poller and no scheduled interval, and it contacts GitHub for an update only when you click the button. The one exception is **Check on startup**, directly below the Updates row. It is off by default. When you turn it on, Aerini makes a single request to GitHub each time it launches and, if a newer version exists, shows a message and the same status line as a manual check. It never installs by itself, a failed startup check (for example when you're offline) says nothing, and turning the setting on or off takes effect the next time Aerini starts.
 
 The check reads a small manifest from the latest published release on GitHub and compares it to your installed version. One of three things happens:
 

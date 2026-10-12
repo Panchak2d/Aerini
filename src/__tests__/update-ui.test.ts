@@ -8,10 +8,13 @@ vi.mock("../ipc/update", () => ({
   cancelUpdateDownload: vi.fn(),
   takeUpdateNotice: vi.fn(),
   listenUpdateProgress: vi.fn(),
+  startupUpdateCheck: vi.fn(),
+  getUpdateCheckOnStartup: vi.fn(),
+  setUpdateCheckOnStartup: vi.fn(),
 }));
 vi.mock("../confirm", () => ({ showConfirm: vi.fn() }));
 
-import { applyView, stateFromCheck, viewFor } from "../update-ui";
+import { applyView, startupToast, stateFromCheck, viewFor } from "../update-ui";
 import type { UpdateEls, UpdateState } from "../update-ui";
 import type { UpdateCheckResult } from "../ipc/update";
 
@@ -105,5 +108,16 @@ describe("update row rendering", () => {
     expect(els.installBtn.hidden).toBe(true);
     expect(els.status.textContent).toContain("Move it to Applications");
     expect(els.status.querySelector("a")?.textContent).toBe("Download from GitHub");
+  });
+});
+
+describe("startup check notification", () => {
+  it("speaks up only when a newer version exists", () => {
+    expect(startupToast(stateFromCheck(check({})))).toBe("v0.5.0 is available. Open Settings > About to update.");
+    expect(startupToast(stateFromCheck(check({
+      install_support: { kind: "manual", reason: "no_release_for_platform", message: "m" },
+    })))).toContain("v0.5.0 is available");
+    expect(startupToast(stateFromCheck(check({ available: false, latest_version: null })))).toBeNull();
+    expect(startupToast({ kind: "idle" })).toBeNull();
   });
 });

@@ -42,15 +42,30 @@ const OTHER_TERMINATORS: [char; 12] = [
 ];
 
 /// Abbreviations whose dot does not end a sentence, matched case-insensitively
-/// on the word just before the dot. Kept short on purpose: words such as `no`,
-/// `etc`, `inc` and `co` end sentences as often as they abbreviate, and `U.S.`,
-/// `a.m.` and `p.m.` often end one too.
-const ABBREVIATIONS: [&str; 28] = [
+/// on the word just before the dot. Kept short on purpose: words such as `etc`,
+/// `inc` and `co` end sentences as often as they abbreviate, and `U.S.`,
+/// `a.m.` and `p.m.` often end one too. English, German, French, Spanish,
+/// Portuguese, Italian and Dutch titles and common written-out shortenings.
+const ABBREVIATIONS: [&str; 65] = [
     "mr", "mrs", "ms", "mx", "dr", "prof", "sr", "jr", "st", "mt", "vs", "cf", "capt", "col",
     "gen", "lt", "sgt", "rev", "hon", "mme", "mlle", "sra", "srta", "herr", "fr", "approx",
     "dept", "fig",
+    "chr", "vgl", "ggf", "evtl", "bzw", "ca", "inkl", "sog", "std",
+    "dra", "lic", "sta", "sto", "excmo", "excma", "ilmo", "avda", "av", "vid",
+    "drs", "eng", "exmo", "exma", "ltda", "pag",
+    "sig", "ing", "dott", "avv", "arch", "geom", "rag", "mons", "tel",
+    "dir",
+    "ir", "dhr",
 ];
-const DOTTED_ABBREVIATIONS: [&str; 6] = ["e.g", "i.e", "ph.d", "z.b", "d.h", "u.a"];
+const DOTTED_ABBREVIATIONS: [&str; 8] = ["e.g", "i.e", "ph.d", "z.b", "d.h", "u.a", "p.ej", "n.b"];
+
+/// Abbreviations that also end ordinary sentences (`No.`, `Art.`, `p.`), so the
+/// dot is kept inside the sentence only when a number follows (`Nr. 5`, `pp. 12`).
+const NUMERIC_ABBREVIATIONS: [&str; 5] = ["nr", "art", "p", "pp", "no"];
+
+/// Most extra abbreviations one run accepts, and the longest one in characters.
+const MAX_EXTRA_ABBREVIATIONS: usize = 200;
+const MAX_EXTRA_ABBREVIATION_CHARS: usize = 20;
 
 /// Adds a non-empty chunk. Returns false once the list is past `MAX_CHUNKS`, so
 /// a splitter stops allocating chunks for a result that will be refused.
@@ -99,6 +114,11 @@ impl Node for TextSplitterNode {
                 "source_field": {
                     "type": "string",
                     "description": "Optional: dot-path to a string field in the connected node's output, e.g. 'body' or 'content'. Fails if the field is not found. Overrides text."
+                },
+                "extra_abbreviations": {
+                    "type": "string",
+                    "x-aerini-multiline": true,
+                    "description": "Sentences mode only. Extra abbreviations whose dot does not end a sentence, separated by commas or new lines, e.g. 'Kap., Anm., o.ä.'. Not case-sensitive; the trailing dot is optional. Up to 200 entries of up to 20 letters or dots each."
                 }
             }
         })
@@ -161,6 +181,10 @@ impl Node for TextSplitterNode {
                 format!("Unknown mode {}. Valid modes: {}", input.input["mode"], MODES.join(", ")),
             )),
         };
+        let extra_abbreviations = match parse_extra_abbreviations(&input.input["extra_abbreviations"]) {
+            Ok(list) => list,
+            Err(e) => return NodeOutput::failure(e),
+        };
         let total_chars = text.chars().count();
 
         if total_chars > MAX_TEXT_CHARS {
@@ -215,7 +239,7 @@ impl Node for TextSplitterNode {
         }
 
         let chunks: Vec<String> = match mode {
-            "sentences"  => split_by_sentences(&text, chunk_size, overlap),
+            "sentences"  => split_by_sentences(&text, chunk_size, overlap, &extra_abbreviations),
             "paragraphs" => split_by_paragraphs(&text, chunk_size, overlap),
             "words"      => split_by_words(&text, chunk_size, overlap),
             _            => split_by_chars(&text, chunk_size, overlap),
@@ -282,7 +306,7 @@ fn is_sentence_terminator(ch: char) -> bool {
 
 /// True when the dot at `dot` closes a known abbreviation (`Mrs.`, `e.g.`) or
 /// an initial (`J. K. Rowling`), so it does not end a sentence.
-fn dot_follows_abbreviation(chars: &[char], dot: usize) -> bool {
+fn dot_follows_abbreviation(chars: &[char], dot: usize, extra: &[String]) -> bool {
     let mut start = dot;
     while start > 0 && (chars[start - 1].is_alphabetic() || chars[start - 1] == '.') {
         start -= 1;
@@ -294,15 +318,65 @@ fn dot_follows_abbreviation(chars: &[char], dot: usize) -> bool {
         return false;
     }
     let token: String = chars[start..dot].iter().flat_map(|c| c.to_lowercase()).collect();
-    if ABBREVIATIONS.contains(&token.as_str()) || DOTTED_ABBREVIATIONS.contains(&token.as_str()) {
+    if ABBREVIATIONS.contains(&token.as_str())
+        || DOTTED_ABBREVIATIONS.contains(&token.as_str())
+        || extra.contains(&token)
+    {
+        return true;
+    }
+    let next = chars[dot + 1..].iter().find(|c| !c.is_whitespace());
+    if NUMERIC_ABBREVIATIONS.contains(&token.as_str()) && next.is_some_and(|c| c.is_numeric()) {
         return true;
     }
     let is_initial = dot - start == 1 && chars[start].is_uppercase();
-    is_initial
-        && chars[dot + 1..]
-            .iter()
-            .find(|c| !c.is_whitespace())
-            .is_some_and(|c| c.is_uppercase())
+    is_initial && next.is_some_and(|c| c.is_uppercase())
+}
+
+/// Reads `extra_abbreviations`: entries split on commas and new lines, trimmed,
+/// lowercased, trailing dot dropped. Blank or missing is an empty list.
+fn parse_extra_abbreviations(value: &Value) -> Result<Vec<String>, NodeError> {
+    let raw = match value {
+        Value::Null => return Ok(Vec::new()),
+        Value::String(s) => s,
+        _ => return Err(NodeError::unrecoverable(
+            "INVALID_EXTRA_ABBREVIATIONS",
+            "extra_abbreviations must be text: abbreviations separated by commas or new lines",
+        )),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw.split([',', '\n', '\r']) {
+        let entry = entry.trim();
+        let entry = entry.strip_suffix('.').unwrap_or(entry);
+        if entry.is_empty() {
+            continue;
+        }
+        let valid = entry.chars().count() <= MAX_EXTRA_ABBREVIATION_CHARS
+            && entry.chars().all(|c| c.is_alphabetic() || c == '.')
+            && entry.chars().any(|c| c.is_alphabetic())
+            && !entry.starts_with('.')
+            && !entry.contains("..");
+        if !valid {
+            return Err(NodeError::unrecoverable(
+                "INVALID_EXTRA_ABBREVIATIONS",
+                format!(
+                    "extra_abbreviations entry '{}' is not valid: use letters and inner dots only, at most {} characters, separated by commas or new lines",
+                    entry.chars().take(40).collect::<String>(),
+                    MAX_EXTRA_ABBREVIATION_CHARS
+                ),
+            ));
+        }
+        let lowered: String = entry.chars().flat_map(|c| c.to_lowercase()).collect();
+        if !out.contains(&lowered) {
+            out.push(lowered);
+        }
+        if out.len() > MAX_EXTRA_ABBREVIATIONS {
+            return Err(NodeError::unrecoverable(
+                "INVALID_EXTRA_ABBREVIATIONS",
+                format!("extra_abbreviations has more than {} entries", MAX_EXTRA_ABBREVIATIONS),
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn is_closing_mark(ch: char) -> bool {
@@ -315,7 +389,7 @@ fn push_trimmed(out: &mut Vec<String>, chars: &[char]) {
     if !s.is_empty() { out.push(s.to_string()); }
 }
 
-fn find_sentences(text: &str) -> Vec<String> {
+fn find_sentences(text: &str, extra: &[String]) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut sentences = Vec::new();
     let mut start = 0;
@@ -332,7 +406,7 @@ fn find_sentences(text: &str) -> Vec<String> {
         let cjk = chars[i..end].iter().any(|c| CJK_TERMINATORS.contains(c));
         let unambiguous = cjk || chars[i..end].iter().any(|c| OTHER_TERMINATORS.contains(c));
         let at_boundary = unambiguous || end == chars.len() || chars[end].is_whitespace() || is_cjk_letter(chars[end]);
-        let abbreviation = end == i + 1 && chars[i] == '.' && dot_follows_abbreviation(&chars, i);
+        let abbreviation = end == i + 1 && chars[i] == '.' && dot_follows_abbreviation(&chars, i, extra);
         if at_boundary && !abbreviation && (unambiguous || end - start > 3) {
             push_trimmed(&mut sentences, &chars[start..end]);
             start = end;
@@ -360,8 +434,8 @@ fn join_sentences(sentences: &[String]) -> String {
     out
 }
 
-fn split_by_sentences(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
-    let sentences = find_sentences(text);
+fn split_by_sentences(text: &str, chunk_size: usize, overlap: usize, extra: &[String]) -> Vec<String> {
+    let sentences = find_sentences(text, extra);
     let step = if chunk_size > overlap { chunk_size - overlap } else { 1 };
     let mut chunks = Vec::new();
     let mut start = 0;
@@ -836,26 +910,111 @@ mod tests {
 
     #[test]
     fn a_latin_terminator_directly_before_cjk_ends_the_sentence_but_a_decimal_does_not() {
-        assert_eq!(find_sentences("Hello world.你好世界"), ["Hello world.", "你好世界"]);
-        assert_eq!(find_sentences("Pi is 3.14 today."), ["Pi is 3.14 today."]);
+        assert_eq!(find_sentences("Hello world.你好世界", &[]), ["Hello world.", "你好世界"]);
+        assert_eq!(find_sentences("Pi is 3.14 today.", &[]), ["Pi is 3.14 today."]);
     }
 
     #[test]
     fn abbreviations_and_initials_do_not_end_a_sentence_but_ordinary_words_do() {
-        assert_eq!(find_sentences("Mrs. Smith left. Then Dr. Who? Yes."), ["Mrs. Smith left.", "Then Dr. Who?", "Yes."]);
-        assert_eq!(find_sentences("See e.g. this one. Done."), ["See e.g. this one.", "Done."]);
-        assert_eq!(find_sentences("J. K. Rowling wrote it. Fine."), ["J. K. Rowling wrote it.", "Fine."]);
-        assert_eq!(find_sentences("He said no. Then he left."), ["He said no.", "Then he left."]);
-        assert_eq!(find_sentences("We met (Prof. Lee) today. Ok."), ["We met (Prof. Lee) today.", "Ok."]);
-        assert_eq!(find_sentences("It was etc. Then more."), ["It was etc.", "Then more."]);
+        assert_eq!(find_sentences("Mrs. Smith left. Then Dr. Who? Yes.", &[]), ["Mrs. Smith left.", "Then Dr. Who?", "Yes."]);
+        assert_eq!(find_sentences("See e.g. this one. Done.", &[]), ["See e.g. this one.", "Done."]);
+        assert_eq!(find_sentences("J. K. Rowling wrote it. Fine.", &[]), ["J. K. Rowling wrote it.", "Fine."]);
+        assert_eq!(find_sentences("He said no. Then he left.", &[]), ["He said no.", "Then he left."]);
+        assert_eq!(find_sentences("We met (Prof. Lee) today. Ok.", &[]), ["We met (Prof. Lee) today.", "Ok."]);
+        assert_eq!(find_sentences("It was etc. Then more.", &[]), ["It was etc.", "Then more."]);
     }
 
     #[test]
     fn other_script_terminators_end_a_sentence_and_are_joined_with_a_space() {
-        assert_eq!(find_sentences("كيف حالك؟ أنا بخير۔ شكرا"), ["كيف حالك؟", "أنا بخير۔", "شكرا"]);
-        assert_eq!(find_sentences("यह पहला है। यह दूसरा है॥ तीसरा"), ["यह पहला है।", "यह दूसरा है॥", "तीसरा"]);
-        assert_eq!(find_sentences("Really⁇ Yes‼ Fine"), ["Really⁇", "Yes‼", "Fine"]);
+        assert_eq!(find_sentences("كيف حالك؟ أنا بخير۔ شكرا", &[]), ["كيف حالك؟", "أنا بخير۔", "شكرا"]);
+        assert_eq!(find_sentences("यह पहला है। यह दूसरा है॥ तीसरा", &[]), ["यह पहला है।", "यह दूसरा है॥", "तीसरा"]);
+        assert_eq!(find_sentences("Really⁇ Yes‼ Fine", &[]), ["Really⁇", "Yes‼", "Fine"]);
         assert_eq!(join_sentences(&["यह पहला है।".to_string(), "दूसरा".to_string()]), "यह पहला है। दूसरा");
+    }
+
+    #[test]
+    fn german_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("Dr. Müller kam ca. 5 Uhr an, vgl. Anhang. Fertig.", &[]),
+            ["Dr. Müller kam ca. 5 Uhr an, vgl. Anhang.", "Fertig."]
+        );
+    }
+
+    #[test]
+    fn french_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("Voir fig. 2 et la dir. générale ici. Fin.", &[]),
+            ["Voir fig. 2 et la dir. générale ici.", "Fin."]
+        );
+    }
+
+    #[test]
+    fn spanish_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("La Sra. Pérez vive en la Avda. Mayor, p.ej. hoy. Fin.", &[]),
+            ["La Sra. Pérez vive en la Avda. Mayor, p.ej. hoy.", "Fin."]
+        );
+    }
+
+    #[test]
+    fn portuguese_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("O Eng. Silva falou com a Dra. Costa. Depois saiu.", &[]),
+            ["O Eng. Silva falou com a Dra. Costa.", "Depois saiu."]
+        );
+    }
+
+    #[test]
+    fn italian_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("Il Dott. Rossi e l'Avv. Bianchi sono qui. Ciao.", &[]),
+            ["Il Dott. Rossi e l'Avv. Bianchi sono qui.", "Ciao."]
+        );
+    }
+
+    #[test]
+    fn dutch_abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            find_sentences("Dhr. Jansen en ir. De Vries zijn er. Klaar.", &[]),
+            ["Dhr. Jansen en ir. De Vries zijn er.", "Klaar."]
+        );
+    }
+
+    #[test]
+    fn numeric_only_abbreviations_end_a_sentence_unless_a_number_follows() {
+        assert_eq!(
+            find_sentences("See Art. 12 and No. 7 on p. 4. Then Art. Seven.", &[]),
+            ["See Art. 12 and No. 7 on p. 4.", "Then Art.", "Seven."]
+        );
+    }
+
+    #[test]
+    fn extra_abbreviations_are_normalized_and_applied() {
+        let list = parse_extra_abbreviations(&json!("Kap., Anm\no.ä. , KAP")).unwrap();
+        assert_eq!(list, ["kap", "anm", "o.ä"]);
+        assert_eq!(
+            find_sentences("Siehe Kap. Drei. Ende.", &list),
+            ["Siehe Kap. Drei.", "Ende."]
+        );
+        assert!(parse_extra_abbreviations(&Value::Null).unwrap().is_empty());
+        assert!(parse_extra_abbreviations(&json!(" , \n")).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_extra_abbreviations_fail_with_a_named_error() {
+        let too_many = (0..201usize)
+            .map(|i| format!("{}{}", (b'a' + (i / 26) as u8) as char, (b'a' + (i % 26) as u8) as char))
+            .collect::<Vec<_>>()
+            .join(",");
+        for bad in [json!("two words"), json!("ab1"), json!(7), json!("a".repeat(21)), json!("a..b"), json!(too_many)] {
+            let out = TextSplitterNode
+                .execute(make_input(json!({ "text": "Hello there.", "mode": "sentences", "extra_abbreviations": bad })))
+                .await;
+            assert!(!out.success);
+            let e = out.error.unwrap();
+            assert_eq!(e.code, "INVALID_EXTRA_ABBREVIATIONS");
+            assert!(!e.recoverable);
+        }
     }
 
     #[test]

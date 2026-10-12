@@ -22,6 +22,8 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
     const iconDanger  = modal.querySelector(".confirm-icon--danger");
     const iconNeutral = modal.querySelector(".confirm-icon--neutral");
 
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     msgEl.textContent = message;
     okBtn.textContent = okLabel;
     okBtn.classList.toggle("confirm-danger", isDanger);
@@ -37,15 +39,38 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
       okBtn.removeEventListener("click", onOk);
       cancelBtn.removeEventListener("click", onCancel);
       backdrop.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey, true);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
       resolve(result);
     };
 
     const onOk     = () => cleanup(true);
     const onCancel = () => cleanup(false);
 
+    // Capture phase, and every key is stopped from reaching the rest of the
+    // app: while the dialog is up, Ctrl+Enter, Ctrl+N and the other global
+    // shortcuts must not act on the page behind it. Enter and Space on a
+    // focused button still activate it, since that is the browser's default
+    // action, not a propagated event.
+    const onKey = (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); onCancel(); return; }
+      if (e.key !== "Tab") return;
+      const current = document.activeElement;
+      const inside  = modal.contains(current);
+      if (e.shiftKey ? (current === cancelBtn || !inside) : (current === okBtn || !inside)) {
+        e.preventDefault();
+        (e.shiftKey ? okBtn : cancelBtn).focus();
+      }
+    };
+
     okBtn.addEventListener("click", onOk);
     cancelBtn.addEventListener("click", onCancel);
     backdrop.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey, true);
+
+    // A danger prompt opens on Cancel so a stray Enter cannot approve it.
+    (isDanger ? cancelBtn : okBtn).focus();
   });
 }
 

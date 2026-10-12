@@ -23,14 +23,14 @@ export function initInterpolationAutocomplete(canvas: Canvas): void {
     const items  = dropdown.querySelectorAll<HTMLElement>(".interp-item");
     const active = dropdown.querySelector<HTMLElement>(".interp-item.active");
     const idx    = active ? [...items].indexOf(active) : -1;
-    if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      items[Math.min(idx + 1, items.length - 1)]?.classList.add("active");
-      active?.classList.remove("active");
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      items[Math.max(idx - 1, 0)]?.classList.add("active");
-      active?.classList.remove("active");
+      const next = items[Math.min(Math.max(idx + (e.key === "ArrowDown" ? 1 : -1), 0), items.length - 1)];
+      if (next && next !== active) {
+        active?.classList.remove("active");
+        next.classList.add("active");
+        next.scrollIntoView?.({ block: "nearest" });
+      }
     } else if (e.key === "Enter" || e.key === "Tab") {
       e.preventDefault();
       (active ?? items[0])?.click();

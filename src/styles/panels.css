@@ -200,6 +200,8 @@
 .confirm-btn-ok { flex:1; padding:var(--space-2) var(--space-4); background:var(--color-action-nav); border:1px solid var(--color-action-nav); border-radius:var(--radius-lg); color:#000; font-size:13px; font-weight:600; cursor:pointer; transition:opacity var(--trans); }
 .confirm-btn-ok:hover { opacity:.85; }
 .confirm-btn-ok.confirm-danger { background:var(--red); border-color:var(--red); color:#fff; }
+.confirm-btn-cancel:focus-visible,
+.confirm-btn-ok:focus-visible { outline:2px solid var(--color-focus); outline-offset:2px; }
 
 
 /* ── NODE POPOVER ───────────────────────────────────────────────────────────── */
@@ -400,6 +402,7 @@
 .history-item:hover { background: var(--bg4); border-color: var(--t3); }
 .history-item.history-fail { border-left: 3px solid var(--red); }
 .history-item.history-ok   { border-left: 3px solid var(--green); }
+.history-item.history-unreadable { opacity: 0.55; cursor: not-allowed; }
 
 .history-item-row {
   display: flex;

@@ -165,6 +165,28 @@ impl Default for ActiveRunToken {
 }
 
 #[cfg(test)]
+mod start_visibility_tests {
+    use super::should_start_hidden;
+
+    #[test]
+    fn minimized_launch_without_an_update_result_stays_hidden() {
+        assert!(should_start_hidden(["aerini", "--minimized"], false));
+    }
+
+    #[test]
+    fn minimized_launch_with_an_update_result_is_shown() {
+        assert!(!should_start_hidden(["aerini", "--minimized"], true));
+    }
+
+    #[test]
+    fn launch_without_the_exact_flag_is_shown() {
+        assert!(!should_start_hidden(["aerini"], false));
+        assert!(!should_start_hidden(["aerini", "--minimized-later", "minimized"], false));
+        assert!(!should_start_hidden(Vec::<String>::new(), false));
+    }
+}
+
+#[cfg(test)]
 mod active_run_token_tests {
     use super::*;
 
@@ -324,11 +346,32 @@ fn read_text_file(path: String) -> Result<String, String> {
         .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))
 }
 
+/// Argument the autostart entry passes so a login launch opens in the tray.
+const MINIMIZED_FLAG: &str = "--minimized";
+
+/// Whether the main window stays hidden after launch. A launch with the
+/// minimized flag stays hidden unless there is an update result the person
+/// needs to see.
+fn should_start_hidden<I, S>(args: I, has_update_notice: bool) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    !has_update_notice && args.into_iter().any(|a| a.as_ref() == MINIMIZED_FLAG)
+}
+
+/// Set once at startup; `show_main_window` does nothing while it is `true`.
+struct StartHidden(bool);
+
 /// Called by the frontend once it has painted its first real frame.
 /// Window is created hidden (see tauri.conf.json) to avoid a flash of the
-/// desktop showing through before content is ready.
+/// desktop showing through before content is ready. Does nothing for a launch
+/// that is meant to stay in the tray; the tray's "Open Aerini" shows it then.
 #[tauri::command]
 fn show_main_window(window: tauri::Window) -> Result<(), String> {
+    if window.try_state::<StartHidden>().is_some_and(|hold| hold.0) {
+        return Ok(());
+    }
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())
 }
@@ -699,6 +742,8 @@ pub fn run() {
                 &data_dir,
                 &app.package_info().version.to_string(),
             );
+            let start_hidden = should_start_hidden(std::env::args(), update_notice.is_some());
+            app.manage(StartHidden(start_hidden));
             app.manage(commands::update::UpdateState::new(
                 commands::update::marker_path(&data_dir),
                 update_notice,
@@ -776,14 +821,16 @@ pub fn run() {
             let main_window_clone = main_window.clone();
             // Safety net: if the frontend never calls show_main_window (e.g. a JS
             // error before it reaches that point), don't leave the app permanently
-            // invisible to the user.
-            let fallback_window = main_window.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if !fallback_window.is_visible().unwrap_or(true) {
-                    let _ = fallback_window.show();
-                }
-            });
+            // invisible to the user. Skipped for a launch that stays in the tray.
+            if !start_hidden {
+                let fallback_window = main_window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if !fallback_window.is_visible().unwrap_or(true) {
+                        let _ = fallback_window.show();
+                    }
+                });
+            }
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -912,6 +959,9 @@ pub fn run() {
             commands::update::install_update,
             commands::update::cancel_update_download,
             commands::update::take_update_notice,
+            commands::update::startup_update_check,
+            commands::update::get_update_check_on_startup,
+            commands::update::set_update_check_on_startup,
             commands::providers::list_provider_models,
             pick_folder_dialog,
             pick_plugin_file_dialog,

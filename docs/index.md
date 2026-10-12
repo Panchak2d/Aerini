@@ -40,7 +40,7 @@ The edges matter as much as the feature list.
 - **Not a general data platform.** No data warehouse, no built-in analytics, no massive-scale batch processing. It's an automation tool for individuals and small setups, not enterprise ETL infrastructure.
 
 > [!NOTE]
-> Aerini collects no telemetry, analytics, or crash reports of any kind. The one exception: the app's own interface loads a font (Inter) from Google Fonts over HTTPS. Everything else is under your control. See [Security](guide/security.md) for the full picture.
+> Aerini collects no telemetry, analytics, or crash reports of any kind. The one exception: the app's own interface loads a font (Inter) from Google Fonts over HTTPS. Checking for updates is separate and happens only when you click, unless you turn on the off-by-default **Check on startup** setting. Everything else is under your control. See [Security](guide/security.md) for the full picture.
 
 ## Two documents both called "Security"
 

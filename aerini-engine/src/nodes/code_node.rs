@@ -920,9 +920,10 @@ mod tests {
     #[tokio::test]
     async fn failure_message_shows_a_redacted_tail_of_stderr_not_all_of_it() {
         let node = require_node!();
-        let code = "console.error('x'.repeat(300000)); \
-                    console.error('cannot reach postgres://app:hunter2@db/prod'); \
-                    console.error('real error'); process.exit(1);";
+        let code = "const w = (s) => new Promise((r) => process.stderr.write(s + '\\n', r)); \
+                    await w('x'.repeat(300000)); \
+                    await w('cannot reach postgres://app:hunter2@db/prod'); \
+                    await w('real error'); process.exit(1);";
         let out = run_code(&node, json!({ "code": code }), HashMap::new()).await;
         let err = out.error.expect("expected NodeError");
         assert_eq!(err.code, "RUNTIME_ERROR");
@@ -937,7 +938,8 @@ mod tests {
     async fn endless_output_is_stopped_with_output_flood_before_the_timeout() {
         let node = require_node!();
         let started = std::time::Instant::now();
-        let code = "const chunk = 'x'.repeat(65536); while (true) process.stdout.write(chunk);";
+        let code = "const chunk = 'x'.repeat(65536); \
+                    while (true) await new Promise((r) => process.stdout.write(chunk, r));";
         let out = run_code(&node, json!({ "code": code, "timeout_secs": 60 }), HashMap::new()).await;
         let err = out.error.expect("expected NodeError");
         assert_eq!(err.code, "OUTPUT_FLOOD", "{}", err.message);

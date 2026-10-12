@@ -14,6 +14,11 @@ On macOS, Aerini asks for Keychain access to read the key that decrypts your sav
 
 Aerini's macOS build isn't signed with an Apple Developer certificate. macOS can treat each new build of such an app as a different program, so after an update (in-app or by hand) it may ask again for permission to read the key that decrypts your saved credentials. Choose **Always Allow**. If you click **Deny**, Aerini shows an error and closes without touching your credentials, as described in the entry above. Removing the repeat prompts needs an Apple Developer ID signature, which the project doesn't have yet.
 
+
+## Launch at login shows no window, and Linux without a system tray has nothing to click
+
+**Launch at login** starts Aerini in the system tray with its window hidden, so a login doesn't put a window in front of you. Workflows with Schedule, Webhook or trigger-plugin triggers still run. Open the window from the tray icon's **Open Aerini**. The exception is the first start after an in-app update, which opens the window so you can see the result. Some Linux desktops, such as GNOME without an AppIndicator extension, don't show tray icons; there a login launch has no icon to click and no window, so turn **Launch at login** off, or install the extension.
+
 ## A database cancel can, rarely, hit the next statement on the same connection
 
 When a run is cancelled or times out, a Postgres or MySQL `Execute` statement is cancelled by a second request to the server. If the statement finishes in the instant before that request lands, the cancel can interrupt the next statement that happens to be running on the same pooled connection. That statement fails with a cancellation error and can be retried. It needs a cancel and a statement completion to coincide, so it is rare.
@@ -42,6 +47,10 @@ The sign-in (OAuth) callback listener's handling of the browser hand-off on Wind
 
 A failed connection is retried for every node with a retry policy, and a timeout only for nodes that are safe to repeat (not for Slack, Telegram, Discord, SendGrid, GitHub, Notion, Sheets Append Row, image generation, or HTTP `POST`/`PATCH`). A connection that times out while being made is expected to count as a failed connection and be retried, but this has not been confirmed against a real network. If it is reported as a timeout, a send node does not retry it. That is the safe direction: nothing is sent twice.
 
+## Linux desktop notifications: a daemon without markup support shows the body with its escapes
+
+The Desktop Notification node escapes `&`, `<` and `>` in the title and body, because most daemons read a small markup language there. A daemon that does not support markup (dunst with `markup=no`, mako with markup off) shows `&amp;`, `&lt;` and `&gt;` literally. Aerini does not ask the daemon what it supports, so it cannot switch to plain text. The 15 second limit has also not been measured against a real or fake notification daemon; it is checked only with stand-in commands.
+
 ## Parts that have not been tested against the real service
 
 These paths are covered only by tests against local stand-ins, not by a real service, so a difference in a provider's real behavior can show up:
@@ -52,3 +61,4 @@ These paths are covered only by tests against local stand-ins, not by a real ser
 - Image Generation with the real providers (ComfyUI cancel, Flux, GPT Image, Nano Banana, Automatic1111).
 - Nano Banana with `gemini-nano-banana-2.1` or `gemini-3.1-flash-lite-image`: Google's documentation does not confirm those models work with the request this node sends, so the default model is unchanged. If one fails, switch back to `gemini-2.5-flash-image` until Google retires it.
 - Notion `create_page` with a **Data Source ID**, which is sent with Notion API version `2025-09-03`.
+- Instagram upload: the reply to `GET /me?fields=user_id,username` is read as a flat `user_id` (then `id`) or as `data[0].user_id`, because Meta's own sample and other code disagree on the shape. Confirm on a real professional account.

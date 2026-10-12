@@ -26,10 +26,11 @@ fn is_valid_notion_id(s: &str) -> bool {
 /// stays on `NOTION_VERSION`.
 const DATA_SOURCE_NOTION_VERSION: &str = "2025-09-03";
 
-/// The database ID in `raw`: the ID itself, or the one in a pasted
-/// `notion.so` / `notion.site` link (the last 32 hex digits of the last path
-/// segment; the query string, such as `?v=<view id>`, is ignored). `None` when
-/// `raw` is neither.
+/// The database ID in `raw`: the ID itself, or the one in a pasted http(s) link
+/// whose last path segment is the ID or ends in `-` plus the ID (the query
+/// string and fragment, such as `?v=<view id>`, are ignored). The link is only
+/// read for its ID, never fetched, so any host is accepted, including a custom
+/// domain. `None` when `raw` is neither.
 fn database_id_from_input(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if is_valid_notion_id(raw) {
@@ -41,11 +42,8 @@ fn database_id_from_input(raw: &str) -> Option<String> {
         .map(|p| p.len())?;
     let rest = &raw[scheme_len..];
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let host = rest[..authority_end].to_ascii_lowercase();
-    let notion_host = ["notion.so", "notion.site"]
-        .iter()
-        .any(|d| host == *d || host.strip_suffix(d).is_some_and(|h| h.ends_with('.')));
-    if !notion_host || host.contains(['@', ':']) {
+    let host = &rest[..authority_end];
+    if host.is_empty() || host.contains('@') {
         return None;
     }
     let path = rest[authority_end..].split(['?', '#']).next().unwrap_or("");
@@ -148,7 +146,7 @@ fn plan(cfg: &Value) -> Result<Request, NodeError> {
                 (Some(raw), None) => {
                     let id = database_id_from_input(raw).ok_or_else(|| NodeError::unrecoverable(
                         "INVALID_DATABASE_ID",
-                        "database_id must be a Notion database ID (32 hex digits, with or without hyphens) or a link to the database on notion.so or notion.site",
+                        "database_id must be a Notion database ID (32 hex digits, with or without hyphens) or a link to the database",
                     ))?;
                     (json!({ "database_id": id }), NOTION_VERSION)
                 }
@@ -218,7 +216,7 @@ impl Node for NotionNode {
             "required": ["action"],
             "properties": {
                 "action":      { "type": "string", "enum": ["create_page", "update_page"], "description": "Operation to perform" },
-                "database_id": { "type": "string", "description": "Notion database ID (32 hex digits, with or without hyphens) or a link to the database on notion.so or notion.site — create_page needs this or data_source_id" },
+                "database_id": { "type": "string", "description": "Notion database ID (32 hex digits, with or without hyphens) or a link to the database — create_page needs this or data_source_id" },
                 "data_source_id": { "type": "string", "description": "Notion data source ID, for a database with several data sources. Use instead of database_id, not with it" },
                 "page_id":     { "type": "string", "description": "Notion page ID — required for update_page" },
                 "title":       { "type": "string", "description": "Page title, written to the title property (see Title Property)" },
@@ -421,15 +419,17 @@ mod request_tests {
             format!("https://www.notion.so/myworkspace/Tasks-{DB}?v=fedcba9876543210fedcba9876543210&pvs=4"),
             format!("HTTPS://team.notion.site/{DB}#top"),
             format!("https://notion.so/{hyphenated}"),
+            format!("https://wiki.example.com/docs/Tasks-{DB}?v=1"),
+            format!("http://localhost:8080/{DB}"),
         ] {
             let body = create(json!({ "database_id": link })).unwrap().body;
             let got = body["parent"]["database_id"].as_str().unwrap().to_string();
             assert!(got == DB || got == hyphenated, "link {link} gave {got}");
         }
         for bad in [
-            format!("https://evil.example/{DB}"),
-            format!("https://notion.so.evil.example/{DB}"),
             format!("https://notion.so@evil.example/{DB}"),
+            format!("https://{DB}"),
+            format!("https:///{DB}"),
             format!("https://www.notion.so/Tasks{DB}"),
             "https://www.notion.so/".to_string(),
             format!("ftp://www.notion.so/{DB}"),

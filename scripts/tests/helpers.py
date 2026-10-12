@@ -13,11 +13,11 @@ def load(filename):
 
 
 def fake_sig(version, file_name="x"):
-    trusted = f"timestamp:1700000000\tfile:{file_name}" + (f"\tversion:{version}" if version else "")
+    comment_fields = f"timestamp:1700000000\tfile:{file_name}" + (f"\tversion:{version}" if version else "")
     text = (
         "untrusted comment: signature from tauri secret key\n"
         "RUQ" + "A" * 85 + "\n"
-        f"trusted comment: {trusted}\n"
+        f"trusted comment: {comment_fields}\n"
         + "B" * 86 + "\n"
     )
     return base64.b64encode(text.encode()).decode()

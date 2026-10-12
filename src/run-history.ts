@@ -270,7 +270,17 @@ function buildItem(
   item.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).closest(".history-del-btn, .history-replay-btn")) return;
     if (isInterrupted) return;
-    try { onRestoreRun(JSON.parse(record.result_json) as WorkflowResult); } catch { /* */ }
+    let result: WorkflowResult;
+    try {
+      result = JSON.parse(record.result_json) as WorkflowResult;
+    } catch (err) {
+      console.warn("Aerini: run record result is unreadable", record.id, err);
+      item.classList.add("history-unreadable");
+      item.title = "This run's recorded result could not be read";
+      item.setAttribute("aria-disabled", "true");
+      return;
+    }
+    onRestoreRun(result);
   });
   item.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
