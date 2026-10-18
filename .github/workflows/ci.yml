@@ -109,10 +109,11 @@ jobs:
 
       # Filtered to the tests that cover Windows-specific code. The rest of the engine
       # suite assumes a Unix host and is run by the Linux job above. --include-ignored
-      # runs the tests that need a real Windows shell.
+      # runs the tests that need a real Windows shell; the one that shows a real toast
+      # needs a desktop session, which a runner does not have, so it is skipped.
       - name: Test Windows-specific engine code
         shell: bash
-        run: cargo test -p aerini-engine --locked -- nodes::shell nodes::notification --include-ignored --nocapture
+        run: cargo test -p aerini-engine --locked -- nodes::shell nodes::notification --include-ignored --skip the_windows_toast_command_runs_to_completion --nocapture
 
   template-wit-sync:
     name: Example plugin template WIT files match canonical

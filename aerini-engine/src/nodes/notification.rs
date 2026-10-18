@@ -95,6 +95,35 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const TOAST_APP_ID: &str = "Aerini";
 
+#[cfg(windows)]
+const TOAST_XML_PATH_ENV: &str = "AERINI_TOAST_XML";
+
+/// PowerShell that loads the toast XML named by `TOAST_XML_PATH_ENV` into `$xml`.
+/// The path travels in the environment, never inside the script text, so no
+/// character in it (`'`, `$`, a backtick, a typographic quote) can be read as
+/// PowerShell syntax. Both WinRT types are loaded by name first: `New-Object`
+/// and `::new()` cannot find `XmlDocument` until it is.
+#[cfg(windows)]
+fn load_toast_xml_script() -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+         [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; \
+         $xml = [Windows.Data.Xml.Dom.XmlDocument]::new(); \
+         $xml.LoadXml([System.IO.File]::ReadAllText($env:{TOAST_XML_PATH_ENV}))"
+    )
+}
+
+#[cfg(windows)]
+fn toast_script() -> String {
+    format!(
+        "{}; \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{TOAST_APP_ID}').Show(\
+         [Windows.UI.Notifications.ToastNotification]::new($xml))",
+        load_toast_xml_script()
+    )
+}
+
 /// Windows shows a toast only for an application id it knows. A per-user
 /// registry key naming the id is enough, and needs no administrator rights.
 #[cfg(windows)]
@@ -247,42 +276,29 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
 
     #[cfg(target_os = "windows")]
     {
-        // Title and body are written into an XML temp file.
-        // No user-controlled data is interpolated into the PowerShell -Command
-        // string — the command only loads from the temp file path (a UUID-named
-        // OS temp file, not attacker-controlled).
-        //
-        // XML special characters in title/body are entity-escaped, and characters
-        // XML 1.0 forbids are dropped, so the document stays well-formed even
-        // with arbitrary input.
+        // Title and body are written into an XML temp file; the script reads it
+        // through an environment variable, so nothing user-controlled and no
+        // path is interpolated into the PowerShell command text. Markup
+        // characters are entity-escaped and characters XML 1.0 forbids are
+        // dropped, so the document stays well-formed for any input.
         if let Err(e) = register_app_id().await {
             tracing::warn!("could not register the notification application id: {e}");
         }
         let xml = toast_xml(title, body);
-        // Write XML to a temp file. Only the file path (not the content) is
-        // placed into the PowerShell -Command string.
-        let mut tmp = tempfile::Builder::new()
+        let mut file = tempfile::Builder::new()
             .suffix(".xml")
             .tempfile()
             .map_err(|e| format!("Failed to create temp file for notification: {}", e))?;
         use std::io::Write as _;
-        tmp.write_all(xml.as_bytes())
+        file.write_all(xml.as_bytes())
             .map_err(|e| format!("Failed to write notification XML: {}", e))?;
-        let path = tmp.path().to_string_lossy().to_string();
-        // path is an OS-assigned temp path. Windows forbids `"` in file paths so
-        // wrapping in double quotes is safe. Single quotes are avoided because a
-        // temp dir rooted in a user profile path like "O'Brien" would break a
-        // single-quoted PowerShell string literal.
-        let ps_cmd = format!(
-            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
-             $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
-             $xml.LoadXml([System.IO.File]::ReadAllText(\"{}\")); \
-             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{}').Show(\
-             [Windows.UI.Notifications.ToastNotification]::new($xml))",
-            path, TOAST_APP_ID
-        );
+        // The script's ReadAllText refuses a file that is still open for
+        // writing, so the handle is closed first. The path still deletes the
+        // file when it drops.
+        let tmp = file.into_temp_path();
         let mut cmd = Command::new("powershell");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd]);
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &toast_script()]);
+        cmd.env(TOAST_XML_PATH_ENV, tmp.as_os_str());
         cmd.creation_flags(CREATE_NO_WINDOW);
         // tmp is deleted when it drops, after the process has ended.
         run_notifier(cmd, "PowerShell", NOTIFY_TIMEOUT).await?;
@@ -411,6 +427,22 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("Aerini"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_toast_script_loads_the_xml_from_a_path_with_shell_special_characters() {
+        use std::io::Write as _;
+        let dir = tempfile::Builder::new().prefix("o'b$r`ien \u{2019}").tempdir().unwrap();
+        let mut file = tempfile::Builder::new().suffix(".xml").tempfile_in(dir.path()).unwrap();
+        file.write_all(toast_xml("a < b", "c & d").as_bytes()).unwrap();
+        let path = file.into_temp_path();
+        let script = format!("{}; if ($xml.DocumentElement.NodeName -ne 'toast') {{ exit 3 }}", load_toast_xml_script());
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        cmd.env(TOAST_XML_PATH_ENV, path.as_os_str());
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        run_notifier(cmd, "PowerShell", NOTIFY_TIMEOUT).await.unwrap();
     }
 
     #[cfg(windows)]
