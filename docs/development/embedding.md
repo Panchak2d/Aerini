@@ -18,15 +18,17 @@ async-trait   = "0.1"
 serde_json    = "1.0"
 ```
 
+The crate has one optional feature, `schema`, which derives JSON Schema for the workflow file types in `model.rs`. It exists to generate `docs/reference/workflow.schema.json`, is off by default, and adds nothing to a build that doesn't enable it.
+
 The package name has a hyphen; the crate's own `[lib]` declaration renames it to `aerini_engine` for `use` paths, so every import below reads `aerini_engine::...`, not `aerini-engine::...`.
 
 ## What's actually there to use
 
-The crate root declares seventeen public modules, the same list [Architecture](architecture.md#inside-aerini-engine) already walks through. Two items sit at the crate root itself rather than inside a module: `aerini_engine::Workflow` and `aerini_engine::NodeRegistry`, re-exported because they're the two types almost every caller needs first. `EventSink`, `NoopEventSink`, and `ENGINE_VERSION` also live at the root.
+The crate root declares twenty public modules, the same list [Architecture](architecture.md#inside-aerini-engine) already walks through. Two items sit at the crate root itself rather than inside a module: `aerini_engine::Workflow` and `aerini_engine::NodeRegistry`, re-exported because they're the two types almost every caller needs first. `EventSink`, `NoopEventSink`, and `ENGINE_VERSION` also live at the root.
 
-Not every `pub` item in those seventeen modules is something an embedder has a reason to reach for. `provider::ProviderRegistry` exists so the AI Prompt and AI Agent nodes can share provider-detection logic between themselves; both call it through associated functions with no setup on your part, and there's nothing to configure there directly. `db::WorkflowDb` is genuinely one struct, but its methods span several unrelated concerns collected under one type: workflow storage and versioning, run history, performance reports, and the desktop app's Chat Panel sessions all live on the same handle. Opening a `WorkflowDb` for run history, covered below, hands you all of it, whether or not you touch the rest.
+Not every `pub` item in those modules is something an embedder has a reason to reach for. `provider::ProviderRegistry` exists so the AI Prompt and AI Agent nodes can share provider-detection logic between themselves; both call it through associated functions with no setup on your part, and there's nothing to configure there directly. `db::WorkflowDb` is genuinely one struct, but its methods span several unrelated concerns collected under one type: workflow storage and versioning, run history, performance reports, and the desktop app's Chat Panel sessions all live on the same handle. Opening a `WorkflowDb` for run history, covered below, hands you all of it, whether or not you touch the rest.
 
-The modules you'll actually work with for a basic embedding are `node` (`NodeRegistry`, the `Node` trait), `nodes` (`register_builtins`, the 40 built-in implementations), `model` (`Workflow` and its parts), and `executor` (`WorkflowExecutor`, `CredentialResolver`). `graph` is public but you won't call into it: `WorkflowExecutor::run` builds and discards an `ExecutionGraph` internally on every call, so there's no reason to construct one yourself.
+The modules you'll actually work with for a basic embedding are `node` (`NodeRegistry`, the `Node` trait), `nodes` (`register_builtins`, the 40 built-in implementations), `model` (`Workflow` and its parts), and `executor` (`WorkflowExecutor`, `CredentialResolver`). `graph` is public but you won't call into it: `WorkflowExecutor::run` builds and discards an `ExecutionGraph` internally on every call, so there's no reason to construct one yourself. To check a workflow *before* running it, call `aerini_engine::validation::validate_workflow(&workflow, &registry)` (or `validate_workflow_json` for a raw string). It returns a `ValidationReport` with `errors`, `warnings` and the `checks_run`, and never executes anything. It is best-effort: a report with no errors means no known structural problem, not that the run will succeed, because node config values are not type-checked.
 
 ## A minimal embedding
 

@@ -6,6 +6,10 @@ This page documents the JSON shape of a workflow: every top-level field, what a 
 
 A workflow is plain JSON, saved with a `.aerini` extension by convention. A `.json` file with the same shape works the same way, see [Workflow file](../glossary.md#workflow-file). This is the shape Aerini's own database stores, the shape exchanged between the desktop frontend and the engine, and the shape the scheduler loads for a background run.
 
+## JSON Schema
+
+A JSON Schema (draft 2020-12) for this shape is generated from the engine's own types and kept in the repository as `docs/reference/workflow.schema.json`. Use it to check a hand-written or generated file before you import it. It checks field names, value types, and which fields are required, the same things the tables below describe. It does not check that a `node_type_id` exists, that a node's `config` is valid for that node, or that connections fit a node's ports; the [Node Catalog](node-catalog.md) lists what each node accepts. The schema describes the current [schema version](#schema-version).
+
 ## Top-level fields
 
 | Field | Type | Required | Default / notes |

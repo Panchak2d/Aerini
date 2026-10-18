@@ -9,6 +9,7 @@
 //! | [`nodes`] | 30 built-in node implementations; `register_builtins()` |
 //! | [`executor`] | `WorkflowExecutor` — runs a workflow, resolves expressions, handles retries |
 //! | [`graph`] | petgraph wrapper: topological sort, cycle detection, BFS reachability |
+//! | [`validation`] | `validate_workflow` — best-effort static check of a workflow against a `NodeRegistry`, without running it |
 //! | [`context`] | `ExecutionState` / `SharedExecutionState` — per-run mutable state |
 //! | [`mem_tracking`] | Per-workflow/per-node live memory attribution (`#[global_allocator]`) |
 //! | [`expression`] | `{{...}}` template resolver with 40 inline functions |
@@ -58,6 +59,7 @@ pub mod plugin_loader;
 pub mod provider;
 pub mod scheduler;
 pub mod store;
+pub mod validation;
 #[cfg(target_os = "linux")]
 pub mod session_bus;
 

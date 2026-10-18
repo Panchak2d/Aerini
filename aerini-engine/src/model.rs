@@ -34,6 +34,7 @@ use crate::executor::SecretString;
 /// Controls which section of the node picker the node appears in.
 /// Has no effect on execution behavior — the executor treats all categories identically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
     Action,
@@ -50,6 +51,7 @@ pub enum NodeType {
 /// `max_attempts` times. Nodes returning an unrecoverable error are never retried
 /// regardless of this setting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RetryPolicy {
     /// Total attempts allowed, including the first. `1` means no automatic retry.
     pub max_attempts: u32,
@@ -69,6 +71,7 @@ impl Default for RetryPolicy {
 // ── Canvas position (stored with node, ignored by executor) ──────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CanvasPosition {
     pub x: f64,
     pub y: f64,
@@ -86,7 +89,9 @@ pub struct CanvasPosition {
 /// JSON blob (see `WorkflowDb::save`/`load`), so a new `#[serde(default)]`
 /// field is backwards- and forwards-compatible by construction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
+#[cfg_attr(feature = "schema", schemars(description = "Chat panel feature toggles. Omitted fields use their defaults."))]
 pub struct ChatSettings {
     /// Show the paperclip attach button in the Chat panel. Default OFF.
     pub allow_attachments: bool,
@@ -117,7 +122,9 @@ impl Default for ChatSettings {
 /// non-chat settings groups can be added without another top-level
 /// `Workflow` field.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
+#[cfg_attr(feature = "schema", schemars(description = "Workflow-scoped feature settings. Currently holds only chat."))]
 pub struct WorkflowSettings {
     pub chat: ChatSettings,
 }
@@ -130,6 +137,8 @@ pub struct WorkflowSettings {
 /// invoked. `config` holds the user-provided parameter values as freeform JSON;
 /// the node's `execute()` method deserializes the fields it needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(description = "One node instance in a workflow. node_type_id picks the node implementation and config holds its settings."))]
 pub struct WorkflowNode {
     /// Unique ID within this workflow (e.g. "node_abc123").
     pub id: String,
@@ -185,6 +194,7 @@ pub struct WorkflowNode {
 /// produces output. Multi-output nodes (e.g. `if_condition`, `switch`) write a
 /// `branch` key to their output; the executor matches that value against `from_port`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkflowEdge {
     /// Unique ID for this edge (used by canvas to track connectors).
     pub id: String,
@@ -210,10 +220,18 @@ pub struct WorkflowEdge {
 
 // ── Workflow metadata ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "schema")]
+fn date_time_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "format": "date-time" })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkflowMetadata {
     pub author: String,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "date_time_schema"))]
     pub created_at: DateTime<Utc>,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "date_time_schema"))]
     pub updated_at: DateTime<Utc>,
     pub version: String,
     #[serde(default)]
@@ -249,6 +267,8 @@ fn default_schema_version() -> String { CURRENT_VERSION.to_string() }
 /// migrations before deserializing. Field names are part of the wire contract
 /// with the TypeScript frontend; do not rename without a coordinated frontend update.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(description = "A workflow document: nodes, the connections (edges) between them, and workflow-level settings. A file with an older schema_version is migrated when it is loaded."))]
 pub struct Workflow {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
@@ -273,6 +293,7 @@ pub struct Workflow {
     /// that backstop breaks.
     /// Default: false — zero behavior change for existing saved workflows.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(description = "Only takes effect on a manual run started from the desktop app; scheduled and background runs ignore it. When true, the run ignores both the server duration ceiling and max_duration_secs."))]
     pub unlimited_duration: bool,
     /// When true, independent branches run concurrently via the parallel executor.
     /// Default: false — existing workflows are unaffected (sequential-safe default).
@@ -289,6 +310,7 @@ pub struct Workflow {
     /// Missing in older saved workflows — defaults apply per-field, see
     /// [`WorkflowSettings`].
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(description = "Workflow-scoped feature settings. Currently only the Chat panel toggles. Omitted fields use their defaults."))]
     pub settings: WorkflowSettings,
 }
 

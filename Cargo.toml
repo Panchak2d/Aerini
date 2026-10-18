@@ -3,6 +3,7 @@ members = [
     "src-tauri",
     "aerini-engine",
     "aerini-server",
+    "aerini-mcp",
 ]
 # examples/plugin-template is a standalone wasm32-wasip2 Component Model plugin
 # (see its own Cargo.toml / README), built via its own `cargo build --target

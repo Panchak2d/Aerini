@@ -1,0 +1,3405 @@
+{
+  "engine_version": "0.4.2",
+  "nodes": [
+    {
+      "author": "",
+      "description": "Give an AI model a set of tools it can invoke to complete a goal autonomously over multiple steps.",
+      "display_name": "AI Agent",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "API key — resolved from Connections",
+            "type": "string"
+          },
+          "base_url": {
+            "description": "API base URL (leave blank for default)",
+            "type": "string"
+          },
+          "context": {
+            "description": "Additional context to give the agent (from previous nodes, variables, etc.)",
+            "type": "string"
+          },
+          "goal": {
+            "description": "What the agent should accomplish. Be specific and include constraints.",
+            "type": "string"
+          },
+          "max_iterations": {
+            "description": "Not used: the agent makes one call. Kept so saved workflows still load.",
+            "type": "number"
+          },
+          "max_tokens": {
+            "description": "Maximum tokens per agent response (default: 2048). Higher values allow longer output but increase cost.",
+            "type": "number"
+          },
+          "model": {
+            "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash.",
+            "type": "string",
+            "x-aerini-model-picker": true
+          },
+          "provider": {
+            "description": "AI provider. OpenAI/Gemini: tool definitions are sent and tool requests returned. Anthropic: single reasoning pass, no tools.",
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "local",
+              "auto"
+            ],
+            "type": "string"
+          },
+          "system": {
+            "description": "System instructions for the agent's persona and behavior.",
+            "type": "string"
+          },
+          "temperature": {
+            "description": "Creativity (0.0-1.0). Agents work best at 0.2-0.5.",
+            "type": "number"
+          },
+          "tools": {
+            "description": "JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers; the node returns the model's tool requests and does not run them. Anthropic ignores tools.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "goal",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "ai",
+      "output_schema": {
+        "properties": {
+          "awaiting_tools": {
+            "description": "True when the model asked for tools and has not given a final answer",
+            "type": "boolean"
+          },
+          "finished": {
+            "description": "True if the model answered cleanly; false if it asked for tools or the reply was cut off",
+            "type": "boolean"
+          },
+          "iterations": {
+            "description": "Always 1: the agent makes one model call",
+            "type": "number"
+          },
+          "reasoning": {
+            "description": "Step-by-step reasoning trace",
+            "type": "array"
+          },
+          "result": {
+            "description": "Final answer or conclusion from the agent",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "Tools the model asked for: {id, tool, arguments, parsed_arguments}. The node does not run them.",
+            "type": "array"
+          },
+          "truncated": {
+            "description": "True if the provider cut off the response mid-generation (max_tokens hit). Raise max_tokens to fix.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          },
+          {
+            "id": "attachments",
+            "label": "Files",
+            "port_type": "files",
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Done",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "ai_agent",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Read from or write to persistent AI memory scoped per session, so the AI can remember past conversations — and, optionally, the files shared in them.",
+      "display_name": "AI Memory",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Message content (required for write/append)",
+            "type": "string"
+          },
+          "files": {
+            "description": "Files to remember with this message (write/append only). An expression that resolves to a files array, e.g. {{Webhook.output.files}}. Leave blank to store no files. Stored files stay on this device until the session is cleared, they are pruned, or you use forget_files.",
+            "type": "string"
+          },
+          "include_files": {
+            "description": "Return the session's remembered files in the output's 'files' array (read/append/write). Wire it to an AI node's Files port to show the model those files again. Off by default. The AI provider receives them again on every run that uses them.",
+            "type": "boolean"
+          },
+          "max_files": {
+            "description": "Most files returned when include_files is on, newest first (default: 5, maximum: 20). Only files attached to messages inside the max_messages window come back, up to 12 MiB in total.",
+            "type": "number"
+          },
+          "max_messages": {
+            "description": "Maximum messages to return on read (default: 20, newest first)",
+            "type": "number"
+          },
+          "max_stored": {
+            "description": "Maximum messages to retain in storage per session. Oldest rows are pruned after append if exceeded (default: 1000, minimum: 1).",
+            "type": "number"
+          },
+          "max_stored_files": {
+            "description": "Maximum files to retain per session. Oldest files are pruned after append if exceeded (default: 20, minimum: 1). A session never keeps more than 32 MiB of files, and each file is limited to 3 MiB.",
+            "type": "number"
+          },
+          "operation": {
+            "description": "read: get history as messages array. write: replace history. append: add a message. clear: delete all messages and files. forget_files: delete the session's remembered files but keep its messages.",
+            "enum": [
+              "read",
+              "write",
+              "append",
+              "clear",
+              "forget_files"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "description": "Message role (required for write/append)",
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ],
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Unique ID for this conversation thread, e.g. 'user_123' or 'support_chat'",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "ai",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "description": "Number of messages in this session",
+            "type": "number"
+          },
+          "files": {
+            "description": "Remembered files as [{filename, mime_type, data}] — present only when include_files is on; wire it to a Files port",
+            "type": "array"
+          },
+          "files_omitted": {
+            "description": "Remembered files in the message window that did not fit max_files or the size limit — present only when include_files is on",
+            "type": "number"
+          },
+          "files_removed": {
+            "description": "Files deleted — forget_files only",
+            "type": "number"
+          },
+          "messages": {
+            "description": "Conversation history as [{role, content}] array",
+            "type": "array"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "ai_memory",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Send a prompt to an AI model — Claude, GPT, Gemini, or a local Ollama model — and receive a reply.",
+      "display_name": "AI Prompt",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "API key — resolved from Connections",
+            "type": "string"
+          },
+          "base_url": {
+            "description": "API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here, for local models such as Ollama.",
+            "type": "string"
+          },
+          "max_tokens": {
+            "description": "Maximum response tokens. Default 2048. Higher values allow longer output but increase cost and latency. The ceiling that actually applies is set by the provider/model you select above, not by this node.",
+            "type": "number"
+          },
+          "model": {
+            "description": "Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3",
+            "type": "string",
+            "x-aerini-model-picker": true
+          },
+          "prompt": {
+            "description": "User prompt",
+            "type": "string"
+          },
+          "provider": {
+            "description": "API provider. 'auto' detects from base_url.",
+            "enum": [
+              "auto",
+              "openai",
+              "anthropic",
+              "gemini",
+              "local"
+            ],
+            "type": "string"
+          },
+          "rate_limit_rpm": {
+            "description": "Max requests per minute. 0 = unlimited",
+            "type": "number"
+          },
+          "system": {
+            "description": "System / persona instructions",
+            "type": "string"
+          },
+          "temperature": {
+            "description": "Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7",
+            "type": "number"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "ai",
+      "output_schema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "number"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "number"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          },
+          {
+            "id": "attachments",
+            "label": "Files",
+            "port_type": "files",
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Success",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "ai_prompt",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Execute a JavaScript snippet and return its result. Full Node.js runtime available.",
+      "display_name": "Code (JS)",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "code": {
+            "description": "JavaScript to run. Use output(value) to return a result. Has access to `input` and `context`.",
+            "type": "string"
+          },
+          "timeout_secs": {
+            "description": "Max execution time in seconds (1 to 60, default 10)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "_sandbox_partial": {
+            "description": "Present and true on macOS when --code-sandbox is active. ESM module import restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied.",
+            "type": "boolean"
+          },
+          "duration_ms": {
+            "type": "number"
+          },
+          "result": {
+            "description": "Value passed to output()"
+          },
+          "stdout": {
+            "description": "Text the code printed, such as console.log output",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "True when printed output exceeded 10 MB and only the last 10 MB is kept",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "code",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Gather files from multiple upstream sources into a single list for downstream processing.",
+      "display_name": "Collect Files",
+      "dynamic_ports": true,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "sources": {
+            "description": "Source slots — each has id, name, source_expr (auto-populated by canvas wire)",
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "source_expr": {
+                  "description": "Resolved to JSON string of media contract",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "type": "number"
+          },
+          "files": {
+            "description": "Merged files from all sources",
+            "type": "array"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "Source",
+            "port_type": "files",
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "collect_files",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Run SQL queries against a SQLite, PostgreSQL, or MySQL database, or key-value operations against Redis, and return the results.",
+      "display_name": "Database",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "allow_local": {
+            "description": "Postgres / MySQL / Redis only. Default: false — connections to localhost, 127.0.0.1, and private-network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, etc.) are blocked (SSRF protection). Set true only when connection_url intentionally targets a database you run yourself on this machine or LAN.",
+            "type": "boolean"
+          },
+          "allow_raw_sql": {
+            "description": "SQL only. Default: false. When false, a query containing single-quoted string literals (or double-quoted ones on MySQL) is refused so values go through `?` and `params`. Only an admin caller (a server run with admin rights) can turn this on; the desktop app ignores it.",
+            "type": "boolean"
+          },
+          "connection_url": {
+            "description": "Postgres / MySQL / Redis. Connection URL. Examples: postgres://user@host/db  mysql://user@host/db  redis://host:6379. Leave the password out and use Password below to keep it out of the workflow file; a password written in the URL still works.",
+            "type": "string"
+          },
+          "db_path": {
+            "description": "SQLite only. Absolute path ending in .db, .sqlite, or .sqlite3.",
+            "type": "string"
+          },
+          "db_type": {
+            "description": "Database backend. Default: sqlite.",
+            "enum": [
+              "sqlite",
+              "postgres",
+              "mysql",
+              "redis"
+            ],
+            "type": "string"
+          },
+          "expire": {
+            "description": "Redis set: optional TTL in seconds. Omit for no expiry.",
+            "type": "number"
+          },
+          "field": {
+            "description": "Redis: hash field name for hget and hset.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Redis: key to operate on.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "SQL: query (SELECT) or execute (INSERT/UPDATE/DELETE). Redis: get, set, del, lpush, rpush, lpop, rpop, hget, hset.",
+            "type": "string"
+          },
+          "params": {
+            "description": "JSON array of positional parameters for ? placeholders. Example: [42, \"Alice\"]",
+            "type": "string"
+          },
+          "password": {
+            "description": "Postgres / MySQL / Redis. Password for connection_url. Select a saved credential; it replaces any password written in the URL.",
+            "type": "string"
+          },
+          "query": {
+            "description": "SQL query. Use ? for parameters. Not used for Redis — use operation + key/value/field.",
+            "type": "string"
+          },
+          "value": {
+            "description": "Redis: value for set, lpush, rpush, hset.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "columns": {
+            "description": "SQL: column names in result order.",
+            "type": "array"
+          },
+          "deleted": {
+            "description": "Redis del: number of keys deleted.",
+            "type": "number"
+          },
+          "last_insert_id": {
+            "description": "Last inserted row ID. SQLite and MySQL populate this. Postgres returns 0 — use RETURNING instead.",
+            "type": "number"
+          },
+          "list_length": {
+            "description": "Redis lpush/rpush: list length after push.",
+            "type": "number"
+          },
+          "ok": {
+            "description": "Redis set/hset: true on success.",
+            "type": "boolean"
+          },
+          "rows": {
+            "description": "SQL rows: a SELECT's, or an Execute statement's RETURNING rows.",
+            "type": "array"
+          },
+          "rows_affected": {
+            "description": "SQL execute: rows changed.",
+            "type": "number"
+          },
+          "truncated": {
+            "description": "SQL execute: true when RETURNING rows beyond the result limit were dropped. The statement itself completed.",
+            "type": "boolean"
+          },
+          "value": {
+            "description": "Redis get/hget/lpop/rpop: retrieved value or null.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "database",
+      "version": "2.0.0"
+    },
+    {
+      "author": "",
+      "description": "Pause the workflow for a fixed duration before continuing to the next node.",
+      "display_name": "Delay",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "duration": {
+            "default": 1,
+            "description": "How long to wait",
+            "type": "number"
+          },
+          "unit": {
+            "default": "s",
+            "enum": [
+              "ms",
+              "s",
+              "m",
+              "h"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "delay",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Send a text message to a Discord channel via a webhook URL.",
+      "display_name": "Discord",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "allow_everyone_mentions": {
+            "description": "Let @everyone and @here in the content ping the channel (default false). The webhook's channel permissions can still block it.",
+            "type": "boolean"
+          },
+          "content": {
+            "description": "Message content (max 2000 characters)",
+            "type": "string"
+          },
+          "username": {
+            "description": "Override the webhook's display name (optional)",
+            "type": "string"
+          },
+          "webhook_url": {
+            "description": "Discord webhook URL (https://discord.com/api/webhooks/...)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "webhook_url",
+          "content"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "sent": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "discord",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Send an email via SMTP with plain text or HTML content and multiple recipients.",
+      "display_name": "Send Email",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "from": {
+            "description": "Sender email address",
+            "type": "string"
+          },
+          "html": {
+            "default": false,
+            "description": "Send as HTML email (default: false)",
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string"
+          },
+          "smtp_host": {
+            "description": "SMTP server e.g. smtp.gmail.com",
+            "type": "string"
+          },
+          "smtp_port": {
+            "default": 587,
+            "description": "587 (STARTTLS, recommended) or 465 (SSL)",
+            "type": "number"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "to": {
+            "description": "Recipient(s): comma-separated, or an array of addresses from an upstream node. A comma inside quotes or <angle brackets>, as in \"Doe, John\" <a@b.c>, does not split. Maximum 50 recipients.",
+            "type": "string"
+          },
+          "username": {
+            "description": "SMTP username (usually your email address)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "smtp_host",
+          "from",
+          "to",
+          "subject",
+          "body"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "sent": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "email_send",
+      "version": "2.0.0"
+    },
+    {
+      "author": "",
+      "description": "Read, write, or delete a file at a given path on the host machine.",
+      "display_name": "File",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Content to write (write/append only; required, use an empty string for an empty file)",
+            "type": "string"
+          },
+          "encoding": {
+            "description": "Default: utf8. Reading a file that is not valid UTF-8 as utf8 fails; use base64 for binary files.",
+            "enum": [
+              "utf8",
+              "base64"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "read",
+              "write",
+              "append",
+              "delete",
+              "exists"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "Absolute or relative file path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "path"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "bytes": {
+            "type": "number"
+          },
+          "content": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "file",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Read a named workflow variable set earlier in the run by a Set Variable node.",
+      "display_name": "Get Variable",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "default": {
+            "description": "Value to return when the variable is not found (in this run, or in the DB if persist is true)."
+          },
+          "key": {
+            "description": "Variable name to retrieve",
+            "type": "string"
+          },
+          "persist": {
+            "default": false,
+            "description": "If true, fall back to DB when variable not found in this run",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "get_variable",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Interact with the GitHub API: create issues, pull requests, comments, and repository files.",
+      "display_name": "GitHub",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "description": "Operation to perform",
+            "enum": [
+              "create_issue",
+              "add_comment"
+            ],
+            "type": "string"
+          },
+          "api_key": {
+            "description": "GitHub personal access token",
+            "type": "string"
+          },
+          "body": {
+            "description": "Issue body or comment text",
+            "type": "string"
+          },
+          "issue_number": {
+            "description": "Issue number (required for add_comment)",
+            "type": "number"
+          },
+          "owner": {
+            "description": "Repository owner (user or org)",
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repository name",
+            "type": "string"
+          },
+          "title": {
+            "description": "Issue title (required for create_issue)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "html_url": {
+            "description": "URL of the created issue or comment",
+            "type": "string"
+          },
+          "id": {
+            "type": "number"
+          },
+          "number": {
+            "description": "Issue number",
+            "type": "number"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "github",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Read from or write to a Google Sheets spreadsheet using the Sheets API.",
+      "display_name": "Google Sheets",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "description": "Operation to perform",
+            "enum": [
+              "append_row",
+              "get_values"
+            ],
+            "type": "string"
+          },
+          "api_key": {
+            "description": "Google OAuth 2.0 access token, pasted directly. Does not auto-refresh (expires after ~1 hour). Only used when client_id/client_secret are not set.",
+            "type": "string"
+          },
+          "client_id": {
+            "description": "Google OAuth client ID — enables automatic token refresh (recommended). Entered directly here; not currently offered as a saved-credential picker field.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "Google OAuth client secret — enables automatic token refresh (recommended). Pick a saved credential or enter it directly.",
+            "type": "string",
+            "x-aerini-credential": {
+              "inline": true
+            }
+          },
+          "range": {
+            "description": "A1 notation range (e.g. Sheet1!A1:D1)",
+            "type": "string"
+          },
+          "spreadsheet_id": {
+            "description": "Google Sheets spreadsheet ID (from the URL); the full sheet address also works",
+            "type": "string"
+          },
+          "value_input": {
+            "description": "append_row only. RAW (default) stores values as typed. USER_ENTERED parses them as if typed in the sheet: formulas run, dates and numbers are converted. Do not use USER_ENTERED with data you do not control: a value starting with = becomes a formula.",
+            "enum": [
+              "RAW",
+              "USER_ENTERED"
+            ],
+            "type": "string"
+          },
+          "values": {
+            "description": "Row data for append_row — rows of cells as JSON, e.g. [[\"a\",\"b\"]]. Stored as typed (RAW) unless value_input is USER_ENTERED.",
+            "x-aerini-multiline": true
+          }
+        },
+        "required": [
+          "action",
+          "spreadsheet_id",
+          "range"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "updatedCells": {
+            "type": "number"
+          },
+          "updatedColumns": {
+            "type": "number"
+          },
+          "updatedRange": {
+            "type": "string"
+          },
+          "updatedRows": {
+            "type": "number"
+          },
+          "values": {
+            "description": "Cell values returned by get_values"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "google_sheets",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Make an HTTP request to any URL. Supports GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE, and custom headers and body.",
+      "display_name": "HTTP Request",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "Resolved from credentials",
+            "type": "string"
+          },
+          "body": {
+            "description": "Request body (for POST/PUT/PATCH)"
+          },
+          "headers": {
+            "description": "Request headers",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "HEAD",
+              "OPTIONS",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "description": "Request URL",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "body": {},
+          "headers": {
+            "type": "object"
+          },
+          "status": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Success",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "http_request",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Branch the workflow on a condition. True paths go to one output, false to another. Set Left Value, Operator and Right Value, or write one Condition string. Text comparisons (==, !=, contains) ignore case; numbers compare numerically.",
+      "display_name": "If / Condition",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "condition": {
+            "description": "Condition as one string, used when Left Value and Right Value are both blank. Examples: '{{temperature_2m}} > 20', '{{status}} == ok', '{{count}} >= 5', '{{tags}} contains urgent'. ==, != and contains ignore case.",
+            "type": "string"
+          },
+          "lhs": {
+            "description": "Left Value. With Operator and Right Value, replaces Condition: each side is kept whole, so a value that contains '>' or ' contains ' is not misread.",
+            "type": "string"
+          },
+          "op": {
+            "description": "Operator for Left Value and Right Value. ==, != and contains ignore case; the others compare numbers.",
+            "enum": [
+              "==",
+              "!=",
+              ">",
+              ">=",
+              "<",
+              "<=",
+              "contains"
+            ],
+            "type": "string"
+          },
+          "rhs": {
+            "description": "Right Value.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "on_true",
+            "label": "True",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_false",
+            "label": "False",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "if_condition",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Generate images from a text prompt. Cloud: GPT Image 1/2 (OpenAI), Nano Banana/Gemini (Google), Flux Pro/2 Pro (BFL). Local: Automatic1111, ComfyUI.",
+      "display_name": "Image Generation",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "API key from Connections. OpenAI key for GPT Image; Google AI key for NanoBanana; BFL key for Flux. Not used for a1111 or comfyui.",
+            "type": "string"
+          },
+          "aspect_ratio": {
+            "description": "NanoBanana / Gemini only. Supported: 1:1 1:4 1:8 2:3 3:2 3:4 4:1 4:3 4:5 5:4 8:1 9:16 16:9 21:9. Default: 1:1",
+            "type": "string"
+          },
+          "base_url": {
+            "description": "Local provider base URL (a1111/comfyui). e.g. http://127.0.0.1:7860 for a1111, http://127.0.0.1:8188 for comfyui. May embed credentials: http://user:pass@host:port",
+            "type": "string"
+          },
+          "cfg_scale": {
+            "description": "a1111 only. Classifier-free guidance scale (default 7.0).",
+            "type": "number"
+          },
+          "height": {
+            "description": "flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. a1111: 64-2048 rounded to nearest 8. Not used by other providers. Default: 768 (flux_pro) / 1024 (flux_2_pro) / 512 (a1111)",
+            "type": "number"
+          },
+          "model": {
+            "description": "NanoBanana / Gemini only. Default gemini-2.5-flash-image, which Google shuts down on March 15 2027. gemini-nano-banana-2.1 and gemini-3.1-flash-lite-image (1K images only) are Google's replacements; Google's docs do not confirm they work through this node's request, so a refusal comes back as an API error with Google's message.",
+            "enum": [
+              "gemini-2.5-flash-image",
+              "gemini-nano-banana-2.1",
+              "gemini-3.1-flash-lite-image"
+            ],
+            "type": "string"
+          },
+          "n": {
+            "description": "Images to generate (1-4, default 1). GPT Image, NanoBanana and Flux send one request per image; a1111 sends one batch. Not used by comfyui: the workflow decides.",
+            "type": "number"
+          },
+          "negative_prompt": {
+            "description": "a1111 only. Things to exclude from the image.",
+            "type": "string"
+          },
+          "password": {
+            "description": "a1111 only. Basic auth password. Overrides any password in base_url.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "Image generation prompt. Required for every provider except comfyui, where the text lives in the workflow JSON.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider. gpt_image_1 recommended for cloud. a1111/comfyui for local inference. imagen4/nano_banana -> NanoBanana; dalle3 -> gpt-image-1 (legacy aliases).",
+            "enum": [
+              "gpt_image_1",
+              "gpt_image_2",
+              "flux_pro",
+              "flux_2_pro",
+              "imagen4",
+              "nano_banana",
+              "dalle3",
+              "a1111",
+              "comfyui"
+            ],
+            "type": "string"
+          },
+          "quality": {
+            "description": "GPT Image only. Default: auto",
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "size": {
+            "description": "GPT Image only. gpt_image_1: 1024x1024|1536x1024|1024x1536|auto. gpt_image_2: WxH divisible by 16, or same presets. Default: 1024x1024",
+            "type": "string"
+          },
+          "steps": {
+            "description": "a1111 only. Sampling steps (1-150, default 20).",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "description": "a1111 only. HTTP request timeout in seconds. Raise for large batch_size or high step counts on slower hardware. Default 300, max 1800 (30 min).",
+            "type": "number"
+          },
+          "username": {
+            "description": "a1111 only. Basic auth username. Overrides any username in base_url.",
+            "type": "string"
+          },
+          "width": {
+            "description": "flux_pro: 256-1440 rounded to nearest 32. flux_2_pro: min 64. a1111: 64-2048 rounded to nearest 8. Not used by other providers. Default: 1024 (a1111: 512)",
+            "type": "number"
+          },
+          "workflow": {
+            "description": "comfyui only. Workflow in ComfyUI API format (export via Settings → Enable Dev Mode → Save API Format).",
+            "type": "object"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "ai",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "description": "Number of images successfully generated",
+            "type": "number"
+          },
+          "files": {
+            "description": "Generated images as media objects",
+            "type": "array"
+          },
+          "source": {
+            "description": "Provider string that generated the images",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          },
+          {
+            "id": "reference_images",
+            "label": "Reference Images",
+            "port_type": "files",
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "image_gen",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Parse a JSON string into an object, or serialise an object into a JSON string.",
+      "display_name": "JSON",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "index": {
+            "default": 0,
+            "description": "Array index for array_get",
+            "type": "number"
+          },
+          "input_text": {
+            "description": "JSON string to parse",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "parse",
+              "stringify",
+              "extract",
+              "merge",
+              "array_get"
+            ],
+            "type": "string"
+          },
+          "pointer": {
+            "description": "JSON pointer e.g. /user/name or /0/temperature",
+            "type": "string"
+          },
+          "source_node": {
+            "description": "Node ID whose output stringify, extract, merge and array_get read. Leave blank to read the whole run context (deprecated).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "properties": {
+          "result": {}
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "json",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Run a downstream branch once for each item in a list, then continue with the collected results.",
+      "display_name": "Loop (For Each)",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "array_field": {
+            "description": "Dot-path to the array to iterate, e.g. 'items' or 'response.results'",
+            "type": "string"
+          },
+          "index_var": {
+            "description": "Variable name for the current index (default: 'index')",
+            "type": "string"
+          },
+          "item_var": {
+            "description": "Variable name for the current item (default: 'item')",
+            "type": "string"
+          },
+          "max_iterations": {
+            "description": "Stop after this many items instead of the full array (default: no limit — every item runs). 0 or blank also means no limit. Can only lower the bound: a value larger than the array, or larger than the 10,000-item cap, has no effect beyond the array's own length.",
+            "type": "number"
+          },
+          "source_node": {
+            "description": "Node ID to read the array from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "array_field",
+          "source_node"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "properties": {
+          "all_results": {
+            "description": "Collected results from loop body executions",
+            "type": "array"
+          },
+          "done": {
+            "description": "True when all items have been processed",
+            "type": "boolean"
+          },
+          "index": {
+            "description": "Current zero-based index",
+            "type": "number"
+          },
+          "item": {
+            "description": "Current item in the iteration"
+          },
+          "items": {
+            "description": "The full array being iterated",
+            "type": "array"
+          },
+          "total": {
+            "description": "Total number of items",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "loop_body",
+            "label": "Each Item",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "done",
+            "label": "Done",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "loop",
+      "version": "2.0.0"
+    },
+    {
+      "author": "",
+      "description": "Run a workflow manually via the Run button in the app or the server API.",
+      "display_name": "Manual Trigger",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "mock_payload": {
+            "description": "Optional JSON payload to inject when running manually",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Start",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "manual_trigger",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Wait for all incoming parallel branches to complete, then continue as a single execution path.",
+      "display_name": "Merge",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "mode": {
+            "description": "How to combine inputs: object (keyed by node ID) or array (values only)",
+            "enum": [
+              "object",
+              "array"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "description": "The outputs of the upstream nodes wired into this one, merged into one value",
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "arity": "multi",
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "merge",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Show a desktop notification on the host machine while the workflow is running.",
+      "display_name": "Desktop Notification",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "body": {
+            "description": "Notification message body",
+            "type": "string"
+          },
+          "title": {
+            "description": "Notification title",
+            "type": "string"
+          },
+          "urgency": {
+            "default": "normal",
+            "description": "Urgency level (Linux only)",
+            "enum": [
+              "low",
+              "normal",
+              "critical"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "sent": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "notification",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Create or update pages and database entries in Notion.",
+      "display_name": "Notion",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "description": "Operation to perform",
+            "enum": [
+              "create_page",
+              "update_page"
+            ],
+            "type": "string"
+          },
+          "api_key": {
+            "description": "Notion integration token (secret_...)",
+            "type": "string"
+          },
+          "data_source_id": {
+            "description": "Notion data source ID, for a database with several data sources. Use instead of database_id, not with it",
+            "type": "string"
+          },
+          "database_id": {
+            "description": "Notion database ID (32 hex digits, with or without hyphens) or a link to the database — create_page needs this or data_source_id",
+            "type": "string"
+          },
+          "page_id": {
+            "description": "Notion page ID — required for update_page",
+            "type": "string"
+          },
+          "properties": {
+            "description": "Additional Notion page properties as a JSON object, e.g. {\"Status\": {\"select\": {\"name\": \"Done\"}}}",
+            "x-aerini-multiline": true
+          },
+          "title": {
+            "description": "Page title, written to the title property (see Title Property)",
+            "type": "string"
+          },
+          "title_property": {
+            "description": "Name of the database's title property (default Name). Set it when the database calls its title column something else",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Notion page ID",
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "url": {
+            "description": "Public URL of the page",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "notion",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Mark the final output of the workflow. Required for the Chat Panel and the embeddable widget.",
+      "display_name": "Output",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "field": {
+            "description": "Specific field to extract, e.g. 'content' or 'body.text'. Leave blank to show everything.",
+            "type": "string"
+          },
+          "label": {
+            "description": "Label shown above the result (default: 'Result')",
+            "type": "string"
+          },
+          "source_node": {
+            "description": "Node ID to display output from. Leave blank to use incoming data.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "output_type": {
+            "description": "Set to 'media_batch' when value is a media contract payload",
+            "type": "string"
+          },
+          "type": {
+            "description": "Detected value type: string | number | boolean | object | array | null",
+            "type": "string"
+          },
+          "value": {
+            "description": "The displayed value"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "output",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Upload, download, list, or delete objects in an S3-compatible object store.",
+      "display_name": "S3 Storage",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "access_key_id": {
+            "description": "Access key ID.",
+            "type": "string"
+          },
+          "bucket": {
+            "description": "Bucket name.",
+            "type": "string"
+          },
+          "content": {
+            "description": "Content to upload. Text or base64 bytes depending on content_encoding.",
+            "type": "string"
+          },
+          "content_encoding": {
+            "description": "Encoding of content field. Default: text.",
+            "enum": [
+              "text",
+              "base64"
+            ],
+            "type": "string"
+          },
+          "content_length": {
+            "description": "presign_url with PUT: exact size in bytes the upload must have, up to 5 GiB. Signed into the URL; the uploader must send the same Content-Length.",
+            "type": "number"
+          },
+          "content_type": {
+            "description": "MIME type for upload (default application/octet-stream). With presign_url and PUT, signed into the URL: the uploader must send the same Content-Type. Not allowed with GET.",
+            "type": "string"
+          },
+          "delimiter": {
+            "description": "List only: group keys that share the text between the prefix and the first delimiter (usually '/') into common_prefixes, like folders. Empty lists every key.",
+            "type": "string"
+          },
+          "endpoint": {
+            "description": "Custom endpoint URL. Required for r2 (https://ACCOUNT_ID.r2.cloudflarestorage.com) and minio (http://host:9000). Must be empty for aws.",
+            "type": "string"
+          },
+          "expiry_secs": {
+            "description": "Presigned URL expiry in seconds. Default: 3600. Maximum: 604800 (7 days).",
+            "type": "number"
+          },
+          "key": {
+            "description": "Object key (path). Required for upload, download, delete, presign_url.",
+            "type": "string"
+          },
+          "max_objects": {
+            "description": "Most entries a list returns, 1 to 10000. Default: 10000.",
+            "type": "number"
+          },
+          "method": {
+            "description": "HTTP method the presigned URL is valid for: GET downloads the object, PUT uploads it. Default: GET.",
+            "enum": [
+              "GET",
+              "PUT"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "description": "Operation to perform.",
+            "enum": [
+              "upload",
+              "download",
+              "list",
+              "delete",
+              "presign_url"
+            ],
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Key prefix filter for list. Empty string lists all objects.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Storage provider. Default: aws.",
+            "enum": [
+              "aws",
+              "r2",
+              "minio"
+            ],
+            "type": "string"
+          },
+          "region": {
+            "description": "AWS region (e.g. us-east-1). Default: us-east-1. For R2, use 'auto'. Ignored for MinIO — use endpoint.",
+            "type": "string"
+          },
+          "secret_access_key": {
+            "description": "Secret access key.",
+            "type": "string",
+            "x-aerini-credential": {
+              "inline": true
+            }
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "common_prefixes": {
+            "description": "Prefixes that group keys at the delimiter, e.g. ['photos/2026/'] (list only; empty without a delimiter).",
+            "type": "array"
+          },
+          "content": {
+            "description": "Base64-encoded object bytes (download only).",
+            "type": "string"
+          },
+          "content_encoding": {
+            "description": "Always 'base64' for download output.",
+            "type": "string"
+          },
+          "content_type": {
+            "description": "MIME type (upload only).",
+            "type": "string"
+          },
+          "count": {
+            "description": "Number of objects returned (list only).",
+            "type": "number"
+          },
+          "deleted": {
+            "description": "True on successful delete.",
+            "type": "boolean"
+          },
+          "expires_in": {
+            "description": "Presigned URL TTL in seconds.",
+            "type": "number"
+          },
+          "headers": {
+            "description": "Headers the caller must send with the presigned request, name to value; empty when none (presign_url only).",
+            "type": "object"
+          },
+          "key": {
+            "description": "Object key.",
+            "type": "string"
+          },
+          "max_objects": {
+            "description": "Most entries this list could return, from the max_objects setting (list only).",
+            "type": "number"
+          },
+          "method": {
+            "description": "HTTP method the presigned URL is valid for (presign_url only).",
+            "type": "string"
+          },
+          "objects": {
+            "description": "List of objects: [{key, size, last_modified}] (list only).",
+            "type": "array"
+          },
+          "prefix": {
+            "description": "Prefix used for the list query.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Object size in bytes.",
+            "type": "number"
+          },
+          "truncated": {
+            "description": "True when the bucket holds more matching entries than were returned (list only).",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "Presigned URL (presign_url only).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "s3_storage",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Save one or more files to a folder on disk with optional subfolder organisation.",
+      "display_name": "Save to Folder",
+      "dynamic_ports": true,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "filename_prefix": {
+            "description": "Optional prefix prepended to every saved filename",
+            "maxLength": 50,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "description": "Number of files saved",
+            "type": "number"
+          },
+          "errors": {
+            "description": "Files that failed to write",
+            "type": "array"
+          },
+          "folder": {
+            "description": "Destination folder path",
+            "type": "string"
+          },
+          "saved": {
+            "description": "Successfully saved file records",
+            "type": "array"
+          },
+          "skipped": {
+            "description": "Files skipped (overwrite=false)",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": "files",
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "save_to_folder",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Run a workflow on a cron schedule, fixed interval, or one-time delay.",
+      "display_name": "Schedule",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "cron_expr": {
+            "description": "Cron expression e.g. 0 9 * * 1-5",
+            "type": "string"
+          },
+          "interval_secs": {
+            "description": "Seconds between runs (interval mode)",
+            "type": "number"
+          },
+          "mode": {
+            "enum": [
+              "interval",
+              "cron",
+              "once"
+            ],
+            "type": "string"
+          },
+          "run_at": {
+            "description": "ISO timestamp (once mode)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "triggered_at": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Triggered",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "schedule",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Send a plain-text transactional email via the SendGrid API.",
+      "display_name": "SendGrid",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "SendGrid API key (SG....)",
+            "type": "string"
+          },
+          "body": {
+            "description": "Email body (plain text)",
+            "type": "string"
+          },
+          "from_email": {
+            "description": "Sender email address (must be verified in SendGrid). Write the bare address; use from_name for a display name.",
+            "type": "string"
+          },
+          "from_name": {
+            "description": "Sender display name (optional, max 200 characters)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Email subject line",
+            "type": "string"
+          },
+          "to_email": {
+            "description": "Recipient email address, or several separated by commas (up to 1000; each gets a separate copy)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to_email",
+          "from_email",
+          "subject",
+          "body"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "sent": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "sendgrid",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Store a value in a named workflow variable accessible to downstream nodes via Get Variable or expressions.",
+      "display_name": "Set Variable",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "key": {
+            "description": "Variable name",
+            "type": "string"
+          },
+          "persist": {
+            "default": false,
+            "description": "If true, persist value to DB so it survives between runs",
+            "type": "boolean"
+          },
+          "value": {
+            "description": "Value to store (any JSON type)"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "set_variable",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Run a shell command on the host machine and capture its stdout, stderr, and exit code.",
+      "display_name": "Shell Command",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "command": {
+            "description": "Shell command to run",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Working directory",
+            "type": "string"
+          },
+          "env": {
+            "description": "Environment variables",
+            "type": "object"
+          },
+          "timeout_secs": {
+            "default": 30,
+            "description": "Max run time in seconds (1 to 86400, default 30)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "exit_code": {
+            "type": "number"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "True when stdout or stderr exceeded 10 MB and the rest was discarded",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "shell_exec",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Post a message to a Slack channel via the Slack API (chat.postMessage) using a Bot Token.",
+      "display_name": "Slack",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "Slack Bot Token (xoxb-...)",
+            "type": "string"
+          },
+          "channel": {
+            "description": "Channel ID or name (e.g. C1234567890 or #general)",
+            "type": "string"
+          },
+          "text": {
+            "description": "Message text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "text"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "ts": {
+            "description": "Message timestamp",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "slack",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Upload video or image content to YouTube, Instagram, or TikTok. Instagram takes a public URL as the file's data. Fails when no file was uploaded.",
+      "display_name": "Social Upload",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "client_id": {
+            "description": "OAuth client ID / client key. Entered directly here; not currently offered as a saved-credential picker field.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "OAuth client secret. Pick a saved credential or enter it directly.",
+            "type": "string",
+            "x-aerini-credential": {
+              "inline": true
+            }
+          },
+          "description": {
+            "description": "Post description (optional). Added after the title in a TikTok or Instagram caption.",
+            "type": "string"
+          },
+          "files": {
+            "description": "Media contract files array. For Instagram, each file's data is a public http(s) URL.",
+            "type": "array"
+          },
+          "platform": {
+            "enum": [
+              "youtube",
+              "instagram",
+              "tiktok"
+            ],
+            "type": "string"
+          },
+          "privacy": {
+            "description": "Privacy level (default private). YouTube: public|private|unlisted. TikTok: public_to_everyone|mutual_follow_friends|follower_of_creator|self_only. Ignored by Instagram.",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Comma-separated tags (YouTube)",
+            "type": "string"
+          },
+          "title": {
+            "description": "Post title. TikTok and Instagram use it as the start of the caption.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "files",
+          "platform",
+          "title"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "description": "Number of files uploaded",
+            "type": "number"
+          },
+          "errors": {
+            "description": "Upload errors with explanation and action",
+            "type": "array"
+          },
+          "failed": {
+            "description": "Number of files that failed",
+            "type": "number"
+          },
+          "platform": {
+            "description": "Target platform",
+            "type": "string"
+          },
+          "uploaded": {
+            "description": "Successfully uploaded files",
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "social_upload",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "End this branch of the workflow. Downstream nodes on this path will not run; other independent branches are unaffected.",
+      "display_name": "Stop",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "reason": {
+            "description": "Reason to log when stopping",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": []
+      },
+      "trigger_capable": false,
+      "type_id": "stop",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Create a Stripe PaymentIntent via the Stripe API.",
+      "display_name": "Stripe",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "description": "Stripe operation to perform",
+            "enum": [
+              "create_payment_intent"
+            ],
+            "type": "string"
+          },
+          "amount": {
+            "description": "Amount in the smallest currency unit (e.g. 1000 for $10.00 USD)",
+            "type": "number"
+          },
+          "api_key": {
+            "description": "Stripe secret key (sk_live_... or sk_test_...)",
+            "type": "string"
+          },
+          "currency": {
+            "description": "Three-letter ISO currency code, lowercase (e.g. 'usd')",
+            "type": "string"
+          },
+          "description": {
+            "description": "Optional description for this payment intent",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Optional value identifying this specific charge (e.g. an order ID) — prevents Stripe from creating a duplicate PaymentIntent if this node is retried or re-run with the same value. If omitted, a key is derived automatically from this run and the resolved amount/currency/description.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "amount": {
+            "type": "number"
+          },
+          "client_secret": {
+            "description": "Client secret for frontend confirmation",
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "id": {
+            "description": "PaymentIntent ID (pi_...)",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "stripe",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Route the workflow to one of several branches based on a value match, like a switch statement. Matching is exact and case-sensitive; a field path can index arrays (items.0.status).",
+      "display_name": "Switch",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "cases": {
+            "description": "JSON array of cases: [{\"match\": \"ok\", \"port\": \"case_1\"}, ...]. Matches are exact and case-sensitive.",
+            "type": "string"
+          },
+          "default_port": {
+            "description": "Port to route to when no case matches (default: 'default')",
+            "type": "string"
+          },
+          "field": {
+            "description": "Field path to switch on, e.g. status or response.code or items.0.status",
+            "type": "string"
+          },
+          "source_node": {
+            "description": "Node ID to read field from",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "cases",
+          "source_node"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "logic",
+      "output_schema": {
+        "properties": {
+          "data": {},
+          "matched_case": {
+            "type": "string"
+          },
+          "value": {}
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "case_1",
+            "label": "Case 1",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_2",
+            "label": "Case 2",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_3",
+            "label": "Case 3",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_4",
+            "label": "Case 4",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_5",
+            "label": "Case 5",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_6",
+            "label": "Case 6",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_7",
+            "label": "Case 7",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "case_8",
+            "label": "Case 8",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "default",
+            "label": "Default",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "switch",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Send a text message to a Telegram chat or channel via a bot token.",
+      "display_name": "Telegram",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "api_key": {
+            "description": "Telegram Bot Token (from @BotFather)",
+            "type": "string"
+          },
+          "chat_id": {
+            "description": "Telegram chat ID or username (e.g. 123456789 or @channelname)",
+            "type": "string"
+          },
+          "parse_mode": {
+            "description": "Optional text formatting mode",
+            "enum": [
+              "",
+              "Markdown",
+              "HTML"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "description": "Message text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chat_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "chat": {
+            "type": "object"
+          },
+          "date": {
+            "type": "number"
+          },
+          "message_id": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "telegram",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Split a long text into smaller chunks by characters, words, sentences, or paragraphs.",
+      "display_name": "Text Splitter",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "chunk_size": {
+            "description": "Maximum size of each chunk (in the unit specified by mode), 1 or more. Default: 1000 chars / 200 words / 5 sentences / 3 paragraphs",
+            "type": "number"
+          },
+          "extra_abbreviations": {
+            "description": "Sentences mode only. Extra abbreviations whose dot does not end a sentence, separated by commas or new lines, e.g. 'Kap., Anm., o.ä.'. Not case-sensitive; the trailing dot is optional. Up to 200 entries of up to 20 letters or dots each.",
+            "type": "string",
+            "x-aerini-multiline": true
+          },
+          "mode": {
+            "description": "How to split: chars (by character count), words, sentences, or paragraphs. Default: chars",
+            "enum": [
+              "chars",
+              "words",
+              "sentences",
+              "paragraphs"
+            ],
+            "type": "string"
+          },
+          "overlap": {
+            "description": "How much each chunk overlaps with the previous one (same unit as chunk_size). Overlap helps AI maintain context. Default: 100 chars / 20 words / 1 sentence / 0 paragraphs",
+            "type": "number"
+          },
+          "source_field": {
+            "description": "Optional: dot-path to a string field in the connected node's output, e.g. 'body' or 'content'. Fails if the field is not found. Overrides text.",
+            "type": "string"
+          },
+          "text": {
+            "description": "The text to split into chunks",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "ai",
+      "output_schema": {
+        "properties": {
+          "chunk_size": {
+            "type": "number"
+          },
+          "chunks": {
+            "description": "Array of text chunks",
+            "type": "array"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "overlap": {
+            "type": "number"
+          },
+          "total_chars": {
+            "description": "Total character count of input text",
+            "type": "number"
+          },
+          "total_chunks": {
+            "description": "Total number of chunks",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Chunks",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "text_splitter",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Converts a text string into a file object. Use between AI Prompt and Save to Folder to write AI output to disk.",
+      "display_name": "Text to File",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Text content to encode as a file",
+            "type": "string"
+          },
+          "filename": {
+            "description": "Output filename (default: output.<format>)",
+            "type": "string"
+          },
+          "format": {
+            "description": "Output format. Falls back to the filename extension, then 'txt', when omitted. pdf/docx produce real binary documents (headings rendered from leading #/##/###; docx also renders **bold**/*italic*); other formats pass the text through unchanged. PDF uses a built-in Latin-1 font: other characters (CJK, emoji) are replaced with '?' and reported in the node log.",
+            "enum": [
+              "txt",
+              "md",
+              "html",
+              "csv",
+              "json",
+              "pdf",
+              "docx"
+            ],
+            "type": "string"
+          },
+          "mime_type": {
+            "description": "MIME type (default: chosen from the format, e.g. text/csv for csv)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "properties": {
+          "files": {
+            "items": {
+              "properties": {
+                "data": {
+                  "description": "Base64-encoded file content",
+                  "type": "string"
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "mime_type": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "text_to_file",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Reshape or extract data from the previous node's output using a template or expression.",
+      "display_name": "Transform Data",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "mappings": {
+            "items": {
+              "properties": {
+                "from": {
+                  "description": "JSON pointer into source, or $ for the whole source output",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Key in output object",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "from",
+                "to"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "source_node": {
+            "description": "Node ID to pull output from",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mappings",
+          "source_node"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "description": "Mapped output fields",
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "transform",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Pause the workflow for a fixed duration, or check a field once and route to Done (match) or Timed out (no match).",
+      "display_name": "Wait",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "duration_secs": {
+            "description": "Seconds to wait (duration mode). Default 5.",
+            "type": "number"
+          },
+          "expected": {
+            "description": "Value the field must equal to leave through Done (condition mode). \"200\" matches 200 and \"true\" matches true; a missing or null field never matches."
+          },
+          "field": {
+            "description": "Dot-path into upstream node outputs to check, e.g. 'node_http.status' (condition mode).",
+            "type": "string"
+          },
+          "mode": {
+            "description": "duration: wait a fixed time. condition: check once whether a value matches; routes to Done if it does, Timed out if not (no waiting).",
+            "enum": [
+              "duration",
+              "condition"
+            ],
+            "type": "string"
+          },
+          "poll_interval_secs": {
+            "description": "No longer used. Kept so saved workflows load; the condition is checked once.",
+            "type": "number"
+          },
+          "timeout_secs": {
+            "description": "No longer used. Kept so saved workflows load; a condition that does not match routes to Timed out immediately.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "timed_out": {
+            "type": "boolean"
+          },
+          "waited_ms": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Done",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "timed_out",
+            "label": "Timed out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "wait",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
+      "description": "Start a workflow when an HTTP request arrives. Outputs the request body, headers, method, and path, plus files when the body has an attachments array.",
+      "display_name": "Webhook",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "dedup_window_secs": {
+            "description": "When set above 0, a request whose body was already seen within this many seconds does not re-run the workflow (the caller still gets a 200 OK — this only suppresses the re-run). Providers that retry on timeout or a non-2xx response (Stripe, GitHub, ...) resend the same event body byte-for-byte, so this catches that case. Only applies to requests with a non-empty body — GET requests and empty-body POSTs are never deduped. Default: 0 (disabled). Only takes effect for a workflow set to run in the background (Active in the scheduler) — an ad-hoc 'Run' press always executes once per press.",
+            "type": "number"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "ANY"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "URL path (default /webhook)",
+            "type": "string"
+          },
+          "port": {
+            "description": "Port to listen on (default 3456). In server/API mode, external traffic cannot reach 127.0.0.1 directly — a reverse proxy forwarding to this port is required.",
+            "type": "number"
+          },
+          "secret": {
+            "description": "Optional shared secret validated via x-webhook-secret header. This verifies the caller knows the secret but does NOT sign the request body — captured requests can be replayed verbatim. For integrations that send HMAC-SHA256 body signatures (Stripe, GitHub, etc.), verify the platform's native signature header (e.g. x-hub-signature-256) in a Code node immediately downstream rather than relying on this field alone.",
+            "type": "string"
+          },
+          "timeout_secs": {
+            "description": "Wait timeout (default 60)",
+            "type": "number"
+          },
+          "validate_timestamp": {
+            "description": "When true, requires callers to include an `x-webhook-timestamp` header containing a Unix timestamp (seconds). Requests older than 5 minutes are rejected, which reduces but does not eliminate the replay window — the timestamp is not cryptographically bound to the request body, so an attacker can replay with a captured secret and a fresh timestamp. For body integrity, verify a platform HMAC header (e.g. Stripe-Signature, X-Hub-Signature-256) in a downstream Code node. Default: false. Set to true to require timestamp headers (not compatible with GitHub, Stripe, or other platforms that do not send x-webhook-timestamp).",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "action",
+      "output_schema": {
+        "properties": {
+          "body": {},
+          "files": {
+            "description": "Present when the body has an `attachments` array (e.g. Chat panel uploads); mirrors it for wiring to a Files port.",
+            "type": "array"
+          },
+          "headers": {
+            "type": "object"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Triggered",
+            "port_type": null,
+            "position": "right"
+          },
+          {
+            "id": "on_error",
+            "label": "Error",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "webhook",
+      "version": "1.0.0"
+    }
+  ],
+  "schema_version": "1.0"
+}

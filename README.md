@@ -84,6 +84,10 @@ Click **Export → Export for Server** on a workflow to generate a deployment pa
 
 `aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. Get it with `docker pull ghcr.io/panchak2d/aerini-server`, or build it yourself (Docker or from source) if you want to customize it. Full details: [Server Deployment](docs/operations/server-deploy.md).
 
+## Working with an AI agent
+
+`aerini-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/) server that lets an AI agent such as Claude Code or Claude Desktop look up what Aerini's nodes can do, write a workflow, check it, save it, and, against an `aerini-server api` instance, run it. It is a separate small program, downloaded from the [Releases page](https://github.com/Panchak2d/aerini/releases), that the agent's client starts itself. It carries your token's scope and workflow access list, and anything that changes the server needs an explicit `--allow-write`. Without a server, an offline build writes `.aerini` files you drag onto the desktop canvas and never runs anything. Setup and what to lock down first: [MCP Server for AI Agents](docs/operations/mcp.md). How an agent should use it: [Building Workflows with an AI Agent](docs/guide/agents.md).
+
 ## Using the engine in your own program
 
 `aerini-engine` is a plain Rust crate: no Tauri, no UI dependency. Pull it into your own program, register your own nodes alongside or instead of the 40 built-ins, supply your own credential resolver and event sink, and run workflows headless. It's the same engine behind the desktop app and `aerini-server`, so retries, parallel execution, expressions, and plugins all behave the same way embedded as they do anywhere else.
@@ -158,6 +162,8 @@ The first build takes a few minutes while Rust compiles. After that, changes reb
 | [Server Deployment](docs/operations/server-deploy.md) | Running workflows 24/7 on Docker or a Linux box |
 | [Server CLI Reference](docs/operations/server-cli-reference.md) | Every `aerini-server serve`/`api` flag |
 | [Server API Reference](docs/operations/server-api-reference.md) | REST endpoints, SSE events, scoped tokens |
+| [MCP Server for AI Agents](docs/operations/mcp.md) | Installing `aerini-mcp`, configuring Claude Code and Claude Desktop, limits, what to lock down |
+| [Building with an AI Agent](docs/guide/agents.md) | The order an agent should work in, and what to keep a person in charge of |
 | [Updating](docs/operations/updating.md) | Desktop updates, server binary updates, workflow schema migration |
 
 

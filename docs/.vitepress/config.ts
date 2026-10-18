@@ -52,6 +52,7 @@ export default defineConfig({
           { text: 'Local Models', link: '/guide/local-models' },
           { text: 'Chat Panel', link: '/guide/chat-panel' },
           { text: 'Widget Embedding', link: '/guide/widget-embedding' },
+          { text: 'Building with an AI Agent', link: '/guide/agents' },
           { text: 'Security', link: '/guide/security' },
           { text: 'Examples', link: '/guide/examples' }
         ]
@@ -60,6 +61,7 @@ export default defineConfig({
         text: 'Reference',
         items: [
           { text: 'Workflow File Format', link: '/reference/workflow-file-format' },
+          { text: 'Node Catalog', link: '/reference/node-catalog' },
           { text: 'Schema Migrations', link: '/reference/schema-migrations' }
         ]
       },
@@ -69,6 +71,7 @@ export default defineConfig({
           { text: 'Server Deployment', link: '/operations/server-deploy' },
           { text: 'Server CLI Reference', link: '/operations/server-cli-reference' },
           { text: 'Server API Reference', link: '/operations/server-api-reference' },
+          { text: 'MCP Server for AI Agents', link: '/operations/mcp' },
           { text: 'Updating', link: '/operations/updating' }
         ]
       },

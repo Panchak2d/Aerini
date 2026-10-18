@@ -1,6 +1,6 @@
 # Server API Reference
 
-`aerini-server api` exposes a REST API for every workflow it manages: CRUD, on-demand runs, the scheduler, live memory and performance data, credentials, plugins, and token administration, plus a Server-Sent Events stream for run status. This page is an exhaustive route reference. For how to get the server running in the first place, see [Server Deployment](server-deploy.md); for the equivalent `aerini-server` CLI flags and control commands, see [Server CLI Reference](server-cli-reference.md); for the security reasoning behind scopes, ACLs, and the SSRF warning, see [Security](../guide/security.md).
+`aerini-server api` exposes a REST API for every workflow it manages: CRUD, on-demand runs, dry-run validation, the node catalog, the scheduler, live memory and performance data, credentials, plugins, and token administration, plus a Server-Sent Events stream for run status. This page is an exhaustive route reference. For how to get the server running in the first place, see [Server Deployment](server-deploy.md); for the equivalent `aerini-server` CLI flags and control commands, see [Server CLI Reference](server-cli-reference.md); for the security reasoning behind scopes, ACLs, and the SSRF warning, see [Security](../guide/security.md).
 
 ## Authentication and scopes
 
@@ -17,6 +17,7 @@ A restricted token is confined to its granted workflows on every route that addr
 - **Pre-check, `403`** with `{"error": "token ACL does not permit access to this workflow"}` before any work is done: `GET|DELETE /api/workflows/:id`, `POST /api/workflows/:id/run`, `POST /api/workflows` (the workflow's own `id` must be granted, so a restricted token cannot create a new workflow or overwrite another one), `POST /api/scheduler/:id/start`, `POST /api/scheduler/:id/stop`, `GET|DELETE /api/performance/reports`, and `GET /api/events?workflow_id=`. The answer depends only on the token's own grants, never on whether the workflow exists, so it reveals nothing about other workflows.
 - **Filtered lists:** `GET /api/workflows`, `GET /api/scheduler`, `GET /api/memory`, `GET /api/performance/live`, and `GET /api/events` without a `workflow_id` return only what the token may see. On the two paginated lists, filtering happens before pagination, so `total` and the page reflect only the token's own workflows.
 - **Fetch-then-check, `404`:** `GET|DELETE /api/performance/reports/:run_id` return a plain `404` for a run whose workflow is outside the grants, identical to a run that does not exist.
+- **Not tied to a workflow:** `GET /api/nodes` and `POST /api/validate-workflow` address no workflow and read nothing stored, so a restricted token may use them (read scope still applies).
 - **Server-wide routes, `403`:** `GET`, `POST` and `DELETE` on `/api/credentials` belong to no single workflow, so a restricted token is refused with `{"error": "token is restricted to specific workflows and cannot use server-wide routes"}`. Scope still applies on top of the ACL.
 
 ## Conventions
@@ -76,6 +77,44 @@ All five enforce the [per-token workflow ACL](#per-token-workflow-acl): a token 
 **`DELETE /api/workflows/:id`** stops any active scheduled job for the workflow first (best effort), then deletes its run history, scheduled-job row, and the workflow itself. `200` with `{"ok": true}`.
 
 **`POST /api/workflows/:id/run`** body: `{"initial_variables": {...}}` (optional, defaults to empty). Runs synchronously and returns the full result once execution finishes: `200` with `{"execution_id", "workflow_id", "success", "node_outputs": {...}, "logs": [...], "error": "<string or null>", "validation_errors": [...]}`. A workflow that fails at runtime still returns `200` with `success: false` and `error` set; `500` is reserved for the request itself failing (a DB error, an executor panic), not for the workflow's own logic failing. `404` if the workflow doesn't exist. Note that a caller with the `admin` scope who runs a workflow this way passes that admin privilege into the run, so any Database node in that workflow gets `allow_raw_sql` for that execution. If the client disconnects before the run finishes, the run is cancelled.
+
+## Node catalog and validation
+
+| Method | Path | Scope |
+|---|---|---|
+| `GET` | `/api/nodes` | read |
+| `POST` | `/api/validate-workflow` | read |
+
+Both are read-only: nothing is saved or run, and neither depends on a workflow ID, so the [per-token workflow ACL](#per-token-workflow-acl) does not restrict them.
+
+**`GET /api/nodes`** returns `200` with `{"engine_version": "<version>", "nodes": [...]}`. `nodes` is the live registry (built-in nodes plus any loaded plugins) sorted by `type_id`, so two calls return the same order. Each entry has `type_id`, `display_name`, `node_type`, `version`, `description`, `author`, `input_schema` (JSON Schema Draft 7 for the node's config fields), `output_schema`, `ports` (`inputs` and `outputs`, each with an `id`, and `arity` on an input that accepts several wires), `dynamic_ports` (true when the ports depend on the config), `is_plugin`, `trigger_capable`, and `enabled`. `enabled` is `false` for a Shell Command, Code or Database node when the server was started without `--allow-shell`, `--allow-code` or `--allow-database`: the node can be saved in a workflow but fails when a run reaches it. The plugin `icon` markup is left out. The same data for the built-in nodes, for a version without a running server, is in the generated [Node Catalog](../reference/node-catalog.md) and `node-schemas.json`.
+
+**`POST /api/validate-workflow`** body: `{"workflow_json": "<the workflow as a JSON string>"}`, the same envelope as `POST /api/workflows`. It checks the workflow against this server's live node registry and always answers `200` when the envelope is well formed, including for an invalid workflow; the answer is in `valid`. A body without `workflow_json` is a `4xx` from the JSON parser. The response is:
+
+```json
+{
+  "valid": false,
+  "best_effort": true,
+  "errors":   [{"check": "node_types", "message": "...", "node_id": "n2"}],
+  "warnings": [{"check": "ports", "message": "...", "node_id": "n1", "edge_id": "e1"}],
+  "checks_run": ["duplicate_ids", "node_types", "graph", "port_arity", "ports", "triggers", "required_config"]
+}
+```
+
+`valid` is `true` exactly when `errors` is empty. `node_id` and `edge_id` appear only when a finding points at one. The checks:
+
+| `check` | Reported as | What it finds |
+|---|---|---|
+| `parse` | error | The JSON does not parse as a workflow (the only check run in that case) |
+| `duplicate_ids` | error (nodes), warning (edges) | Two nodes, or two edges, share an `id` |
+| `node_types` | error (warning on a disabled node) | A `node_type_id` that is not registered on this server |
+| `graph` | error | An edge to a node that does not exist, a cycle, no entry node, or a node no entry node reaches; the first one found |
+| `port_arity` | error | Two wires into an input port that accepts one; the first one found |
+| `ports` | warning | An edge that leaves or enters a port the node does not declare. The run routes by `from_port` alone, so such an edge carries nothing |
+| `triggers` | warning | No enabled trigger node, so the workflow can only be run on demand |
+| `required_config` | warning | A field the node type lists as `required` is empty in its config and not filled by a credential. An upstream node may still supply it at run time |
+
+This is a best-effort check, not a promise that the run will succeed. It does not type-check config values (many are `{{expressions}}`), does not repeat per-node rules such as the Database node's `db_type`-dependent fields, and cannot see credentials, network access or sandbox limits. `valid: true` means no known structural problem. Findings never include config values, only field names.
 
 ## Scheduler
 

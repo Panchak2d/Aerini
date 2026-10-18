@@ -41,7 +41,7 @@ jobs:
           swap-storage: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
@@ -69,7 +69,7 @@ jobs:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Test engine
-        run: cargo test -p aerini-engine --locked
+        run: cargo test -p aerini-engine --locked --features schema
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
@@ -79,7 +79,22 @@ jobs:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Clippy
-        run: cargo clippy -p aerini-engine -p aerini-server --locked -- -D warnings
+        run: cargo clippy -p aerini-engine -p aerini-server --locked --features aerini-engine/schema -- -D warnings
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Test MCP server
+        run: cargo test -p aerini-mcp --locked
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Test MCP server (offline mode)
+        run: cargo test -p aerini-mcp --locked --features offline
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Clippy MCP server
+        run: cargo clippy -p aerini-mcp --all-targets --locked -- -D warnings && cargo clippy -p aerini-mcp --all-targets --locked --features offline -- -D warnings
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
@@ -94,7 +109,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -169,13 +184,13 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust with wasm32-wasip2
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-wasip2
 
       # No Cargo.lock ships with the echo template, so this build resolves the
-      # newest wit-bindgen 0.57.x and fails if the template stops compiling.
+      # newest wit-bindgen 0.62.x and fails if the template stops compiling.
       - name: Build echo template
         working-directory: examples/plugin-template
         run: cargo build --target wasm32-wasip2 --release
@@ -319,7 +334,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -369,7 +384,7 @@ jobs:
           swap-storage: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy

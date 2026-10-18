@@ -18,17 +18,17 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# Provides `wit_bindgen::generate!` (re-exported, pinned to 0.57.1 -- same
+# Provides `wit_bindgen::generate!` (re-exported, pinned to 0.62.0 -- same
 # version the base echo template pins directly) plus the async
 # runtime-support types (`spawn`, `wit_stream`, `StreamReader`,
 # `clocks::monotonic_clock`) an async `trigger.events` export needs. Used via
 # `wasip3::wit_bindgen::generate!` rather than adding a second, separately
 # versioned `wit-bindgen` dependency -- a second copy would not satisfy
-# wasip3's own `^0.57.1` requirement under Cargo's 0.x semver rules, and
+# wasip3's own `^0.62.0` requirement under Cargo's 0.x semver rules, and
 # would produce two incompatible copies of those runtime-support types.
 # VERIFIED (spike/wasi-p3-trigger-poc's own research, this audit trail):
-# 0.7.1+wasi-0.3.0 is current, final WASI 0.3.0 (not an -rc build).
-wasip3 = { version = "0.7.1", features = ["wit-bindgen-macros", "async-spawn"] }
+# 0.9.0+wasi-0.3.0 is current, final WASI 0.3.0 (not an -rc build).
+wasip3 = { version = "0.9.0", features = ["wit-bindgen-macros", "async-spawn"] }
 # Parses the trigger's own JSON config string (wit/node.wit's `trigger.events`
 # doc comment). Pure-Rust, no OS-specific syscalls -- compiles cleanly to
 # wasm32-wasip2. VERIFIED: 1.0.151 current on crates.io/docs.rs.
