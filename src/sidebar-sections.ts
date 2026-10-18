@@ -1,5 +1,6 @@
 import { enterMonitorMode, exitMonitorMode } from "./monitor-mode";
 import { mountMonitorPanel, unmountMonitorPanel } from "./panels/MonitorPanel";
+import { openMenu } from "./menu";
 
 const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
@@ -85,12 +86,6 @@ function resetTransientState(): void {
     wfSearch.dispatchEvent(new Event("input"));
   }
 
-  // Workflow list items are hidden via inline style.display — reset them
-  // directly so the list is not silently filtered after the input is cleared.
-  document.querySelectorAll<HTMLElement>(".workflow-item, .workflow-collection-group").forEach(el => {
-    el.style.display = "";
-  });
-
   // 3 — Orphaned dropdowns
   document.getElementById("sort-dropdown")?.remove();
   document.getElementById("filter-dropdown")?.remove();
@@ -123,8 +118,13 @@ function resetTransientState(): void {
   }
 }
 
+function savedWidth(): number {
+  const w = lsGet<unknown>(LS_WIDTH, DEF_W);
+  return typeof w === "number" && Number.isFinite(w) ? w : DEF_W;
+}
+
 function applySavedWidth(): void {
-  setWidth(lsGet<number>(LS_WIDTH, DEF_W), false);
+  setWidth(savedWidth(), false);
 }
 
 function setWidth(w: number, save: boolean): void {
@@ -150,7 +150,7 @@ export function bindResizeHandle(): void {
     handle.classList.add("dragging");
     document.body.classList.add("resizing-h");
     const startX = e.clientX;
-    const startW = lsGet<number>(LS_WIDTH, DEF_W);
+    const startW = savedWidth();
     document.body.style.transition = "none";
 
     const onMove = (me: MouseEvent) => setWidth(startW + me.clientX - startX, false);
@@ -285,45 +285,11 @@ function bindSearchToggle(btnId: string, barId: string, inputId: string): void {
   });
 }
 
-export function bindWorkflowSectionControls(onSort: (mode: string) => void): void {
+export function bindWorkflowSectionControls(onSort: (mode: string) => void, onSearch: (query: string) => void): void {
   const search = document.getElementById("wf-search") as HTMLInputElement | null;
   const sort   = document.getElementById("btn-wf-sort");
 
-  search?.addEventListener("input", () => {
-    const q = search.value.toLowerCase().trim();
-    document.querySelectorAll<HTMLElement>(".workflow-item").forEach(item => {
-      const name = item.querySelector(".workflow-item-name")?.textContent?.toLowerCase() ?? "";
-      const tags = item.dataset.wfTags ?? "";
-      item.style.display = q && !name.includes(q) && !tags.includes(q) ? "none" : "";
-    });
-    const groups = document.querySelectorAll<HTMLElement>(".workflow-collection-group");
-    let anyGroupVisible = false;
-    groups.forEach(group => {
-      const hasVisibleItem = !!group.querySelector<HTMLElement>('.workflow-item:not([style*="display: none"])');
-      const isEmptyGroup = !group.querySelector(".workflow-item"); // no items at all, not filtered out
-      const hide = q && !hasVisibleItem && !isEmptyGroup;
-      group.style.display = hide ? "none" : "";
-      if (!hide) anyGroupVisible = true;
-    });
-
-    // A search that matches nothing previously left the list area completely
-    // blank with no explanation. Only shown when there's actually a library
-    // to search (groups.length > 0) -- otherwise the "No workflows yet…"
-    // empty state (workflow-manager.ts) already covers it, and stacking both
-    // messages would be redundant.
-    let noMatch = document.getElementById("wf-search-no-match");
-    if (q && groups.length > 0 && !anyGroupVisible) {
-      if (!noMatch) {
-        noMatch = document.createElement("div");
-        noMatch.id = "wf-search-no-match";
-        noMatch.className = "workflow-list-empty";
-        document.getElementById("workflow-list")?.appendChild(noMatch);
-      }
-      noMatch.textContent = `No workflows match "${search.value.trim()}"`;
-    } else {
-      noMatch?.remove();
-    }
-  });
+  search?.addEventListener("input", () => onSearch(search.value));
 
   const SORT_OPTIONS = [
     { value: "updated_desc", label: "Newest first" },
@@ -334,40 +300,24 @@ export function bindWorkflowSectionControls(onSort: (mode: string) => void): voi
 
   sort?.addEventListener("click", (e) => {
     e.stopPropagation();
-    document.getElementById("sort-dropdown")?.remove();
-
     const cur = sort.dataset.sort ?? "updated_desc";
-    const rect = sort.getBoundingClientRect();
-
-    const dd = document.createElement("div");
-    dd.id = "sort-dropdown";
-    dd.className = "filter-dropdown";
-    dd.style.top = `${rect.bottom + 4}px`;
-    dd.style.left = `${rect.left}px`;
-
-    SORT_OPTIONS.forEach(opt => {
-      const btn = document.createElement("button");
-      btn.className = "filter-dropdown-item" + (opt.value === cur ? " active" : "");
-      btn.textContent = opt.label;
-      btn.addEventListener("mousedown", (ev) => {
-        ev.preventDefault();
-        sort.dataset.sort = opt.value;
-        sort.title = opt.label;
-        sort.setAttribute("data-tooltip", opt.label);
-        sort.classList.toggle("active", opt.value !== "updated_desc");
-        onSort(opt.value);
-        dd.remove();
-      });
-      dd.appendChild(btn);
+    openMenu({
+      id: "sort-dropdown",
+      variant: "dropdown",
+      invoker: sort,
+      anchor: sort,
+      items: SORT_OPTIONS.map(opt => ({
+        label: opt.label,
+        active: opt.value === cur,
+        onSelect: () => {
+          sort.dataset.sort = opt.value;
+          sort.title = opt.label;
+          sort.setAttribute("data-tooltip", opt.label);
+          sort.classList.toggle("active", opt.value !== "updated_desc");
+          onSort(opt.value);
+        },
+      })),
     });
-
-    document.body.appendChild(dd);
-    const dismiss = (ev: MouseEvent) => {
-      if (!dd.contains(ev.target as Node) && ev.target !== sort) {
-        dd.remove(); document.removeEventListener("mousedown", dismiss, true);
-      }
-    };
-    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
   });
 }
 

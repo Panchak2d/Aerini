@@ -79,12 +79,16 @@ export function setMonitorWfManager(wfManager: WorkflowManager): void {
 let _lastAllRows: MonitorRow[] = [];
 let _startAllInFlight = false;
 let _stopAllInFlight = false;
+let _tickInFlight = false;
+let _mountGeneration = 0;
 
 export function mountMonitorPanel(): void {
   if (_mounted) return;
   const area = document.getElementById("monitor-area");
   if (!area) return;
   _mounted = true;
+  _mountGeneration++;
+  _tickInFlight = false;
 
   if (!isTauri()) {
     area.innerHTML = `<div class="monitor-empty">Monitor is only available in the desktop app.</div>`;
@@ -498,7 +502,17 @@ function updateResources(processBytes: number | null, summary: MemSummary, activ
 // ── Poll tick ──────────────────────────────────────────────────────────
 
 async function renderTick(): Promise<void> {
-  if (!_mounted) return;
+  if (!_mounted || _tickInFlight) return;
+  const generation = _mountGeneration;
+  _tickInFlight = true;
+  try {
+    await renderTickBody(() => !_mounted || generation !== _mountGeneration);
+  } finally {
+    if (generation === _mountGeneration) _tickInFlight = false;
+  }
+}
+
+async function renderTickBody(isStale: () => boolean): Promise<void> {
   renderCanvasCard();
 
   const jobs = getBgJobs();
@@ -506,14 +520,14 @@ async function renderTick(): Promise<void> {
     getMemoryBreakdown().catch(() => [] as RunBreakdown[]),
     getProcessMemory().catch(() => null),
   ]);
-  if (!_mounted) return; // unmounted while the await above was in flight
+  if (isStale()) return; // unmounted while the await above was in flight
 
   const processBytes = procMem === null ? null : procMem.current_bytes;
   _peakProcessBytes = updatePeak(processBytes, _peakProcessBytes);
 
   if (_tick % WORKFLOW_REFRESH_EVERY === 0) {
     const wfs = await listWorkflows().catch(() => [] as WorkflowSummary[]);
-    if (!_mounted) return;
+    if (isStale()) return;
     _idleWorkflows = wfs.filter(wf => !isWorkflowRunning(wf.id));
   }
   _tick++;
@@ -790,6 +804,8 @@ function startCountdown(rowId: string, nextRunAt: string, el: HTMLElement): void
     el.textContent = formatNextRun(secsLeft);
   };
   update();
+  const previous = _countdownIntervals.get(rowId);
+  if (previous !== undefined) clearInterval(previous);
   const id = setInterval(() => {
     if (!document.getElementById("monitor-list")?.contains(el)) { clearInterval(id); return; }
     update();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::context::{new_shared_state, LogLevel};
+use crate::context::{LogLevel, SharedExecutionState};
 use crate::error::{EngineError, NodeError};
 use crate::graph::ExecutionGraph;
 use crate::model::{NodeOutput, Workflow};
@@ -145,10 +145,9 @@ impl Readiness<'_> {
 pub(super) async fn run_inner_parallel(
     executor:          Arc<WorkflowExecutor>,
     workflow:          Arc<Workflow>,
-    initial_variables: HashMap<String, Value>,
+    state:             SharedExecutionState,
 ) -> Result<WorkflowResult, EngineError> {
     let graph = ExecutionGraph::build(&workflow)?;
-    let state = new_shared_state(&workflow.id, initial_variables);
 
     // Shared accumulator for non-strict schema validation warnings from parallel tasks.
     // Tasks push into this instead of the (unshareable) per-function Vec used in sequential mode.
@@ -408,7 +407,7 @@ pub(super) async fn run_inner_parallel(
                     // Schema validation: strict → fail; non-strict → warn and accumulate.
                     let schema_errors = WorkflowExecutor::validate_node_input(
                         &ndef.input_schema,
-                        &resolved_input.input,
+                        &exec.schema_view(&ndef, &resolved_input),
                     );
                     if !schema_errors.is_empty() {
                         if exec.config.strict_schema_validation {
@@ -438,7 +437,7 @@ pub(super) async fn run_inner_parallel(
                                 }).collect()
                             }; // st write lock released here
                             vacc.lock()
-                                .expect("validation_acc mutex poisoned")
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .extend(warnings);
                         }
                     }
@@ -629,7 +628,7 @@ pub(super) async fn run_inner_parallel(
 
     let validation_errors = validation_acc
         .lock()
-        .expect("validation_acc mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
 
     if abort {
@@ -681,7 +680,7 @@ mod tests {
     struct NoopCreds;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCreds {
-        async fn resolve(&self, _: &str) -> Result<String, CredentialResolveError> {
+        async fn resolve(&self, _: &str) -> Result<crate::executor::SecretString, CredentialResolveError> {
             Err(CredentialResolveError::NotFound)
         }
     }

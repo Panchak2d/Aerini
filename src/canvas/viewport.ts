@@ -31,3 +31,19 @@ function unobstructedHeight(r: DOMRect): number {
   if (dr.right <= r.left || dr.left >= r.right) return r.height;
   return Math.max(0, Math.min(r.bottom, dr.top) - r.top);
 }
+
+export interface SavedViewport {
+  panX: number;
+  panY: number;
+  zoom: number;
+}
+
+export function parseSavedViewport(raw: string, minZoom: number, maxZoom: number): SavedViewport | null {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return null; }
+  if (typeof v !== "object" || v === null) return null;
+  const { panX, panY, zoom } = v as Record<string, unknown>;
+  if (typeof panX !== "number" || typeof panY !== "number" || typeof zoom !== "number") return null;
+  if (!Number.isFinite(panX) || !Number.isFinite(panY) || !Number.isFinite(zoom)) return null;
+  return { panX, panY, zoom: Math.min(maxZoom, Math.max(minZoom, zoom)) };
+}

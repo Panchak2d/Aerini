@@ -25,6 +25,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::executor::SecretString;
+
 // ── Node type category ────────────────────────────────────────────────────────
 
 /// Palette category for a node type.
@@ -343,7 +345,7 @@ impl Workflow {
 /// Built by the executor immediately before calling `execute()`. The `input` field
 /// contains the node's config values with all `{{...}}` expressions evaluated and
 /// credential values already substituted — the node sees plaintext secrets directly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct NodeInput {
     pub node_id: String,
     pub workflow_id: String,
@@ -354,13 +356,24 @@ pub struct NodeInput {
     /// merged into `input` under. A clean, structured path to the same secrets
     /// `input` already carries — plugins may read either; this does not replace
     /// the merge.
-    pub resolved_credentials: HashMap<String, String>,
+    pub resolved_credentials: HashMap<String, SecretString>,
     pub context: ExecutionContext,
     /// `Some` when the run carries a cancellation token; resolves when the run is
-    /// cancelled. `CancellationToken` has no `Serialize`/`Deserialize` impl, hence
-    /// the skip — safe here since this type is never (de)serialized in practice.
-    #[serde(skip)]
+    /// cancelled.
     pub cancel_token: Option<CancellationToken>,
+}
+
+impl std::fmt::Debug for NodeInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeInput")
+            .field("node_id", &self.node_id)
+            .field("workflow_id", &self.workflow_id)
+            .field("execution_id", &self.execution_id)
+            .field("input", &"<redacted>")
+            .field("resolved_credentials", &format_args!("<{} redacted>", self.resolved_credentials.len()))
+            .field("cancel_token", &self.cancel_token)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Read-only snapshot of workflow execution state at the moment a node is about to run.

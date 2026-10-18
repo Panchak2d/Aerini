@@ -4,11 +4,22 @@
 //! `aerini_engine::nodes::ai_prompt::list_models`, the same coordinating
 //! function `AiPromptNode::execute()` mirrors.
 
+use aerini_engine::executor::SecretString;
+
 #[tauri::command]
 pub async fn list_provider_models(
     provider: String,
     base_url: String,
     api_key: String,
+) -> Result<Vec<String>, String> {
+    let api_key = SecretString::new(api_key);
+    models_for(&provider, &base_url, &api_key).await
+}
+
+pub(crate) async fn models_for(
+    provider: &str,
+    base_url: &str,
+    api_key: &SecretString,
 ) -> Result<Vec<String>, String> {
     // AI Prompt's own schema defaults `provider` to "auto" (it's enum[0]),
     // and local-models.md recommends leaving it there — so the "Fetch
@@ -17,11 +28,11 @@ pub async fn list_provider_models(
     // guard rejects anything else), so "auto" is resolved here the same
     // way `AiPromptNode`/`AiAgentNode`'s own `execute()` resolve it, reusing
     // that single classifier rather than adding a second one.
-    let provider_id: &str = match provider.as_str() {
-        "anthropic" | "gemini" | "openai" | "local" => provider.as_str(),
-        _ => aerini_engine::provider::ProviderRegistry::detect_from_url(&base_url),
+    let provider_id: &str = match provider {
+        "anthropic" | "gemini" | "openai" | "local" => provider,
+        _ => aerini_engine::provider::ProviderRegistry::detect_from_url(base_url),
     };
-    aerini_engine::nodes::ai_prompt::list_models(provider_id, &base_url, &api_key)
+    aerini_engine::nodes::ai_prompt::list_models(provider_id, base_url, api_key)
         .await
         .map_err(|e| format!("{}: {}", e.code, e.message))
 }

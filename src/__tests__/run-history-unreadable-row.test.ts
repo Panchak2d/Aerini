@@ -40,4 +40,13 @@ describe("run history restore", () => {
     expect(row.classList.contains("history-unreadable")).toBe(true);
     expect(row.getAttribute("aria-disabled")).toBe("true");
   });
+
+  it("edge case: a result replaced by a size marker is not restored", async () => {
+    const onRestore = vi.fn();
+    const panel = await renderWith([rec(JSON.stringify({ $truncated: { original_bytes: 40_000_000 } }))], onRestore);
+    const row = panel.querySelector<HTMLElement>(".history-item")!;
+    row.click();
+    expect(onRestore).not.toHaveBeenCalled();
+    expect(row.classList.contains("history-unreadable")).toBe(true);
+  });
 });

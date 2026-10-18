@@ -35,10 +35,14 @@
 //!   POST   /api/credentials
 //!   DELETE /api/credentials/:id
 //!   POST   /api/plugins/reload  (admin scope required)
+//!   GET    /api/plugins/load-report  (admin scope required)
 //!   GET    /api/events   (SSE)
 //!   GET    /api/tokens   (admin scope required)
 //!   POST   /api/tokens   (admin scope required)
 //!   DELETE /api/tokens/:id  (admin scope required)
+//!   GET    /api/tokens/:id/workflows  (admin scope required)
+//!   POST   /api/tokens/:id/workflows/:wf_id  (admin scope required)
+//!   DELETE /api/tokens/:id/workflows/:wf_id  (admin scope required)
 
 pub(super) mod routes;
 
@@ -54,12 +58,12 @@ use axum::{
 use tower_http::cors::AllowOrigin;
 use aerini_engine::{
     db::WorkflowDb,
-    executor::{CredentialResolver, WorkflowExecutor},
+    executor::{CredentialResolver, SecretString, WorkflowExecutor},
     node::{NodeRegistry, Reloadable},
     nodes::register_builtins,
     plugin_loader::{load_plugins, PluginLoadReport},
     scheduler::SchedulerDaemon,
-    store::{CredentialStore, KeySource, StoreCredentialResolver},
+    store::{CredentialStore, KeySource, StoreCredentialResolver, MAX_VALUE_BYTES},
     EventSink,
 };
 use std::{
@@ -73,8 +77,8 @@ use tokio_util::sync::CancellationToken;
 use rand::TryRng;
 
 use crate::event_bridge::BroadcastEventSink;
-use crate::token_store::TokenStore;
-use crate::util::{extract_client_ip, parse_bearer};
+use crate::token_store::{ImportOutcome, TokenStore};
+use crate::util::{extract_client_ip, join_host_port, parse_bearer};
 
 /// Configuration bundle for [`run`]. Groups the server parameters to stay
 /// under the clippy `too_many_arguments` limit.
@@ -107,96 +111,6 @@ pub use routes::state::ApiState;
 pub use routes::state::SSE_MAX_CONNECTIONS;
 
 
-/// Sets a DACL on `path` that grants full control to the file owner only,
-/// mirroring Unix `chmod 0600`. Only compiled on Windows targets.
-#[cfg(windows)]
-fn set_owner_only_acl(path: &std::path::Path) -> Result<(), String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{
-        ACL, InitializeAcl, AddAccessAllowedAce, GetTokenInformation,
-        TOKEN_USER, TokenUser, ACL_REVISION, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION,
-    };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, CloseHandle};
-
-    let wide: Vec<u16> = OsStr::new(path)
-        .encode_wide()
-        .chain(std::iter::once(0u16))
-        .collect();
-
-    unsafe {
-        let mut token: HANDLE = INVALID_HANDLE_VALUE;
-        if windows_sys::Win32::System::Threading::OpenProcessToken(
-            windows_sys::Win32::System::Threading::GetCurrentProcess(),
-            windows_sys::Win32::Security::TOKEN_QUERY,
-            &mut token,
-        ) == 0 {
-            return Err(format!(
-                "OpenProcessToken failed: {}",
-                windows_sys::Win32::Foundation::GetLastError()
-            ));
-        }
-
-        let mut needed: u32 = 0;
-        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
-
-        if needed == 0 {
-            CloseHandle(token);
-            return Err("GetTokenInformation returned zero size — unexpected security configuration".to_string());
-        }
-
-        let mut buf = vec![0u8; needed as usize];
-        if GetTokenInformation(
-            token, TokenUser, buf.as_mut_ptr() as *mut _, needed, &mut needed,
-        ) == 0 {
-            CloseHandle(token);
-            return Err(format!(
-                "GetTokenInformation (second call) failed: {}",
-                windows_sys::Win32::Foundation::GetLastError()
-            ));
-        }
-        CloseHandle(token);
-
-        let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let sid = user.User.Sid;
-
-        // Use Vec<u32> to guarantee 4-byte alignment required by ACL header.
-        const ACL_BUF_BYTES: usize = 256;
-        let mut acl_buf = vec![0u32; ACL_BUF_BYTES / 4];
-        if InitializeAcl(acl_buf.as_mut_ptr() as *mut ACL, ACL_BUF_BYTES as u32, ACL_REVISION as u32) == 0 {
-            return Err(format!(
-                "InitializeAcl failed: {}",
-                windows_sys::Win32::Foundation::GetLastError()
-            ));
-        }
-        if AddAccessAllowedAce(
-            acl_buf.as_mut_ptr() as *mut ACL, ACL_REVISION as u32, FILE_ALL_ACCESS, sid,
-        ) == 0 {
-            return Err(format!(
-                "AddAccessAllowedAce failed: {}",
-                windows_sys::Win32::Foundation::GetLastError()
-            ));
-        }
-
-        let rc = SetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            acl_buf.as_mut_ptr() as *mut ACL,
-            std::ptr::null_mut(),
-        );
-        if rc != 0 {
-            return Err(format!("SetNamedSecurityInfoW failed: {}", rc));
-        }
-    }
-    Ok(())
-}
-
 /// Prints one error line and exits. Used for failures during startup, where a
 /// panic backtrace would only bury the cause.
 fn fatal(msg: &str) -> ! {
@@ -205,6 +119,7 @@ fn fatal(msg: &str) -> ! {
 }
 
 fn read_token_key(path: &std::path::Path) -> [u8; 32] {
+    aerini_engine::store::tighten_key_file_permissions(path);
     let bytes = std::fs::read(path)
         .unwrap_or_else(|e| fatal(&format!("cannot read token key file {}: {e}", path.display())));
     if bytes.len() != 32 {
@@ -220,42 +135,35 @@ fn read_token_key(path: &std::path::Path) -> [u8; 32] {
     key
 }
 
+#[cfg(unix)]
+fn is_group_or_world_accessible(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_group_or_world_accessible(_dir: &std::path::Path) -> bool {
+    false
+}
+
 fn load_or_create_token_key(path: &std::path::Path) -> [u8; 32] {
-    // Exclusive creation with the owner-only mode set at creation, so the key
-    // never exists on disk readable by others, and a second process starting
-    // on the same data dir cannot replace a key the first just wrote.
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+    if path.exists() {
+        return read_token_key(path);
     }
-    let mut file = match opts.open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return read_token_key(path),
-        Err(e) => fatal(&format!("cannot create token key file {}: {e}", path.display())),
-    };
+    let _lock = aerini_engine::store::lock_beside(path).unwrap_or_else(|e| {
+        fatal(&format!("cannot lock token key file {}: {e}", path.display()))
+    });
+    if path.exists() {
+        return read_token_key(path);
+    }
 
     let mut key = [0u8; 32];
     rand::rngs::SysRng
         .try_fill_bytes(&mut key)
         .unwrap_or_else(|_| fatal("the operating system's random number generator failed"));
-    {
-        use std::io::Write;
-        if let Err(e) = file.write_all(&key) {
-            // A partial key file would be rejected as the wrong length on every later start.
-            let _ = std::fs::remove_file(path);
-            fatal(&format!("cannot write token key file {}: {e}", path.display()));
-        }
-    }
-    drop(file);
-
-    #[cfg(windows)]
-    set_owner_only_acl(path).unwrap_or_else(|e| {
-        fatal(&format!("cannot restrict token key file {} to its owner: {e}", path.display()))
+    aerini_engine::store::publish_secret_file(path, &key).unwrap_or_else(|e| {
+        fatal(&format!("cannot write token key file {}: {e}", path.display()))
     });
-
     key
 }
 
@@ -286,6 +194,71 @@ fn expand_home(raw: &str, home: Option<&std::path::Path>) -> Result<PathBuf, Str
     // `join` with a rooted argument would discard `home`, so `~//etc` must not become `/etc`.
     let rest = rest.trim_start_matches(std::path::is_separator);
     Ok(if rest.is_empty() { home.to_path_buf() } else { home.join(rest) })
+}
+
+/// Longest backup key `restore_key` reads. A key is 44 base64 characters; the
+/// headroom is for whitespace around it.
+const MAX_BACKUP_KEY_BYTES: u64 = 1024;
+
+/// Reads a backup key from `reader`: UTF-8 text, at most `MAX_BACKUP_KEY_BYTES`,
+/// not blank. The text is returned as read; the engine trims it.
+fn read_backup_key(reader: impl std::io::Read) -> Result<SecretString, String> {
+    use std::io::Read;
+    let mut text = SecretString::new(String::new());
+    reader
+        .take(MAX_BACKUP_KEY_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidData => "the backup key must be plain text".to_string(),
+            _ => format!("cannot read the backup key: {e}"),
+        })?;
+    if text.len() as u64 > MAX_BACKUP_KEY_BYTES {
+        return Err(format!(
+            "that is not a backup key: it is longer than {MAX_BACKUP_KEY_BYTES} bytes"
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err("the backup key is empty".to_string());
+    }
+    Ok(text)
+}
+
+/// `aerini-server restore-key`: puts a backed-up credential encryption key back
+/// in `data_dir`, after checking that it decrypts that folder's credentials.
+/// Run it while the server is stopped.
+pub async fn restore_key(data_dir: &str, key_file: Option<&std::path::Path>, keychain: bool) {
+    use std::io::IsTerminal;
+    crate::init_tracing();
+    let data_dir = expand_home(data_dir, home_dir().as_deref()).unwrap_or_else(|e| fatal(&e));
+    let db_path = data_dir.join("credentials.db");
+    let fallback = data_dir.join("aerini.key");
+    let key_source = if keychain {
+        KeySource::OsKeychain { fallback }
+    } else {
+        KeySource::File(fallback)
+    };
+
+    let backup = match key_file {
+        Some(path) => std::fs::File::open(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(read_backup_key),
+        None if std::io::stdin().is_terminal() => Err(
+            "pass the backup key with --key-file, or pipe it in; a key typed at a terminal stays on screen"
+                .to_string(),
+        ),
+        None => read_backup_key(std::io::stdin().lock()),
+    }
+    .unwrap_or_else(|e| fatal(&e));
+
+    let outcome = tokio::task::spawn_blocking(move || {
+        CredentialStore::restore_key_base64(&db_path, key_source, backup.trim())
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => println!("Key restored. Start the server again."),
+        Ok(Err(e)) => fatal(&e.to_string()),
+        Err(e) => fatal(&format!("the restore task failed: {e}")),
+    }
 }
 
 /// The first-run banner around the generated API token. Every line has the
@@ -335,6 +308,23 @@ fn cors_origin_allowed(origin: &[u8], path: &str, extra_origins: &[Vec<u8>]) -> 
     is_localhost_origin(origin) || extra_origins.iter().any(|o| o.as_slice() == origin)
 }
 
+/// Largest request body the public widget routes accept: the 1,000,000-byte
+/// cap on what the Webhook listener takes, plus room for the JSON wrapper
+/// around it.
+const WIDGET_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// Largest request body the credential routes accept: twice the stored-value
+/// cap (JSON escapes a quote or newline as two bytes), plus 16 KiB for the
+/// other fields and their JSON syntax.
+const CREDENTIAL_BODY_LIMIT_BYTES: usize = 2 * MAX_VALUE_BYTES + 16 * 1024;
+
+/// True when the server listens beyond loopback with no proxy count set: a
+/// reverse proxy in front would then make every client share one rate-limit
+/// bucket, because each request appears to come from the proxy's address.
+fn needs_proxy_count_notice(bind: &str, trusted_proxy_count: usize) -> bool {
+    trusted_proxy_count == 0 && !matches!(bind, "127.0.0.1" | "::1" | "localhost")
+}
+
 /// Upper bound on how long shutdown waits for open HTTP connections to close.
 const SHUTDOWN_DRAIN_SECS: u64 = 10;
 
@@ -349,6 +339,7 @@ pub async fn run(cfg: ServerConfig) {
         plugin_dir,
     } = cfg;
     crate::init_tracing();
+    let token = token.map(SecretString::new);
 
     // Enforce minimum token length for user-supplied tokens.
     // Auto-generated tokens are always 43 chars (URL_SAFE_NO_PAD of 32 bytes).
@@ -360,21 +351,16 @@ pub async fn run(cfg: ServerConfig) {
         }
     }
     let data_dir = expand_home(&data_dir, home_dir().as_deref()).unwrap_or_else(|e| fatal(&e));
-    std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
+    let data_dir_existed = data_dir.is_dir();
+    aerini_engine::store::create_private_dir_all(&data_dir).unwrap_or_else(|e| {
         fatal(&format!("cannot create data directory {}: {e}", data_dir.display()))
     });
-
-    // Restrict data dir to owner-only on Unix. Default umask typically produces
-    // 0755 which makes the key file discoverable even though it is 0600.
-    // Setting the directory to 0700 prevents other users from listing its contents.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| tracing::warn!(
-                "Could not set permissions on data dir {:?}: {}",
-                data_dir, e
-            ));
+    if data_dir_existed && is_group_or_world_accessible(&data_dir) {
+        tracing::warn!(
+            "Data directory {:?} is accessible to group or other users. It holds the token \
+             database, the token key and the credential store. Restrict it with: chmod 700 {:?}",
+            data_dir, data_dir
+        );
     }
 
     let token_key = load_or_create_token_key(&data_dir.join("tokens.key"));
@@ -385,19 +371,38 @@ pub async fn run(cfg: ServerConfig) {
         })
     );
 
+    let store_was_empty = token_store.is_empty()
+        .unwrap_or_else(|e| fatal(&format!("cannot read token store {}: {e}", tokens_db.display())));
     match &token {
         Some(t) => {
-            token_store
+            match token_store
                 .import_token(t, "default", &["read", "write", "admin"])
-                .unwrap_or_else(|e| fatal(&format!("cannot import token into token store: {e}")));
+                .unwrap_or_else(|e| fatal(&format!("cannot import token into token store: {e}")))
+            {
+                ImportOutcome::Added if store_was_empty => {}
+                ImportOutcome::Added => tracing::warn!(
+                    "--token / AERINI_TOKEN is not a token this server already knows, so it was added \
+                     as a new admin token. Unrevoked tokens already stored in {} stay active. List them with \
+                     `aerini-server tokens list` and revoke any you no longer want with \
+                     `aerini-server tokens revoke`.",
+                    tokens_db.display()
+                ),
+                ImportOutcome::AlreadyActive => {}
+                ImportOutcome::Revoked => fatal(
+                    "the token given by --token / AERINI_TOKEN has been revoked. Start without it to \
+                     use the tokens already stored, or give a new token (openssl rand -base64 32).",
+                ),
+            }
         }
         None => {
-            if token_store.is_empty() {
+            if store_was_empty {
                 let mut raw_bytes = [0u8; 32];
                 rand::rngs::SysRng
                     .try_fill_bytes(&mut raw_bytes)
                     .unwrap_or_else(|_| fatal("the operating system's random number generator failed"));
-                let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes);
+                let generated = SecretString::new(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes),
+                );
                 eprintln!();
                 eprintln!("{}", token_banner(&generated));
                 eprintln!();
@@ -406,6 +411,16 @@ pub async fn run(cfg: ServerConfig) {
                     .unwrap_or_else(|e| fatal(&format!("cannot import generated token: {e}")));
             }
         }
+    }
+    if !token_store
+        .has_active_admin()
+        .unwrap_or_else(|e| fatal(&format!("cannot read token store {}: {e}", tokens_db.display())))
+    {
+        fatal(&format!(
+            "no active admin token in {}: every admin token is revoked or expired. Start once with \
+             --token <new token> (or AERINI_TOKEN, at least 32 characters) to add one.",
+            tokens_db.display()
+        ));
     }
 
     let workflow_db_path = data_dir.join("aerini.db");
@@ -566,9 +581,14 @@ pub async fn run(cfg: ServerConfig) {
         server_max_duration_secs,
         base_executor,
         sse_semaphore: Arc::new(Semaphore::new(SSE_MAX_CONNECTIONS)),
-        run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs)),
+        run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs.max(1))),
         queue_timeout: std::time::Duration::from_secs(max_queue_wait_secs),
     };
+
+    let credential_routes = Router::new()
+        .route("/api/credentials",         get(routes::credentials::list_creds).post(routes::credentials::save_cred))
+        .route("/api/credentials/{id}",     delete(routes::credentials::delete_cred))
+        .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT_BYTES));
 
     let protected = Router::new()
         .route("/api/workflows",           get(routes::workflows::list_workflows).post(routes::workflows::save_workflow))
@@ -581,8 +601,6 @@ pub async fn run(cfg: ServerConfig) {
         .route("/api/performance/live",     get(routes::performance::get_live))
         .route("/api/performance/reports",  get(routes::performance::list_reports).delete(routes::performance::clear_reports))
         .route("/api/performance/reports/{run_id}", get(routes::performance::get_report).delete(routes::performance::delete_report))
-        .route("/api/credentials",         get(routes::credentials::list_creds).post(routes::credentials::save_cred))
-        .route("/api/credentials/{id}",     delete(routes::credentials::delete_cred))
         .route("/api/plugins/reload",      post(routes::plugins::reload_plugins))
         .route("/api/plugins/load-report", get(routes::plugins::load_report))
         .route("/api/events",              get(routes::workflows::sse_events))
@@ -590,6 +608,7 @@ pub async fn run(cfg: ServerConfig) {
         .route("/api/tokens/{id}",          delete(routes::tokens::revoke_token_handler))
         .route("/api/tokens/{id}/workflows",             get(routes::tokens::list_token_workflows_handler))
         .route("/api/tokens/{id}/workflows/{wf_id}",      post(routes::tokens::grant_token_workflow_handler).delete(routes::tokens::revoke_token_workflow_handler))
+        .merge(credential_routes)
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     let extra_origins: std::sync::Arc<Vec<Vec<u8>>> = std::sync::Arc::new(
@@ -624,13 +643,15 @@ pub async fn run(cfg: ServerConfig) {
     // Both public widget routes are gated only by the workflow's own Webhook
     // secret (routes::widget module doc) rather than a server Bearer token,
     // so unlike every other route here, a leaked/guessed credential lets an
-    // arbitrary internet caller reach them at will. Two axes:
-    //   - per-IP:       bounds a single leaked credential used from one place.
-    //   - per-workflow: bounds total cost/abuse regardless of how many
-    //                   different IPs a leaked credential gets used from
-    //                   (VPN rotation, botnet) — the blast radius that
-    //                   matters to the workflow owner is "how many times did
-    //                   MY workflow run", not "from how many IPs".
+    // arbitrary internet caller reach them at will. Two axes on `trigger`:
+    //   - per-IP:       a layer here, applied to every request including ones
+    //                   with a wrong secret; bounds a single leaked credential
+    //                   used from one place and secret guessing.
+    //   - per-workflow: checked inside the handler, after the credential is
+    //                   verified. It bounds total cost/abuse however many IPs a
+    //                   leaked credential is used from (VPN rotation, botnet),
+    //                   and because unauthenticated requests never reach it,
+    //                   they cannot use up the budget real visitors share.
     // mint-token has no per-workflow axis: it never runs the workflow, only
     // checks a secret, so the per-IP guess-throttle is the relevant bound.
     let widget_trigger_ip_rl = Arc::new(crate::middleware::RateLimiter::new(20, 60));
@@ -638,19 +659,16 @@ pub async fn run(cfg: ServerConfig) {
     let widget_trigger_wf_rl = Arc::new(crate::middleware::KeyedRateLimiter::new(60, 60));
     Arc::clone(&widget_trigger_wf_rl).spawn_eviction_task();
     let tpc_wt = trusted_proxy_count;
-    let widget_trigger_rate_limit = middleware::from_fn(
-        move |axum::extract::Path(workflow_id): axum::extract::Path<String>, req: Request, next: Next| {
-            let ip_rl = Arc::clone(&widget_trigger_ip_rl);
-            let wf_rl = Arc::clone(&widget_trigger_wf_rl);
-            async move {
-                let ip: IpAddr = extract_client_ip(&req, tpc_wt);
-                if !ip_rl.is_allowed(ip) || !wf_rl.is_allowed(&workflow_id) {
-                    return crate::middleware::too_many_requests();
-                }
-                next.run(req).await
+    let widget_trigger_rate_limit = middleware::from_fn(move |req: Request, next: Next| {
+        let ip_rl = Arc::clone(&widget_trigger_ip_rl);
+        async move {
+            let ip: IpAddr = extract_client_ip(&req, tpc_wt);
+            if !ip_rl.is_allowed(ip) {
+                return crate::middleware::too_many_requests();
             }
-        },
-    );
+            next.run(req).await
+        }
+    });
 
     let widget_mint_ip_rl = Arc::new(crate::middleware::RateLimiter::new(10, 60));
     Arc::clone(&widget_mint_ip_rl).spawn_eviction_task();
@@ -675,12 +693,20 @@ pub async fn run(cfg: ServerConfig) {
     // `widget_mint_rate_limit` on top of `trigger` as well, silently
     // dropping its effective limit to mint-token's stricter 10/min/IP
     // instead of the documented 20/min/IP + 60/min/workflow.
+    //
+    // Both public routers also cap the request body at `WIDGET_BODY_LIMIT_BYTES`
+    // (the global 5 MiB limit is applied further out; the innermost
+    // `DefaultBodyLimit` wins). These routes parse the body before any
+    // credential is checked, and their listener refuses anything over 1 MB.
     let trigger_router = Router::new()
         .route("/api/widget/{workflow_id}/trigger", post(routes::widget::trigger_widget))
-        .layer(widget_trigger_rate_limit);
+        .layer(widget_trigger_rate_limit)
+        .layer(axum::Extension(widget_trigger_wf_rl))
+        .layer(DefaultBodyLimit::max(WIDGET_BODY_LIMIT_BYTES));
     let mint_router = Router::new()
         .route("/api/widget/{workflow_id}/mint-token", post(routes::widget::mint_widget_token))
-        .layer(widget_mint_rate_limit);
+        .layer(widget_mint_rate_limit)
+        .layer(DefaultBodyLimit::max(WIDGET_BODY_LIMIT_BYTES));
     let widget_routes = trigger_router.merge(mint_router);
 
     let app = Router::new()
@@ -702,13 +728,23 @@ pub async fn run(cfg: ServerConfig) {
         .layer(cors)
         .layer(middleware::from_fn(crate::middleware::api_security_headers));
 
-    let addr     = format!("{}:{}", bind, port);
+    if needs_proxy_count_notice(&bind, trusted_proxy_count) {
+        tracing::warn!(
+            "aerini-server is bound to {} with --trusted-proxy-count 0 (the default). \
+             If a reverse proxy (nginx, Caddy, a load balancer) sits in front of it, every \
+             client shares one rate-limit allowance, including the widget's 20 requests per \
+             minute. Set --trusted-proxy-count (AERINI_TRUSTED_PROXY_COUNT) to the number of \
+             proxies in front of this server. See docs/guide/security.md.",
+            bind
+        );
+    }
+    let addr     = join_host_port(&bind, port);
     let listener = tokio::net::TcpListener::bind(&addr).await
         .unwrap_or_else(|e| { tracing::error!("Cannot bind {}: {}", addr, e); std::process::exit(1); });
 
     tracing::info!(
-        api_url    = %format!("http://{}:{}", bind, port),
-        health_url = %format!("http://{}:{}/api/health", bind, port),
+        api_url    = %format!("http://{addr}"),
+        health_url = %format!("http://{addr}/api/health"),
         "Aerini Server started in API mode"
     );
     // In API mode any token holder with 'write' scope can submit workflows with
@@ -811,9 +847,22 @@ async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_directory_is_judged_by_its_mode_and_left_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("aerini_data_dir_mode_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(super::is_group_or_world_accessible(&dir));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!super::is_group_or_world_accessible(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use super::{
-        cors_origin_allowed, expand_home, extract_client_ip, is_localhost_origin, is_mint_token_path,
-        token_banner,
+        cors_origin_allowed, expand_home, read_backup_key, extract_client_ip, is_localhost_origin, is_mint_token_path,
+        needs_proxy_count_notice, token_banner,
     };
     use axum::body::Body;
     use axum::extract::Request;
@@ -925,5 +974,94 @@ mod tests {
         let widths: Vec<usize> = banner.lines().map(|l| l.chars().count()).collect();
         assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
         assert!(banner.lines().any(|l| l.contains(&token) && l.starts_with('│') && l.ends_with('│')));
+    }
+
+    #[tokio::test]
+    async fn widget_body_limit_overrides_the_wider_global_limit() {
+        use axum::{extract::DefaultBodyLimit, http::StatusCode, routing::post, Json, Router};
+        use tower::ServiceExt as _;
+
+        let app = Router::new()
+            .route("/", post(|Json(_): Json<serde_json::Value>| async {}))
+            .layer(DefaultBodyLimit::max(super::WIDGET_BODY_LIMIT_BYTES))
+            .layer(DefaultBodyLimit::max(5 * 1024 * 1024));
+        let post_json = |n: usize| {
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("content-type", "application/json")
+                .body(Body::from(format!("\"{}\"", "a".repeat(n))))
+                .unwrap()
+        };
+
+        let small = app.clone().oneshot(post_json(1000)).await.unwrap();
+        assert_eq!(small.status(), StatusCode::OK);
+        let large = app
+            .oneshot(post_json(super::WIDGET_BODY_LIMIT_BYTES + 10))
+            .await
+            .unwrap();
+        assert_eq!(large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn credential_body_limit_admits_the_largest_valid_body_and_refuses_more() {
+        use super::routes::credentials::CredBody;
+        use axum::{extract::DefaultBodyLimit, http::StatusCode, routing::post, Json, Router};
+        use tower::ServiceExt as _;
+
+        let app = Router::new()
+            .route("/", post(|Json(_): Json<CredBody>| async {}))
+            .layer(DefaultBodyLimit::max(super::CREDENTIAL_BODY_LIMIT_BYTES))
+            .layer(DefaultBodyLimit::max(5 * 1024 * 1024));
+        let post_body = |body: String| {
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        let largest = serde_json::json!({
+            "id": "a".repeat(128),
+            "name": "n".repeat(256),
+            "value": "\n".repeat(super::MAX_VALUE_BYTES),
+            "cred_type": "api_key",
+            "update": true,
+        })
+        .to_string();
+        assert!(largest.len() < super::CREDENTIAL_BODY_LIMIT_BYTES);
+        let ok = app.clone().oneshot(post_body(largest)).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let oversized = serde_json::json!({
+            "id": "a",
+            "name": "n",
+            "value": "v".repeat(super::CREDENTIAL_BODY_LIMIT_BYTES),
+        })
+        .to_string();
+        let refused = app.oneshot(post_body(oversized)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn proxy_count_notice_only_for_non_loopback_bind_with_no_proxy_count() {
+        assert!(needs_proxy_count_notice("0.0.0.0", 0));
+        assert!(needs_proxy_count_notice("192.168.1.5", 0));
+        assert!(!needs_proxy_count_notice("0.0.0.0", 1));
+        assert!(!needs_proxy_count_notice("127.0.0.1", 0));
+        assert!(!needs_proxy_count_notice("::1", 0));
+        assert!(!needs_proxy_count_notice("localhost", 0));
+    }
+
+    #[test]
+    fn backup_key_input_is_bounded_plain_text_and_not_blank() {
+        let key = "A".repeat(44);
+        assert_eq!(&*read_backup_key(format!("{key}\n").as_bytes()).unwrap(), &format!("{key}\n"));
+        assert!(read_backup_key(&b" \r\n"[..]).is_err());
+        assert!(read_backup_key(&b""[..]).is_err());
+        assert!(read_backup_key(&[0xff, 0xfe, b'a'][..]).is_err());
+        assert!(read_backup_key("A".repeat(1025).as_bytes()).is_err());
+        assert!(read_backup_key("A".repeat(1024).as_bytes()).is_ok());
     }
 }

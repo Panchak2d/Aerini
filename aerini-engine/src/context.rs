@@ -13,15 +13,27 @@
 //! `node_succeeded`, `node_status`. These are part of the public inspection API used
 //! by tooling and tests — zero direct call sites in the executor is correct.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::model::{ExecutionContext, NodeOutput};
+
+/// Log entries one run keeps. A 10,000-iteration loop with a handful of body
+/// nodes stays well under it; the cap stops a runaway node from growing the
+/// run's memory and its stored result without bound.
+const MAX_LOG_ENTRIES: usize = 100_000;
+
+/// Longest single log message kept, in bytes.
+const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,6 +72,113 @@ pub struct ExecutionLogEntry {
     pub message: String,
 }
 
+/// Shortest secret the redactor masks. Shorter values would also mask ordinary words.
+const MIN_REDACTED_SECRET_LEN: usize = 8;
+const REDACTION_MASK: &str = "[redacted]";
+
+/// Secret values known to one run, masked out of everything the run reports.
+/// Each secret is masked as typed and in the encoded forms a node is likely to
+/// write it in: percent-encoded (URL password or query value) and base64 (any
+/// alignment, standard or URL-safe alphabet). The characters at the two ends
+/// of a base64 run that also encode neighbouring bytes are not masked.
+#[derive(Default)]
+pub struct SecretRedactor {
+    secrets: Vec<Zeroizing<String>>,
+}
+
+impl fmt::Debug for SecretRedactor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretRedactor({} values)", self.secrets.len())
+    }
+}
+
+fn percent_encoded_forms(secret: &str) -> Vec<String> {
+    let mut forms =
+        vec![url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>()];
+    if let Ok(mut u) = url::Url::parse("http://u@h/") {
+        if u.set_password(Some(secret)).is_ok() {
+            forms.extend(u.password().map(str::to_owned));
+        }
+    }
+    forms
+}
+
+fn base64_forms(secret: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    for lead in 0..3usize {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(lead + secret.len()));
+        bytes.resize(lead, 0u8);
+        bytes.extend_from_slice(secret.as_bytes());
+        let encoded = Zeroizing::new(STANDARD.encode(bytes.as_slice()));
+        let start = if lead == 0 { 0 } else { 4 };
+        let end = bytes.len() / 3 * 4;
+        if end > start {
+            let run = &encoded[start..end];
+            forms.push(run.to_string());
+            forms.push(run.replace('+', "-").replace('/', "_"));
+        }
+    }
+    forms
+}
+
+impl SecretRedactor {
+    /// Remembers `secret` and its encoded forms. Values under the minimum length
+    /// are ignored. Longer values sort first so a secret that contains another is
+    /// masked whole.
+    pub fn register(&mut self, secret: &str) {
+        if secret.len() < MIN_REDACTED_SECRET_LEN {
+            return;
+        }
+        self.add(secret.to_string());
+        for form in percent_encoded_forms(secret).into_iter().chain(base64_forms(secret)) {
+            self.add(form);
+        }
+    }
+
+    fn add(&mut self, text: String) {
+        if text.len() < MIN_REDACTED_SECRET_LEN || self.secrets.iter().any(|s| s.as_str() == text) {
+            return;
+        }
+        self.secrets.push(Zeroizing::new(text));
+        self.secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty()
+    }
+
+    pub fn redact_str<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        let mut out = Cow::Borrowed(text);
+        for secret in &self.secrets {
+            if out.contains(secret.as_str()) {
+                let masked = out.replace(secret.as_str(), REDACTION_MASK);
+                out = Cow::Owned(masked);
+            }
+        }
+        out
+    }
+
+    pub fn redact_value(&self, value: &mut Value) {
+        let mut stack: Vec<&mut Value> = vec![value];
+        while let Some(current) = stack.pop() {
+            match current {
+                Value::String(s) => {
+                    let masked = match self.redact_str(s) {
+                        Cow::Owned(m) => Some(m),
+                        Cow::Borrowed(_) => None,
+                    };
+                    if let Some(m) = masked {
+                        *s = m;
+                    }
+                }
+                Value::Array(items) => stack.extend(items.iter_mut()),
+                Value::Object(map) => stack.extend(map.values_mut()),
+                _ => {}
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ExecutionState {
@@ -74,6 +193,7 @@ pub struct ExecutionState {
     loop_results: HashMap<String, Vec<Value>>,
     pub logs: Vec<ExecutionLogEntry>,
     execution_order: Vec<String>,
+    redactor: SecretRedactor,
 }
 
 impl ExecutionState {
@@ -90,7 +210,16 @@ impl ExecutionState {
             loop_results: HashMap::new(),
             logs: Vec::new(),
             execution_order: Vec::new(),
+            redactor: SecretRedactor::default(),
         }
+    }
+
+    pub fn register_secret(&mut self, secret: &str) {
+        self.redactor.register(secret);
+    }
+
+    pub fn redactor(&self) -> &SecretRedactor {
+        &self.redactor
     }
 
     pub fn mark_running(&mut self, node_id: &str) {
@@ -198,7 +327,26 @@ impl ExecutionState {
         self.loop_results.remove(loop_id).unwrap_or_default()
     }
 
-    pub fn log(&mut self, node_id: Option<&str>, level: LogLevel, message: String) {
+    pub fn log(&mut self, node_id: Option<&str>, level: LogLevel, mut message: String) {
+        let (level, node_id, message) = match self.logs.len().cmp(&MAX_LOG_ENTRIES) {
+            std::cmp::Ordering::Less => {
+                if message.len() > MAX_LOG_MESSAGE_BYTES {
+                    let mut cut = MAX_LOG_MESSAGE_BYTES;
+                    while !message.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    message.truncate(cut);
+                    message.push('…');
+                }
+                (level, node_id, message)
+            }
+            std::cmp::Ordering::Equal => (
+                LogLevel::Warn,
+                None,
+                format!("Run log limit of {MAX_LOG_ENTRIES} entries reached; later entries are not kept"),
+            ),
+            std::cmp::Ordering::Greater => return,
+        };
         self.logs.push(ExecutionLogEntry {
             timestamp: Utc::now(),
             node_id: node_id.map(|s| s.to_string()),
@@ -234,6 +382,47 @@ pub fn new_shared_state(
     variables: HashMap<String, Value>,
 ) -> SharedExecutionState {
     Arc::new(RwLock::new(ExecutionState::new(workflow_id, variables)))
+}
+
+#[cfg(test)]
+mod redactor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn masks_long_secrets_in_nested_values_and_leaves_short_ones() {
+        let mut r = SecretRedactor::default();
+        r.register("short");
+        r.register("abcdefgh");
+        r.register("abcdefgh-longer");
+        let mut v = json!({ "a": ["x abcdefgh y"], "b": { "c": "short abcdefgh-longer" }, "n": 7 });
+        r.redact_value(&mut v);
+        assert_eq!(v, json!({ "a": ["x [redacted] y"], "b": { "c": "short [redacted]" }, "n": 7 }));
+    }
+
+    #[test]
+    fn encoded_forms_of_a_secret_are_masked_in_urls_and_at_every_base64_alignment() {
+        let secret = "p@ss w0rd/42+x";
+        let mut r = SecretRedactor::default();
+        r.register(secret);
+
+        let form = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>();
+        let masked = r.redact_str(&format!("q={form}&x=1")).into_owned();
+        assert!(!masked.contains(&form), "{masked}");
+
+        let mut u = url::Url::parse("postgres://user@host/db").unwrap();
+        u.set_password(Some(secret)).unwrap();
+        let masked = r.redact_str(u.as_str()).into_owned();
+        assert!(!masked.contains(u.password().unwrap()), "{masked}");
+
+        for prefix in ["", "u:", "us:", "usr:"] {
+            for engine in [STANDARD, base64::engine::general_purpose::URL_SAFE] {
+                let text = engine.encode(format!("{prefix}{secret}:tail"));
+                let masked = r.redact_str(&text).into_owned();
+                assert!(masked.contains(REDACTION_MASK), "prefix {prefix:?}: {text} -> {masked}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -333,5 +522,32 @@ mod execution_order_tests {
         let ctx = s.snapshot();
         assert_eq!(ctx.node_outputs.get("a"), Some(&json!({"x": 1})));
         assert_eq!(ctx.node_outputs.get("b"), Some(&json!({"y": 2})));
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn run_log_stops_at_the_entry_limit_with_one_notice() {
+        let mut state = ExecutionState::new("wf", HashMap::new());
+        for i in 0..MAX_LOG_ENTRIES + 5 {
+            state.log(None, LogLevel::Info, format!("entry {i}"));
+        }
+        assert_eq!(state.logs.len(), MAX_LOG_ENTRIES + 1);
+        assert_eq!(state.logs[MAX_LOG_ENTRIES - 1].message, format!("entry {}", MAX_LOG_ENTRIES - 1));
+        assert!(matches!(state.logs[MAX_LOG_ENTRIES].level, LogLevel::Warn));
+    }
+
+    #[test]
+    fn long_log_message_is_cut_on_a_character_boundary() {
+        let mut state = ExecutionState::new("wf", HashMap::new());
+        state.log(Some("n"), LogLevel::Error, "é".repeat(MAX_LOG_MESSAGE_BYTES));
+        state.log(None, LogLevel::Info, "short".to_string());
+        let kept = &state.logs[0].message;
+        assert!(kept.len() <= MAX_LOG_MESSAGE_BYTES + '…'.len_utf8());
+        assert!(kept.ends_with('…') && kept.starts_with('é'));
+        assert_eq!(state.logs[1].message, "short");
     }
 }

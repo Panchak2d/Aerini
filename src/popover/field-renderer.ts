@@ -17,8 +17,10 @@ export interface PropSchema {
   maxLength?: number;
   /** Opts a field into the credential picker. `true` for no type constraint,
    *  or an object naming the cred_type ("api_key" | "bearer" | "basic" |
-   *  "oauth" | "other") to filter the saved-credential picker to that type. */
-  "x-aerini-credential"?: true | { cred_type?: string };
+   *  "oauth" | "other") to filter the saved-credential picker to that type.
+   *  `inline: true` also keeps a direct-entry box under the picker, for a
+   *  field a user may type into instead of saving a credential. */
+  "x-aerini-credential"?: true | { cred_type?: string; inline?: boolean };
   /** Opts a field into the model-discovery picker: a "Fetch Models" button
    *  that calls `ExtensionContext.fetchModels` and offers the result as a
    *  dropdown alongside the normal free-text input. Same shape as
@@ -46,12 +48,12 @@ export interface PropSchema {
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
 export const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
 
-interface CredentialFieldInfo { key: string; credType?: string; }
+interface CredentialFieldInfo { key: string; credType?: string; inline?: boolean; }
 
 function credentialFieldInfo(key: string, prop: PropSchema): CredentialFieldInfo | null {
   const ann = prop["x-aerini-credential"];
   if (ann === true) return { key };
-  if (ann && typeof ann === "object") return { key, credType: ann.cred_type };
+  if (ann && typeof ann === "object") return { key, credType: ann.cred_type, inline: ann.inline === true };
   if (CREDENTIAL_KEYS.has(key)) return { key };
   return null;
 }
@@ -814,7 +816,7 @@ export function renderCredentialSection(
     : "Select a saved credential to attach to this node.";
   body.appendChild(hint);
 
-  for (const { key: credKey, credType } of credFields) {
+  for (const { key: credKey, credType, inline } of credFields) {
     let pool = credType ? creds.filter(c => c.cred_type === credType) : creds;
 
     // AI nodes: hard-filter the api_key picker to credentials whose Advanced
@@ -886,6 +888,28 @@ export function renderCredentialSection(
         inp.placeholder = "sk-…";
         inp.addEventListener("input", () => {
           (node.data.config as Record<string, unknown>)["api_key"] = inp.value;
+          onChange();
+        });
+        return inp;
+      }, "Saved in this workflow's file, unencrypted. Ignored if a saved credential is selected above."));
+      body.appendChild(details);
+    }
+
+    if (inline && credKey !== "api_key") {
+      const config = node.data.config as Record<string, unknown>;
+      const details = document.createElement("details");
+      details.className = "cred-advanced";
+      details.open = String(config[credKey] ?? "") !== "";
+      const summary = document.createElement("summary");
+      summary.className = "cred-advanced-summary";
+      summary.textContent = "Or enter a value directly";
+      details.appendChild(summary);
+      details.appendChild(mkField(`${formatLabel(credKey)} (direct)`, () => {
+        const inp = mk<HTMLInputElement>("input");
+        inp.type = "password"; inp.autocomplete = "off"; inp.spellcheck = false;
+        inp.value = String(config[credKey] ?? "");
+        inp.addEventListener("input", () => {
+          config[credKey] = inp.value;
           onChange();
         });
         return inp;

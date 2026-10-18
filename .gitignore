@@ -76,3 +76,10 @@ coverage/
 out/
 
 patch_staging/
+
+# VitePress local build output and dev cache (docs.yml builds the site from source).
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# Python bytecode
+__pycache__/

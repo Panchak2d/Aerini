@@ -10,7 +10,7 @@ import { listChatSessionMeta, loadChatMessages, appendChatMessage, saveChatSessi
 import type { ChatSessionWire, ChatSessionMetaWire, ChatMessageWire } from "../ipc/chat";
 import type { SchedulerStatusEvent } from "../ipc/events";
 import { addSchedulerStatusListener } from "../scheduler-events";
-import { escapeHtml } from "../utils";
+import { escapeHtml, copyWithButtonFeedback } from "../utils";
 import { type ChatSettings, DEFAULT_CHAT_SETTINGS } from "../canvas/CanvasSerializer";
 import type { Connector } from "../canvas/Connector";
 import { RunningSync, triggerFingerprint } from "../running-sync";
@@ -1034,10 +1034,7 @@ export class ChatPanel {
     copyBtn.className = "chat-bubble-copy";
     copyBtn.textContent = "Copy";
     copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(text).then(() => {
-        copyBtn.textContent = "Copied";
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
-      }).catch(() => { /* clipboard unavailable — non-fatal */ });
+      void copyWithButtonFeedback(copyBtn, text);
     });
     bubble.appendChild(copyBtn);
     return bubble;

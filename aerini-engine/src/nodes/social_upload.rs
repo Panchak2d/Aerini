@@ -357,7 +357,7 @@ impl Node for SocialUploadNode {
                     "description": "Privacy level (default private). YouTube: public|private|unlisted. TikTok: public_to_everyone|mutual_follow_friends|follower_of_creator|self_only. Ignored by Instagram."
                 },
                 "client_id":     { "type": "string",  "description": "OAuth client ID / client key. Entered directly here; not currently offered as a saved-credential picker field." },
-                "client_secret": { "type": "string",  "description": "OAuth client secret. Entered directly here; not currently offered as a saved-credential picker field." }
+                "client_secret": { "type": "string",  "description": "OAuth client secret. Pick a saved credential or enter it directly.", "x-aerini-credential": { "inline": true } }
             }
         })
     }

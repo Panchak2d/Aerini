@@ -69,7 +69,8 @@ impl Node for S3Node {
                 },
                 "secret_access_key": {
                     "type": "string",
-                    "description": "Secret access key."
+                    "description": "Secret access key.",
+                    "x-aerini-credential": { "inline": true }
                 },
                 "region": {
                     "type": "string",
@@ -912,9 +913,11 @@ mod tests {
         assert!(!ips.is_empty() && ips.iter().all(|ip| ip.is_loopback()), "{ips:?}");
     }
 
+    type SeenRequests = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct Stub {
         port: u16,
-        seen: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        seen: SeenRequests,
     }
 
     /// Serves `responses` in order (the last repeats) on a loopback port and
@@ -922,7 +925,7 @@ mod tests {
     async fn stub_server(responses: Vec<(u16, String)>) -> Stub {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let seen: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::default();
+        let seen: SeenRequests = Arc::default();
         let next = Arc::new(AtomicUsize::new(0));
         let log = seen.clone();
         tokio::spawn(async move {
@@ -1029,7 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_on_aws_is_refused_but_blank_endpoint_is_not() {
-        let err = build_client(&cfg_for("aws", "https://example.com")).await.err().expect("must fail");
+        let err = build_client(&cfg_for("aws", "https://example.com")).await.expect_err("must fail");
         assert_eq!(err.code, "ENDPOINT_NOT_SUPPORTED");
         assert!(!err.recoverable);
         assert!(err.message.contains("r2 or minio"), "{}", err.message);

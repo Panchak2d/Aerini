@@ -115,10 +115,12 @@ async function init() {
   // Persist viewport per workflow so zoom/pan survive workflow switches
   canvas.onViewportChange = () => {
     if (!wfManager.currentId) return;
-    localStorage.setItem(
-      `aerini_viewport_${wfManager.currentId}`,
-      JSON.stringify({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom })
-    );
+    try {
+      localStorage.setItem(
+        `aerini_viewport_${wfManager.currentId}`,
+        JSON.stringify({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom })
+      );
+    } catch { /* storage full or unavailable — viewport simply isn't remembered */ }
   };
 
   if (!isTauri()) {
@@ -352,7 +354,7 @@ async function init() {
   await wfManager.refreshWorkflowList();
 
   bindSectionSearchToggles();
-  bindWorkflowSectionControls((sortMode) => wfManager.setSortMode(sortMode));
+  bindWorkflowSectionControls((sortMode) => wfManager.setSortMode(sortMode), (query) => wfManager.setSearchQuery(query));
   bindBgRunsFilter((status, query) =>
     loadBgPanel().then(m => m.renderBgJobs(wfManager, runManager, status, query, toast))
   );

@@ -3,7 +3,7 @@ import type { WorkflowManager } from "./workflow-manager";
 import type { ChatSettings } from "./canvas/CanvasSerializer";
 import { RunManager, getBgJobs } from "./run-manager";
 import { stopScheduledWorkflow, parseSchedulerError, exportAllWorkflows } from "./ipc/workflow";
-import { isTauri } from "./utils";
+import { isTauri, copyText } from "./utils";
 import { getAutostart, setAutostart } from "./ipc/autostart";
 import { bindUpdateUi } from "./update-ui";
 import { invoke } from "@tauri-apps/api/core";
@@ -352,7 +352,8 @@ export function bindToolbar(
   $("btn-run-panel")?.addEventListener("click",  () => runWithValidation());
   $("btn-copy-output").addEventListener("click", () => {
     const text = document.getElementById("output-content")?.innerText ?? "";
-    navigator.clipboard.writeText(text).then(() => {
+    void copyText(text).then(ok => {
+      if (!ok) { toast("Couldn't copy to clipboard", "error"); return; }
       const btn = $("btn-copy-output");
       btn.classList.add("copied");
       toast("Copied to clipboard", "success");

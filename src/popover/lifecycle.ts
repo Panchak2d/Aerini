@@ -4,7 +4,7 @@ import { showConfirm } from "../confirm";
 import type { CanvasNode } from "../canvas/Node";
 import type { Canvas } from "../canvas/Canvas";
 import { visibleViewport } from "../canvas/viewport";
-import { listCredentials, getCredentialMetadata, getCredentialSecret } from "../ipc/credentials";
+import { listCredentials, getCredentialMetadata, listCredentialModels } from "../ipc/credentials";
 import { listProviderModels } from "../ipc/providers";
 import { runWorkflow } from "../ipc/workflow";
 import type { WorkflowLogEntry } from "../ipc/workflow";
@@ -228,10 +228,9 @@ export async function showPopover(
     const provider = String(config["provider"] ?? "auto");
     const baseUrl  = String(config["base_url"] ?? "");
     const credId   = node.data.credentials["api_key"];
-    const apiKey   = credId
-      ? (await getCredentialSecret(credId).catch(() => null)) ?? ""
-      : String(config["api_key"] ?? "");
-    return listProviderModels(provider, baseUrl, apiKey);
+    return credId
+      ? listCredentialModels(credId, provider, baseUrl)
+      : listProviderModels(provider, baseUrl, String(config["api_key"] ?? ""));
   }
   const customUiKeys = CUSTOM_UI_KEYS[node.data.node_type_id];
   const credFieldKeys = getCredentialFieldKeys(props);

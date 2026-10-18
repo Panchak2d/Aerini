@@ -37,6 +37,11 @@ PRERELEASE=false
 case "$EXPECTED" in
   *-*) PRERELEASE=true ;;
 esac
+if [ "$PRERELEASE" = false ] && ! awk -v heading="## [${EXPECTED}]" 'index($0, heading) == 1 { found = 1 } END { exit !found }' CHANGELOG.md; then
+  echo "ERROR: CHANGELOG.md has no '## [${EXPECTED}]' section; move the Unreleased entries under it before tagging" >&2
+  exit 1
+fi
+
 echo "prerelease: ${PRERELEASE}"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"

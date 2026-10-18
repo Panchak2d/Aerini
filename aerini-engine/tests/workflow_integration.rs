@@ -25,7 +25,7 @@ struct NoopResolver;
 
 #[async_trait]
 impl CredentialResolver for NoopResolver {
-    async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+    async fn resolve(&self, _id: &str) -> Result<aerini_engine::executor::SecretString, CredentialResolveError> {
         Err(CredentialResolveError::NotFound)
     }
 }

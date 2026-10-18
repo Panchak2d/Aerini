@@ -10,7 +10,7 @@ use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
 
 use super::shell::failure_stderr;
-use super::util::{cfg_u64_opt, drain_capped, kill_group_on_drop, FloodLimit, Keep, OUTPUT_CAP_BYTES, OUTPUT_FLOOD_BYTES};
+use super::util::{cfg_u64_opt, drain_capped, kill_tree_on_drop, FloodLimit, Keep, OUTPUT_CAP_BYTES, OUTPUT_FLOOD_BYTES};
 
 #[cfg(target_os = "linux")]
 const DEFAULT_CODE_MEMORY_MB: u64 = 512;
@@ -39,7 +39,7 @@ static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 /// Written to a temp file because Node.js loaders cannot be passed inline.
 ///
 /// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os, module,
-/// v8, inspector
+/// v8, inspector, tls, wasi, trace_events, sqlite, test
 /// These cover: subprocess spawning, filesystem access, raw network access, and — via
 /// `module`'s `createRequire()` — a CommonJS `require()` that would otherwise reach every
 /// other entry on this list. `v8` is blocked because `v8.writeHeapSnapshot(path)` writes a
@@ -49,6 +49,9 @@ static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
 /// without going through `eval`/`new Function`, bypassing `--disallow-code-generation-from-strings`.
 /// `process.getBuiltinModule()` reaches the same builtins without an `import` and so never
 /// hits this hook; `execute()`'s sandbox prelude overrides it with the same blocklist.
+/// `tls` is blocked because `tls.connect()` opens raw network connections without importing
+/// `net`; `wasi` maps host directories into a guest; `trace_events` and `sqlite` write files;
+/// `node:test` can spawn processes.
 /// Allowed: crypto, util, path, stream, events, url, buffer, string_decoder, querystring
 ///
 /// Compatibility: --experimental-loader works on all Node.js 18+ versions.
@@ -78,6 +81,12 @@ const BLOCKED = new Set([
   'node:v8',            'v8',
   'node:inspector',     'inspector',
   'node:inspector/promises', 'inspector/promises',
+  'node:tls',           'tls',
+  'node:wasi',          'wasi',
+  'node:trace_events',  'trace_events',
+  'node:sqlite',        'sqlite',
+  'node:test',          'test',
+  'node:test/reporters', 'test/reporters',
 ]);
 
 export async function resolve(specifier, context, nextResolve) {
@@ -125,6 +134,8 @@ delete globalThis.XMLHttpRequest;
 delete process.binding;
 delete process._linkedBinding;
 delete process.dlopen;
+delete process.kill;
+delete process.report;
 {
   const __sandboxBlockedBuiltins = new Set([
     'node:child_process', 'child_process',
@@ -147,6 +158,12 @@ delete process.dlopen;
     'node:v8',            'v8',
     'node:inspector',     'inspector',
     'node:inspector/promises', 'inspector/promises',
+    'node:tls',           'tls',
+    'node:wasi',          'wasi',
+    'node:trace_events',  'trace_events',
+    'node:sqlite',        'sqlite',
+    'node:test',          'test',
+    'node:test/reporters', 'test/reporters',
   ]);
   const __sandboxOriginalGetBuiltinModule = process.getBuiltinModule.bind(process);
   process.getBuiltinModule = (id) => {
@@ -282,6 +299,7 @@ impl CodeNode {
         let empty_obj = serde_json::Value::Object(Default::default());
         let direct_input = input.context.metadata.get("__direct_input").unwrap_or(&empty_obj);
         let name_outputs = input.context.metadata.get("__node_name_outputs").unwrap_or(&empty_obj);
+        let unsafe_integers = count_unsafe_integers(direct_input) + count_unsafe_integers(name_outputs);
         let marker = format!("__AERINI_RESULT_{}__", uuid::Uuid::new_v4().simple());
         let wrapper = format!(r#"
 // input   — output of the directly-wired upstream node.
@@ -366,7 +384,7 @@ function output(v) {{ __result = v; }}
         #[cfg(not(windows))]
         if let Some(ref lf) = loader_tempfile {
             // ESM loader intercepts import resolution to block dangerous modules.
-            cmd.arg(format!("--experimental-loader=file://{}", lf.path().display()));
+            cmd.arg(format!("--experimental-loader={}", loader_url(lf.path())));
             // Suppress the loader experimental warning — it's noise for end users.
             cmd.arg("--no-warnings");
         }
@@ -388,6 +406,8 @@ function output(v) {{ __result = v; }}
                     }
                 }
             }
+        } else {
+            super::util::withhold_server_env(&mut cmd, &input.context.metadata);
         }
         cmd.stdin(Stdio::piped())
            .stdout(Stdio::piped())
@@ -482,11 +502,14 @@ function output(v) {{ __result = v; }}
                 )
             ),
         };
-        let group_guard = kill_group_on_drop(child.id());
+        let group_guard = kill_tree_on_drop(&child);
 
         if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(wrapper.as_bytes()).await;
+            let script = wrapper.into_bytes();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&script).await;
+            });
         }
 
         // The result sits at the end of stdout, so the tail is kept when printed output overflows the cap.
@@ -610,10 +633,13 @@ function output(v) {{ __result = v; }}
                         if sandbox_partial {
                             out["_sandbox_partial"] = json!(true);
                         }
-                        NodeOutput::success_with_logs(
-                            out,
-                            vec![format!("Code executed in {}ms", duration_ms)],
-                        )
+                        let mut logs = vec![format!("Code executed in {}ms", duration_ms)];
+                        if unsafe_integers > 0 {
+                            logs.push(format!(
+                                "PRECISION: {unsafe_integers} integer(s) in the input or context are beyond 2^53 and JavaScript rounds them; pass such values as strings to keep every digit"
+                            ));
+                        }
+                        NodeOutput::success_with_logs(out, logs)
                     }
                 }
             }
@@ -721,6 +747,35 @@ fn resolve_node_bin_from(
 
 // ── Sandbox helpers ────────────────────────────────────────────────────────────
 
+const JS_SAFE_INTEGER: u64 = 1 << 53;
+
+/// Counts integers whose magnitude is above 2^53, which JavaScript rounds to
+/// the nearest double when the script reads them.
+fn count_unsafe_integers(value: &Value) -> usize {
+    let mut count = 0;
+    let mut stack = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Number(n) => {
+                let beyond = n.as_u64().is_some_and(|u| u > JS_SAFE_INTEGER)
+                    || n.as_i64().is_some_and(|i| i.unsigned_abs() > JS_SAFE_INTEGER);
+                count += usize::from(beyond);
+            }
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Object(map) => stack.extend(map.values()),
+            _ => {}
+        }
+    }
+    count
+}
+
+#[cfg(not(windows))]
+fn loader_url(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|()| format!("file://{}", path.display()))
+}
+
 /// Write the sandbox ESM loader script to a named temp file.
 /// The caller is responsible for keeping the returned `NamedTempFile` alive until
 /// the Node.js subprocess exits — drop = delete.
@@ -740,6 +795,19 @@ fn write_sandbox_loader() -> std::io::Result<tempfile::NamedTempFile> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_integers_past_2_pow_53_are_counted() {
+        let value = json!({"a": 42, "b": [9007199254740992u64, 9007199254740993u64], "c": {"d": -9007199254740993i64, "e": 1.5e300}});
+        assert_eq!(count_unsafe_integers(&value), 2);
+        assert_eq!(count_unsafe_integers(&json!({"n": 7, "list": [1, 2.5]})), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn loader_path_is_percent_encoded_in_its_url() {
+        assert_eq!(loader_url(Path::new("/tmp/a b/#x.mjs")), "file:///tmp/a%20b/%23x.mjs");
+    }
+
     use super::*;
     use crate::model::ExecutionContext;
     use std::collections::HashMap;
@@ -784,6 +852,31 @@ mod tests {
         assert!(SANDBOX_LOADER_CONTENT.contains("'v8'"));
         assert!(SANDBOX_LOADER_CONTENT.contains("'node:inspector'"));
         assert!(SANDBOX_LOADER_CONTENT.contains("'inspector'"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn sandbox_blocks_network_and_file_capable_builtins_beyond_net_and_fs() {
+        for id in ["tls", "wasi", "trace_events", "sqlite", "test"] {
+            let prefixed = format!("'node:{id}'");
+            assert!(SANDBOX_LOADER_CONTENT.contains(&prefixed), "loader misses {id}");
+            assert!(SANDBOX_GLOBALS_HARDENING.contains(&prefixed), "prelude misses {id}");
+        }
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.kill;"));
+        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.report;"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn loader_and_prelude_block_the_same_modules() {
+        fn quoted(src: &str) -> std::collections::BTreeSet<String> {
+            let start = src.find("new Set([").expect("blocklist start");
+            let end = start + src[start..].find("]);").expect("blocklist end");
+            src[start..end].split('\'').skip(1).step_by(2).map(str::to_owned).collect()
+        }
+        let in_loader = quoted(SANDBOX_LOADER_CONTENT);
+        assert!(in_loader.contains("node:child_process"));
+        assert_eq!(in_loader, quoted(SANDBOX_GLOBALS_HARDENING));
     }
 
     #[test]

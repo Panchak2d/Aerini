@@ -196,6 +196,28 @@ describe("field-renderer — credential fields", () => {
     expect(warn.textContent).toBe('No saved credentials of type "oauth". Add one in Credentials in the toolbar.');
   });
 
+  it("inline: true keeps a direct-entry box that writes the field, opens when a value is already stored, and a plain credential field has none", () => {
+    const node = makeNode("n1");
+    (node.data.config as Record<string, unknown>)["secret_access_key"] = "stored-value";
+    const ctx = makeCtx(node);
+    const props: Record<string, PropSchema> = {
+      secret_access_key: { type: "string", "x-aerini-credential": { inline: true } },
+      token:             { type: "string", "x-aerini-credential": true },
+    };
+
+    renderCredentialSection(ctx, props, undefined, () => {});
+
+    const boxes = Array.from(ctx.body.querySelectorAll("details.cred-advanced"));
+    expect(boxes).toHaveLength(1);
+    expect((boxes[0] as HTMLDetailsElement).open).toBe(true);
+    const input = boxes[0].querySelector("input") as HTMLInputElement;
+    expect(input.type).toBe("password");
+    expect(input.value).toBe("stored-value");
+    input.value = "typed";
+    input.dispatchEvent(new Event("input"));
+    expect((node.data.config as Record<string, unknown>)["secret_access_key"]).toBe("typed");
+  });
+
   it("backward compat: a bare 'api_key' field with no annotation still renders unfiltered, exactly as before this change", () => {
     const ctx = makeCtx(makeNode("n1"));
     ctx.creds.push({ id: "c1", name: "Any old key", cred_type: "basic" });

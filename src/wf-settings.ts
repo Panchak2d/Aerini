@@ -1,5 +1,6 @@
 import type { WorkflowManager } from "./workflow-manager";
 import type { IChatPanel } from "./toolbar";
+import { createTagEditor } from "./tag-editor";
 
 export function bindWfSettings(wfManager: WorkflowManager, chatPanel: IChatPanel): void {
   const $ = (id: string) => document.getElementById(id)!;
@@ -8,29 +9,18 @@ export function bindWfSettings(wfManager: WorkflowManager, chatPanel: IChatPanel
     chatPanel.applyToggles(wfManager.chatSettings);
   }
 
-  function renderTagChips(): void {
-    const chips = $("wf-setting-tags-chips");
-    chips.innerHTML = "";
-    for (const tag of wfManager.currentTags) {
-      const chip = document.createElement("span");
-      chip.className = "wf-tag-chip";
-      const label = document.createElement("span");
-      label.textContent = tag;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "wf-tag-chip-remove";
-      remove.textContent = "✕";
-      remove.title = `Remove "${tag}"`;
-      remove.setAttribute("data-tooltip", `Remove "${tag}"`);
-      remove.addEventListener("click", () => {
-        wfManager.currentTags = wfManager.currentTags.filter(t => t !== tag);
+  function mountTagEditor(): void {
+    createTagEditor({
+      root: $("wf-setting-tags-editor"),
+      initial: wfManager.currentTags.map(label => ({ label, have: 1 })),
+      total: 1,
+      getLibrary: () => wfManager.getTagLibrary(),
+      onChange: (displayed) => {
+        wfManager.currentTags = displayed;
         wfManager.markUnsaved(true);
-        renderTagChips();
-      });
-      chip.appendChild(label);
-      chip.appendChild(remove);
-      chips.appendChild(chip);
-    }
+        wfManager.renderFromCache();
+      },
+    });
   }
 
   $("btn-wf-settings").addEventListener("click", () => {
@@ -52,22 +42,8 @@ export function bindWfSettings(wfManager: WorkflowManager, chatPanel: IChatPanel
     (document.getElementById("wf-setting-chat-persistence") as HTMLInputElement).checked = cs.session_persistence;
     (document.getElementById("wf-setting-chat-branding")    as HTMLInputElement).checked = cs.show_branding;
 
-    renderTagChips();
+    mountTagEditor();
     modal.classList.remove("hidden");
-  });
-
-  document.getElementById("wf-setting-tags-input")!.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key !== "Enter") return;
-    e.preventDefault();
-    const input = e.target as HTMLInputElement;
-    const value = input.value.trim();
-    input.value = "";
-    if (!value) return;
-    const isDuplicate = wfManager.currentTags.some(t => t.toLowerCase() === value.toLowerCase());
-    if (isDuplicate) return;
-    wfManager.currentTags = [...wfManager.currentTags, value];
-    wfManager.markUnsaved(true);
-    renderTagChips();
   });
 
   $("btn-close-wf-settings").addEventListener("click", () => {

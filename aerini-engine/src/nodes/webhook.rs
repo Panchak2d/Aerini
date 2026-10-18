@@ -9,7 +9,6 @@ use serde_json::{json, Map, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
-use blake3;
 use base64::Engine as _;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -19,7 +18,7 @@ use dashmap::DashSet;
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
-use super::util::{cfg_bool_opt, cfg_u64_opt};
+use super::util::{cfg_bool_opt, cfg_u64_opt, secrets_equal};
 
 /// Global registry of ports currently held by active Webhook nodes.
 /// Prevents two concurrent workflows from binding the same port and producing
@@ -116,6 +115,24 @@ fn validate_signed_token(secret: &str, path: &str, rest: &str) -> bool {
     }
     let expected = signed_token_mac(secret, path, expiry);
     expected.as_bytes().ct_eq(provided_sig.as_slice()).unwrap_u8() == 1
+}
+
+/// True when `provided` is acceptable for a Webhook configured with `secret`
+/// at `path`: either the raw secret, or an unexpired signed token minted from
+/// it for this path. Both comparisons are constant-time. A value that starts
+/// with the token prefix but is not a valid token is still compared as a raw
+/// secret, so a secret whose literal text begins with the prefix keeps working.
+///
+/// An empty `secret` never matches here; callers decide separately what an
+/// unconfigured secret means.
+pub fn credential_valid(secret: &str, path: &str, provided: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
+    match provided.strip_prefix(SIGNED_TOKEN_PREFIX) {
+        Some(rest) => validate_signed_token(secret, path, rest) || secrets_equal(secret, provided),
+        None => secrets_equal(secret, provided),
+    }
 }
 
 pub struct WebhookNode;
@@ -611,22 +628,7 @@ async fn handle_request(
             .get("x-webhook-secret")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let ok = if let Some(rest) = provided.strip_prefix(SIGNED_TOKEN_PREFIX) {
-            // Structurally a token attempt — but if it doesn't validate as
-            // one, still fall back to plain equality: a secret whose literal
-            // value happens to start with "awh1." must keep working exactly
-            // as it always has, not silently start rejecting valid callers.
-            validate_signed_token(&st.secret, &st.path, rest) || {
-                let expected_hash = blake3::hash(st.secret.as_bytes());
-                let provided_hash = blake3::hash(provided.as_bytes());
-                expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() == 1
-            }
-        } else {
-            let expected_hash = blake3::hash(st.secret.as_bytes());
-            let provided_hash = blake3::hash(provided.as_bytes());
-            expected_hash.as_bytes().ct_eq(provided_hash.as_bytes()).unwrap_u8() == 1
-        };
-        if !ok {
+        if !credential_valid(&st.secret, &st.path, provided) {
             return Ok(with_cors(Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Full::new(Bytes::new()))
@@ -995,6 +997,28 @@ mod tests {
         let rest_expired = signed_token_mac("s3cr3t", "/hook", past);
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rest_expired.as_bytes());
         assert!(!validate_signed_token("s3cr3t", "/hook", &format!("{past}.{sig_b64}")));
+    }
+
+    #[test]
+    fn credential_accepts_raw_secret_and_valid_token_only() {
+        let token = mint_signed_token("s3cr3t", "/hook", 60);
+        assert!(credential_valid("s3cr3t", "/hook", "s3cr3t"));
+        assert!(credential_valid("s3cr3t", "/hook", &token));
+        assert!(!credential_valid("s3cr3t", "/hook", "wrong"));
+        assert!(!credential_valid("s3cr3t", "/other", &token));
+        assert!(!credential_valid("other-secret", "/hook", &token));
+    }
+
+    #[test]
+    fn credential_rejects_everything_when_no_secret_is_configured() {
+        assert!(!credential_valid("", "/hook", ""));
+        assert!(!credential_valid("", "/hook", "anything"));
+    }
+
+    #[test]
+    fn credential_accepts_a_raw_secret_that_starts_with_the_token_prefix() {
+        assert!(credential_valid("awh1.not-a-token", "/hook", "awh1.not-a-token"));
+        assert!(!credential_valid("awh1.not-a-token", "/hook", "awh1.other"));
     }
 
     #[test]

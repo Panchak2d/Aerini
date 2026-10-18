@@ -87,7 +87,7 @@ Since it's now firing every ten seconds, stop it once you've seen enough. Open t
 
 ![The Background Runs panel with a live countdown to the next scheduled fire](../public/images/background-runs-panel.png)
 
-Closing the window doesn't stop it: Aerini keeps running in your system tray even with no window open, so the button or panel above is the actual off switch, not the window's close button.
+Closing the window doesn't stop it: Aerini keeps running in your system tray even with no window open (on a Linux desktop with no tray it minimizes instead, since a hidden window couldn't be brought back), so the button or panel above is the actual off switch, not the window's close button.
 
 ## What you just built
 

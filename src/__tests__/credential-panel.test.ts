@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { CredentialEntry, CredentialMetadata } from "../ipc/credentials";
 
 const credMock = vi.hoisted(() => ({
   listCredentials:       vi.fn(),
   listCredentialUsage:   vi.fn(),
   getCredentialMetadata: vi.fn(),
-  getCredentialSecret:   vi.fn(),
   saveCredential:        vi.fn(),
   deleteCredential:      vi.fn(),
+  listCredentialModels:  vi.fn(),
+  exportEncryptionKey:   vi.fn(),
 }));
 vi.mock("../ipc/credentials", () => credMock);
 
@@ -39,9 +40,10 @@ beforeEach(() => {
   credMock.listCredentials.mockReset().mockResolvedValue([]);
   credMock.listCredentialUsage.mockReset().mockResolvedValue({});
   credMock.getCredentialMetadata.mockReset().mockResolvedValue(null);
-  credMock.getCredentialSecret.mockReset().mockResolvedValue(null);
   credMock.saveCredential.mockReset().mockResolvedValue(undefined);
   credMock.deleteCredential.mockReset().mockResolvedValue(undefined);
+  credMock.listCredentialModels.mockReset().mockResolvedValue([]);
+  credMock.exportEncryptionKey.mockReset().mockResolvedValue("KEY-BASE64");
   confirmMock.showConfirm.mockReset().mockResolvedValue(true);
   providersMock.listProviderModels.mockReset().mockResolvedValue([]);
 });
@@ -146,7 +148,7 @@ describe("CredentialPanel — Secret Value requirement", () => {
     expect(document.getElementById("cred-save-error")?.textContent).toBe("Secret value is required");
   });
 
-  it("allows an empty Secret Value when Advanced Provider is 'local'", async () => {
+  it("allows an empty Secret Value on create when Advanced Provider is 'local'", async () => {
     const panel = new CredentialPanel();
     await panel.show();
     await flush();
@@ -158,28 +160,32 @@ describe("CredentialPanel — Secret Value requirement", () => {
     await flush();
 
     expect(credMock.saveCredential).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "local_model", value: "", provider: "local" })
+      expect.objectContaining({ id: "local_model", value: "", provider: "local" }),
+      false,
     );
   });
 });
 
-describe("CredentialPanel — view / re-edit a saved credential", () => {
-  it("loads the decrypted secret into a masked (password) field, and locks the ID field", async () => {
+describe("CredentialPanel — re-edit a saved credential", () => {
+  async function openEdit(): Promise<CredentialPanel> {
     credMock.listCredentials.mockResolvedValue([entry("k1", "Key One", "bearer")]);
-    credMock.getCredentialSecret.mockResolvedValue("sk-super-secret");
     credMock.getCredentialMetadata.mockResolvedValue({ provider: "openai", model: "gpt-4o" } as CredentialMetadata);
-
     const panel = new CredentialPanel();
     await panel.show();
     await flush();
     (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
     await flush();
+    return panel;
+  }
 
-    expect(credMock.getCredentialSecret).toHaveBeenCalledWith("k1");
+  it("never loads the secret: the Secret Value field is blank, masked and marked unchanged, and the ID is locked", async () => {
+    await openEdit();
+
     const valueInp = document.getElementById("cred-value") as HTMLInputElement;
     const idInp    = document.getElementById("cred-id")    as HTMLInputElement;
-    expect(valueInp.value).toBe("sk-super-secret");
+    expect(valueInp.value).toBe("");
     expect(valueInp.type).toBe("password");
+    expect(valueInp.placeholder).toContain("unchanged");
     expect(idInp.value).toBe("k1");
     expect(idInp.readOnly).toBe(true);
     expect((document.getElementById("cred-meta-provider") as HTMLInputElement).value).toBe("openai");
@@ -187,36 +193,46 @@ describe("CredentialPanel — view / re-edit a saved credential", () => {
     expect(document.querySelector(".cred-item.editing")?.getAttribute("data-id")).toBe("k1");
   });
 
-  it("saves an edit as an update to the same ID, then leaves edit mode", async () => {
-    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
-    credMock.getCredentialSecret.mockResolvedValue("old-secret");
-
-    const panel = new CredentialPanel();
-    await panel.show();
-    await flush();
-    (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
-    await flush();
+  it("saves an edit as an update that sends no secret unless one is typed, then leaves edit mode", async () => {
+    await openEdit();
 
     (document.getElementById("cred-name") as HTMLInputElement).value = "Key One Renamed";
     (document.getElementById("cred-save") as HTMLButtonElement).click();
     await flush();
-
-    expect(credMock.saveCredential).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "k1", name: "Key One Renamed", value: "old-secret" })
+    expect(credMock.saveCredential).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "k1", name: "Key One Renamed", value: "" }),
+      true,
     );
     expect(document.getElementById("cred-cancel")).toBeNull();
-    expect(document.querySelector(".cred-add-title")?.textContent).not.toContain("Editing");
+
+    (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
+    await flush();
+    (document.getElementById("cred-value") as HTMLInputElement).value = "rotated-secret";
+    (document.getElementById("cred-save") as HTMLButtonElement).click();
+    await flush();
+    expect(credMock.saveCredential).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "k1", value: "rotated-secret" }),
+      true,
+    );
   });
 
-  it("Cancel exits edit mode without saving", async () => {
-    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
-    credMock.getCredentialSecret.mockResolvedValue("old-secret");
-
+  it("creating sends update=false", async () => {
     const panel = new CredentialPanel();
     await panel.show();
     await flush();
-    (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
+    (document.getElementById("cred-name") as HTMLInputElement).value = "New Key";
+    (document.getElementById("cred-id") as HTMLInputElement).value = "new_key";
+    (document.getElementById("cred-value") as HTMLInputElement).value = "sk-new";
+    (document.getElementById("cred-save") as HTMLButtonElement).click();
     await flush();
+    expect(credMock.saveCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "new_key", value: "sk-new" }),
+      false,
+    );
+  });
+
+  it("Cancel exits edit mode without saving", async () => {
+    await openEdit();
     (document.getElementById("cred-cancel") as HTMLButtonElement).click();
     await flush();
 
@@ -227,9 +243,9 @@ describe("CredentialPanel — view / re-edit a saved credential", () => {
 
   it("ignores a second Edit click on another item while the first load is still in flight (race guard)", async () => {
     credMock.listCredentials.mockResolvedValue([entry("k1", "Key One"), entry("k2", "Key Two")]);
-    let resolveFirst: (v: string) => void;
-    credMock.getCredentialSecret.mockImplementation((id: string) =>
-      id === "k1" ? new Promise<string>(res => { resolveFirst = res; }) : Promise.resolve("k2-secret")
+    let resolveFirst: (v: CredentialMetadata | null) => void;
+    credMock.getCredentialMetadata.mockImplementation((id: string) =>
+      id === "k1" ? new Promise<CredentialMetadata | null>(res => { resolveFirst = res; }) : Promise.resolve(null)
     );
 
     const panel = new CredentialPanel();
@@ -241,26 +257,66 @@ describe("CredentialPanel — view / re-edit a saved credential", () => {
     editK2.click();
     await flush();
 
-    expect(credMock.getCredentialSecret).toHaveBeenCalledTimes(1);
-    expect(credMock.getCredentialSecret).toHaveBeenCalledWith("k1");
+    expect(credMock.getCredentialMetadata).toHaveBeenCalledTimes(1);
+    expect(credMock.getCredentialMetadata).toHaveBeenCalledWith("k1");
 
-    resolveFirst!("k1-secret");
+    resolveFirst!(null);
     await flush();
     expect((document.getElementById("cred-id") as HTMLInputElement).value).toBe("k1");
   });
+});
 
-  it("if the secret can no longer be loaded (e.g. deleted meanwhile), warns and does not enter edit mode", async () => {
-    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
-    credMock.getCredentialSecret.mockResolvedValue(null);
+describe("CredentialPanel — encryption key backup", () => {
+  afterEach(() => { vi.useRealTimers(); });
 
+  async function revealKey(): Promise<CredentialPanel> {
     const panel = new CredentialPanel();
     await panel.show();
     await flush();
-    (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
+    (document.getElementById("cred-key-backup") as HTMLButtonElement).click();
     await flush();
+    return panel;
+  }
 
-    expect(confirmMock.showConfirm).toHaveBeenCalled();
-    expect(document.getElementById("cred-cancel")).toBeNull();
+  it("hides the revealed key after 60 seconds, and immediately when the panel is hidden", async () => {
+    vi.useFakeTimers();
+    const panel = await revealKey();
+    const slot = document.getElementById("cred-key-banner-slot")!;
+    expect(slot.querySelector(".esp-run-secret-value")?.textContent).toBe("KEY-BASE64");
+
+    vi.advanceTimersByTime(59_000);
+    expect(slot.querySelector(".esp-run-secret-value")).not.toBeNull();
+    vi.advanceTimersByTime(1_000);
+    expect(slot.querySelector(".esp-run-secret-value")).toBeNull();
+
+    (document.getElementById("cred-key-backup") as HTMLButtonElement).click();
+    await flush();
+    expect(slot.querySelector(".esp-run-secret-value")).not.toBeNull();
+    panel.hide();
+    expect(slot.querySelector(".esp-run-secret-value")).toBeNull();
+  });
+
+  it("shows nothing and no error when the native confirmation is declined", async () => {
+    credMock.exportEncryptionKey.mockRejectedValue("CANCELLED");
+    await revealKey();
+    expect(document.querySelector(".esp-run-secret-value")).toBeNull();
+    expect(confirmMock.showConfirm).not.toHaveBeenCalled();
+  });
+
+  it("clears the clipboard 60 seconds after the key was copied", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText, readText: vi.fn().mockResolvedValue("KEY-BASE64") },
+    });
+    await revealKey();
+    (document.querySelector(".esp-run-secret-copy") as HTMLButtonElement).click();
+    await flush();
+    expect(writeText).toHaveBeenLastCalledWith("KEY-BASE64");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(writeText).toHaveBeenLastCalledWith("");
   });
 });
 
@@ -350,8 +406,6 @@ describe("CredentialPanel — Advanced 'Fetch Models'", () => {
     expect(modelInp.value).toBe("typed-manually");
     expect(document.querySelector("#cred-model-list-slot .csel-option")).toBeNull();
 
-    // The whole point of this fix: the CODE: prefix is stripped so the
-    // reader sees the reason, not the raw backend error string.
     const errHint = document.querySelector("#cred-model-list-slot .config-hint-warn") as HTMLElement;
     expect(errHint?.textContent).toBe("Anthropic requires an API key");
   });
@@ -368,6 +422,23 @@ describe("CredentialPanel — Advanced 'Fetch Models'", () => {
 
     expect(document.getElementById("cred-fetch-models")?.textContent).toBe("Couldn't fetch — try again");
     expect(document.querySelector("#cred-model-list-slot .csel-option")).toBeNull();
+  });
+
+  it("while editing with a blank Secret Value, asks the backend to use the saved secret", async () => {
+    credMock.listCredentials.mockResolvedValue([entry("k1", "Key One")]);
+    credMock.listCredentialModels.mockResolvedValue(["gpt-4o"]);
+    const panel = new CredentialPanel();
+    await panel.show();
+    await flush();
+    (document.querySelector(".cred-item-edit") as HTMLButtonElement).click();
+    await flush();
+
+    (document.getElementById("cred-meta-provider") as HTMLInputElement).value = "openai";
+    (document.getElementById("cred-fetch-models") as HTMLButtonElement).click();
+    await flush();
+
+    expect(credMock.listCredentialModels).toHaveBeenCalledWith("k1", "openai", "");
+    expect(providersMock.listProviderModels).not.toHaveBeenCalled();
   });
 
   it("resolves a blank Provider to 'auto', matching the node popover's own default", async () => {

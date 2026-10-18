@@ -74,6 +74,14 @@ pub struct RunRecord {
     pub status:        String,
 }
 
+/// One row of a run listing that omits the stored result document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub ran_at:      String,
+    pub success:     bool,
+    pub duration_ms: i64,
+}
+
 /// A persisted [`PerformanceReport`], linked to its `run_history` row by 'id'
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +651,109 @@ mod tests {
         junk.result_json = "not json \"attachments\"".to_string();
         db.save_run(&junk).unwrap();
         assert_eq!(db.get_run("r-junk").unwrap().unwrap().result_json, "not json \"attachments\"");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn oversized_result_drops_largest_outputs_and_keeps_the_rest() {
+        let result = serde_json::json!({
+            "execution_id": "e1", "workflow_id": "wf-1", "success": true,
+            "node_outputs": { "big": { "data": "B".repeat(5000) }, "mid": { "data": "M".repeat(300) }, "small": { "n": 1 } },
+            "logs": [], "error": null,
+        });
+
+        let stored: serde_json::Value = serde_json::from_str(
+            &run_history::bound_result_json(result.to_string(), 1000),
+        ).unwrap();
+
+        let big_bytes = serde_json::json!({ "data": "B".repeat(5000) }).to_string().len();
+        assert_eq!(stored["node_outputs"]["big"], serde_json::json!({ "$truncated": { "original_bytes": big_bytes } }));
+        assert_eq!(stored["node_outputs"]["mid"], result["node_outputs"]["mid"]);
+        assert_eq!(stored["node_outputs"]["small"], result["node_outputs"]["small"]);
+        assert_eq!(stored["execution_id"], "e1");
+        assert_eq!(
+            run_history::bound_result_json(result.to_string(), 1_000_000),
+            result.to_string(),
+            "a result within the limit is stored untouched"
+        );
+    }
+
+    #[test]
+    fn oversized_result_with_small_outputs_keeps_only_recent_logs() {
+        let logs: Vec<serde_json::Value> = (0..5000)
+            .map(|i| serde_json::json!({ "message": format!("entry {i:05}") }))
+            .collect();
+        let result = serde_json::json!({
+            "execution_id": "e1", "workflow_id": "wf-1", "success": true,
+            "node_outputs": { "n": { "ok": true } }, "logs": logs,
+        });
+        assert!(result.to_string().len() > 100_000);
+
+        let stored: serde_json::Value = serde_json::from_str(
+            &run_history::bound_result_json(result.to_string(), 100_000),
+        ).unwrap();
+
+        let kept = stored["logs"].as_array().unwrap();
+        assert_eq!(kept.len(), 1000);
+        assert_eq!(kept[999]["message"], "entry 04999");
+        assert_eq!(stored["node_outputs"]["n"], serde_json::json!({ "ok": true }));
+    }
+
+    #[test]
+    fn oversized_result_that_cannot_be_trimmed_is_reduced_to_its_summary() {
+        let huge_error = serde_json::json!({
+            "execution_id": "e1", "workflow_id": "wf-1", "success": false,
+            "node_outputs": {}, "logs": [], "error": "E".repeat(5000),
+        });
+        let stored: serde_json::Value = serde_json::from_str(
+            &run_history::bound_result_json(huge_error.to_string(), 1000),
+        ).unwrap();
+        assert_eq!(stored["execution_id"], "e1");
+        assert_eq!(stored["success"], false);
+        assert_eq!(stored["node_outputs"], serde_json::json!({}));
+        assert!(stored["$truncated"]["original_bytes"].as_u64().unwrap() > 5000);
+
+        let not_an_object = run_history::bound_result_json("[".to_string() + &"1,".repeat(2000) + "1]", 1000);
+        assert!(serde_json::from_str::<serde_json::Value>(&not_an_object).unwrap()["$truncated"].is_object());
+    }
+
+    #[test]
+    fn listing_keeps_the_first_result_and_replaces_those_past_the_byte_budget() {
+        let mut used = 0;
+        let mut run = |id: &str, len: usize| {
+            let mut r = run_with_result(id, &serde_json::json!({ "node_outputs": {} }));
+            r.result_json = "x".repeat(len);
+            run_history::within_listing_budget(&mut used, 100, r)
+        };
+        assert_eq!(run("big", 500).result_json.len(), 500);
+        assert!(run("next", 10).result_json.contains("$truncated"));
+        let marker: serde_json::Value = serde_json::from_str(&run("later", 10).result_json).unwrap();
+        assert_eq!(marker["$truncated"]["original_bytes"], 10);
+    }
+
+    #[test]
+    fn run_summaries_are_newest_first_and_omit_results() {
+        let path = temp_path("run_summaries");
+        cleanup(&path);
+        let db = WorkflowDb::open(&path, 8).expect("open failed");
+        for (id, ran_at, success) in [
+            ("r1", "2024-01-01T00:00:01Z", true),
+            ("r2", "2024-01-01T00:00:02Z", false),
+            ("r3", "2024-01-01T00:00:03Z", true),
+        ] {
+            let mut run = run_with_result(id, &serde_json::json!({ "node_outputs": {} }));
+            run.ran_at = ran_at.to_string();
+            run.success = success;
+            db.save_run(&run).unwrap();
+        }
+
+        let got = db.recent_run_summaries("wf-1", 2).unwrap();
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].ran_at, "2024-01-01T00:00:03Z");
+        assert!(!got[1].success);
+        assert!(db.recent_run_summaries("other-wf", 10).unwrap().is_empty());
 
         cleanup(&path);
     }

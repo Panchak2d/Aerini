@@ -52,6 +52,9 @@ fn validate_create_token(b: &CreateTokenBody) -> Result<(), String> {
     if b.label.trim().is_empty() || label_chars > MAX_LABEL_CHARS {
         return Err(format!("label must be 1–{MAX_LABEL_CHARS} characters"));
     }
+    if b.label.chars().any(char::is_control) {
+        return Err("label must not contain control characters".to_string());
+    }
     if b.scopes.is_empty() {
         return Err("scopes must not be empty. Allowed: read, write, admin".to_string());
     }
@@ -243,6 +246,15 @@ mod tests {
         b.label = "é".repeat(MAX_LABEL_CHARS);
         assert!(validate_create_token(&b).is_ok());
         b.label = "é".repeat(MAX_LABEL_CHARS + 1);
+        assert!(validate_create_token(&b).is_err());
+    }
+
+    #[test]
+    fn label_with_control_characters_is_rejected() {
+        let mut b = body();
+        b.label = "ci\u{1b}[31m".to_string();
+        assert!(validate_create_token(&b).is_err());
+        b.label = "ci\nrunner".to_string();
         assert!(validate_create_token(&b).is_err());
     }
 

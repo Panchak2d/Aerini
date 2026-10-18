@@ -2,15 +2,15 @@ import {
   listCredentials,
   listCredentialUsage,
   getCredentialMetadata,
-  getCredentialSecret,
   saveCredential,
   deleteCredential,
   exportEncryptionKey,
+  listCredentialModels,
 } from "../ipc/credentials";
 import { listProviderModels, describeModelFetchError } from "../ipc/providers";
 import { mkCustomSelect } from "../node-configs/popover-utils";
 import { showConfirm } from "../confirm";
-import { escapeHtml as escHtml } from "../utils";
+import { escapeHtml as escHtml, copyWithButtonFeedback } from "../utils";
 
 interface Credential { id: string; name: string; cred_type: string; }
 
@@ -24,14 +24,15 @@ const CRED_TYPES: CredType[] = [
   { value: "other",   label: "Other / Custom", hint: "Any custom secret value",                           placeholder: "Your secret value"           },
 ];
 
-// Prefill snapshot loaded into the form when re-opening a saved credential
-// for editing. `value` is the decrypted secret — held in memory only for the
-// life of this edit, same as anything else typed into the form.
+const SECRET_DISPLAY_MS = 60_000;
+const UNCHANGED_PLACEHOLDER = "••• (unchanged)";
+
+// Prefill snapshot for re-opening a saved credential. The secret itself is
+// never loaded: a blank Secret Value on save keeps the stored one.
 interface EditingCredential {
   id: string;
   name: string;
   cred_type: string;
-  value: string;
   provider: string;
   model: string;
   base_url: string;
@@ -47,6 +48,8 @@ export class CredentialPanel {
   // still loading can let whichever IPC call resolves last silently
   // clobber the edit session the user is actually looking at.
   private busy = false;
+  private keyBannerTimer: ReturnType<typeof setTimeout> | null = null;
+  private clipboardTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.el = document.getElementById("cred-panel")!;
@@ -64,7 +67,10 @@ export class CredentialPanel {
     await this.refresh();
   }
 
-  hide(): void { this.el.classList.add("hidden"); }
+  hide(): void {
+    this.clearKeyBanner();
+    this.el.classList.add("hidden");
+  }
 
   private async refresh(): Promise<void> {
     const [creds, usage] = await Promise.all([
@@ -78,16 +84,6 @@ export class CredentialPanel {
 
   private async backupEncryptionKey(): Promise<void> {
     if (this.busy) return;
-    const ok = await showConfirm(
-      "This reveals the master key that encrypts every credential saved here. " +
-      "Anyone who gets it can decrypt all of them. Store it somewhere as secure " +
-      "as the credentials themselves — a password manager, not a plain text file " +
-      "on this machine. It will only be shown this once per click.",
-      true,
-      "Show Key",
-    );
-    if (!ok) return;
-
     this.busy = true;
     const btn = this.el.querySelector<HTMLButtonElement>("#cred-key-backup")!;
     btn.disabled = true;
@@ -97,12 +93,29 @@ export class CredentialPanel {
       const key = await exportEncryptionKey();
       this.renderKeyBanner(key);
     } catch (e) {
-      await showConfirm(`Could not read the encryption key: ${e}`);
+      if (String(e) !== "CANCELLED") {
+        await showConfirm(`Could not read the encryption key: ${e}`);
+      }
     } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
       this.busy = false;
     }
+  }
+
+  private clearKeyBanner(): void {
+    if (this.keyBannerTimer) clearTimeout(this.keyBannerTimer);
+    this.keyBannerTimer = null;
+    const slot = this.el.querySelector("#cred-key-banner-slot");
+    if (slot) slot.innerHTML = "";
+  }
+
+  private scheduleClipboardClear(key: string): void {
+    if (this.clipboardTimer) clearTimeout(this.clipboardTimer);
+    this.clipboardTimer = setTimeout(() => {
+      this.clipboardTimer = null;
+      void clearClipboardIfHolding(key);
+    }, SECRET_DISPLAY_MS);
   }
 
   private renderKeyBanner(key: string): void {
@@ -115,24 +128,23 @@ export class CredentialPanel {
           If the OS keychain entry holding this is ever lost, this is the <strong>only</strong> way
           to recover every credential saved above. To restore: stop the app, place this exact value
           in the key file the app expects (see <code>docs/credentials.md</code>), then restart —
-          it's picked up automatically.
+          it's picked up automatically. This panel hides the key after 60 seconds.
         </div>
         <div class="esp-run-secret-row">
-          <code class="esp-run-secret-value">${escHtml(key)}</code>
+          <code class="esp-run-secret-value"></code>
           <button class="esp-run-secret-copy" type="button">Copy</button>
         </div>
       </div>`;
+    slot.querySelector(".esp-run-secret-value")!.textContent = key;
 
     const copyBtn = slot.querySelector<HTMLButtonElement>(".esp-run-secret-copy")!;
     copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(key).then(() => {
-        copyBtn.textContent = "Copied!";
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
-      }).catch(() => {
-        copyBtn.textContent = "Copy failed";
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
-      });
+      void copyWithButtonFeedback(copyBtn, key);
+      this.scheduleClipboardClear(key);
     });
+
+    if (this.keyBannerTimer) clearTimeout(this.keyBannerTimer);
+    this.keyBannerTimer = setTimeout(() => this.clearKeyBanner(), SECRET_DISPLAY_MS);
   }
 
   private render(): void {
@@ -250,14 +262,14 @@ export class CredentialPanel {
       <div class="field-group">
         <label class="field-label">Secret Value</label>
         <div class="cred-secret-wrap">
-          <input id="cred-value" type="password" placeholder="${escHtml(activeType.placeholder)}" autocomplete="new-password" value="${escHtml(e?.value ?? "")}" />
+          <input id="cred-value" type="password" placeholder="${escHtml(e ? UNCHANGED_PLACEHOLDER : activeType.placeholder)}" autocomplete="new-password" value="" />
           <button type="button" class="cred-show-btn" id="cred-show" title="Show / hide" data-tooltip="Show / hide" aria-label="Show or hide secret value">
             <svg id="cred-eye-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
             </svg>
           </button>
         </div>
-        <div class="field-hint">Stored encrypted on your device. Never sent to Aerini servers.</div>
+        <div class="field-hint">${e ? "Leave blank to keep the saved secret. Saved secrets are never shown." : "Stored encrypted on your device. Never sent to Aerini servers."}</div>
       </div>
       <details class="cred-advanced"${e && (e.provider || e.model || e.base_url) ? " open" : ""}>
         <summary class="cred-advanced-summary">Advanced (optional) — provider, model, base URL</summary>
@@ -310,7 +322,7 @@ export class CredentialPanel {
     let selectedCredType = this.editing?.cred_type ?? CRED_TYPES[0].value;
     typeWrap.appendChild(buildCredTypeSelect(CRED_TYPES, (t) => {
       hintEl.textContent = t.hint;
-      valInp.placeholder = t.placeholder;
+      valInp.placeholder = this.editing ? UNCHANGED_PLACEHOLDER : t.placeholder;
       selectedCredType   = t.value;
     }, selectedCredType));
 
@@ -388,7 +400,8 @@ export class CredentialPanel {
     // Mirrors the node popover's model picker: free-text Model is never
     // blocked, success offers a dropdown on top of it, any failure silently
     // leaves the text field alone. Reads Provider/Base URL/Secret Value off
-    // this form directly — no saved credential to look up while adding one.
+    // this form; a blank Secret Value while editing uses the saved secret,
+    // which the backend reads itself.
     const FETCH_MODELS_LABEL = "Fetch Models";
     fetchModelsBtn.addEventListener("click", async () => {
       fetchModelsBtn.disabled = true;
@@ -396,7 +409,10 @@ export class CredentialPanel {
       try {
         const provider = providerInp.value.trim() || "auto";
         const baseUrl  = baseUrlInp.value.trim();
-        const models   = await listProviderModels(provider, baseUrl, valInp.value);
+        const editingId = this.editing?.id;
+        const models   = editingId && !valInp.value
+          ? await listCredentialModels(editingId, provider, baseUrl)
+          : await listProviderModels(provider, baseUrl, valInp.value);
         if (!models.length) throw new Error("no models returned");
 
         modelListSlot.innerHTML = "";
@@ -435,7 +451,8 @@ export class CredentialPanel {
       errDiv.classList.add("hidden");
       if (!name)  { this.showFormError("Name is required"); return; }
       if (!id)    { this.showFormError("ID is required"); return; }
-      if (!value && providerInp.value.trim() !== "local") { this.showFormError("Secret value is required"); return; }
+      const editing = this.editing !== null;
+      if (!value && !editing && providerInp.value.trim() !== "local") { this.showFormError("Secret value is required"); return; }
       if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
         this.showFormError("ID can only contain letters, numbers, underscores, and hyphens");
         return;
@@ -452,7 +469,7 @@ export class CredentialPanel {
           provider: provider || undefined,
           model:    model    || undefined,
           base_url: baseUrl  || undefined,
-        });
+        }, editing);
         this.editing = null;
         await this.refresh();
       } catch (e) {
@@ -498,11 +515,10 @@ export class CredentialPanel {
     });
   }
 
-  // Loads the decrypted secret + metadata for a saved credential into the
-  // form so it can be viewed (masked, same as the password field) and
-  // re-edited. The ID input stays locked: `saveCredential` upserts by ID, so
-  // an edited ID would create a second, orphaned credential instead of
-  // updating this one.
+  // Loads a saved credential's non-secret fields into the form for editing.
+  // The secret stays in the backend: leaving Secret Value blank keeps it. The
+  // ID input stays locked: an edited ID would create a second, orphaned
+  // credential instead of updating this one.
   private async startEdit(id: string, btn: HTMLButtonElement): Promise<void> {
     if (this.busy) return;
     const cred = this.creds.find(c => c.id === id);
@@ -513,27 +529,15 @@ export class CredentialPanel {
     const originalLabel = btn.textContent;
     btn.textContent = "Loading…";
     try {
-      const [value, meta] = await Promise.all([
-        getCredentialSecret(id),
-        getCredentialMetadata(id).catch(() => null),
-      ]);
-      if (value == null) {
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-        await showConfirm(`Could not load credential "${cred.name}" — it may have been deleted.`);
-        await this.refresh();
-        return;
-      }
+      const meta = await getCredentialMetadata(id).catch(() => null);
       this.editing = {
-        id: cred.id, name: cred.name, cred_type: cred.cred_type, value,
+        id: cred.id, name: cred.name, cred_type: cred.cred_type,
         provider: meta?.provider ?? "", model: meta?.model ?? "", base_url: meta?.base_url ?? "",
       };
       this.render();
-    } catch (e) {
+    } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
-      await showConfirm(`Failed to load credential: ${e}`);
-    } finally {
       this.busy = false;
     }
   }
@@ -541,6 +545,22 @@ export class CredentialPanel {
   private cancelEdit(): void {
     this.editing = null;
     this.render();
+  }
+}
+
+// Clears the clipboard only if it still holds `secret`; when the clipboard
+// cannot be read, clears it anyway rather than leave the secret there.
+async function clearClipboardIfHolding(secret: string): Promise<void> {
+  try {
+    let holdsSecret = true;
+    try {
+      holdsSecret = (await navigator.clipboard.readText()) === secret;
+    } catch {
+      holdsSecret = true;
+    }
+    if (holdsSecret) await navigator.clipboard.writeText("");
+  } catch {
+    return;
   }
 }
 

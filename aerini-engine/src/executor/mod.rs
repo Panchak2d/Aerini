@@ -16,6 +16,7 @@
 //! receive resolved values — they never see credential IDs or the store directly.
 
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
@@ -83,6 +84,9 @@ pub enum CredentialResolveError {
     StoreError(String),
 }
 
+/// A secret that is overwritten with zeros when dropped.
+pub type SecretString = zeroize::Zeroizing<String>;
+
 /// Provides resolved credential values to the executor at run time.
 ///
 /// The executor calls `resolve(credential_id)` for each credential reference in
@@ -97,11 +101,13 @@ pub trait CredentialResolver: Send + Sync + 'static {
     /// Return the plaintext value for `credential_id`, or an error describing why
     /// it couldn't be resolved.
     ///
-    /// An `Err` leaves the corresponding field absent from the node's input (not
-    /// set to an empty string) and logs a warning naming the credential and the
-    /// reason. The executor does not treat a missing credential as a hard failure
-    /// — the node still runs.
-    async fn resolve(&self, credential_id: &str) -> Result<String, CredentialResolveError>;
+    /// [`CredentialResolveError::NotFound`] leaves the corresponding field absent
+    /// from the node's input (not set to an empty string) and logs a warning; the
+    /// node still runs. [`CredentialResolveError::Unreadable`] and
+    /// [`CredentialResolveError::StoreError`] fail the node, so a damaged or
+    /// unreachable store never turns into an unauthenticated request. The reason
+    /// text is not written to the run's logs.
+    async fn resolve(&self, credential_id: &str) -> Result<SecretString, CredentialResolveError>;
 }
 
 // ── Executor ──────────────────────────────────────────────────────────────────
@@ -332,6 +338,109 @@ impl WorkflowExecutor {
             .iter_errors(input)
             .map(|e| format!("{} (at path: {})", e, e.instance_path()))
             .collect()
+    }
+
+    /// Credential fields of a node type: `api_key`, `password`, and any property its
+    /// registered schema marks `x-aerini-credential`. The registered schema is used,
+    /// never the one stored in the workflow, which a workflow author controls.
+    fn declared_credential_fields(&self, node_type_id: &str) -> HashSet<String> {
+        let mut fields: HashSet<String> =
+            ["api_key", "password"].iter().map(|k| k.to_string()).collect();
+        if let Some(node) = self.registry.get(node_type_id) {
+            let schema = node.input_schema();
+            if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+                for (key, prop) in props {
+                    let flagged = prop
+                        .get("x-aerini-credential")
+                        .is_some_and(|v| !v.is_null() && *v != Value::Bool(false));
+                    if flagged {
+                        fields.insert(key.clone());
+                    }
+                }
+            }
+        }
+        fields
+    }
+
+    /// The input a schema is checked against: credential fields, whether resolved or
+    /// typed inline, keep their length but not their characters, so a validation
+    /// message cannot repeat a secret.
+    pub(super) fn schema_view<'a>(
+        &self,
+        node_def: &crate::model::WorkflowNode,
+        input:    &'a NodeInput,
+    ) -> Cow<'a, Value> {
+        match &node_def.input_schema {
+            Value::Object(m) if !m.is_empty() => {}
+            _ => return Cow::Borrowed(&input.input),
+        }
+        let Some(obj) = input.input.as_object() else {
+            return Cow::Borrowed(&input.input);
+        };
+        let mut fields = self.declared_credential_fields(&node_def.node_type_id);
+        fields.extend(input.resolved_credentials.keys().cloned());
+        if !fields.iter().any(|f| obj.contains_key(f.as_str())) {
+            return Cow::Borrowed(&input.input);
+        }
+        let mut masked = obj.clone();
+        for field in &fields {
+            if let Some(Value::String(s)) = masked.get_mut(field.as_str()) {
+                *s = "*".repeat(s.chars().count());
+            }
+        }
+        Cow::Owned(Value::Object(masked))
+    }
+
+    /// Masks every secret the run resolved, or read from a credential field, in the
+    /// result before it is returned, so run history and API responses never hold one.
+    pub(super) async fn redact_result(
+        state:      &SharedExecutionState,
+        mut result: WorkflowResult,
+    ) -> WorkflowResult {
+        let s = state.read().await;
+        let redactor = s.redactor();
+        if redactor.is_empty() {
+            return result;
+        }
+        for output in result.node_outputs.values_mut() {
+            redactor.redact_value(output);
+        }
+        for entry in &mut result.logs {
+            let masked = redactor.redact_str(&entry.message).into_owned();
+            entry.message = masked;
+        }
+        if let Some(error) = result.error.as_mut() {
+            let masked = redactor.redact_str(error).into_owned();
+            *error = masked;
+        }
+        for message in &mut result.validation_errors {
+            let masked = redactor.redact_str(message).into_owned();
+            *message = masked;
+        }
+        result
+    }
+
+    pub(super) async fn redact_error(state: &SharedExecutionState, error: EngineError) -> EngineError {
+        let s = state.read().await;
+        let redactor = s.redactor();
+        if redactor.is_empty() {
+            return error;
+        }
+        let mask = |text: &str| redactor.redact_str(text).into_owned();
+        match error {
+            EngineError::InputValidationFailed { node_id, reason } => {
+                EngineError::InputValidationFailed { node_id, reason: mask(&reason) }
+            }
+            EngineError::OutputValidationFailed { node_id, reason } => {
+                EngineError::OutputValidationFailed { node_id, reason: mask(&reason) }
+            }
+            EngineError::NodeExecutionFailed { node_id, attempts, reason } => {
+                EngineError::NodeExecutionFailed { node_id, attempts, reason: mask(&reason) }
+            }
+            EngineError::SchemaViolation(text) => EngineError::SchemaViolation(mask(&text)),
+            EngineError::Internal(text) => EngineError::Internal(mask(&text)),
+            other => other,
+        }
     }
 
     /// Run schema validation for `node_id`'s input.
@@ -592,32 +701,88 @@ impl WorkflowExecutor {
         let (mut resolved_input, mut expr_warnings) =
             crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.config.env_allowlist.as_deref());
 
-        let mut resolved_credentials: HashMap<String, String> = HashMap::new();
+        let mut resolved_credentials: HashMap<String, SecretString> = HashMap::new();
+        let mut credential_failure: Option<NodeOutput> = None;
+
+        let declared = self.declared_credential_fields(&node_def.node_type_id);
 
         if !node_def.credentials.is_empty() {
+            let allowed = &declared;
+            let mut keys: Vec<&String> = node_def.credentials.keys().collect();
+            keys.sort();
+            if let Some(key) = keys.iter().find(|k| !allowed.contains(k.as_str())) {
+                return Err(NodeOutput::failure(NodeError::unrecoverable(
+                    "CREDENTIAL_FIELD_NOT_ALLOWED",
+                    format!(
+                        "Node '{}': '{}' is not a credential field of node type '{}'.",
+                        node_def.name, key, node_def.node_type_id
+                    ),
+                )));
+            }
             if let Some(obj) = resolved_input.as_object_mut() {
-                for (key, credential_id) in &node_def.credentials {
+                for key in keys {
+                    let credential_id = &node_def.credentials[key];
                     match self.credential_resolver.resolve(credential_id).await {
-                        Ok(secret) => {
-                            obj.insert(key.clone(), Value::String(secret.clone()));
-                            resolved_credentials.insert(key.clone(), secret);
+                        Ok(mut secret) => {
+                            let plain = std::mem::take(&mut *secret);
+                            obj.insert(key.clone(), Value::String(plain.clone()));
+                            resolved_credentials.insert(key.clone(), SecretString::new(plain));
+                        }
+                        Err(CredentialResolveError::NotFound) => {
+                            expr_warnings.push(format!(
+                                "Credential '{}' (field '{}') was not found. Field left unset.",
+                                credential_id, key
+                            ));
                         }
                         Err(reason) => {
-                            expr_warnings.push(format!(
-                                "Credential '{}' (field '{}') could not be resolved — {}. Field left unset.",
-                                credential_id, key, reason
-                            ));
+                            tracing::warn!(
+                                credential = %credential_id,
+                                "credential could not be resolved: {}",
+                                reason
+                            );
+                            let (code, what) = match reason {
+                                CredentialResolveError::Unreadable(_) => (
+                                    "CREDENTIAL_UNREADABLE",
+                                    "is damaged or does not match the encryption key",
+                                ),
+                                _ => ("CREDENTIAL_STORE_ERROR", "could not be loaded from the credential store"),
+                            };
+                            credential_failure = Some(NodeOutput::failure(NodeError::unrecoverable(
+                                code,
+                                format!(
+                                    "Node '{}': credential '{}' (field '{}') {}.",
+                                    node_def.name, credential_id, key, what
+                                ),
+                            )));
+                            break;
                         }
                     }
                 }
             }
         }
 
-        if !expr_warnings.is_empty() {
-            let mut s = state.write().await;
-            for msg in expr_warnings {
-                s.log(Some(&node_def.id), LogLevel::Warn, msg);
+        {
+            let mut inline_secrets: Vec<&str> = Vec::new();
+            if let Some(obj) = resolved_input.as_object() {
+                for field in &declared {
+                    if let Some(Value::String(v)) = obj.get(field) {
+                        inline_secrets.push(v.as_str());
+                    }
+                }
             }
+            if !inline_secrets.is_empty() || !resolved_credentials.is_empty() || !expr_warnings.is_empty() {
+                let mut s = state.write().await;
+                for v in inline_secrets.into_iter().chain(resolved_credentials.values().map(|v| v.as_str())) {
+                    s.register_secret(v);
+                }
+                for msg in expr_warnings {
+                    s.log(Some(&node_def.id), LogLevel::Warn, msg);
+                }
+            }
+        }
+
+        if let Some(failure) = credential_failure {
+            return Err(failure);
         }
 
         Ok(NodeInput {
@@ -646,14 +811,15 @@ impl WorkflowExecutor {
                 }
                 if self.config.code_sandbox_enabled {
                     ctx.metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
-                    // Expose the --allow-env-vars allowlist so the Code node can
-                    // re-inject approved vars after env_clear() in sandbox mode.
-                    if let Some(ref allowlist) = self.config.env_allowlist {
-                        let vars: Vec<Value> = allowlist.iter()
-                            .map(|s| Value::String(s.clone()))
-                            .collect();
-                        ctx.metadata.insert("__allowed_env_vars".to_string(), Value::Array(vars));
-                    }
+                }
+                // The --allow-env-vars allowlist: the Code node re-injects these
+                // after env_clear() in sandbox mode, and the Shell node after
+                // dropping the server's AERINI_* variables.
+                if let Some(ref allowlist) = self.config.env_allowlist {
+                    let vars: Vec<Value> = allowlist.iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect();
+                    ctx.metadata.insert("__allowed_env_vars".to_string(), Value::Array(vars));
                 }
                 if let Some(mb) = self.config.code_max_memory_mb {
                     ctx.metadata.insert("__code_max_memory_mb".to_string(), Value::Number(mb.into()));
@@ -874,7 +1040,7 @@ mod tests {
     struct NoopCredentials;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCredentials {
-        async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+        async fn resolve(&self, _id: &str) -> Result<SecretString, CredentialResolveError> {
             Err(CredentialResolveError::NotFound)
         }
     }
@@ -977,8 +1143,8 @@ mod tests {
     struct FixedCredential(&'static str);
     #[async_trait::async_trait]
     impl CredentialResolver for FixedCredential {
-        async fn resolve(&self, _credential_id: &str) -> Result<String, CredentialResolveError> {
-            Ok(self.0.to_string())
+        async fn resolve(&self, _credential_id: &str) -> Result<SecretString, CredentialResolveError> {
+            Ok(SecretString::new(self.0.to_string()))
         }
     }
 
@@ -1016,23 +1182,153 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_resolution_success_inserts_field_with_no_warning() {
+    async fn resolved_credential_is_masked_wherever_a_node_echoes_it() {
         let mut registry = NodeRegistry::new();
         registry.register(Arc::new(CaptureInputNode));
-        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("sk-secret")));
-        let workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("sk-secret-value")));
+        let mut workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+        workflow.nodes[0].config = serde_json::json!({ "note": "token sk-secret-value used" });
 
         let result = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
         assert!(result.success);
         assert_eq!(
             result.node_outputs.get("n1"),
-            Some(&serde_json::json!({ "api_key": "sk-secret" })),
-            "resolved credential must be injected into the node's input exactly as before"
+            Some(&serde_json::json!({ "api_key": "[redacted]", "note": "token [redacted] used" })),
+            "an echoed secret must be masked in the returned outputs"
         );
         assert!(
-            result.logs.iter().all(|e| !e.message.contains("Credential")),
-            "a successful resolution must not log a credential warning"
+            result.logs.iter().all(|e| !e.message.contains("Credential") && !e.message.contains("sk-secret-value")),
+            "a successful resolution must not log a warning or the value"
         );
+    }
+
+    #[tokio::test]
+    async fn schema_check_input_hides_credential_values_but_keeps_their_length() {
+        let executor = WorkflowExecutor::new(Arc::new(NodeRegistry::new()), Arc::new(FixedCredential("sk-secret-value")));
+        let mut workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+        workflow.nodes[0].input_schema =
+            serde_json::json!({ "properties": { "api_key": { "maxLength": 1 } } });
+        let state = crate::context::new_shared_state(workflow.id.clone(), HashMap::new());
+        let node_input = executor.build_input(&workflow, &workflow.nodes[0], &state, None).await.unwrap();
+
+        let view = executor.schema_view(&workflow.nodes[0], &node_input);
+        let errors = WorkflowExecutor::validate_node_input(&workflow.nodes[0].input_schema, &view);
+        assert!(!errors.is_empty(), "the schema must still be enforced");
+        assert!(errors.iter().all(|e| !e.contains("sk-secret-value")), "{errors:?}");
+        assert_eq!(view["api_key"].as_str().map(str::len), Some("sk-secret-value".len()));
+    }
+
+    #[tokio::test]
+    async fn credential_can_fill_only_declared_credential_fields() {
+        struct FlaggedFieldNode;
+        #[async_trait::async_trait]
+        impl Node for FlaggedFieldNode {
+            fn type_id(&self)       -> &'static str { "flagged_field_test" }
+            fn display_name(&self)  -> &'static str { "Flagged Field Test" }
+            fn node_type(&self)     -> NodeType     { NodeType::Utility }
+            fn version(&self)       -> &'static str { "1.0" }
+            fn input_schema(&self)  -> serde_json::Value {
+                serde_json::json!({ "properties": {
+                    "token": { "type": "string", "x-aerini-credential": true },
+                    "url":   { "type": "string" },
+                }})
+            }
+            fn output_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, input: crate::model::NodeInput) -> crate::model::NodeOutput {
+                crate::model::NodeOutput::success(input.input.clone())
+            }
+        }
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(FlaggedFieldNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("sk-secret-value")));
+        let state = crate::context::new_shared_state("wf1", HashMap::new());
+
+        let mut declared = single_node_workflow_with_credential("token", "cred_ok");
+        declared.nodes[0].node_type_id = "flagged_field_test".to_string();
+        let input = executor.build_input(&declared, &declared.nodes[0], &state, None).await.unwrap();
+        assert_eq!(input.input["token"], "sk-secret-value");
+
+        let mut hijack = single_node_workflow_with_credential("url", "cred_ok");
+        hijack.nodes[0].node_type_id = "flagged_field_test".to_string();
+        let failure = executor.build_input(&hijack, &hijack.nodes[0], &state, None).await.unwrap_err();
+        assert_eq!(failure.error.unwrap().code, "CREDENTIAL_FIELD_NOT_ALLOWED");
+
+        let mut inline = single_node_workflow_with_credential("token", "cred_ok");
+        inline.nodes[0].node_type_id = "flagged_field_test".to_string();
+        inline.nodes[0].credentials.clear();
+        inline.nodes[0].config = serde_json::json!({ "token": "typed-inline-secret", "url": "typed-url-value" });
+        let state = crate::context::new_shared_state("wf1", HashMap::new());
+        executor.build_input(&inline, &inline.nodes[0], &state, None).await.unwrap();
+        let redactor_state = state.read().await;
+        assert_eq!(redactor_state.redactor().redact_str("x typed-inline-secret y"), "x [redacted] y");
+        assert_eq!(redactor_state.redactor().redact_str("typed-url-value"), "typed-url-value");
+    }
+
+    #[test]
+    fn built_in_nodes_flag_the_secrets_typed_into_their_own_fields() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(crate::nodes::s3::S3Node));
+        registry.register(Arc::new(crate::nodes::google_sheets::GoogleSheetsNode));
+        registry.register(Arc::new(crate::nodes::social_upload::SocialUploadNode));
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(FixedCredential("unused")));
+        for (type_id, field) in [
+            (crate::nodes::s3::S3Node.type_id(), "secret_access_key"),
+            (crate::nodes::google_sheets::GoogleSheetsNode.type_id(), "client_secret"),
+            (crate::nodes::social_upload::SocialUploadNode.type_id(), "client_secret"),
+        ] {
+            let fields = executor.declared_credential_fields(type_id);
+            assert!(fields.contains(field), "{type_id} must declare {field}");
+            assert!(!fields.contains("client_id"), "{type_id} must not treat its public id as a secret");
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_error_text_is_masked_like_the_rest_of_a_run_result() {
+        let state = crate::context::new_shared_state("wf1", HashMap::new());
+        state.write().await.register_secret("sk-secret-value");
+
+        let failed = EngineError::NodeExecutionFailed {
+            node_id: "n1".into(),
+            attempts: 2,
+            reason: "rejected key sk-secret-value".into(),
+        };
+        let masked = WorkflowExecutor::redact_error(&state, failed).await;
+        assert_eq!(masked.to_string(), "Node 'n1' failed after 2 attempt(s): rejected key [redacted]");
+
+        let cancelled = WorkflowExecutor::redact_error(&state, EngineError::ExecutionCancelled).await;
+        assert!(matches!(cancelled, EngineError::ExecutionCancelled));
+    }
+
+    #[tokio::test]
+    async fn unreadable_or_unavailable_credential_fails_the_node_without_the_reason_text() {
+        struct FailingCredential(CredentialResolveError);
+        #[async_trait::async_trait]
+        impl CredentialResolver for FailingCredential {
+            async fn resolve(&self, _id: &str) -> Result<SecretString, CredentialResolveError> {
+                Err(self.0.clone())
+            }
+        }
+        let workflow = single_node_workflow_with_credential("api_key", "cred_bad");
+        for (reason, code) in [
+            (CredentialResolveError::Unreadable("db-detail-xyz".into()), "CREDENTIAL_UNREADABLE"),
+            (CredentialResolveError::StoreError("db-detail-xyz".into()), "CREDENTIAL_STORE_ERROR"),
+        ] {
+            let executor = WorkflowExecutor::new(Arc::new(NodeRegistry::new()), Arc::new(FailingCredential(reason)));
+            let state = crate::context::new_shared_state(workflow.id.clone(), HashMap::new());
+            let failure = executor.build_input(&workflow, &workflow.nodes[0], &state, None).await.unwrap_err();
+            let error = failure.error.unwrap();
+            assert_eq!(error.code, code);
+            assert!(!error.message.contains("db-detail-xyz"), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn node_input_debug_output_holds_no_values() {
+        let executor = WorkflowExecutor::new(Arc::new(NodeRegistry::new()), Arc::new(FixedCredential("sk-secret-value")));
+        let workflow = single_node_workflow_with_credential("api_key", "cred_ok");
+        let state = crate::context::new_shared_state(workflow.id.clone(), HashMap::new());
+        let node_input = executor.build_input(&workflow, &workflow.nodes[0], &state, None).await.unwrap();
+        assert!(!format!("{node_input:?}").contains("sk-secret-value"));
     }
 
     #[tokio::test]
@@ -1075,8 +1371,8 @@ mod tests {
             "resolved credential must still be merged into `input` for backward compat"
         );
         assert_eq!(
-            node_input.resolved_credentials.get("api_key"),
-            Some(&"sk-secret".to_string()),
+            node_input.resolved_credentials.get("api_key").map(|s| s.as_str()),
+            Some("sk-secret"),
             "the same resolved secret must also be available structured, keyed by field name"
         );
     }

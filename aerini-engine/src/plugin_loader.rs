@@ -29,9 +29,10 @@
 //!
 //! # Memory limit
 //!
-//! Each Store is limited to [`PLUGIN_MEMORY_LIMIT`] bytes (64 MiB by default).
-//! The limit is enforced by [`wasmtime::StoreLimitsBuilder`] via
-//! [`wasmtime::Store::limiter`].
+//! Each Store is limited to [`PLUGIN_MEMORY_LIMIT`] bytes (64 MiB) of linear memory
+//! in total, summed over every memory the component creates, and to
+//! [`PLUGIN_TABLE_ELEMENT_LIMIT`] elements per table. Both are enforced by
+//! [`PluginLimits`] via [`wasmtime::Store::limiter`].
 //!
 //! # WASI surface
 //!
@@ -117,7 +118,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use wasmtime::component::{ResourceTable, Source, StreamConsumer, StreamResult};
-use wasmtime::{Config, Engine, StoreLimitsBuilder};
+use wasmtime::{Config, Engine};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -293,7 +294,7 @@ struct RawDescribe {
     input_schema: String,
     output_schema: String,
     /// Empty when the plugin doesn't export `metadata`, or exports it but left
-    /// this field unset -- both mean "use the host default" (Constraint 1 /
+    /// this field unset -- both mean "use the host default" (see
     /// `wit/node.wit`'s doc comment).
     version: String,
     author: String,
@@ -645,7 +646,7 @@ pub mod signature {
 /// - [`WasiCtx`] — WASIp2 context (sandboxed filesystem, clocks, random, stdio).
 /// - [`WasiHttpCtx`] — WASI HTTP context for outbound requests.
 /// - [`ResourceTable`] — tracks host-owned resources (shared by WASI and HTTP).
-/// - [`wasmtime::StoreLimits`] — enforces the 64 MiB memory cap per execution.
+/// - [`PluginLimits`] — enforces the 64 MiB memory cap per execution.
 /// - [`PluginHttpHooks`] — enforces this crate's SSRF policy on every outbound
 ///   request and connects only to the validated address.
 /// - `storage` — this call's `storage` import backing, if any. `None` for
@@ -657,7 +658,7 @@ struct PluginState {
     wasi_ctx: WasiCtx,
     http_ctx: WasiHttpCtx,
     table: ResourceTable,
-    limits: wasmtime::StoreLimits,
+    limits: PluginLimits,
     http_hooks: PluginHttpHooks,
     storage: Option<PluginStorageHandle>,
     fs_watch: Option<PluginFsWatchHandle>,
@@ -718,12 +719,56 @@ impl wit_storage::StorageHost for PluginState {
 struct PluginFsWatchHandle {
     registry: Arc<FsWatchRegistry>,
     plugin_type_id: String,
+    scope: FsWatchScope,
+}
+
+/// Which paths a plugin may watch: anywhere, only inside the server's file
+/// sandbox directory, or nowhere when that directory is configured but unusable.
+#[derive(Clone)]
+enum FsWatchScope {
+    Unrestricted,
+    Within(PathBuf),
+    Denied,
+}
+
+impl FsWatchScope {
+    fn from_metadata(metadata: &HashMap<String, Value>) -> Self {
+        match crate::nodes::fs_sandbox::root_from_metadata(metadata) {
+            Ok(None) => Self::Unrestricted,
+            Ok(Some(root)) => Self::Within(root),
+            Err(_) => Self::Denied,
+        }
+    }
+
+    fn from_root(root: Option<&Path>) -> Self {
+        match root {
+            None => Self::Unrestricted,
+            Some(root) => std::fs::canonicalize(root).map_or(Self::Denied, Self::Within),
+        }
+    }
+
+    fn permits(&self, path: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Denied => false,
+            Self::Within(root) => std::fs::canonicalize(path).is_ok_and(|resolved| resolved.starts_with(root)),
+        }
+    }
+}
+
+impl PluginFsWatchHandle {
+    fn poll(&self, target: &wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
+        if !self.scope.permits(&target.path) {
+            return Err(wit_fs_watch::WatchError::PermissionDenied);
+        }
+        self.registry.poll(&self.plugin_type_id, target)
+    }
 }
 
 impl wit_fs_watch::FsWatchHost for PluginState {
     fn poll(&mut self, target: wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
         let handle = self.fs_watch.as_ref().ok_or(wit_fs_watch::WatchError::Unavailable)?;
-        handle.registry.poll(&handle.plugin_type_id, &target)
+        handle.poll(&target)
     }
 
     fn unwatch(&mut self, target: wit_fs_watch::WatchTarget) {
@@ -755,7 +800,7 @@ struct TriggerPluginState {
     wasi_ctx: WasiCtx,
     http_ctx: WasiHttpCtx,
     table: ResourceTable,
-    limits: wasmtime::StoreLimits,
+    limits: PluginLimits,
     http_hooks: PluginHttpHooks,
     /// This instance's `storage` import backing, if any -- same shape and
     /// same "scoped by the resolved `type_id`, `None` if the directory's
@@ -830,7 +875,7 @@ impl wit_fs_watch::FsWatchHost for TriggerPluginState {
     fn poll(&mut self, target: wit_fs_watch::WatchTarget) -> Result<wit_fs_watch::PollResult, wit_fs_watch::WatchError> {
         self.touch();
         let handle = self.fs_watch.as_ref().ok_or(wit_fs_watch::WatchError::Unavailable)?;
-        handle.registry.poll(&handle.plugin_type_id, &target)
+        handle.poll(&target)
     }
 
     fn unwatch(&mut self, target: wit_fs_watch::WatchTarget) {
@@ -891,7 +936,7 @@ fn make_trigger_plugin_state(
         wasi_ctx: WasiCtx::builder().build(),
         http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
-        limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
+        limits: PluginLimits::default(),
         http_hooks: PluginHttpHooks,
         storage,
         fs_watch,
@@ -1226,11 +1271,41 @@ mod plugin_http_hooks_tests {
 
 // ── Memory limit ──────────────────────────────────────────────────────────────
 
-/// Maximum linear memory per plugin execution: 64 MiB.
+/// Maximum linear memory per plugin execution, summed over all of the
+/// component's memories: 64 MiB.
 ///
 /// Plugin instances that attempt to grow beyond this limit receive a WASM
 /// `memory.grow` failure surfacing as a trap in the guest.
 const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Maximum elements in any one table of a plugin instance.
+const PLUGIN_TABLE_ELEMENT_LIMIT: usize = 100_000;
+
+/// Store-wide resource limits. `wasmtime::StoreLimits` applies its memory cap
+/// to each linear memory separately, so a component declaring many memories
+/// could exceed the budget; this tracks one running total instead.
+#[derive(Default)]
+struct PluginLimits {
+    memory_in_use: usize,
+}
+
+impl wasmtime::ResourceLimiter for PluginLimits {
+    fn memory_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> wasmtime::Result<bool> {
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+        let total = self.memory_in_use.saturating_add(desired.saturating_sub(current));
+        if total > PLUGIN_MEMORY_LIMIT {
+            return Ok(false);
+        }
+        self.memory_in_use = total;
+        Ok(true)
+    }
+
+    fn table_growing(&mut self, _current: usize, desired: usize, maximum: Option<usize>) -> wasmtime::Result<bool> {
+        Ok(desired <= PLUGIN_TABLE_ELEMENT_LIMIT && maximum.is_none_or(|max| desired <= max))
+    }
+}
 
 /// CPU time limit for plugin execution, expressed in epoch ticks.
 ///
@@ -1252,6 +1327,11 @@ const PLUGIN_EPOCH_DEADLINE: u64 = 3_000;
 /// call, which should always return promptly) — timing that out would
 /// misfire on every healthy, simply-quiet trigger.
 const PLUGIN_TRIGGER_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wall-clock limit on one `execute()` call on the synchronous engine: the
+/// guest's ~30 s epoch budget plus one outbound request, which
+/// `plugin_http` caps at 60 s.
+const PLUGIN_EXECUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Epoch ticks (10 ms each) a trigger-engine guest may run before it yields
 /// to the async runtime: about one second.
@@ -1278,7 +1358,7 @@ fn make_plugin_state(
         wasi_ctx: WasiCtx::builder().build(),
         http_ctx: WasiHttpCtx::new(),
         table: ResourceTable::new(),
-        limits: StoreLimitsBuilder::new().memory_size(PLUGIN_MEMORY_LIMIT).build(),
+        limits: PluginLimits::default(),
         http_hooks: PluginHttpHooks,
         storage,
         fs_watch,
@@ -1414,7 +1494,7 @@ impl PluginStorage {
 
         let existing_len: Option<i64> = tx
             .query_row(
-                "SELECT LENGTH(value) FROM plugin_storage WHERE scope = ?1 AND key = ?2",
+                "SELECT LENGTH(CAST(value AS BLOB)) FROM plugin_storage WHERE scope = ?1 AND key = ?2",
                 rusqlite::params![scope, key],
                 |row| row.get(0),
             )
@@ -1442,7 +1522,7 @@ impl PluginStorage {
 
         let scope_total: i64 = tx
             .query_row(
-                "SELECT COALESCE(SUM(LENGTH(value)), 0) FROM plugin_storage WHERE scope = ?1",
+                "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM plugin_storage WHERE scope = ?1",
                 rusqlite::params![scope],
                 |row| row.get(0),
             )
@@ -1542,6 +1622,22 @@ mod plugin_storage_tests {
         // up immediately).
         let path = dir.keep();
         PluginStorage::open(&path).expect("PluginStorage::open failed")
+    }
+
+    /// Edge case: the scope quota counts bytes, so multi-byte text cannot
+    /// store more than the quota's worth.
+    #[test]
+    fn scope_quota_counts_bytes_not_characters() {
+        let db = storage();
+        let value = "€".repeat(STORAGE_MAX_VALUE_BYTES / 3);
+        let fits = (STORAGE_MAX_SCOPE_BYTES as usize) / value.len();
+        for i in 0..fits {
+            db.set("plugin-a", &format!("k{i}"), &value).expect("write within quota failed");
+        }
+        assert!(matches!(
+            db.set("plugin-a", "one-too-many", &value),
+            Err(wit_storage::StorageError::QuotaExceeded)
+        ));
     }
 
     /// Normal case: a value written by `set` is returned by `get`, scoped
@@ -1781,7 +1877,7 @@ impl FsWatchRegistry {
         // long-idle target from counting against this plugin's own quota.
         self.reap_idle();
 
-        let mut targets = self.targets.lock().expect("fs-watch registry mutex poisoned");
+        let mut targets = self.targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if !targets.contains_key(&key) {
             let active_for_plugin =
@@ -1828,7 +1924,7 @@ impl FsWatchRegistry {
         // locked buffer.
         drop(targets);
 
-        let mut buf = buffer.lock().expect("fs-watch target buffer mutex poisoned");
+        let mut buf = buffer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let drained: Vec<wit_fs_watch::FsEvent> = buf.events.drain(..).collect();
         let overflowed = buf.overflowed;
         buf.overflowed = false;
@@ -1851,13 +1947,13 @@ impl FsWatchRegistry {
             recursive: target.recursive,
             events,
         };
-        self.targets.lock().expect("fs-watch registry mutex poisoned").remove(&key);
+        self.targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
     }
 
     fn reap_idle(&self) {
         self.targets
             .lock()
-            .expect("fs-watch registry mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, state| state.last_polled.elapsed() < FS_WATCH_IDLE_TIMEOUT);
     }
 }
@@ -1868,7 +1964,7 @@ impl FsWatchRegistry {
 /// callback thread, one call per raw OS notification — kept fast and
 /// scoped to this one target's [`TargetBuffer`], never the whole registry.
 fn handle_raw_event(buffer: &Arc<Mutex<TargetBuffer>>, event: NotifyEvent) {
-    let mut buf = buffer.lock().expect("fs-watch target buffer mutex poisoned");
+    let mut buf = buffer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // `need_rescan` is `notify`'s own cross-backend signal that events may
     // have been missed (e.g. Linux inotify's queue overflow arrives as this
@@ -2040,6 +2136,25 @@ mod fs_watch_registry_tests {
             recursive: false,
             events: events.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// Normal and edge case: a sandbox scope permits paths inside its root and
+    /// refuses siblings, `..` escapes and (when the root is unusable) everything.
+    #[test]
+    fn watch_scope_confines_paths_to_the_sandbox_root() {
+        let root = tempfile::tempdir().expect("tempdir create failed");
+        let outside = tempfile::tempdir().expect("tempdir create failed");
+        let inside_path = root.path().join("watched");
+        std::fs::create_dir(&inside_path).expect("mkdir failed");
+
+        let scope = FsWatchScope::from_root(Some(root.path()));
+        assert!(scope.permits(&inside_path.to_string_lossy()));
+        assert!(!scope.permits(&outside.path().to_string_lossy()));
+        let escape = inside_path.join("..").join("..");
+        assert!(!scope.permits(&escape.to_string_lossy()));
+
+        assert!(FsWatchScope::from_root(None).permits(&outside.path().to_string_lossy()));
+        assert!(!FsWatchScope::from_root(Some(Path::new("/nonexistent/sandbox"))).permits(&inside_path.to_string_lossy()));
     }
 
     /// Normal case: creating a file inside a watched directory produces one
@@ -2354,6 +2469,12 @@ pub struct PluginDescriptor {
     pub node_type: NodeType,
 }
 
+/// True for a path with a `.wasm` extension in any letter case, matching how
+/// the install and listing commands recognise plugin files.
+fn is_wasm_file_name(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("wasm"))
+}
+
 /// Maps a plugin-supplied category string to a [`NodeType`], defaulting to
 /// [`NodeType::Action`] (with a warning) for any unrecognised value. Shared
 /// by [`PluginLoader::load_plugin`] and [`PluginLoader::describe_plugin`] so
@@ -2548,6 +2669,15 @@ impl PluginLoader {
         Ok(result)
     }
 
+    /// Drops every cached component and signature result held for `path`.
+    /// For a file that was only read once, such as a staged install, so its
+    /// compiled code is not kept for the rest of the process.
+    pub fn forget_path(&self, path: &Path) {
+        self.component_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+        self.trigger_component_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+        self.signature_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(path);
+    }
+
     /// Returns the process-wide shared [`PluginLoader`], constructing it on
     /// the first call and reusing it — and its one `Engine` and one
     /// epoch-ticker thread — for every later call, from any caller, for the
@@ -2643,7 +2773,7 @@ impl PluginLoader {
         // for a plain custom host-implemented interface). Linked
         // unconditionally, like (a)/(b) above: a plugin compiled before
         // `storage` existed has no such import to satisfy, so this is a
-        // no-op for it, not a compatibility risk (Constraint 1).
+        // no-op for it, not a compatibility risk.
         wit_storage::add_to_linker::<PluginState, wasmtime::component::HasSelf<PluginState>>(
             &mut linker,
             |state| state,
@@ -2902,7 +3032,7 @@ impl PluginLoader {
 
             let path = entry.path();
 
-            if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+            if !is_wasm_file_name(&path) {
                 continue;
             }
 
@@ -3070,6 +3200,7 @@ impl PluginLoader {
         &self,
         dir: &Path,
         type_id: &str,
+        sandbox_root: Option<&Path>,
     ) -> Result<(wasmtime::Store<TriggerPluginState>, wit_trigger::AeriniNodeWithTrigger), PluginLoadError> {
         let entries = std::fs::read_dir(dir).map_err(PluginLoadError::Io)?;
 
@@ -3089,6 +3220,7 @@ impl PluginLoader {
         let fs_watch_handle = Some(PluginFsWatchHandle {
             registry: self.fs_watch_registry.clone(),
             plugin_type_id: type_id.to_string(),
+            scope: FsWatchScope::from_root(sandbox_root),
         });
 
         let scan_started = std::time::Instant::now();
@@ -3097,7 +3229,7 @@ impl PluginLoader {
         for entry in entries {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+            if !is_wasm_file_name(&path) {
                 continue;
             }
 
@@ -3186,12 +3318,13 @@ impl PluginLoader {
         dir: &Path,
         type_id: &str,
         config: &str,
+        sandbox_root: Option<&Path>,
     ) -> Result<(
         tokio::task::JoinHandle<()>,
         tokio::sync::mpsc::Receiver<Result<String, String>>,
         NextFireWatch,
     ), PluginLoadError> {
-        let (mut store, bindings) = self.resolve_trigger_instance(dir, type_id).await?;
+        let (mut store, bindings) = self.resolve_trigger_instance(dir, type_id, sandbox_root).await?;
         let (next_fire_tx, next_fire_rx) = tokio::sync::watch::channel(None);
         store.data_mut().next_fire = Some(next_fire_tx);
         let watch = install_stall_watch(&mut store);
@@ -3383,13 +3516,14 @@ impl Node for WasmPluginNode {
         let fs_watch_handle = Some(PluginFsWatchHandle {
             registry: self.fs_watch_registry.clone(),
             plugin_type_id: self.type_id.to_string(),
+            scope: FsWatchScope::from_metadata(&input.context.metadata),
         });
 
         let result = match &self.backend {
             NodeBackend::Sync { engine, pre } => {
                 let engine = engine.clone();
                 let pre = pre.clone();
-                tokio::task::spawn_blocking(move || {
+                let call = tokio::task::spawn_blocking(move || {
                     let mut store = make_store(&engine, make_plugin_state(storage_handle, fs_watch_handle));
 
                     let bindings = pre.instantiate(&mut store).map_err(|e| e.to_string())?;
@@ -3398,8 +3532,17 @@ impl Node for WasmPluginNode {
                         .aerini_plugin_node()
                         .call_execute(&mut store, &wit_input)
                         .map_err(|e| e.to_string())
-                })
-                .await
+                });
+                // The epoch deadline cannot interrupt a blocking host call, so
+                // the wait is bounded here too. The thread itself ends when its
+                // current host call returns and the guest hits the deadline.
+                match tokio::time::timeout(PLUGIN_EXECUTE_TIMEOUT, call).await {
+                    Ok(joined) => joined,
+                    Err(_elapsed) => Ok(Err(format!(
+                        "plugin ran for {}s without returning and was stopped",
+                        PLUGIN_EXECUTE_TIMEOUT.as_secs()
+                    ))),
+                }
             }
             NodeBackend::Trigger { pre } => {
                 let trigger_input = wit_input_to_trigger(&wit_input);
@@ -3494,7 +3637,7 @@ fn engine_input_to_wit(input: &NodeInput) -> wit::NodeInput {
     let credentials: Vec<wit::Param> = input
         .resolved_credentials
         .iter()
-        .map(|(k, v)| wit::Param { key: k.clone(), value: v.clone() })
+        .map(|(k, v)| wit::Param { key: k.clone(), value: v.as_str().to_owned() })
         .collect();
 
     wit::NodeInput { params, credentials }
@@ -3563,7 +3706,9 @@ mod engine_input_to_wit_tests {
     #[test]
     fn resolved_credentials_becomes_wit_credentials() {
         let mut input = make_input(json!({ "api_key": "sk_live_abc123" }));
-        input.resolved_credentials.insert("api_key".to_string(), "sk_live_abc123".to_string());
+        input
+            .resolved_credentials
+            .insert("api_key".to_string(), crate::executor::SecretString::new("sk_live_abc123".to_string()));
 
         let wit_input = engine_input_to_wit(&input);
 
@@ -3579,8 +3724,32 @@ mod engine_input_to_wit_tests {
 }
 
 /// Convert a WIT `NodeOutput` record to the engine's [`NodeOutput`].
+/// Largest `data` string accepted from a plugin: 10 MiB, the same bound the
+/// HTTP, S3, JSON and Shell nodes apply to what they return.
+const PLUGIN_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Longest error code or message kept from a plugin, in characters.
+const PLUGIN_ERROR_TEXT_LIMIT_CHARS: usize = 4096;
+
+fn truncate_chars(text: String, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text;
+    }
+    text.chars().take(max_chars).collect()
+}
+
 fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
     if out.success {
+        if out.data.len() > PLUGIN_OUTPUT_LIMIT_BYTES {
+            return NodeOutput::failure(NodeError::unrecoverable(
+                "wasm_output_too_large",
+                format!(
+                    "plugin output is {} bytes, over the {} byte limit",
+                    out.data.len(),
+                    PLUGIN_OUTPUT_LIMIT_BYTES
+                ),
+            ));
+        }
         match serde_json::from_str::<Value>(&out.data) {
             Ok(value) => NodeOutput::success(value),
             Err(parse_err) => {
@@ -3603,8 +3772,8 @@ fn wit_output_to_engine(out: wit::NodeOutput) -> NodeOutput {
         }
     } else {
         NodeOutput::failure(NodeError {
-            code: out.error_code,
-            message: out.error_message,
+            code: truncate_chars(out.error_code, PLUGIN_ERROR_TEXT_LIMIT_CHARS),
+            message: truncate_chars(out.error_message, PLUGIN_ERROR_TEXT_LIMIT_CHARS),
             recoverable: out.recoverable,
         })
     }
@@ -3727,6 +3896,75 @@ mod tests {
         sig_path
     }
 
+    /// Edge case: the memory budget is shared by every memory in a store, and
+    /// a growth that adds nothing is always allowed.
+    #[test]
+    fn memory_budget_is_shared_across_memories() {
+        use wasmtime::ResourceLimiter;
+
+        let mut limits = PluginLimits::default();
+        let half = PLUGIN_MEMORY_LIMIT / 2;
+        assert!(limits.memory_growing(0, half, None).unwrap());
+        assert!(limits.memory_growing(0, half, None).unwrap());
+        assert!(!limits.memory_growing(0, 65_536, None).unwrap());
+        assert!(limits.memory_growing(half, half, None).unwrap());
+    }
+
+    /// Edge case: table growth stops at the element cap.
+    #[test]
+    fn table_growth_stops_at_the_element_cap() {
+        use wasmtime::ResourceLimiter;
+
+        let mut limits = PluginLimits::default();
+        assert!(limits.table_growing(0, PLUGIN_TABLE_ELEMENT_LIMIT, None).unwrap());
+        assert!(!limits.table_growing(0, PLUGIN_TABLE_ELEMENT_LIMIT + 1, None).unwrap());
+    }
+
+    /// Edge case: a successful plugin result over the size limit becomes a
+    /// failure, and an over-long error message is cut; ordinary output passes.
+    #[test]
+    fn plugin_output_over_the_limit_is_rejected_and_error_text_is_cut() {
+        let ok = wit::NodeOutput {
+            success: true,
+            data: "{\"a\":1}".to_string(),
+            error_code: String::new(),
+            error_message: String::new(),
+            recoverable: false,
+        };
+        assert!(wit_output_to_engine(ok).success);
+
+        let huge = wit::NodeOutput {
+            success: true,
+            data: format!("\"{}\"", "a".repeat(PLUGIN_OUTPUT_LIMIT_BYTES)),
+            error_code: String::new(),
+            error_message: String::new(),
+            recoverable: false,
+        };
+        let failed = wit_output_to_engine(huge);
+        assert!(!failed.success);
+        assert_eq!(failed.error.expect("error missing").code, "wasm_output_too_large");
+
+        let noisy = wit::NodeOutput {
+            success: false,
+            data: String::new(),
+            error_code: "E".to_string(),
+            error_message: "m".repeat(PLUGIN_ERROR_TEXT_LIMIT_CHARS * 2),
+            recoverable: true,
+        };
+        let cut = wit_output_to_engine(noisy).error.expect("error missing");
+        assert_eq!(cut.message.chars().count(), PLUGIN_ERROR_TEXT_LIMIT_CHARS);
+    }
+
+    /// Normal and edge case: `.wasm` is recognised in any letter case and
+    /// sidecars are not plugin files.
+    #[test]
+    fn wasm_extension_match_ignores_case() {
+        assert!(is_wasm_file_name(Path::new("a.wasm")));
+        assert!(is_wasm_file_name(Path::new("A.WASM")));
+        assert!(!is_wasm_file_name(Path::new("a.wasm.sig")));
+        assert!(!is_wasm_file_name(Path::new("wasm")));
+    }
+
     /// Non-existent path must return `PluginLoadError::Io`.
     #[test]
     fn load_plugin_nonexistent_file_returns_io_error() {
@@ -3839,13 +4077,13 @@ mod tests {
         std::fs::write(&tampered, b"(component)").expect("write failed");
         write_tampered_sidecar(&tampered);
 
-        let err = l.resolve_trigger_instance(tampered_dir.path(), "any").await.err().expect("expected a miss");
+        let err = l.resolve_trigger_instance(tampered_dir.path(), "any", None).await.err().expect("expected a miss");
         assert!(matches!(err, PluginLoadError::NoSuchTriggerPlugin(_)), "expected NoSuchTriggerPlugin, got: {err:?}");
         assert_eq!(l.trigger_compile_count(), 0, "tampered file must not be compiled");
 
         let unsigned_dir = tempfile::tempdir().expect("tempdir create failed");
         std::fs::write(unsigned_dir.path().join("plugin.wasm"), b"(component)").expect("write failed");
-        let _ = l.resolve_trigger_instance(unsigned_dir.path(), "any").await;
+        let _ = l.resolve_trigger_instance(unsigned_dir.path(), "any", None).await;
         assert_eq!(l.trigger_compile_count(), 1, "unsigned file should be compiled");
     }
 

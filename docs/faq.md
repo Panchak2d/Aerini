@@ -30,7 +30,7 @@ Run (or Run Now) executes the workflow once, immediately, and shows you the resu
 
 ## What happens to a running workflow if I close the app?
 
-Nothing stops. Closing Aerini's window just hides it to your system tray; the app, and anything it's running, keeps going. Fully quitting Aerini (Quit Aerini from the tray menu) is what actually stops everything, and if that happens mid-run, the run shows up in [run history](guide/background-runs.md#run-history) as Interrupted rather than a pass or fail. See [Background Runs §Stopping background runs for good](guide/background-runs.md#stopping-background-runs-for-good) for the full detail.
+Nothing stops. Closing Aerini's window just hides it to your system tray; the app, and anything it's running, keeps going. (On a Linux desktop with no tray, closing quits unless something is running, and then it minimizes; see the page linked below.) Fully quitting Aerini (Quit Aerini from the tray menu) is what actually stops everything, and if that happens mid-run, the run shows up in [run history](guide/background-runs.md#run-history) as Interrupted rather than a pass or fail. See [Background Runs §Stopping background runs for good](guide/background-runs.md#stopping-background-runs-for-good) for the full detail.
 
 ## Can I run Aerini without the desktop app open?
 

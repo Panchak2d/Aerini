@@ -83,14 +83,14 @@ async fn check_ssrf(raw_url: &str) -> Result<(), String> {
 fn join_response_headers(map: &reqwest::header::HeaderMap) -> Value {
     let mut out = serde_json::Map::new();
     for (k, v) in map.iter() {
-        let val = v.to_str().unwrap_or("");
+        let val = String::from_utf8_lossy(v.as_bytes());
         match out.get_mut(k.as_str()) {
             Some(Value::String(existing)) => {
                 existing.push_str(", ");
-                existing.push_str(val);
+                existing.push_str(&val);
             }
             _ => {
-                out.insert(k.as_str().to_string(), Value::String(val.to_string()));
+                out.insert(k.as_str().to_string(), Value::String(val.into_owned()));
             }
         }
     }
@@ -346,6 +346,13 @@ mod tests {
         let out = join_response_headers(&map);
         assert_eq!(out["set-cookie"], "a=1, b=2");
         assert_eq!(out["x-one"], "v");
+    }
+
+    #[test]
+    fn response_header_with_non_utf8_bytes_is_kept_lossily() {
+        let mut map = reqwest::header::HeaderMap::new();
+        map.insert("x-name", reqwest::header::HeaderValue::from_bytes(b"caf\xe9").unwrap());
+        assert_eq!(join_response_headers(&map)["x-name"], "caf\u{fffd}");
     }
 
     fn make_input(input: Value) -> NodeInput {

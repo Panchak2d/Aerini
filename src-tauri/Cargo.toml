@@ -37,7 +37,7 @@ serde_json = "1.0"
 # Utils
 chrono = { version = "0.4", features = ["serde"] }
 uuid  = { version = "1.8", features = ["v4"] }
-zip    = { version = "8", default-features = false, features = ["deflate"] }
+zip    = { version = "9", default-features = false, features = ["deflate"] }
 blake3 = "1"
 # Password hashing for run_secret
 argon2 = "0.5"
@@ -50,9 +50,8 @@ base64 = "0.22"
 # (published 2026-07-06, not yanked; the one historical advisory,
 # RUSTSEC-2022-0093, is fixed as of 2.0 and doesn't apply regardless — this
 # crate is used verify-only, no SigningKey/keypair ever exists in this app).
-# MSRV 1.85 per its own Cargo.toml, satisfied by this workspace's
-# `dtolnay/rust-toolchain@stable` CI (no older toolchain pinned anywhere in
-# this repo). default-features = false: the default "fast"/"zeroize"
+# MSRV 1.85 per its own Cargo.toml, below this workspace's 1.96 floor.
+# default-features = false: the default "fast"/"zeroize"
 # features exist for signing/precomputed-table performance and secret-key
 # zeroing — irrelevant here since the app only calls
 # VerifyingKey::verify_strict on a public key, never generates or holds a
@@ -80,11 +79,21 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 # matching plugin_loader.rs's existing test style).
 tempfile = "3"
 
+[dev-dependencies]
+# `test` exposes tauri::test::mock_app, used to give command tests a real managed State.
+tauri = { version = "2.12", features = ["test"] }
+
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
 # The updater is desktop-only. It is registered Rust-side only: no updater permission is
 # granted in capabilities/default.json and there is no @tauri-apps/plugin-updater npm
 # dependency, so the webview cannot reach the plugin directly.
+# Default features minus `zip`: that feature only adds installing Tauri v1-style
+# zip / tar.gz bundles, which this app never publishes (the update manifest lists
+# raw .exe, .msi, .AppImage and .app.tar.gz assets, and macOS unpacks its own
+# .app.tar.gz without it). It is also the only thing that pulls in `zip` 4, whose
+# `ZipArchive::extract` is affected by RUSTSEC-2026-0367, -0368 and -0369 and
+# which the updater (still on `zip ^4` in 2.14) cannot move off.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-updater = "2.13"
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy"] }

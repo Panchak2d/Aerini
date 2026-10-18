@@ -21,9 +21,13 @@
 //! hold a server admin/write API token without exposing it to every visitor.
 //! Authorization is instead the same shared webhook secret the workflow
 //! author already configured on the Webhook node. The secret is forwarded
-//! verbatim as `x-webhook-secret`; this handler never compares it itself —
-//! `webhook.rs`'s existing constant-time check remains the single source of
-//! truth for whether a request is accepted.
+//! verbatim as `x-webhook-secret`. Before anything is relayed, the handler
+//! checks it with `webhook::credential_valid` — the same function the
+//! listeners use, so there is one definition of what the Webhook accepts —
+//! so that only requests holding a valid credential count against the
+//! per-workflow rate limit and reach the workflow's listener. A Webhook node
+//! with no secret is refused: the relay is reachable by anyone who can load
+//! the embedding page, so it never triggers a workflow that has no secret.
 //!
 //! # Effective port, not configured port
 //! The target port is read from `ScheduledJobRow.trigger_kind` (via
@@ -39,6 +43,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use aerini_engine::nodes::webhook::credential_valid;
 use aerini_engine::scheduler::{SchedulerDb, TriggerKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -46,6 +51,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use super::state::{internal_error, ApiState};
+use crate::middleware::{too_many_requests, KeyedRateLimiter};
 
 /// `aerini-server/src/static/aerini-widget.js`, embedded at compile time.
 const AERINI_WIDGET_JS: &str = include_str!("../../static/aerini-widget.js");
@@ -77,6 +83,11 @@ fn relay_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            // Every request goes to 127.0.0.1 and carries the webhook secret:
+            // never let a proxy environment variable route it elsewhere, and
+            // never follow a redirect off the loopback listener.
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build widget relay HTTP client")
     })
@@ -97,8 +108,7 @@ pub struct WidgetTriggerBody {
     /// author and passed through by the widget's `data-secret` attribute —
     /// or a short-lived signed token from `mint_widget_token` (see there for
     /// when to prefer that over embedding the raw secret). Forwarded
-    /// verbatim as `x-webhook-secret`; never compared in this handler (see
-    /// module doc — single source of truth stays in `webhook.rs`).
+    /// verbatim as `x-webhook-secret` once it has passed `credential_gate`.
     pub secret: String,
     /// Forwarded verbatim as the loopback request's JSON body. Shape is
     /// whatever the target workflow's Webhook node expects — the chat
@@ -181,6 +191,41 @@ async fn load_webhook_trigger(
     }
 }
 
+/// Refuses, before anything is relayed, a Webhook with no secret (its listener
+/// would accept anyone) and a credential that is neither the secret nor a
+/// valid signed token for this path. `None` means the request may proceed.
+fn credential_gate(
+    configured_secret: &str,
+    path: &str,
+    provided: &str,
+) -> Option<axum::response::Response> {
+    if configured_secret.is_empty() {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "this Webhook node has no secret configured — the public widget \
+                              relay will not trigger a workflow that anyone could start; set a \
+                              secret on the Webhook node"
+                })),
+            )
+                .into_response(),
+        );
+    }
+    if !credential_valid(configured_secret, path, provided) {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "the secret did not match the Webhook node's configured secret"
+                })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 /// `--allow-shell`/`--allow-code`/`--allow-database` (`main.rs`) are process-wide:
 /// turning one on for an internal, admin-only workflow also unlocks that node
 /// type for every other workflow the same server process runs. Every other
@@ -220,6 +265,7 @@ fn dangerous_node_block(nodes: &[aerini_engine::model::WorkflowNode]) -> Option<
 pub async fn trigger_widget(
     State(s): State<ApiState>,
     Path(workflow_id): Path<String>,
+    axum::Extension(per_workflow_limit): axum::Extension<Arc<KeyedRateLimiter>>,
     Json(b): Json<WidgetTriggerBody>,
 ) -> impl IntoResponse {
     let Some(secret_header) = secret_header_value(&b.secret) else {
@@ -232,10 +278,21 @@ pub async fn trigger_widget(
             .into_response();
     };
 
-    let (port, path, _secret) = match load_webhook_trigger(&s, &workflow_id).await {
+    let (port, path, configured_secret) = match load_webhook_trigger(&s, &workflow_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
+
+    if let Some(resp) = credential_gate(&configured_secret, &path, &b.secret) {
+        return resp;
+    }
+
+    // Counted only after the credential checks out, so callers without one
+    // (limited per IP by the route's own layer) cannot use up the budget the
+    // workflow's real visitors share.
+    if !per_workflow_limit.is_allowed(&workflow_id) {
+        return too_many_requests();
+    }
 
     // Loaded once, ahead of the relay, so the dangerous-node gate can run
     // before anything is forwarded to the workflow's listener — the listener
@@ -410,6 +467,26 @@ pub async fn mint_widget_token(
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod credential_gate_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_a_webhook_with_no_secret_even_when_the_caller_sends_an_empty_one() {
+        let resp = credential_gate("", "/hook", "").expect("must refuse");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_a_wrong_secret_and_accepts_the_secret_or_a_minted_token() {
+        let resp = credential_gate("s3cr3t", "/hook", "nope").expect("must refuse");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(credential_gate("s3cr3t", "/hook", "s3cr3t").is_none());
+        let token = aerini_engine::nodes::webhook::mint_signed_token("s3cr3t", "/hook", 60);
+        assert!(credential_gate("s3cr3t", "/hook", &token).is_none());
+    }
 }
 
 #[cfg(test)]

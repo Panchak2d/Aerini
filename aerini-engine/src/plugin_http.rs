@@ -8,7 +8,7 @@
 //! host name for the TLS server name, so certificate verification and SNI are
 //! unchanged.
 //!
-//! The sender mirrors `wasmtime_wasi_http` 49.0.2 (`default_send_request`),
+//! The sender mirrors `wasmtime_wasi_http` 49.0.3 (`default_send_request`),
 //! which `aerini-engine/Cargo.toml` pins exactly. Re-check this file against
 //! upstream whenever that pin moves.
 
@@ -31,7 +31,14 @@ use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody};
 
 use crate::nodes::util::{SsrfPolicy, check_ssrf_ip};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Upper bound for each phase (connect, first byte, gap between body frames),
+/// and the default. A plugin call has about 30 s of wall-clock budget, and the
+/// engine's epoch deadline cannot interrupt a blocking host call, so one
+/// request must not be able to outlive it by much.
+const MAX_PHASE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wall-clock limit for one request from the first connection attempt to the
+/// end of the response body, so a response that trickles in still ends.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(60);
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a plugin request was refused before any connection was made.
@@ -164,10 +171,11 @@ async fn open_stream(addrs: &[SocketAddr], tls_host: Option<&str>) -> Result<Box
 }
 
 /// Response body that fails with a read timeout when no frame arrives within
-/// the between-bytes interval.
+/// the between-bytes interval or the request deadline has passed.
 pub(crate) struct IncomingResponseBody {
     incoming: Incoming,
     timeout: tokio::time::Interval,
+    deadline: tokio::time::Instant,
 }
 
 impl Body for IncomingResponseBody {
@@ -175,6 +183,9 @@ impl Body for IncomingResponseBody {
     type Error = HttpError;
 
     fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, HttpError>>> {
+        if tokio::time::Instant::now() >= self.deadline {
+            return Poll::Ready(Some(Err(HttpError::HttpResponseTimeout)));
+        }
         match Pin::new(&mut self.as_mut().incoming).poll_frame(cx) {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Ready(Some(Err(err))) => {
@@ -201,6 +212,20 @@ impl Body for IncomingResponseBody {
     }
 }
 
+fn phase_timeout(requested: Option<Duration>) -> Duration {
+    requested.map_or(MAX_PHASE_TIMEOUT, |t| t.min(MAX_PHASE_TIMEOUT))
+}
+
+/// The request line for `uri`: the path and query only, since scheme and
+/// authority are for proxies. A target that is not a path (`*`) is refused.
+fn origin_form(uri: &Uri) -> Result<Uri, HttpError> {
+    let target = uri.path_and_query().map_or("/", |p| p.as_str());
+    if !(target.starts_with('/') || target.starts_with('?')) {
+        return Err(HttpError::HttpRequestUriInvalid);
+    }
+    Uri::builder().path_and_query(target).build().map_err(|_| HttpError::HttpRequestUriInvalid)
+}
+
 /// Sends `req` over a connection to one of `addrs`, which must come from
 /// [`resolve_pinned`]. The request URI's host is used only for the TLS server
 /// name; it is never resolved again.
@@ -212,9 +237,10 @@ pub(crate) async fn send_pinned(
     let use_tls = req.uri().scheme() == Some(&Scheme::HTTPS);
     let host = req.uri().host().ok_or(HttpError::HttpRequestUriInvalid)?.to_owned();
 
-    let connect_timeout = options.and_then(|o| o.connect_timeout).unwrap_or(DEFAULT_TIMEOUT);
-    let first_byte_timeout = options.and_then(|o| o.first_byte_timeout).unwrap_or(DEFAULT_TIMEOUT);
-    let between_bytes_timeout = options.and_then(|o| o.between_bytes_timeout).unwrap_or(DEFAULT_TIMEOUT);
+    let connect_timeout = phase_timeout(options.as_ref().and_then(|o| o.connect_timeout));
+    let first_byte_timeout = phase_timeout(options.as_ref().and_then(|o| o.first_byte_timeout));
+    let between_bytes_timeout = phase_timeout(options.as_ref().and_then(|o| o.between_bytes_timeout));
+    let deadline = tokio::time::Instant::now() + REQUEST_DEADLINE;
 
     let stream = tokio::time::timeout(connect_timeout, open_stream(&addrs, use_tls.then_some(host.as_str())))
         .await
@@ -227,12 +253,7 @@ pub(crate) async fn send_pinned(
     .await
     .map_err(|_| HttpError::ConnectionTimeout)??;
 
-    // The request line carries only the path; scheme and authority are for
-    // proxies.
-    *req.uri_mut() = Uri::builder()
-        .path_and_query(req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/"))
-        .build()
-        .map_err(|_| HttpError::HttpRequestUriInvalid)?;
+    *req.uri_mut() = origin_form(req.uri())?;
 
     let send = async move {
         let res = tokio::time::timeout(first_byte_timeout, sender.send_request(req))
@@ -244,7 +265,7 @@ pub(crate) async fn send_pinned(
             if between_bytes_timeout == Duration::ZERO { Duration::new(0, 1) } else { between_bytes_timeout };
         let mut timeout = tokio::time::interval(between_bytes_timeout);
         timeout.reset();
-        Ok::<_, HttpError>(res.map(|incoming| IncomingResponseBody { incoming, timeout }))
+        Ok::<_, HttpError>(res.map(|incoming| IncomingResponseBody { incoming, timeout, deadline }))
     };
     let mut send = pin!(send);
     let mut conn = Some(conn);
@@ -293,6 +314,13 @@ mod tests {
     }
 
     #[test]
+    fn phase_timeouts_default_to_and_never_exceed_the_cap() {
+        assert_eq!(phase_timeout(None), MAX_PHASE_TIMEOUT);
+        assert_eq!(phase_timeout(Some(Duration::from_secs(600))), MAX_PHASE_TIMEOUT);
+        assert_eq!(phase_timeout(Some(Duration::from_secs(5))), Duration::from_secs(5));
+    }
+
+    #[test]
     fn public_literal_is_pinned_to_itself_with_the_uri_port() {
         assert_eq!(classify(&uri("http://93.184.216.34/")).unwrap(), Target::Literal(sa("93.184.216.34:80")));
         assert_eq!(classify(&uri("https://93.184.216.34/")).unwrap(), Target::Literal(sa("93.184.216.34:443")));
@@ -311,6 +339,13 @@ mod tests {
         ] {
             assert!(matches!(classify(&uri(u)), Err(SsrfRejection::Prohibited)), "{u}");
         }
+    }
+
+    #[test]
+    fn origin_form_keeps_a_path_and_query_drops_the_authority_and_refuses_asterisk_form() {
+        assert_eq!(origin_form(&uri("/a/b?c=d")).unwrap().to_string(), "/a/b?c=d");
+        assert_eq!(origin_form(&uri("http://other.example/x?y=1")).unwrap().to_string(), "/x?y=1");
+        assert!(matches!(origin_form(&uri("*")), Err(HttpError::HttpRequestUriInvalid)));
     }
 
     #[test]

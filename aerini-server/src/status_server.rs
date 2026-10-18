@@ -42,15 +42,27 @@ pub(crate) const STATUS_PAGE_CSS: &str = concat!(
 /// Inline script content rendered between `<script>` tags in the status page.
 /// This const is the exact byte sequence hashed by the CSP script-src directive.
 /// The hash is computed automatically at runtime from this constant, so no
-/// manual recomputation is needed when this changes.
+/// manual recomputation is needed when this changes. The page's buttons must be
+/// bound here with `addEventListener`: a script hash does not cover inline
+/// `onclick` attributes, so those would be blocked by the CSP.
 pub(crate) const STATUS_PAGE_SCRIPT: &str = concat!(
     "async function _aeriniRun(){",
-    "var s=document.getElementById('_aerini_rs').value;",
+    "var i=document.getElementById('_aerini_rs'),b=document.getElementById('_aerini_btn');",
+    "if(b.disabled){return;}",
+    "if(!i.value){alert('Enter the run secret.');return;}",
+    "b.disabled=true;",
+    "try{",
     "var r=await fetch('/api/run',{method:'POST',",
-    "headers:{'Authorization':'Bearer '+s,'Content-Type':'application/json'},",
+    "headers:{'Authorization':'Bearer '+i.value,'Content-Type':'application/json'},",
     "body:'{}'});",
-    "if(r.ok){document.getElementById('_aerini_rs').value='';alert('Run triggered.');}",
-    "else{alert('Invalid run secret.');}}"
+    "if(r.ok){i.value='';alert('Run triggered.');}",
+    "else if(r.status===403){alert('Invalid run secret.');}",
+    "else if(r.status===429){alert('Too many requests. Try again in a minute.');}",
+    "else{alert('Run request failed (HTTP '+r.status+').');}",
+    "}catch(e){alert('Could not reach the server.');}",
+    "b.disabled=false;}",
+    "document.getElementById('_aerini_btn').addEventListener('click',_aeriniRun);",
+    "document.getElementById('_aerini_rs').addEventListener('keydown',function(e){if(e.key==='Enter'){_aeriniRun();}});"
 );
 
 use axum::{
@@ -68,7 +80,7 @@ use serde_json::{json, Value};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use aerini_engine::db::WorkflowDb;
+use aerini_engine::{db::WorkflowDb, executor::SecretString};
 
 use crate::util::{extract_client_ip, parse_bearer};
 
@@ -80,6 +92,8 @@ pub struct StatusState {
     pub workflow_name: String,
     pub workflow_id:   String,
     pub trigger_desc:  String,
+    /// ISO-8601 time the package was exported, from `aerini-server.json`.
+    pub exported_at:   String,
     pub run_state:     SharedRunState,
     pub log_buffer:    LogBuffer,
     pub run_trigger:   Arc<tokio::sync::Notify>,
@@ -95,9 +109,8 @@ pub struct StatusState {
 }
 
 pub fn router(state: StatusState) -> Router {
-    // Explicit CORS: reject all cross-origin requests.  The status server
-    // serves HTML and JSON to same-origin browser tabs only.  An explicit deny
-    // policy prevents a future wildcard regression if this router is modified.
+    // Explicit CORS: reject all cross-origin requests. The status server
+    // serves HTML and JSON to same-origin browser tabs only.
     let cors = tower_http::cors::CorsLayer::new();
 
     Router::new()
@@ -154,8 +167,17 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
          </td></tr>";
 
     // Recent run history from persistent DB (last 10 runs).
-    let history_html: String = if let Some(ref db) = s.run_history {
-        match db.list_runs(&s.workflow_id, 0, 10, "") {
+    let recent_runs = match s.run_history.clone() {
+        Some(db) => {
+            let workflow_id = s.workflow_id.clone();
+            tokio::task::spawn_blocking(move || db.recent_run_summaries(&workflow_id, 10))
+                .await
+                .ok()
+        }
+        None => None,
+    };
+    let history_html: String = if let Some(result) = recent_runs {
+        match result {
             Ok(runs) if !runs.is_empty() => {
                 let rows: String = runs.iter().map(|r| {
                     let ts    = &r.ran_at[..19.min(r.ran_at.len())];
@@ -241,7 +263,7 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
         css      = STATUS_PAGE_CSS,
         wf       = html_escape(&s.workflow_name),
         trigger  = html_escape(&s.trigger_desc),
-        exported = "—",
+        exported = html_escape(&s.exported_at),
         status_class = status_class,
         status   = html_escape(&rs.status),
         runs     = rs.run_count,
@@ -267,7 +289,7 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
                     "<div class='run-now-wrap'>",
                     "<input type='password' id='_aerini_rs' placeholder='Run secret' ",
                     "class='run-now-input'>",
-                    "<button onclick='_aeriniRun()'>&#9654; Run Now</button>",
+                    "<button id='_aerini_btn'>&#9654; Run Now</button>",
                     "</div>",
                     "<script>{}</script>"
                 ),
@@ -300,16 +322,25 @@ async fn api_status(
     }))
 }
 
-/// GET /api/logs?n=50 — JSON log array.
+#[derive(Deserialize)]
+struct LogsQuery {
+    #[serde(default = "default_logs_n")]
+    n: usize,
+}
+
+fn default_logs_n() -> usize { 50 }
+
+/// GET /api/logs?n=50 — the last `n` log entries (1 to 1000, default 50).
 /// Requires: Authorization: Bearer <run_secret>
 async fn api_logs(
     State(s): State<StatusState>,
     headers:  HeaderMap,
+    Query(q): Query<LogsQuery>,
 ) -> impl IntoResponse {
     if let Err((status, msg)) = check_run_secret(&s, &headers).await {
         return (status, msg).into_response();
     }
-    Json(json!(s.log_buffer.last_n(50))).into_response()
+    Json(json!(s.log_buffer.last_n(q.n.clamp(1, 1000)))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -346,12 +377,14 @@ async fn check_run_secret(
         None => return Err((StatusCode::FORBIDDEN,
             "Run history requires a run secret. Set one at export time.")),
     };
-    let provided = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_bearer)
-        .unwrap_or("")
-        .to_string();
+    let provided = SecretString::new(
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_bearer)
+            .unwrap_or("")
+            .to_string(),
+    );
 
     if provided.is_empty() {
         return Err((StatusCode::FORBIDDEN, "Invalid secret"));
@@ -366,37 +399,55 @@ async fn check_run_secret(
     if ok { Ok(()) } else { Err((StatusCode::FORBIDDEN, "Invalid secret")) }
 }
 
-/// Compares `provided` against `stored`, dispatching on which of the three
-/// on-disk secret formats `stored` is in. Split out of `check_run_secret` so
-/// the comparison — expensive in the argon2id case — can run via
-/// `spawn_blocking` instead of inline on the async reactor.
+/// How `run_secret` is stored in the config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunSecretFormat {
+    Argon2,
+    Blake3Hex,
+    Plaintext,
+}
+
+impl RunSecretFormat {
+    pub fn of(stored: &str) -> Self {
+        if stored.starts_with("$argon2") {
+            Self::Argon2
+        } else if stored.len() == 64 && stored.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Self::Blake3Hex
+        } else {
+            Self::Plaintext
+        }
+    }
+
+    /// What the stored value is, for the startup warning; `None` for argon2id.
+    pub fn legacy_description(self) -> Option<&'static str> {
+        match self {
+            Self::Argon2    => None,
+            Self::Blake3Hex => Some("a fast BLAKE3 hash, which is not brute-force resistant"),
+            Self::Plaintext => Some("the secret itself in plain text"),
+        }
+    }
+}
+
+/// Compares `provided` against `stored`, dispatching on its [`RunSecretFormat`].
+/// Split out of `check_run_secret` so the comparison, expensive in the argon2id
+/// case, can run via `spawn_blocking` instead of inline on the async reactor.
 fn verify_secret(stored: &str, provided: &str) -> bool {
-    // Since Aerini 0.3 the config stores an argon2id PHC string.
-    // Backward-compat: Aerini 0.2 configs stored a 64-char BLAKE3 hex digest.
-    // Detect by whether the value starts with the argon2 PHC prefix "$argon2".
-    // For legacy configs, fall back to the old double-hash comparison path.
-    if stored.starts_with("$argon2") {
-        // New path (0.3+): verify against argon2id PHC hash.
-        // This is brute-force resistant; BLAKE3 was not.
-        match PasswordHash::new(stored) {
+    use blake3::hash as b3;
+    match RunSecretFormat::of(stored) {
+        RunSecretFormat::Argon2 => match PasswordHash::new(stored) {
             Ok(parsed_hash) => Argon2::default()
                 .verify_password(provided.as_bytes(), &parsed_hash)
                 .is_ok(),
             Err(_) => false,
+        },
+        RunSecretFormat::Blake3Hex => {
+            let submitted_hash = b3(provided.as_bytes()).to_hex();
+            stored.as_bytes().ct_eq(submitted_hash.as_bytes()).into()
         }
-    } else if stored.len() == 64 {
-        // Legacy path (0.2): stored is blake3_hex(raw); compare against blake3_hex(submitted).
-        // kept for configs exported before 0.3 — re-export to upgrade.
-        use blake3::hash as b3;
-        let submitted_hash = b3(provided.as_bytes()).to_hex();
-        stored.as_bytes().ct_eq(submitted_hash.as_bytes()).into()
-    } else {
-        // Very old path (pre-0.2): stored is raw secret; hash both sides.
-        use blake3::hash as b3;
-        b3(stored.as_bytes())
+        RunSecretFormat::Plaintext => b3(stored.as_bytes())
             .as_bytes()
             .ct_eq(b3(provided.as_bytes()).as_bytes())
-            .into()
+            .into(),
     }
 }
 
@@ -415,13 +466,18 @@ async fn api_runs(
     };
     let limit  = q.limit.clamp(1, 500);
     let offset = q.offset.max(0);
-    match db.list_runs(&s.workflow_id, offset, limit, &q.filter) {
-        Ok(items) => Json(json!({
+    let db = Arc::clone(db);
+    let workflow_id = s.workflow_id.clone();
+    let filter = q.filter;
+    let listed = tokio::task::spawn_blocking(move || db.list_runs(&workflow_id, offset, limit, &filter)).await;
+    match listed {
+        Ok(Ok(items)) => Json(json!({
             "items":  items,
             "limit":  limit,
             "offset": offset,
         })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -438,10 +494,12 @@ async fn api_run_detail(
     let Some(ref db) = s.run_history else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match db.get_run(&id) {
-        Ok(Some(record)) => Json(record).into_response(),
-        Ok(None)         => StatusCode::NOT_FOUND.into_response(),
-        Err(e)           => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    let db = Arc::clone(db);
+    match tokio::task::spawn_blocking(move || db.get_run(&id)).await {
+        Ok(Ok(Some(record))) => Json(record).into_response(),
+        Ok(Ok(None))         => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(e))           => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e)               => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -480,11 +538,27 @@ mod tests {
     use crate::event_bridge::RunState;
     use tower::ServiceExt;
 
+    #[test]
+    fn run_secret_formats_are_told_apart_and_each_verifies() {
+        let hex = blake3::hash(b"hunter2").to_hex().to_string();
+        assert_eq!(RunSecretFormat::of(&hex), RunSecretFormat::Blake3Hex);
+        assert!(verify_secret(&hex, "hunter2") && !verify_secret(&hex, "other"));
+
+        let plain64 = "p".repeat(64);
+        assert_eq!(RunSecretFormat::of(&plain64), RunSecretFormat::Plaintext);
+        assert!(verify_secret(&plain64, &plain64) && !verify_secret(&plain64, "x"));
+
+        assert_eq!(RunSecretFormat::of("$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaA"), RunSecretFormat::Argon2);
+        assert!(RunSecretFormat::Argon2.legacy_description().is_none());
+        assert!(RunSecretFormat::Blake3Hex.legacy_description().is_some());
+    }
+
     fn make_state(run_secret: Option<&str>) -> StatusState {
         StatusState {
             workflow_name:       "test-workflow".to_string(),
             workflow_id:         "wf-test".to_string(),
             trigger_desc:        "manual".to_string(),
+            exported_at:         "2026-01-01T00:00:00Z".to_string(),
             run_state:           std::sync::Arc::new(std::sync::RwLock::new(RunState::default())),
             log_buffer:          LogBuffer::new(10),
             run_trigger:         std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -606,6 +680,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn run_now_button_is_bound_in_the_hashed_script_not_inline() {
+        let app = router(make_state(Some("runsecret")));
+        let res = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = res.headers().get("content-security-policy").unwrap().to_str().unwrap().to_string();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!html.contains("onclick"), "an inline handler is blocked by the CSP");
+        assert!(html.contains("id='_aerini_btn'"));
+        assert!(html.contains(STATUS_PAGE_SCRIPT));
+        assert!(!csp.contains("unsafe-inline") && !csp.contains("unsafe-hashes"));
+    }
+
+    #[tokio::test]
+    async fn status_page_lists_recent_runs_from_history() {
+        let dir = std::env::temp_dir().join(format!("aerini_status_history_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("history.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Arc::new(WorkflowDb::open(&db_path, 2).expect("open workflow db"));
+        for (id, ran_at, success) in [("r1", "2026-01-01T10:00:00Z", true), ("r2", "2026-01-01T11:00:00Z", false)] {
+            db.save_run(&aerini_engine::db::RunRecord {
+                id: id.to_string(),
+                workflow_id: "wf-test".to_string(),
+                workflow_name: "test-workflow".to_string(),
+                ran_at: ran_at.to_string(),
+                success,
+                duration_ms: 2500,
+                result_json: "{}".to_string(),
+                status: if success { "success" } else { "failed" }.to_string(),
+            }).unwrap();
+        }
+        let mut s = make_state(None);
+        s.run_history = Some(db);
+
+        let res = router(s)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        let failed_at = html.find("2026-01-01 11:00:00").expect("newest run listed");
+        let ok_at = html.find("2026-01-01 10:00:00").expect("older run listed");
+        assert!(failed_at < ok_at, "newest run comes first");
+        assert!(html.contains("run-failed") && html.contains("2.5s"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn api_logs_returns_the_last_n_entries() {
+        let s = make_state(Some("logsecret"));
+        for i in 0..5 {
+            s.log_buffer.push("INFO", None, format!("m{i}"));
+        }
+        let app = router(s);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/logs?n=2")
+                    .header("authorization", "Bearer logsecret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let msgs: Vec<&str> = v.as_array().unwrap().iter().map(|e| e["message"].as_str().unwrap()).collect();
+        assert_eq!(msgs, vec!["m3", "m4"]);
     }
 
     #[tokio::test]

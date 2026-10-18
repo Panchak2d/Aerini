@@ -328,7 +328,10 @@ impl WorkflowExecutor {
 
                 // Validate body node input. In strict mode, fail the loop iteration.
                 // In non-strict mode, log a warning to the execution log and continue.
-                let schema_errors = Self::validate_node_input(&body_def.input_schema, &body_input.input);
+                let schema_errors = Self::validate_node_input(
+                    &body_def.input_schema,
+                    &self.schema_view(body_def, &body_input),
+                );
                 if !schema_errors.is_empty() {
                     if self.config.strict_schema_validation {
                         let reason = schema_errors.join("; ");
@@ -601,7 +604,7 @@ mod tests {
     struct NoopCreds;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCreds {
-        async fn resolve(&self, _: &str) -> Result<String, CredentialResolveError> {
+        async fn resolve(&self, _: &str) -> Result<crate::executor::SecretString, CredentialResolveError> {
             Err(CredentialResolveError::NotFound)
         }
     }
@@ -809,7 +812,7 @@ mod tests {
         assert_eq!(WorkflowExecutor::add_result_bytes(usize::MAX, &v, usize::MAX), None);
     }
 
-    // ── Regression test 1: one entry per iteration, not per body node ─────────
+    // ── One entry per iteration, not per body node ───────────────────────────
     //
     // k=2 bodies, n=3 iterations → 3 entries (not 6), each equal to the last
     // body node's output (whichever the executor's topo order puts last).
@@ -882,7 +885,7 @@ mod tests {
         }
     }
 
-    // ── Regression test 2: disabled body node is skipped ─────────────────────
+    // ── A disabled body node is skipped ──────────────────────────────────────
     //
     // The disabled body node (body_0) must be skipped each iteration.
     // The enabled body node (body_1) must produce the captured output.
@@ -928,7 +931,7 @@ mod tests {
         }
     }
 
-    // ── Regression test 3: None-output body does not push null into all_results ─
+    // ── A body with no output does not push null into all_results ────────────
     //
     // A body node that returns output: None must never push a null entry.
     // Simplest unambiguous form: single null-output body over 2 iterations →

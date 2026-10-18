@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bump deliberately, together with the same value in release.yml. Every locked
+  # dependency's rust-version is at or below this workspace's 1.96 floor.
+  RUST_TOOLCHAIN: 1.96.0
 
 permissions:
   contents: read
@@ -37,10 +40,10 @@ jobs:
           large-packages: true
           swap-storage: false
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       - name: Add swap space
@@ -79,6 +82,38 @@ jobs:
         run: cargo clippy -p aerini-engine -p aerini-server --locked -- -D warnings
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+  test-windows:
+    name: Windows-only engine tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-engine-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-engine-
+
+      # Filtered to the tests that cover Windows-specific code. The rest of the engine
+      # suite assumes a Unix host and is run by the Linux job above. --include-ignored
+      # runs the tests that need a real Windows shell; the one that shows a real toast
+      # needs a desktop session, which a runner does not have, so it is skipped.
+      - name: Test Windows-specific engine code
+        shell: bash
+        run: cargo test -p aerini-engine --locked -- nodes::shell nodes::notification --include-ignored --skip the_windows_toast_command_runs_to_completion --nocapture
 
   template-wit-sync:
     name: Example plugin template WIT files match canonical
@@ -121,7 +156,7 @@ jobs:
         run: python3 -I scripts/verify-updater-config.py "$GITHUB_REPOSITORY"
 
       - name: Lint the release shell scripts
-        run: shellcheck scripts/publish-updater-manifest.sh scripts/verify-release-tag.sh
+        run: shellcheck scripts/*.sh
 
   trigger-example-build:
     name: Trigger example plugin builds for wasm32-wasip2
@@ -133,15 +168,42 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust (stable) with wasm32-wasip2
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+      - name: Install Rust with wasm32-wasip2
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-wasip2
+
+      # No Cargo.lock ships with the echo template, so this build resolves the
+      # newest wit-bindgen 0.57.x and fails if the template stops compiling.
+      - name: Build echo template
+        working-directory: examples/plugin-template
+        run: cargo build --target wasm32-wasip2 --release
 
       - name: Build trigger example
         working-directory: examples/plugin-template/trigger-example
         run: cargo build --target wasm32-wasip2 --release --locked
+
+  cargo-deny:
+    name: Dependency licenses, bans and sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Policy lives in deny.toml. Advisories are left to security-audit.yml so a
+      # newly published advisory fails the daily audit, not unrelated pull requests.
+      # rust-version: the action image ships Rust 1.85, older than this workspace's
+      # 1.96 floor, so it is updated to stable before cargo-deny reads the manifests.
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: licenses bans sources
+          rust-version: stable
 
   node-checks:
     name: Node.js dependency audit and dist staleness
@@ -156,7 +218,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -181,6 +243,8 @@ jobs:
         run: |
           npm run vite:build
           git diff --exit-code dist/ || (echo "ERROR: dist/ is stale — run 'npm run vite:build' and commit the result" && exit 1)
+          untracked="$(git ls-files --others --exclude-standard dist/)"
+          [ -z "$untracked" ] || (echo "ERROR: dist/ is stale — the build produced files that are not committed:" && echo "$untracked" && exit 1)
 
   docs-build:
     name: Docs site builds
@@ -195,7 +259,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -212,8 +276,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-24.04
-          - platform: ubuntu-24.04-arm
+          - platform: ubuntu-22.04
+          - platform: ubuntu-22.04-arm
           - platform: windows-latest
           - platform: macos-latest
     runs-on: ${{ matrix.platform }}
@@ -249,15 +313,15 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -283,3 +347,56 @@ jobs:
       # the `release` environment, so pull requests (including forks) never see it.
       - name: Build desktop app
         run: npm run build:unsigned
+
+  tauri-test:
+    name: Test desktop app (src-tauri)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          preinstalled-runtimes: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+
+      - name: Add swap space
+        run: bash scripts/ci-add-swap.sh
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tauri-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tauri-test-
+
+      # The crate's build script requires the sidecar to exist, and dist/ is committed.
+      - name: Fetch and stage Node binaries
+        run: bash scripts/fetch-node-binaries.sh
+
+      - name: Test desktop crate
+        run: cargo test -p aerini --locked
+
+      - name: Clippy desktop crate
+        run: cargo clippy -p aerini --locked -- -D warnings

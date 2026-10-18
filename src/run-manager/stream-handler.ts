@@ -12,7 +12,7 @@ import {
 } from "../output-renderer";
 import { saveRunToHistory, saveRunStarted, renderHistoryPanel, type HistoryPanel, type RunRecord } from "../run-history";
 import { setWorkflowRunning } from "../workflow-manager";
-import { isTauri, escapeHtml } from "../utils";
+import { isTauri, escapeHtml, copyWithButtonFeedback } from "../utils";
 import { resolveNextRunAt, triggerTypeFromKindJson } from "../monitor-helpers";
 import { RunStateMachine } from "./state-machine";
 
@@ -173,7 +173,7 @@ export class RunManager {
     if (copyBtn) {
       const errorText = errorLogs.map(l => l.message).join("\n");
       copyBtn.addEventListener("click", () => {
-        navigator.clipboard.writeText(errorText).then(() => { copyBtn.textContent = "Copied"; });
+        void copyWithButtonFeedback(copyBtn, errorText);
       });
     }
   }
@@ -384,7 +384,7 @@ export class RunManager {
 
       // If the user cancelled while we were awaiting, discard the result silently.
       // forceReset() already reset the UI — no toast, no history entry, no drawer rebuild.
-      if (this.state.consumeCancelRequest()) {
+      if (this.state.consumeCancelRequest(runId)) {
         return;
       }
 
@@ -425,6 +425,7 @@ export class RunManager {
       // actually cancel it; a genuine cancellation via Stop already
       // does this in forceReset(), this only covers the timeout path.
       if (timedOut) cancelRun(runId).catch(() => {});
+      if (this.state.consumeCancelRequest(runId)) return;
       this.onRunResult?.(false);
       // run_workflow rejects with the same already_running JSON shape the
       // scheduler uses (per-workflow exec-lock) if this exact workflow is
@@ -442,7 +443,7 @@ export class RunManager {
       const catchCopyBtn = content.querySelector<HTMLButtonElement>("#run-catch-copy-btn");
       if (catchCopyBtn) {
         catchCopyBtn.addEventListener("click", () => {
-          navigator.clipboard.writeText(errMsg).then(() => { catchCopyBtn.textContent = "Copied"; });
+          void copyWithButtonFeedback(catchCopyBtn, errMsg);
         });
       }
       this.onStatus(`Error: ${escapeHtml(errMsg)}`);
@@ -476,9 +477,13 @@ export class RunManager {
       this.onToast("Could not read this run's recorded data.", "error");
       return;
     }
-    const recordedOutput = result.node_outputs[triggerNode.data.id];
+    const recordedOutput = result.node_outputs?.[triggerNode.data.id];
     if (recordedOutput === undefined) {
       this.onToast("This run has no recorded trigger output to replay — the workflow may have changed since.", "error");
+      return;
+    }
+    if (typeof recordedOutput === "object" && recordedOutput !== null && "$truncated" in recordedOutput) {
+      this.onToast("This run's trigger output was too large to keep in history, so it cannot be replayed.", "error");
       return;
     }
     if (!await checkDangerousNodes(this.state.currentWorkflowId, this.canvas.nodes.values(), this.approvedForExecution, showConfirm)) {
@@ -578,7 +583,7 @@ export class RunManager {
 
       // User clicked Stop while we were awaiting — forceReset() already
       // reset the UI; discard the result silently, matching handleRun().
-      if (this.state.consumeCancelRequest()) return;
+      if (this.state.consumeCancelRequest(runId)) return;
 
       for (const [id, out] of Object.entries(result.node_outputs)) {
         const preview = extractPreview(out);
@@ -597,6 +602,7 @@ export class RunManager {
       // Timeout only stops the UI from watching — tell the backend to
       // actually cancel the still-running node execution.
       if (timedOut) cancelRun(runId).catch(() => {});
+      if (this.state.consumeCancelRequest(runId)) return;
       const parsed = parseSchedulerError(String(e));
       const errMsg = parsed.error_kind === "already_running"
         ? `"${currentName}" is already running from another action. Wait for it to finish, then try again.`

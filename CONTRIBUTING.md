@@ -234,15 +234,15 @@ For new nodes, add at least one `#[cfg(test)]` block covering:
 
 The release scripts have their own tests: `python3 -m unittest discover -s scripts/tests`. Run them if you change anything under `scripts/`.
 
-See [Testing](docs/development/testing.md) for how all three Rust crates and the frontend suite fit together, and which of them CI runs for you automatically versus which need a manual `cargo test -p <crate>`.
+See [Testing](docs/development/testing.md) for how all three Rust crates and the frontend suite fit together, and which of them CI runs for you automatically.
 
 ---
 
 ## Opening a pull request
 
 1. Fork, branch from `main`, keep the branch focused on one change.
-2. Run `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` and fix all warnings before opening.
-3. Run `cargo test -p aerini-engine` and `cargo test -p aerini-server`. All tests must pass.
+2. Run `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` (plus `cargo clippy -p aerini --locked -- -D warnings` if you changed `src-tauri/`) and fix all warnings before opening.
+3. Run `cargo test -p aerini-engine` and `cargo test -p aerini-server`, plus `cargo test -p aerini` if you changed `src-tauri/`. All tests must pass.
 4. If you changed the frontend, run `npm run typecheck` and `npm test`, then `npm run vite:build` and commit the rebuilt `dist/`. CI fails on a stale one.
 5. If you touch any IPC command or serde type, call it out explicitly in the PR description.
 6. If you add a node, include a short description of what it does and what credentials it needs.
@@ -333,8 +333,8 @@ Desktop releases are built by `release.yml` when a `vX.Y.Z` tag is pushed. The u
 
 ### Cutting a release
 
-1. Set the new version in `package.json`, `src-tauri/tauri.conf.json` and the root `Cargo.toml` (`bash scripts/verify-release-tag.sh vX.Y.Z` checks all three), update `CHANGELOG.md`, and push the tag.
-2. Approve the pending `release` deployment. The `verify` job has already checked the updater configuration; the build jobs sign each installer.
+1. Set the new version in `package.json`, `src-tauri/tauri.conf.json` and the root `Cargo.toml` (`bash scripts/verify-release-tag.sh vX.Y.Z` checks all three), update `CHANGELOG.md` (the release is refused without a `## [X.Y.Z]` section, except for `-` prerelease tags), and push the tag from a commit on `main` whose CI run has passed.
+2. Approve the pending `release` deployment. The `verify` job has already checked that the commit is on `main` with a passing CI run, the versions and the updater configuration; the build jobs sign each installer. The container image is published after this approval.
 3. When the run finishes, open the summary of the **Publish updater manifest** job. It lists every platform in `latest.json`. Expect eight: AppImage, deb and rpm for x86_64 and aarch64, plus NSIS and MSI for Windows x86_64. macOS is built and signed but deliberately not listed, so macOS users update by downloading the release.
 4. Edit the draft's notes and publish it. Publishing is what releases the update: only a published release that is not a prerelease is served as "latest", so drafts and `-rc` tags are never offered. If the manifest job failed, do not publish. Fix the cause and re-run the failed jobs; re-running is safe.
 5. Smoke test: install the previous version and update to the new one through **Settings → About → Updates**.

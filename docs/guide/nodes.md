@@ -11,7 +11,7 @@ A few things that apply across every node on this page, so they're not repeated 
 - **Fields marked "resolved from Connections"** don't show a plain text box. They open the saved-credential picker instead, so the actual secret lives in Aerini's encrypted credential store, not typed into the node. See [Credentials](credentials.md).
 - **Any text field can take a `{{...}}` expression** to pull in a value from an earlier node, a workflow variable, or the current run. Number and dropdown (enum) fields can't, since there's nowhere in a number box to type `{{`. See [Expressions](expressions.md) for the full syntax.
 - **A number or true/false field that holds text it cannot read** (for example Delay Duration set to `abc`) fails the node with `INVALID_CONFIG` and names the field. A blank field uses its default, and a valid number outside the allowed range is clamped to it.
-- **Retries** are off unless you turn them on in a node's retry settings. A rate limit (`429`) is retried for every node. A `502`, `503` or `504` (and an overloaded `529`) is retried only where repeating the call creates nothing: AI Prompt, AI Agent, Stripe (the same idempotency key goes with every attempt) and Google Sheets Get Values. A `500` is never retried, and neither is any failure from a node that sends, creates or starts a paid job (Slack, Telegram, Discord, SendGrid, GitHub, Notion, Sheets Append Row, image generation): a gateway often returns those after the service already did the work, so a retry could send a second email or message, or pay for a second generation. Retry by hand when you know the first attempt did nothing. The same rule covers a request that times out: a connection that could not be made is retried for every node, but a timeout is retried only where repeating the call creates nothing (the nodes above that retry a `502`), because the provider may already have acted on the request. HTTP Request retries a timeout for `GET`, `HEAD`, `OPTIONS`, `PUT` and `DELETE`, never for `POST` or `PATCH`.
+- **Retries** are off unless you turn them on in a node's retry settings. A rate limit (`429`) is retried for every node. A `502`, `503` or `504` (and an overloaded `529`) is retried only where repeating the call creates nothing: AI Prompt, AI Agent, Stripe (the same idempotency key goes with every attempt) and Google Sheets Get Values. A `500` is never retried, and neither is any failure from a node that sends, creates or starts a paid job (Slack, Telegram, Discord, SendGrid, GitHub, Notion, Sheets Append Row, image generation): a gateway often returns those after the service already did the work, so a retry could send a second email or message, or pay for a second generation. Retry by hand when you know the first attempt did nothing. The same rule covers a request that times out: a connection that could not be made, including one that takes longer than 10 seconds to be made, is retried for every node, but a timeout is retried only where repeating the call creates nothing (the nodes above that retry a `502`), because the provider may already have acted on the request. HTTP Request retries a timeout for `GET`, `HEAD`, `OPTIONS`, `PUT` and `DELETE`, never for `POST` or `PATCH`.
 - **"Ports"** lists what a node connects to on each side. Unless noted otherwise, a node has one input ("In") and one output ("Out"), the same shape you'll see for most boxes on the canvas.
 
 ## Triggers
@@ -85,12 +85,12 @@ Run a shell command on the machine Aerini is on, and capture its stdout, stderr,
 |---|---|---|
 | `command` | Command | Required. |
 | `cwd` | Cwd | Working directory. |
-| `env` | Env | Environment variables, as an object. Edited as JSON in **Advanced: full config**. |
-| `timeout_secs` | Timeout (seconds) | Default 30; values are kept between 1 and 86400. On timeout, or when the run is stopped, the command and every process it started are killed on macOS and Linux; on Windows only the command's own process is. A timeout is never retried by a retry policy, because the command may already have done part of its work. |
+| `env` | Env | Environment variables, as an object. Edited as JSON in **Advanced: full config**. The command inherits Aerini's own environment except variables whose names start with `AERINI_` (the server's API token and credentials); `aerini-server api` passes through any of those listed in `--allow-env-vars`. Variables set here are always passed. |
+| `timeout_secs` | Timeout (seconds) | Default 30; values are kept between 1 and 86400. On timeout, or when the run is stopped, the command and every process it started are killed. On Windows, a command containing double quotes is passed to `cmd` as typed. A timeout is never retried by a retry policy, because the command may already have done part of its work. |
 
 **Ports:** default (In → Out).
 
-**Output:** `stdout`, `stderr`, `exit_code`, `success`, `truncated`. `stdout` and `stderr` each keep the first 10 MB; anything more is discarded and `truncated` is `true`. A command that writes more than 256 MB to one stream is stopped and fails with `OUTPUT_FLOOD`; redirect big output to a file. When the command fails, the error message shows the end of its stderr with URL passwords, `--password`/`--token`/`--passphrase` flags (with `=` or a space), curl `-u user:pass` credentials, and similar secrets masked. Masking is pattern-based: a secret passed in a flag it does not know can still appear in the failure message, in `stderr`, or in the run log.
+**Output:** `stdout`, `stderr`, `exit_code`, `success`, `truncated`. `stdout` and `stderr` each keep the first 10 MB; anything more is discarded and `truncated` is `true`. A command that writes more than 256 MB to one stream is stopped and fails with `OUTPUT_FLOOD`; redirect big output to a file. When the command fails, the error message shows the end of its stderr (or the end of stdout when stderr is empty) with URL passwords, `--password`/`--token`/`--passphrase` flags (with `=` or a space), curl `-u user:pass` credentials, and similar secrets masked. Masking is pattern-based: a secret passed in a flag it does not know can still appear in the failure message, in `stderr`, or in the run log.
 
 **Gotcha:** this runs a real command on the host machine. Aerini treats Shell Command, Code (JS), and Database as "dangerous" nodes: any workflow containing one shows a confirmation dialog before its first run in a session ("This workflow contains nodes that execute code on your computer... Only run workflows from sources you trust"), and the node gets a small warning badge on the canvas. Run, Run this node, a node's Test button, and Replay in run history all ask. Your answer holds for the session only while those nodes stay as they were: changing one's settings, saved credential, type, or enabled state, or loading, importing, or restoring a version of the workflow where they differ, asks again. Moving or renaming a node does not.
 
@@ -101,13 +101,13 @@ Run a JavaScript snippet with a full Node.js runtime and return its result.
 | Field | Label | Notes |
 |---|---|---|
 | `code` | Code | Required. Call `output(value)` to return a result. Has access to `input` and `context`. |
-| `timeout_secs` | Timeout (seconds) | Max execution time. Default 10; values are kept between 1 and 60. On timeout, or when the run is stopped, the Node.js process and any process it started are killed on macOS and Linux; on Windows only the Node.js process is. |
+| `timeout_secs` | Timeout (seconds) | Max execution time. Default 10; values are kept between 1 and 60. On timeout, or when the run is stopped, the Node.js process and any process it started are killed. |
 
 **Ports:** In → Out, Error.
 
 **Output:** `result` (whatever you passed to `output()`), `stdout` (the text the code printed, such as `console.log` output), `duration_ms`, `truncated`, and `_sandbox_partial` (present and `true` on macOS when the code sandbox is active: ESM import restrictions are enforced there, but the CPU/memory limits are Linux-only and don't apply on macOS).
 
-**Gotcha:** counted among the "dangerous" nodes (see Shell Command above); triggers the same confirmation dialog and canvas badge.
+**Gotcha:** counted among the "dangerous" nodes (see Shell Command above); triggers the same confirmation dialog and canvas badge. `process.env` never includes variables whose names start with `AERINI_` unless `aerini-server api` lists them in `--allow-env-vars`.
 
 Printing is safe before or after `output()`. Let the script finish on its own: if it calls `process.exit()`, `output()` is not delivered and the node fails with `NO_RESULT`. A failed run's error message shows only the last few KB of stderr, with URL passwords and `--password`-style secrets masked. Code that prints more than 256 MB to one stream is stopped with `OUTPUT_FLOOD`. Printed text and the result share a 10 MB limit: when the printed text is longer, only its last 10 MB is kept and `truncated` is `true`; a result too large to fit fails with `RESULT_TOO_LARGE`.
 
@@ -140,14 +140,14 @@ Show a desktop notification on the machine running the workflow, while it runs.
 | Field | Label | Notes |
 |---|---|---|
 | `title` | Title | Required text; a title that is not text fails with `INVALID_TITLE`. On Linux `<`, `>` and `&` are escaped, as in the body. |
-| `body` | Body | Optional notification text; a body that is not text fails with `INVALID_BODY`. On Linux `<`, `>` and `&` are escaped so they show as typed; a notification daemon that does not read markup may show the escapes (`&lt;`) instead. |
+| `body` | Body | Optional notification text; a body that is not text fails with `INVALID_BODY`. On Linux Aerini asks the notification daemon whether it reads markup in the body; if it does, or if it cannot be asked, `<`, `>` and `&` are escaped so they show as typed, and if it does not, the text is sent as it is. |
 | `urgency` | Urgency | `low`, `normal`, or `critical`. Applied on Linux only, but any other value fails with `INVALID_URGENCY` on every platform. Default `normal`. |
 
 **Ports:** default (In → Out).
 
 **Output:** `sent`.
 
-**Gotcha:** the notifier (`notify-send`, `osascript`, or PowerShell on Windows) is stopped if it has not finished after 15 seconds, and the failure (`NOTIFY_ERROR`) includes whatever it printed to stderr, such as a missing notification daemon. A notification that fails is never retried.
+**Gotcha:** the notifier (`notify-send`, `osascript`, or PowerShell on Windows) is stopped if it has not finished after 15 seconds, and the failure (`NOTIFY_ERROR`) includes whatever it printed to stderr, such as a missing notification daemon. On Windows, Aerini first adds a per-user registry key, `HKCU\Software\Classes\AppUserModelId\Aerini`, with the display name `Aerini`, because Windows shows a notification only for an application it knows. A notification that fails is never retried.
 
 ### Database
 
@@ -157,22 +157,23 @@ Run SQL against SQLite, PostgreSQL, or MySQL, or key-value operations against Re
 |---|---|---|
 | `db_type` | Db Type | `sqlite`, `postgres`, `mysql`, or `redis`. Default `sqlite`. |
 | `db_path` | Database Path | SQLite only. Absolute path ending in `.db`, `.sqlite`, or `.sqlite3`. |
-| `connection_url` | Connection URL | Postgres/MySQL/Redis. Full connection string including credentials, e.g. `postgres://user:pass@host/db`. |
-| `query` | Query | SQL query, using `?` for parameters. Not used for Redis. |
-| `params` | Params | JSON array of values for the query's `?` placeholders, e.g. `[42, "Alice"]`. |
-| `operation` | Operation | SQL: `query` (SELECT) or `execute` (INSERT/UPDATE/DELETE). Redis: `get`, `set`, `del`, `lpush`, `rpush`, `lpop`, `rpop`, `hget`, `hset`. |
+| `connection_url` | Connection URL | Postgres/MySQL/Redis, e.g. `postgres://user@host/db`. A password written in the URL still works, but Password keeps it out of the workflow file. |
+| `password` | Password | Postgres/MySQL/Redis. Select a saved credential; it replaces any password in Connection URL. |
+| `query` | Query | SQL query, using `?` for parameters. Not used for Redis. On Postgres every `?` outside a string, quoted name, comment or `$$` block is a parameter, so write the JSON key operators `?`, `?\|` and `?&` as `jsonb_exists()`, `jsonb_exists_any()` and `jsonb_exists_all()`. |
+| `params` | Params | JSON array of values for the query's `?` placeholders, e.g. `[42, "Alice"]`. Text that is not a JSON array fails with `INVALID_PARAMS`; blank means none. |
+| `operation` | Operation | SQL: `query` (SELECT) or `execute` (INSERT/UPDATE/DELETE, with `RETURNING` if you want the rows back). Redis: `get`, `set`, `del`, `lpush`, `rpush`, `lpop`, `rpop`, `hget`, `hset`. |
 | `key` | Key | Redis: key to operate on. |
 | `value` | Value | Redis: value for `set`, `lpush`, `rpush`, `hset`. |
 | `field` | Field | Redis: hash field name for `hget`/`hset`. |
 | `expire` | Expire | Redis `set`: optional TTL in seconds. |
 | `allow_raw_sql` | Allow Raw SQL | SQL only. Default off: a query with single-quoted string literals (double-quoted on MySQL) is refused, so values go through `?` and Params. Only an admin caller on a server can turn it on; the desktop app ignores it. |
-| `allow_local` | Allow Local | Postgres/MySQL/Redis only. Default off: connections to localhost, `127.0.0.1`, and private network ranges are blocked. Only turn this on for a database you're intentionally running yourself on this machine or LAN. |
+| `allow_local` | Allow Local | Postgres/MySQL/Redis only. Default off: connections to localhost, `127.0.0.1`, and private network ranges are blocked. Only turn this on for a database you're intentionally running yourself on this machine or LAN. The check covers the host the driver will actually dial, so `?host=`, `?hostaddr=` and `?port=` in a Postgres URL are judged too, and Unix sockets (`?socket=` on MySQL, a `/` host on Postgres) are refused. |
 
 **Ports:** In → Out, Error.
 
-**Output (SQL):** `rows`, `rows_affected`, `last_insert_id` (SQLite and MySQL populate this; Postgres returns 0, use `RETURNING` instead), `columns`. A Query returns at most 100,000 rows and fails past that (add a `LIMIT`). Postgres and MySQL decode integers, floats, booleans and text; any other column type (NUMERIC/DECIMAL, dates and times, UUID, JSON, binary, arrays) comes back as a placeholder string naming the type, with a log line, so cast it to text in the query (`price::text`, `CAST(price AS CHAR)`).
+**Output (SQL):** `rows`, `rows_affected`, `last_insert_id` (SQLite and MySQL populate this; Postgres returns 0, use `RETURNING` instead), `columns`. Execute returns the rows of a `RETURNING` clause in `rows` (Postgres, SQLite 3.35+, MariaDB 10.5+). A Query returns at most 100,000 rows or about 32 MiB of data and fails past either with `ROW_LIMIT_EXCEEDED`. The message says what to do: add a `LIMIT`, read the rows in pages across runs (`LIMIT` with `OFFSET`, or a key range), aggregate in SQL, or select fewer columns. The 32 MiB cap is fixed and has no setting. An Execute over either limit has already written, so it keeps what fits, drops the rest, sets `truncated` to `true` and logs `RESULT_TRUNCATED`. Postgres and MySQL decode integers, floats, booleans and text, plus these: NUMERIC/DECIMAL as an exact string (`"12345.6700"`, so no digits are lost), dates and times as ISO 8601 strings (`"2024-02-29"`, `"2024-02-29T13:14:15.5"`; Postgres `TIMESTAMPTZ` in UTC with a trailing `Z`; `"infinity"` and `"-infinity"` kept; a MySQL `TIME` can be negative or past 24 hours), UUID as a string, JSON and JSONB as the parsed value, and Postgres enums as their label. Any other column type (binary, arrays, intervals, `TIMETZ`, ranges) comes back as a placeholder string naming the type, with a log line, so cast it to text in the query (`price::text`, `CAST(price AS CHAR)`). `NaN` and infinite floats come back as the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, since JSON has no such numbers. Two result shapes lose data without failing, so each writes a log line: columns that share a name (`DUPLICATE_COLUMN`; each row keeps only the last one, so name them with `AS`) and integers beyond 2^53 (`PRECISION`; JavaScript rounds them, so cast the column to text).
 
-**Output (Redis):** `value`, `ok`, `deleted`, `list_length`.
+**Output (Redis):** `value`, `ok`, `deleted`, `list_length`. `get` and `hget` fail with `VALUE_TOO_LARGE` for a value over 32 MiB (they check its length first, so `hget` needs Redis 3.2 or later); `lpop` and `rpop` return the whole element. Key, Field and Value take a string, number or true/false; an array or object fails with `INVALID_VALUE` (or `INVALID_KEY`, `INVALID_FIELD`), so convert it to a JSON string first.
 
 **Gotcha:** the `query` field flatly rejects `{{...}}` expressions and fails the node instead of running. Values are inserted directly into the SQL string, so a numeric injection (`1 OR 1=1`) produces no quotes and can't be sanitized by pattern-matching. Use `?` placeholders in `query` and put the dynamic values in `params` instead, e.g. `query: "SELECT * FROM t WHERE id = ?"` with `params: ["{{HTTP Request.output.id}}"]`.
 
@@ -225,7 +226,7 @@ Upload, download, list, or delete objects in an S3-compatible object store: AWS 
 | `operation` | Operation | `upload`, `download`, `list`, `delete`, or `presign_url`. |
 | `provider` | Provider | `aws`, `r2`, or `minio`, in any letter case. Default `aws` when blank. Any other value fails with `UNKNOWN_PROVIDER`, which lists the valid ones. |
 | `access_key_id` | Access Key ID | |
-| `secret_access_key` | Secret Access Key | |
+| `secret_access_key` | Secret Access Key | Pick a saved credential or type it directly. |
 | `region` | Region | AWS region, e.g. `us-east-1` (default). For R2, use `auto`. Ignored for MinIO, use Endpoint instead. |
 | `endpoint` | Endpoint | Custom endpoint URL. Required for R2 (`https://ACCOUNT_ID.r2.cloudflarestorage.com`) and MinIO (`http://host:9000`). Must be empty for AWS: a value there fails with `ENDPOINT_NOT_SUPPORTED`. |
 | `bucket` | Bucket | Required for most operations. |
@@ -261,7 +262,7 @@ Upload video or image content to YouTube, Instagram, or TikTok.
 | `tags` | Tags | Comma-separated. YouTube only; empty entries are dropped. |
 | `privacy` | Privacy | Default `private`. YouTube: `public`, `private`, or `unlisted`. TikTok: `public_to_everyone`, `mutual_follow_friends`, `follower_of_creator`, or `self_only`. Any other value fails the node (it is never silently made private). Instagram ignores it. |
 | `client_id` | Client ID | OAuth client ID. Typed directly into the node. |
-| `client_secret` | Client Secret | OAuth client secret. Typed directly into the node. |
+| `client_secret` | Client Secret | OAuth client secret. Pick a saved credential or type it directly. |
 
 **Ports:** default (In → Out).
 
@@ -346,7 +347,7 @@ Read from or write to a spreadsheet via the Sheets API.
 | `value_input` | Value Input | Optional, `append_row` only. `RAW` (default) or `USER_ENTERED`; see below. |
 | `values` | Values | Required for `append_row`. Rows of cells as JSON text, e.g. `[["a","b"],["c","d"]]`; an expression that resolves to JSON text works too. A cell is text, a number, `true`/`false` or `null`. |
 | `client_id` | Client ID | Google OAuth client ID. Enables automatic token refresh; recommended. Entered directly on this node; not offered as a saved-credential picker field. |
-| `client_secret` | Client Secret | Google OAuth client secret. Entered directly on this node; not offered as a saved-credential picker field. |
+| `client_secret` | Client Secret | Google OAuth client secret. Pick a saved credential or type it directly. |
 | `api_key` | API Key | A pasted OAuth 2.0 access token instead of client ID/secret. Does not auto-refresh and expires after about an hour. Only used when Client ID/Secret aren't set. |
 
 **Ports:** default (In → Out).

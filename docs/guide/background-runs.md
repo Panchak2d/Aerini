@@ -83,11 +83,11 @@ The app notices a trigger change by comparing the canvas with the saved workflow
 
 Every run gets recorded, whether it started from Run Now, Schedule Run, Run on launch, or a live webhook request. There's no separate "background run log": open a workflow's output drawer and click its **History** tab to see all of them together, newest first, filterable to just successes or failures.
 
-Each entry records whether it succeeded, how long it took, and the full result, including every node's output and logs, the same detail you'd see from watching it run live. Aerini keeps the last 500 runs per workflow and quietly drops the oldest ones past that; there's currently no setting to change that number.
+Each entry records whether it succeeded, how long it took, and the full result, including every node's output and logs, the same detail you'd see from watching it run live. Aerini keeps the last 500 runs per workflow and quietly drops the oldest ones past that; there's currently no setting to change that number. A run whose result is larger than 32 MiB keeps its outcome and its smaller node outputs, and the largest node outputs are replaced by a note giving their original size; if the logs are what make it large, only the last 1,000 log entries are kept. The run you just watched still shows everything. Only the stored copy is cut down.
 
 Two extra things worth knowing:
 
-- **Replay** reruns a past entry using that exact run's recorded trigger data (the payload a Webhook received, or the timestamp a Schedule fired at), so you can test against a real historical case without waiting for it to happen again. Everything downstream of the trigger still executes live against today's workflow, so the result can differ if you've edited anything since.
+- **Replay** reruns a past entry using that exact run's recorded trigger data (the payload a Webhook received, or the timestamp a Schedule fired at), so you can test against a real historical case without waiting for it to happen again. Everything downstream of the trigger still executes live against today's workflow, so the result can differ if you've edited anything since. A run whose trigger output was too large to keep (see above) can't be replayed.
 - A run that never finished, because Aerini was force-quit or crashed mid-execution, shows up as **Interrupted** rather than a pass or fail, and can't be replayed since it has no recorded output.
 
 ## Unattended execution and dangerous nodes
@@ -99,6 +99,8 @@ A manual Run on a workflow containing Shell Command, Code, or Database shows a c
 Closing Aerini's window doesn't stop anything running in the background. The window just hides; Aerini keeps running from your system tray, and any active schedule or webhook listener keeps going with it.
 
 To actually stop everything, either turn off Run on launch and Stop each background job individually, or quit Aerini entirely from the tray icon's menu (**Quit Aerini**), which stops every background run cleanly before the app closes.
+
+On a Linux desktop with no system tray (GNOME without the AppIndicator extension, for example) there is no icon to bring a hidden window back, so closing the window quits Aerini instead. If a run is in flight or a schedule or webhook listener is active, the window minimizes and they keep going; Stop them from the Background Runs panel, then close the window again to quit.
 
 ## Beyond the desktop app
 

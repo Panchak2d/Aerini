@@ -7,7 +7,7 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
-use super::util::{cfg_u64_opt, drain_capped, kill_group_on_drop, scrub_url_in_error, FloodLimit, Keep, OUTPUT_CAP_BYTES, OUTPUT_FLOOD_BYTES};
+use super::util::{cfg_u64_opt, drain_capped, kill_tree_on_drop, scrub_url_in_error, withhold_server_env, FloodLimit, Keep, OUTPUT_CAP_BYTES, OUTPUT_FLOOD_BYTES};
 
 const MAX_TIMEOUT_SECS: u64 = 86_400;
 /// Redaction rescans its input several times, so only this much of the end of stderr is redacted.
@@ -78,7 +78,9 @@ impl Node for ShellExecNode {
         #[cfg(target_os = "windows")]
         let mut cmd = {
             let mut c = Command::new("cmd");
-            c.args(["/C", &command]);
+            // cmd.exe splits its own command line, so the command goes through verbatim inside
+            // the one quote pair that /S strips; `args` would escape inner quotes as \".
+            c.raw_arg("/S /C").raw_arg(format!("\"{}\"", command));
             c.kill_on_drop(true);
             c
         };
@@ -98,6 +100,8 @@ impl Node for ShellExecNode {
             cmd.current_dir(cwd);
         }
 
+        withhold_server_env(&mut cmd, &input.context.metadata);
+
         if let Some(env_obj) = input.input["env"].as_object() {
             for (k, v) in env_obj {
                 if let Some(v_str) = v.as_str() {
@@ -114,7 +118,7 @@ impl Node for ShellExecNode {
                 NodeError::unrecoverable("SPAWN_FAILED", e.to_string())
             ),
         };
-        let group_guard = kill_group_on_drop(child.id());
+        let group_guard = kill_tree_on_drop(&child);
 
         // Drained concurrently with wait(): a child that fills a pipe nobody reads blocks forever.
         let flood = FloodLimit::new(OUTPUT_FLOOD_BYTES);
@@ -197,7 +201,7 @@ impl Node for ShellExecNode {
                     NodeOutput::failure_with_logs(
                         NodeError::unrecoverable(
                             "COMMAND_FAILED",
-                            format!("Exit code {}: {}", exit_code, failure_stderr(&stderr)),
+                            failure_message(exit_code, &stdout, &stderr),
                         ),
                         logs,
                     )
@@ -246,6 +250,23 @@ pub(super) fn failure_stderr(stderr: &str) -> String {
     } else {
         shown.to_string()
     }
+}
+
+/// The `COMMAND_FAILED` message. Many tools report errors on stdout, and some
+/// (`grep`, `test`) exit non-zero with no output at all, so stdout fills in
+/// when stderr is blank rather than leaving the message empty.
+fn failure_message(exit_code: i32, stdout: &str, stderr: &str) -> String {
+    if !stderr.trim().is_empty() {
+        return format!("Exit code {}: {}", exit_code, failure_stderr(stderr));
+    }
+    if !stdout.trim().is_empty() {
+        return format!(
+            "Exit code {} (no stderr; end of stdout): {}",
+            exit_code,
+            failure_stderr(stdout)
+        );
+    }
+    format!("Exit code {} (the command printed no output)", exit_code)
 }
 
 /// `redact_text` for run history, truncated to 500 chars.
@@ -651,7 +672,7 @@ fn redact_env_assignments(cmd: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn shell_input(command: &str, timeout_secs: u64) -> NodeInput {
         NodeInput {
             node_id: "n".to_string(),
@@ -727,6 +748,48 @@ mod tests {
         assert!(!err.recoverable, "a timed-out command must not be retried");
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn double_quotes_in_a_command_reach_cmd_unescaped() {
+        let out = ShellExecNode.execute(shell_input(r#"echo "a b""#, 10)).await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(out.output.unwrap()["stdout"], "\"a b\"\r\n");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "needs Windows with PowerShell"]
+    async fn dropping_shell_node_future_kills_descendants_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("bg.pid");
+        let command = format!(
+            r#"powershell -NoProfile -Command "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -WindowStyle Hidden; Set-Content -Path '{}' -Value $p.Id; Start-Sleep -Seconds 60""#,
+            pid_file.display()
+        );
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            ShellExecNode.execute(shell_input(&command, 60)),
+        )
+        .await;
+        assert!(outcome.is_err(), "command should still be running when the future is dropped");
+
+        let pid = std::fs::read_to_string(&pid_file).expect("pid file written").trim().to_string();
+        let mut gone = false;
+        for _ in 0..40 {
+            let listing = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .output()
+                .unwrap();
+            if !String::from_utf8_lossy(&listing.stdout).contains(&pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).output();
+        assert!(gone, "descendant survived the node future being dropped");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_of_zero_is_raised_to_one_second() {
@@ -747,6 +810,17 @@ mod tests {
         let o = out.output.unwrap();
         assert_eq!(o["stdout"].as_str().unwrap().len(), OUTPUT_CAP_BYTES);
         assert_eq!(o["truncated"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_does_not_inherit_aerini_variables_unless_allowed() {
+        std::env::set_var("AERINI_CRED_SHELL_SCRUB_TEST", "s3cret");
+        std::env::set_var("AERINI_SHELL_SCRUB_ALLOWED", "ok");
+        let mut input = shell_input("echo \"[${AERINI_CRED_SHELL_SCRUB_TEST-}][${AERINI_SHELL_SCRUB_ALLOWED-}]\"", 10);
+        input.context.metadata.insert("__allowed_env_vars".into(), json!(["AERINI_SHELL_SCRUB_ALLOWED"]));
+        let out = ShellExecNode.execute(input).await.output.expect("command output");
+        assert_eq!(out["stdout"].as_str().unwrap().trim(), "[][ok]");
     }
 
     #[cfg(unix)]
@@ -772,6 +846,24 @@ mod tests {
         assert!(err.message.len() < 5_000, "len {}", err.message.len());
         assert!(err.message.contains("[earlier output omitted]"));
         assert!(err.message.trim_end().ends_with("real error"), "got tail: {}", &err.message[err.message.len() - 40..]);
+    }
+
+    #[test]
+    fn failure_message_falls_back_to_stdout_then_to_a_no_output_note() {
+        let from_stderr = failure_message(2, "ignored", "boom\n");
+        assert!(from_stderr.starts_with("Exit code 2: boom"), "got: {from_stderr}");
+        assert!(!from_stderr.contains("ignored"), "got: {from_stderr}");
+        let from_stdout = failure_message(1, "bad input\n", "  \n");
+        assert!(from_stdout.starts_with("Exit code 1 (no stderr; end of stdout): "), "got: {from_stdout}");
+        assert!(from_stdout.ends_with("bad input\n"), "got: {from_stdout}");
+        assert_eq!(failure_message(1, "", ""), "Exit code 1 (the command printed no output)");
+    }
+
+    #[test]
+    fn failure_message_redacts_secrets_echoed_on_stdout() {
+        let msg = failure_message(1, "cannot reach postgres://app:hunter2@db/prod", "");
+        assert!(!msg.contains("hunter2"), "got: {msg}");
+        assert!(msg.contains("[REDACTED]"), "got: {msg}");
     }
 
     #[cfg(unix)]

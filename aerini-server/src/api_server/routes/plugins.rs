@@ -13,7 +13,7 @@ use aerini_engine::nodes::register_builtins;
 use aerini_engine::plugin_loader::{load_plugins, PluginLoadReport};
 
 use crate::token_store::TokenRecord;
-use super::state::{ApiState, require_admin};
+use super::state::{ApiState, internal_error, require_admin};
 
 /// POST /api/plugins/reload — rebuilds the node registry from scratch
 /// (built-ins + every `.wasm` in the configured `--plugin-dir`) and swaps
@@ -46,19 +46,28 @@ pub async fn reload_plugins(
     // independent scan+compile+swap sequences against each other.
     let _guard = s.reload_lock.lock().await;
 
-    let mut new_registry = NodeRegistry::new();
-    register_builtins(&mut new_registry, &s.data_dir, Some(std::sync::Arc::clone(&s.db)));
+    // Compiling plugins is CPU-bound and blocking, so it runs on the blocking
+    // pool; run inline it would stall every other request on this worker.
+    let data_dir   = std::sync::Arc::clone(&s.data_dir);
+    let db         = std::sync::Arc::clone(&s.db);
+    let plugin_dir = std::sync::Arc::clone(plugin_dir);
+    let built = tokio::task::spawn_blocking(move || {
+        let mut new_registry = NodeRegistry::new();
+        register_builtins(&mut new_registry, &data_dir, Some(db));
 
-    // Matches `api_server/mod.rs`'s own startup behavior and the desktop
-    // `list_installed_plugins` command's convention: a plugin_dir that
-    // doesn't currently exist on disk is a warning, not a hard error — the
-    // server still comes back up with just built-ins rather than refusing
-    // the reload outright.
-    let report = if !plugin_dir.exists() {
-        tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", plugin_dir);
-        PluginLoadReport::default()
-    } else {
-        load_plugins(&mut new_registry, plugin_dir)
+        // A plugin_dir that doesn't exist on disk is a warning, not an error:
+        // the server comes back with just the built-ins, as it does at startup.
+        let report = if !plugin_dir.exists() {
+            tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", plugin_dir);
+            PluginLoadReport::default()
+        } else {
+            load_plugins(&mut new_registry, &plugin_dir)
+        };
+        (new_registry, report)
+    }).await;
+    let (new_registry, report) = match built {
+        Ok(pair) => pair,
+        Err(e)   => return internal_error("reload_plugins: task failed", e).into_response(),
     };
 
     s.registry.reload(new_registry);

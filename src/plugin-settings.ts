@@ -1,5 +1,5 @@
 import {
-  getSetting, setSetting, pickFolderDialog, pickPluginFileDialog,
+  getSetting, choosePluginDir, pickPluginFileDialog,
   listInstalledPlugins, installPluginFromPath, removePlugin, reloadPlugins,
   installPluginPackFromPath, removePluginPack,
 } from "./ipc/workflow";
@@ -146,12 +146,14 @@ async function refreshPlugins(): Promise<void> {
 }
 
 async function onBrowse(): Promise<void> {
-  const path = await pickFolderDialog().catch(() => null);
-  if (!path) return;
   const btn = document.getElementById("btn-plugin-dir-browse") as HTMLButtonElement | null;
   if (btn) btn.disabled = true;
   try {
-    await setSetting("plugin_dir", path);
+    const path = await choosePluginDir().catch((err: unknown) => {
+      _toast(`Could not set the plugin folder: ${err}`, "error");
+      return null;
+    });
+    if (!path) return;
     _pluginDir = path;
     renderDirPath();
     try {

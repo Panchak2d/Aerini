@@ -12,7 +12,7 @@ Click **Plugins** in the sidebar. It's its own panel, not tucked inside Settings
 
 ## Setting a plugin directory
 
-Before you can install anything, Aerini needs a folder to keep plugin files in. Click **Browse** next to **Plugin directory** and pick or create one. This is a one-time setup step; every plugin you install afterward lives in this same folder, and both **Install .wasm** and drag-and-drop install (below) stay disabled until it's set.
+Before you can install anything, Aerini needs a folder to keep plugin files in. Click **Browse** next to **Plugin directory** and pick or create one. Aerini only accepts a folder chosen this way; the setting cannot be changed from anywhere else. This is a one-time setup step; every plugin you install afterward lives in this same folder, and both **Install .wasm** and drag-and-drop install (below) stay disabled until it's set.
 
 ## Installing a plugin
 
@@ -21,7 +21,7 @@ Two ways to install a `.wasm` file (a single node) or an `.aerinipkg` file (a bu
 - Click **Install .wasm** and pick the file from the dialog that opens.
 - Drag the file straight onto the Aerini window. Aerini asks you to confirm ("Install plugin \"...\"? Only install plugins from sources you trust.") before installing it, the same caution you'd want before running anyone else's code.
 
-Either way, Aerini installs the file into your plugin directory and reloads the node registry immediately, so the new node is available on the canvas without restarting the app. If installing over an existing plugin with the same identity, Aerini recognizes that and asks whether you want to update it rather than silently overwriting or refusing.
+Either way, Aerini copies the file into your plugin directory (and its signature file, if it has one); each file is written whole or not at all, so a full disk or a closed app never leaves a truncated plugin. If an install is interrupted between the two files, the plugin and its signature file no longer match and Aerini refuses to load it; install it again and reloads the node registry immediately, so the new node is available on the canvas without restarting the app. If installing over an existing plugin with the same identity, Aerini recognizes that and asks whether you want to update it rather than silently overwriting or refusing.
 
 An `.aerinipkg` installs as a group: its member nodes appear together under one heading in the installed list, with a single **Remove pack** action instead of removing each node individually.
 

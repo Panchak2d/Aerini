@@ -312,7 +312,7 @@ impl SchedulerDaemon {
         port_override: Option<u16>,
         always_on:     Option<bool>,
     ) -> Result<(), SchedulerError> {
-        if self.jobs.lock().expect("scheduler jobs mutex poisoned").contains_key(workflow_id) {
+        if self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(workflow_id) {
             return Err(SchedulerError::AlreadyRunning);
         }
 
@@ -374,11 +374,11 @@ impl SchedulerDaemon {
     }
 
     pub fn stop_job(&self, workflow_id: &str) -> Result<(), String> {
-        if let Some(handle) = self.jobs.lock().expect("scheduler jobs mutex poisoned").remove(workflow_id) {
+        if let Some(handle) = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(workflow_id) {
             handle.abort();
         }
         {
-            let mut ports = self.webhook_ports.lock().expect("scheduler webhook_ports mutex poisoned");
+            let mut ports = self.webhook_ports.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ports.retain(|_, v| v != workflow_id);
         }
         self.db.scheduler_set_status(workflow_id, "stopped")?;
@@ -403,7 +403,7 @@ impl SchedulerDaemon {
 
     pub fn stop_all(&self) {
         let workflow_ids: Vec<String> = {
-            let mut jobs = self.jobs.lock().expect("scheduler jobs mutex poisoned");
+            let mut jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let ids: Vec<String> = jobs.keys().cloned().collect();
             for (_, handle) in jobs.drain() {
                 handle.abort();
@@ -411,7 +411,7 @@ impl SchedulerDaemon {
             ids
         };
         {
-            let mut ports = self.webhook_ports.lock().expect("scheduler webhook_ports mutex poisoned");
+            let mut ports = self.webhook_ports.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ports.clear();
         }
         for wf_id in &workflow_ids {
@@ -567,13 +567,19 @@ impl SchedulerDaemon {
         }
 
         let exec_lock = {
-            let mut locks = self.exec_locks.lock().expect("scheduler exec_locks mutex poisoned");
+            let mut locks = self.exec_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(locks.entry(wf_id.clone()).or_insert_with(||
                 Arc::new(tokio::sync::Mutex::new(()))
             ))
         };
 
+        let panic_cleanup = PanicCleanup {
+            jobs:  Arc::clone(&jobs_map),
+            ports: Arc::clone(&ports_map),
+            wf_id: wf_id.clone(),
+        };
         let join_handle = Arc::new(rt.spawn(async move {
+            let _panic_cleanup = panic_cleanup;
             runner::run_job_loop(
                 wf_id.clone(), trigger, db, registry, cred_store,
                 event_sink, exec_lock, fire_immediately, env_allowlist,
@@ -582,10 +588,10 @@ impl SchedulerDaemon {
                 server_max_duration_secs, file_sandbox_dir, plugin_dir, run_semaphore,
                 shutting_down, active_runs,
             ).await;
-            jobs_map.lock().expect("scheduler jobs mutex poisoned").remove(&wf_id);
+            jobs_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&wf_id);
         }));
 
-        self.jobs.lock().expect("scheduler jobs mutex poisoned").insert(workflow_id.to_string(), join_handle);
+        self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(workflow_id.to_string(), join_handle);
         Ok(())
     }
 
@@ -656,6 +662,32 @@ impl SchedulerDaemon {
     }
 }
 
+/// Frees a job's slot and webhook port when its task panics. The cleanup after
+/// `run_job_loop` is skipped by a panic, which would leave the workflow
+/// reporting `AlreadyRunning` and its port claimed until the process restarts.
+/// Does nothing on a normal finish or an abort: `stop_job` and `stop_all` have
+/// already removed the entry, and a restarted job may now own it.
+struct PanicCleanup {
+    jobs:  Arc<Mutex<HashMap<String, Arc<tokio::task::JoinHandle<()>>>>>,
+    ports: Arc<Mutex<HashMap<u16, String>>>,
+    wf_id: String,
+}
+
+impl Drop for PanicCleanup {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        tracing::error!(
+            workflow_id = %self.wf_id,
+            "scheduler: job task panicked; releasing its slot and webhook port"
+        );
+        self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.wf_id);
+        self.ports.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, holder| *holder != self.wf_id);
+    }
+}
+
 /// Checks the webhook port registry for a conflict with a workflow other
 /// than `workflow_id`. A port already held by `workflow_id` itself is not a
 /// conflict — re-claiming its own port (e.g. on re-arm) is expected. Used by
@@ -668,7 +700,7 @@ fn check_webhook_port(
     workflow_id: &str,
     port:        u16,
 ) -> Result<(), SchedulerError> {
-    let ports = ports.lock().expect("scheduler webhook_ports mutex poisoned");
+    let ports = ports.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(holder_id) = ports.get(&port) {
         if holder_id != workflow_id {
             let holder_name = db.scheduler_get(holder_id)
@@ -729,7 +761,7 @@ fn claim_webhook_port(
     workflow_id: &str,
     port:        u16,
 ) -> Result<(), SchedulerError> {
-    let mut ports = ports.lock().expect("scheduler webhook_ports mutex poisoned");
+    let mut ports = ports.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(holder_id) = ports.get(&port) {
         if holder_id != workflow_id {
             let holder_name = db.scheduler_get(holder_id)
@@ -831,6 +863,46 @@ fn delta_from_secs(secs: u64) -> Option<chrono::Duration> {
 mod tests {
     use super::*;
 
+    type JobMap  = Arc<Mutex<HashMap<String, Arc<tokio::task::JoinHandle<()>>>>>;
+    type PortMap = Arc<Mutex<HashMap<u16, String>>>;
+
+    fn guard_fixture() -> (PanicCleanup, JobMap, PortMap, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let jobs = Arc::new(Mutex::new(HashMap::new()));
+        jobs.lock().unwrap().insert("wf".to_string(), Arc::new(rt.spawn(async {})));
+        let ports = Arc::new(Mutex::new(HashMap::from([
+            (9000u16, "wf".to_string()),
+            (9001u16, "other".to_string()),
+        ])));
+        let guard = PanicCleanup {
+            jobs:  Arc::clone(&jobs),
+            ports: Arc::clone(&ports),
+            wf_id: "wf".to_string(),
+        };
+        (guard, jobs, ports, rt)
+    }
+
+    #[test]
+    fn panicking_job_task_releases_its_slot_and_port_only() {
+        let (guard, jobs, ports, _rt) = guard_fixture();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            panic!("job task panic");
+        }));
+        assert!(jobs.lock().unwrap().is_empty());
+        let ports = ports.lock().unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports.get(&9001).map(String::as_str), Some("other"));
+    }
+
+    #[test]
+    fn job_task_finishing_without_panic_leaves_slot_and_port_alone() {
+        let (guard, jobs, ports, _rt) = guard_fixture();
+        drop(guard);
+        assert_eq!(jobs.lock().unwrap().len(), 1);
+        assert_eq!(ports.lock().unwrap().len(), 2);
+    }
+
     struct MockDb {
         rows: HashMap<String, ScheduledJobRow>,
     }
@@ -877,7 +949,7 @@ mod tests {
     struct NoCreds;
     #[async_trait::async_trait]
     impl CredentialResolver for NoCreds {
-        async fn resolve(&self, _id: &str) -> Result<String, crate::executor::CredentialResolveError> {
+        async fn resolve(&self, _id: &str) -> Result<crate::executor::SecretString, crate::executor::CredentialResolveError> {
             Err(crate::executor::CredentialResolveError::NotFound)
         }
     }

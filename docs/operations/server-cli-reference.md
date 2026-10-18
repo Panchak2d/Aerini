@@ -1,6 +1,6 @@
 # Server CLI Reference
 
-Every flag `aerini-server` accepts, for both the `serve` and `api` subcommands, plus the control subcommands (`list`, `stop`, `start`, `restart`, `status`, `tokens`). For what each mode is for and how to get one running, see [Server Deployment](server-deploy.md). For the reasoning behind the security-relevant defaults, see [Security](../guide/security.md).
+Every flag `aerini-server` accepts, for both the `serve` and `api` subcommands, plus the control subcommands (`list`, `stop`, `start`, `restart`, `status`, `tokens`) and `restore-key`. For what each mode is for and how to get one running, see [Server Deployment](server-deploy.md). For the reasoning behind the security-relevant defaults, see [Security](../guide/security.md).
 
 The whole binary accepts `--version`; every subcommand accepts `--help` for this same information printed from the binary itself.
 
@@ -12,13 +12,13 @@ Runs one workflow exported from the desktop app (**Export → Export for Server*
 |---|---|---|---|
 | `--config <path>` | | `aerini-server.json` | Path to the config file produced by the export. |
 | `--port <port>` | | none | Overrides the status page port set in `aerini-server.json`. Leave unset to use that file's own port. |
-| `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Interface the status page binds to. Set to `0.0.0.0` to expose it beyond localhost. |
+| `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Interface the status page binds to. Set to `0.0.0.0` to expose it beyond localhost. An IPv6 address may be written with or without brackets (`::1` or `[::1]`). |
 | `--trusted-proxy-count <n>` | `AERINI_TRUSTED_PROXY_COUNT` | `0` | Reverse-proxy hops to trust when reading `X-Forwarded-For`. Must match your proxy topology exactly, too high a value lets a client spoof its IP and dodge per-IP rate limiting. |
 | `--allow-shell` | | `false` | Enables Shell Command nodes. If the workflow has one and this is left unset, the server prints a startup warning instead of refusing to start. |
 | `--allow-code` | | `false` | Enables Code (JS) nodes. Same startup-warning behavior as `--allow-shell` if the workflow has one and this is unset. |
 | `--allow-database` | | `false` | Enables Database nodes (PostgreSQL, MySQL, SQLite, Redis). Same startup-warning behavior if the workflow has one and this is unset. |
-| `--allow-legacy-run-secret` | | `false` | Lets the server start when the config's `run_secret` is a legacy BLAKE3 hash instead of argon2id. Without it, a legacy hash makes the server refuse to start. `serve`-only, since only `serve` has a `run_secret` at all. |
-| `--file-sandbox-dir <dir>` | | none | Restricts File and Save to Folder node reads and writes to this directory tree. If the workflow has a File node and this is left unset, the server prints a startup warning and File nodes can reach any path the process can. `api` mode handles the unset case differently, see below. |
+| `--allow-legacy-run-secret` | | `false` | Lets the server start when the config's `run_secret` is a legacy BLAKE3 hash, or a plain-text secret from an even older export, instead of argon2id. Without it, either makes the server refuse to start. With it, the server logs a warning saying which format it found. `serve`-only, since only `serve` has a `run_secret` at all. |
+| `--file-sandbox-dir <dir>` | | none | Restricts File and Save to Folder node reads and writes, and the paths a `.wasm` plugin may watch with `fs-watch`, to this directory tree. If the workflow has a File node and this is left unset, the server prints a startup warning and File nodes can reach any path the process can. `api` mode handles the unset case differently, see below. |
 | `--i-acknowledge-partial-sandbox` | | `false` | `serve`-only. Required to start with `--allow-code --code-sandbox` on macOS, see [Platform behavior of `--code-sandbox`](#platform-behavior-of---code-sandbox) below. |
 | `--ssrf-firewall-acknowledged` | | `false` | Suppresses the startup warning about the [SSRF](../glossary.md#ssrf) remaining DNS-rebinding gap (Postgres and MySQL connections) when bound to a non-loopback address. Pass it only once a host-level egress firewall is actually in place. |
 | `--parallel-execution` | | `false` | Runs independent workflow branches concurrently instead of sequentially. |
@@ -34,20 +34,20 @@ Runs the multi-workflow REST API, with bearer-token auth and no export package o
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--token <token>` | `AERINI_TOKEN` | auto-generated | Bearer token for API auth. If you set one, it must be at least 32 characters, the server exits with an error otherwise. Left unset on a first run (no tokens exist yet), the server generates a 43-character token, prints it once to stderr, and grants it all three [scopes](../glossary.md#scoped-token) (`read`, `write`, `admin`). On later restarts it keeps the tokens already stored and prints nothing, so save the first one. |
+| `--token <token>` | `AERINI_TOKEN` | auto-generated | Bearer token for API auth. If you set one, it must be at least 32 characters, the server exits with an error otherwise. Left unset on a first run (no tokens exist yet), the server generates a 43-character token, prints it once to stderr, and grants it all three [scopes](../glossary.md#scoped-token) (`read`, `write`, `admin`). On later restarts it keeps the tokens already stored and prints nothing, so save the first one. A `--token` the server doesn't already know is added as a new admin token and the server warns that the older tokens stay active; revoke them with `tokens revoke`. A `--token` that was revoked stops the server with an error. The server also refuses to start when no unrevoked, unexpired admin token exists: start it once with `--token <new token>` to add one. |
 | `--port <port>` | `AERINI_PORT` | `7700` | Port to listen on. Unlike `serve`'s `--port`, this one is env-backed and always has a default. |
-| `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Directory for the SQLite database and the token/credential key file. `~` or a leading `~/` expands to your home directory (`$HOME`, or `USERPROFILE` on Windows when `HOME` is unset); `~name/...` is used as written. The server exits with an error if it needs a home directory and can't find one. |
+| `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Directory for the SQLite database and the token/credential key file. `~` or a leading `~/` expands to your home directory (`$HOME`, or `USERPROFILE` on Windows when `HOME` is unset); `~name/...` is used as written. The server exits with an error if it needs a home directory and can't find one. A folder the server creates is owner-only (`0700` on Unix); an existing folder keeps its permissions, and the server logs a warning at start-up when group or other users can access it. |
 | `--allow-origin <list>` | | none | Comma-separated additional origins allowed to call the API. Localhost origins (`http://localhost[:port]`, `http://127.0.0.1[:port]`, `http://[::1][:port]`) are always allowed regardless of this flag. |
 | `--allow-env-vars <list>` | | none | Comma-separated environment variable names a workflow may read via `{{$env.VAR}}`. Anything not listed resolves to an empty string. |
-| `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Same as `serve`'s `--bind`. |
-| `--file-sandbox-dir <dir>` | | `<data-dir>/files` | Restricts File and Save to Folder node I/O to this directory. Unlike `serve`, leaving this unset doesn't just warn: the server creates `<data-dir>/files` and uses it as the sandbox automatically. |
+| `--bind <address>` | `AERINI_BIND` | `127.0.0.1` | Same as `serve`'s `--bind`, including IPv6 addresses with or without brackets. |
+| `--file-sandbox-dir <dir>` | | `<data-dir>/files` | Restricts File and Save to Folder node I/O, and the paths a `.wasm` plugin may watch with `fs-watch`, to this directory. Unlike `serve`, leaving this unset doesn't just warn: the server creates `<data-dir>/files` and uses it as the sandbox automatically. |
 | `--trusted-proxy-count <n>` | `AERINI_TRUSTED_PROXY_COUNT` | `0` | Same as `serve`'s. |
 | `--allow-shell` | | `false` | Enables Shell Command nodes. Unlike `serve`, this prints its startup warning banner whenever the flag itself is passed, regardless of whether any current workflow has a Shell Command node yet, since any token with `write` scope can create one later. |
 | `--allow-code` | | `false` | Enables Code (JS) nodes. Same always-on-when-passed warning pattern as `--allow-shell`. |
 | `--allow-database` | | `false` | Enables Database nodes. Same always-on-when-passed warning pattern. |
 | `--code-sandbox` | | `false` | Same as `serve`'s. See [Platform behavior of `--code-sandbox`](#platform-behavior-of---code-sandbox) below. |
 | `--ssrf-firewall-acknowledged` | | `false` | Same as `serve`'s. |
-| `--keychain` | | `false` | Backs the credential/token encryption key with the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of a plain file. Falls back to the file automatically, with a warning, if the keychain isn't available. |
+| `--keychain` | | `false` | Backs the credential/token encryption key with the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of a plain file. The keychain entry belongs to `--data-dir`, so servers with different data directories never share a key. Falls back to the file automatically, with a warning, if the keychain isn't available, and always on a platform where the keychain library has no persistent store. |
 | `--parallel-execution` | | `false` | Same as `serve`'s. |
 | `--max-concurrent-nodes <n>` | | `8` | Same as `serve`'s, same clamp-to-1 floor. |
 | `--max-workflow-duration-secs <secs>` | | none (no limit) | Same as `serve`'s: a ceiling combined with the workflow's own setting via `min()`, same 10 to 86400 clamp. |
@@ -79,8 +79,8 @@ Both subcommands log at `info` by default. Set `RUST_LOG` to change the level or
 |---|---|---|---|
 | `list` | | `read` | Lists every scheduled workflow. |
 | `stop <workflow>` | workflow name or ID | `read` + `write` | `read` to resolve the name/ID, `write` to actually stop it. Partial matches are accepted; an ambiguous match prints every candidate instead of guessing. |
-| `start <workflow>` | workflow name or ID | `read` + `write` | Same matching rule as `stop`. |
-| `restart <workflow>` | workflow name or ID | `read` + `write` | Calls stop then start against the same REST endpoints a scoped token would use. |
+| `start <workflow>` | workflow name or ID | `read` + `write` | Same matching rule as `stop`. Keeps the workflow's always-on setting. |
+| `restart <workflow>` | workflow name or ID | `read` + `write` | Calls stop then start against the same REST endpoints a scoped token would use, and keeps the workflow's always-on setting. |
 | `status` | | `read` | Identical output to `list`. |
 
 Each of the five accepts:
@@ -101,6 +101,16 @@ Manages scoped API tokens against a running `api`-mode server. Every `tokens` ac
 | `tokens revoke <token_id>` | `token_id` (positional, from `tokens list`), `--server`, `--token` | Fails with an error if `token_id` matches the token currently authenticating the call, you can't revoke your own in-use token. |
 
 `--server` and `--token` behave the same way here as for `list`/`stop`/`start`/`restart`/`status` above.
+
+## `restore-key`
+
+Puts a backed-up credential encryption key back into an `api` data folder. Stop the server first. The key is the value shown by **Backup Encryption Key** in the desktop app, or the contents of a saved `aerini.key`. It is checked against the saved credentials before anything is written; a key that does not decrypt them changes nothing.
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `--data-dir <dir>` | `AERINI_DATA_DIR` | `~/.aerini-server` | Data folder holding `credentials.db`. |
+| `--key-file <path>` | | read from standard input | File holding the key, at most 1 KiB. A key typed at a terminal is refused, since it would stay on screen; pipe it in or use a file. |
+| `--keychain` | | off | Restore into the OS keychain, as `api --keychain` stores it, and remove `aerini.key`. |
 
 ## What's next
 

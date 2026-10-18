@@ -9,7 +9,7 @@ import { getScheduledJobs } from "./ipc/workflow";
 import { setWorkflowRunning } from "./workflow-manager";
 import { getBgJobs, updateBgJobStoreFromEvent, hydrateBgJobsFromScheduler } from "./run-manager";
 import { saveRunToHistory } from "./run-history";
-import { isTauri, escapeHtml } from "./utils";
+import { isTauri, escapeHtml, copyWithButtonFeedback } from "./utils";
 import { NODE_IDS } from "./node-ids";
 import { findTriggerNodeTypeId } from "./canvas/node-registry";
 import { getCurrentZone } from "./sidebar-sections";
@@ -120,7 +120,7 @@ export async function bindSchedulerEvents(
           </div>`;
           const copyBtn = drawerContent.querySelector<HTMLButtonElement>("#sched-error-copy-btn");
           copyBtn?.addEventListener("click", () => {
-            navigator.clipboard.writeText(errMsg).then(() => { copyBtn.textContent = "Copied"; });
+            void copyWithButtonFeedback(copyBtn, errMsg);
           });
         }
       }

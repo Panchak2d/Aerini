@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
 use crate::executor::{CredentialResolver, WorkflowExecutor};
@@ -447,7 +446,7 @@ pub(super) async fn run_job_loop(
                     }
                 };
 
-                let (handle, mut rx, next_fire) = match loader.start_trigger(&plugin_dir, &type_id, &config).await {
+                let (handle, mut rx, next_fire) = match loader.start_trigger(&plugin_dir, &type_id, &config, file_sandbox_dir.as_deref().map(|dir| dir.as_path())).await {
                     Ok(v)  => v,
                     Err(e) => {
                         let msg = format!("Plugin trigger \"{}\": {}", type_id, e);
@@ -1293,8 +1292,8 @@ async fn parse_http_request(
             _ => break,
         };
         if line.trim().is_empty() { break; }
-        if let Some((k, v)) = line.trim().split_once(": ") {
-            let k_lower = k.to_lowercase();
+        if let Some((k, v)) = line.trim().split_once(':') {
+            let k_lower = k.trim().to_lowercase();
             if k_lower == "content-length" {
                 content_length = v.trim().parse().ok();
             }
@@ -1307,8 +1306,7 @@ async fn parse_http_request(
         let provided = headers.get("x-webhook-secret")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let secrets_match = provided.as_bytes().ct_eq(secret.as_bytes()).unwrap_u8() == 1;
-        if !secrets_match {
+        if !crate::nodes::webhook::credential_valid(secret, expected_path, provided) {
             return Err(format!("HTTP/1.1 401 Unauthorized\r\n{CORS_HEADER_LINES}\r\n"));
         }
     }
@@ -1329,8 +1327,12 @@ async fn parse_http_request(
         return Err(format!("HTTP/1.1 413 Payload Too Large\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n"));
     }
 
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && reader.read_exact(&mut body_bytes).await.is_err() {
+    // Grown as bytes arrive instead of sized to the declared length up front:
+    // a client that declares 1 MB and sends nothing would otherwise pin 1 MB
+    // per open connection for the whole request timeout.
+    let mut body_bytes = Vec::with_capacity(content_length.min(16 * 1024));
+    let read = (&mut reader).take(content_length as u64).read_to_end(&mut body_bytes).await;
+    if read.is_err() || body_bytes.len() != content_length {
         return Err(format!("HTTP/1.1 400 Bad Request\r\n{CORS_HEADER_LINES}\r\n"));
     }
     let body_str   = String::from_utf8_lossy(&body_bytes).to_string();
@@ -1365,7 +1367,7 @@ mod integration_tests {
     struct NoopCredentials;
     #[async_trait::async_trait]
     impl CredentialResolver for NoopCredentials {
-        async fn resolve(&self, _id: &str) -> Result<String, CredentialResolveError> {
+        async fn resolve(&self, _id: &str) -> Result<crate::executor::SecretString, CredentialResolveError> {
             Err(CredentialResolveError::NotFound)
         }
     }
@@ -2261,5 +2263,63 @@ mod restart_backoff_tests {
         assert!(!gate.should_log("boom", t0 + secs(299)));
         assert!(gate.should_log("other", t0 + secs(299)));
         assert!(gate.should_log("boom", t0 + secs(300)));
+    }
+}
+
+#[cfg(test)]
+mod request_parsing_tests {
+    use super::parse_http_request;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn parse(raw: &'static [u8], secret: &str) -> Result<HashMap<String, Value>, String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(raw).await.unwrap();
+            c.shutdown().await.unwrap();
+            c
+        });
+        let (mut server, _) = listener.accept().await.unwrap();
+        let out = parse_http_request(&mut server, "/hook", "POST", secret).await;
+        let _ = client.await;
+        out
+    }
+
+    #[tokio::test]
+    async fn headers_without_a_space_after_the_colon_are_honoured() {
+        let vars = parse(
+            b"POST /hook HTTP/1.1\r\nX-Webhook-Secret:s3\r\nContent-Length:2\r\n\r\n{}",
+            "s3",
+        )
+        .await
+        .expect("a valid request with compact headers is accepted");
+        assert_eq!(vars["body"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn signed_token_for_the_listener_path_is_accepted_and_a_wrong_path_token_is_not() {
+        let good = crate::nodes::webhook::mint_signed_token("s3", "/hook", 60);
+        let raw = format!("POST /hook HTTP/1.1\r\nX-Webhook-Secret: {good}\r\nContent-Length: 2\r\n\r\n{{}}");
+        let bytes: &'static [u8] = Box::leak(raw.into_bytes().into_boxed_slice());
+        let ok = parse(bytes, "s3").await;
+        assert!(ok.is_ok(), "got: {ok:?}");
+
+        let wrong = crate::nodes::webhook::mint_signed_token("s3", "/elsewhere", 60);
+        let raw = format!("POST /hook HTTP/1.1\r\nX-Webhook-Secret: {wrong}\r\nContent-Length: 2\r\n\r\n{{}}");
+        let bytes: &'static [u8] = Box::leak(raw.into_bytes().into_boxed_slice());
+        let err = parse(bytes, "s3").await.unwrap_err();
+        assert!(err.starts_with("HTTP/1.1 401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn body_shorter_than_declared_length_is_a_bad_request() {
+        let err = parse(b"POST /hook HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc", "")
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("HTTP/1.1 400"), "got: {err}");
     }
 }
