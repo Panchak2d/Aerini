@@ -10,6 +10,7 @@ mod sqlite;
 mod postgres;
 mod mysql;
 mod redis;
+mod types;
 
 pub use pool::start_pool_eviction_task;
 
@@ -40,7 +41,11 @@ impl Node for DatabaseNode {
                 },
                 "connection_url": {
                     "type": "string",
-                    "description": "Postgres / MySQL / Redis. Full connection URL including credentials. Examples: postgres://user:pass@host/db  mysql://user:pass@host/db  redis://host:6379"
+                    "description": "Postgres / MySQL / Redis. Connection URL. Examples: postgres://user@host/db  mysql://user@host/db  redis://host:6379. Leave the password out and use Password below to keep it out of the workflow file; a password written in the URL still works."
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Postgres / MySQL / Redis. Password for connection_url. Select a saved credential; it replaces any password written in the URL."
                 },
                 "query": {
                     "type": "string",
@@ -86,10 +91,11 @@ impl Node for DatabaseNode {
         json!({
             "type": "object",
             "properties": {
-                "rows":           { "type": "array",            "description": "SQL SELECT rows." },
+                "rows":           { "type": "array",            "description": "SQL rows: a SELECT's, or an Execute statement's RETURNING rows." },
                 "rows_affected":  { "type": "number",           "description": "SQL execute: rows changed." },
                 "last_insert_id": { "type": "number",           "description": "Last inserted row ID. SQLite and MySQL populate this. Postgres returns 0 — use RETURNING instead." },
-                "columns":        { "type": "array",            "description": "SQL SELECT: column names in result order." },
+                "columns":        { "type": "array",            "description": "SQL: column names in result order." },
+                "truncated":      { "type": "boolean",          "description": "SQL execute: true when RETURNING rows beyond the result limit were dropped. The statement itself completed." },
                 "value":          { "type": ["string", "null"], "description": "Redis get/hget/lpop/rpop: retrieved value or null." },
                 "ok":             { "type": "boolean",          "description": "Redis set/hset: true on success." },
                 "deleted":        { "type": "number",           "description": "Redis del: number of keys deleted." },
@@ -479,9 +485,33 @@ pub(super) fn reject_path_escaping_statement(query: &str) -> Result<(), String> 
 /// Upper bound on rows one Query operation returns.
 pub(super) const MAX_QUERY_ROWS: usize = 100_000;
 
+/// Upper bound on the approximate size of one Query operation's result.
+pub(super) const MAX_QUERY_BYTES: usize = 32 * 1024 * 1024;
+
+pub(super) fn byte_limit_message() -> String {
+    format!(
+        "Query result is larger than {} MiB. Add a LIMIT, read it in pages (LIMIT with OFFSET, or a key range) across runs, aggregate in SQL, or select fewer columns.",
+        MAX_QUERY_BYTES / (1024 * 1024)
+    )
+}
+
+/// Approximate in-memory size of one result row, for `MAX_QUERY_BYTES`.
+pub(super) fn row_bytes(row: &serde_json::Map<String, Value>) -> usize {
+    row.iter().map(|(k, v)| k.len() + value_bytes(v)).sum()
+}
+
+fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::String(s) => s.len(),
+        Value::Array(a) => a.iter().map(value_bytes).sum::<usize>() + a.len(),
+        Value::Object(o) => o.iter().map(|(k, v)| k.len() + value_bytes(v)).sum(),
+        _ => 8,
+    }
+}
+
 pub(super) fn row_limit_message() -> String {
     format!(
-        "Query returned more than {} rows. Add a LIMIT, or select fewer rows per run.",
+        "Query returned more than {} rows. Add a LIMIT, read the rows in pages (LIMIT with OFFSET, or a key range) across runs, or aggregate in SQL.",
         MAX_QUERY_ROWS
     )
 }
@@ -498,12 +528,81 @@ pub(super) fn unsupported_type_log(column: &str, type_name: &str) -> String {
     )
 }
 
+/// JSON has no NaN or infinity, so those come back as the strings `"NaN"`,
+/// `"Infinity"` and `"-Infinity"` rather than as null.
+pub(super) fn f64_json(f: f64) -> Value {
+    match serde_json::Number::from_f64(f) {
+        Some(n) => Value::Number(n),
+        None if f.is_nan() => Value::String("NaN".to_string()),
+        None if f.is_sign_positive() => Value::String("Infinity".to_string()),
+        None => Value::String("-Infinity".to_string()),
+    }
+}
+
 pub(super) fn f32_json(f: f32) -> Value {
+    if !f.is_finite() {
+        return f64_json(f64::from(f));
+    }
     format!("{}", f)
         .parse::<f64>()
         .ok()
         .and_then(serde_json::Number::from_f64)
         .map_or(Value::Null, Value::Number)
+}
+
+/// First integer magnitude a JavaScript number cannot hold exactly.
+const FIRST_INEXACT_JS_INTEGER: u64 = 1 << 53;
+
+fn is_inexact_in_js(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => n.as_i64().map_or_else(
+            || n.as_u64().is_some_and(|u| u >= FIRST_INEXACT_JS_INTEGER),
+            |i| i.unsigned_abs() >= FIRST_INEXACT_JS_INTEGER,
+        ),
+        _ => false,
+    }
+}
+
+/// Log lines for result shapes that lose data without failing: columns that
+/// share a name (each row keeps only the last one's value) and integers past
+/// 2^53.
+pub(super) fn result_warnings(column_names: &[String], rows: &[Value]) -> Vec<String> {
+    use std::collections::{BTreeSet, HashSet};
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicates: BTreeSet<&str> = BTreeSet::new();
+    for name in column_names {
+        if !seen.insert(name.as_str()) {
+            duplicates.insert(name.as_str());
+        }
+    }
+    let mut inexact: BTreeSet<&str> = BTreeSet::new();
+    for row in rows {
+        if let Value::Object(obj) = row {
+            for (column, value) in obj {
+                if is_inexact_in_js(value) {
+                    inexact.insert(column.as_str());
+                }
+            }
+        }
+    }
+    let mut logs: Vec<String> = duplicates
+        .into_iter()
+        .map(|name| {
+            format!(
+                "[DUPLICATE_COLUMN] column '{}' appears more than once in the result; each row \
+                 keeps only the last one's value. Give each column its own name with AS.",
+                name
+            )
+        })
+        .collect();
+    logs.extend(inexact.into_iter().map(|name| {
+        format!(
+            "[PRECISION] column '{}' has integers beyond 2^53; JavaScript and other readers that \
+             use doubles round them. Cast the column to text in the query.",
+            name
+        )
+    }));
+    logs
 }
 
 /// MySQL reads `"text"` as a string literal by default, so an inlined value in
@@ -534,11 +633,242 @@ where
     }
 }
 
-pub(super) fn parse_params(v: &Value) -> Vec<Value> {
-    v.as_str()
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-        .or_else(|| v.as_array().cloned())
-        .unwrap_or_default()
+/// A pooled connection that is closed, not returned to the pool, if it is
+/// dropped before [`release`](Self::release): the node future was cancelled or
+/// timed out while a statement was running on it. `kill` then asks the server
+/// to stop that statement.
+///
+/// Closing the connection is what makes the kill safe. The kill is a second
+/// request, so it can land after the statement has already finished; on a
+/// recycled connection it would interrupt the next, unrelated statement. A
+/// closed connection has no next statement. Without a kill the close still
+/// frees the pooled connection at once instead of holding it until the server
+/// finishes the abandoned statement.
+pub(super) struct CancelOnDrop<DB: sqlx::Database> {
+    conn: sqlx::pool::PoolConnection<DB>,
+    kill: Option<Box<dyn FnOnce() + Send>>,
+    armed: bool,
+}
+
+impl<DB: sqlx::Database> CancelOnDrop<DB> {
+    pub(super) fn new(conn: sqlx::pool::PoolConnection<DB>, kill: Option<Box<dyn FnOnce() + Send>>) -> Self {
+        Self { conn, kill, armed: true }
+    }
+
+    pub(super) fn conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
+        &mut self.conn
+    }
+
+    /// `false` when the session id needed to target the statement could not be read.
+    pub(super) fn can_kill(&self) -> bool {
+        self.kill.is_some()
+    }
+
+    /// The statement is over: return the connection to the pool and cancel nothing.
+    pub(super) fn release(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<DB: sqlx::Database> Drop for CancelOnDrop<DB> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.conn.close_on_drop();
+        if let Some(kill) = self.kill.take() {
+            kill();
+        }
+    }
+}
+
+/// What reading a Query's rows produced, and whether the server is done with the statement.
+pub(super) struct RowCollection {
+    pub(super) output: NodeOutput,
+    /// `false` when reading stopped while the server was still sending rows
+    /// (the row limit), so the statement may still be running.
+    pub(super) statement_finished: bool,
+}
+
+/// The connection URL with the `password` field, when it is set, applied as the
+/// URL's password. The field is filled from a saved credential, which keeps the
+/// secret out of the workflow file.
+pub(super) fn url_with_password(url: &str, password: &Value) -> Result<String, NodeOutput> {
+    let Some(password) = password.as_str().filter(|p| !p.is_empty()) else {
+        return Ok(url.to_string());
+    };
+    let invalid = |reason: &str| {
+        NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_URL",
+            format!("connection_url cannot take a password: {}", reason),
+        ))
+    };
+    let mut parsed = url::Url::parse(url).map_err(|_| invalid("it is not a valid URL."))?;
+    parsed.set_password(Some(password)).map_err(|_| invalid("it has no host."))?;
+    Ok(parsed.to_string())
+}
+
+/// Which operation is reading a statement's results.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Operation {
+    /// Read-only: a result over a limit fails the node, and reading stops early.
+    Query,
+    /// May write: the statement must finish, so rows over a limit are read and
+    /// dropped instead of failing after the write has happened. Rows the
+    /// statement returns (`RETURNING`) are kept up to the limits.
+    Execute,
+}
+
+impl Operation {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Operation::Query => "Query",
+            Operation::Execute => "Execute",
+        }
+    }
+}
+
+/// Reads every step a Postgres or MySQL statement produces: its rows, and for
+/// `Operation::Execute` its row count and last insert id. `summarize` turns a
+/// driver query result into `(rows_affected, last_insert_id)`; `decode` turns
+/// one column of a row into JSON, or names the type it cannot decode.
+pub(super) async fn collect_steps<S, Q, R>(
+    mut stream: S,
+    operation: Operation,
+    summarize: fn(&Q) -> (u64, u64),
+    decode: fn(&R, usize) -> Result<Value, String>,
+) -> RowCollection
+where
+    S: futures_util::Stream<Item = Result<sqlx::Either<Q, R>, sqlx::Error>> + Unpin,
+    R: sqlx::Row,
+{
+    use futures_util::StreamExt;
+    use sqlx::Column;
+    let mut column_names: Vec<String> = Vec::new();
+    let mut json_rows: Vec<Value> = Vec::new();
+    let mut total_bytes: usize = 0;
+    let mut unsupported: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut rows_affected: u64 = 0;
+    let mut last_insert_id: u64 = 0;
+    let mut dropped: usize = 0;
+    let mut over_bytes = false;
+    while let Some(item) = stream.next().await {
+        let step = match item {
+            Ok(step) => step,
+            Err(e) => return RowCollection {
+                output: NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
+                    format!("{} failed: {}", operation.label(), e))),
+                statement_finished: true,
+            },
+        };
+        let row = match step {
+            sqlx::Either::Left(done) => {
+                if operation == Operation::Execute {
+                    let (affected, insert_id) = summarize(&done);
+                    rows_affected = rows_affected.saturating_add(affected);
+                    last_insert_id = insert_id;
+                }
+                continue;
+            }
+            sqlx::Either::Right(row) => row,
+        };
+        if over_bytes || json_rows.len() >= MAX_QUERY_ROWS {
+            if operation == Operation::Query {
+                return RowCollection {
+                    output: NodeOutput::failure(NodeError::unrecoverable("ROW_LIMIT_EXCEEDED",
+                        if over_bytes { byte_limit_message() } else { row_limit_message() })),
+                    statement_finished: false,
+                };
+            }
+            dropped += 1;
+            continue;
+        }
+        if column_names.is_empty() {
+            column_names = row.columns().iter().map(|c| c.name().to_string()).collect();
+        }
+        let mut obj = serde_json::Map::new();
+        for (i, col) in row.columns().iter().enumerate() {
+            let value = match decode(&row, i) {
+                Ok(v) => v,
+                Err(type_name) => {
+                    let placeholder = Value::String(undecodable_placeholder(&type_name));
+                    unsupported.entry(col.name().to_string()).or_insert(type_name);
+                    placeholder
+                }
+            };
+            obj.insert(col.name().to_string(), value);
+        }
+        total_bytes = total_bytes.saturating_add(row_bytes(&obj));
+        if total_bytes > MAX_QUERY_BYTES {
+            over_bytes = true;
+            if operation == Operation::Query {
+                return RowCollection {
+                    output: NodeOutput::failure(NodeError::unrecoverable("ROW_LIMIT_EXCEEDED",
+                        byte_limit_message())),
+                    statement_finished: false,
+                };
+            }
+            dropped += 1;
+            continue;
+        }
+        json_rows.push(Value::Object(obj));
+    }
+    let mut logs = match operation {
+        Operation::Query => vec![format!("Query returned {} row(s)", json_rows.len())],
+        Operation::Execute if json_rows.is_empty() && dropped == 0 => {
+            vec![format!("{} row(s) affected", rows_affected)]
+        }
+        Operation::Execute => vec![format!(
+            "{} row(s) affected, {} row(s) returned",
+            rows_affected,
+            json_rows.len() + dropped
+        )],
+    };
+    if dropped > 0 {
+        logs.push(format!(
+            "[RESULT_TRUNCATED] The statement completed, but its {} returned row(s) beyond the \
+             result limit ({} rows or {} MiB) were not kept.",
+            dropped, MAX_QUERY_ROWS, MAX_QUERY_BYTES / (1024 * 1024)
+        ));
+    }
+    for (column, type_name) in &unsupported {
+        logs.push(unsupported_type_log(column, type_name));
+    }
+    logs.extend(result_warnings(&column_names, &json_rows));
+    let mut data = json!({
+        "rows": json_rows,
+        "rows_affected": rows_affected,
+        "last_insert_id": last_insert_id,
+        "columns": column_names
+    });
+    if dropped > 0 {
+        data["truncated"] = Value::Bool(true);
+    }
+    RowCollection {
+        output: NodeOutput::success_with_logs(data, logs),
+        statement_finished: true,
+    }
+}
+
+/// Reads the `params` input: absent, null or blank means no parameters; otherwise
+/// a JSON array, given directly or as a string.
+pub(super) fn parse_params(v: &Value) -> Result<Vec<Value>, NodeOutput> {
+    let invalid = || {
+        NodeOutput::failure(NodeError::unrecoverable(
+            "INVALID_PARAMS",
+            "params must be a JSON array of values, for example [42, \"Alice\"].",
+        ))
+    };
+    match v {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(a) => Ok(a.clone()),
+        Value::String(s) if s.trim().is_empty() => Ok(Vec::new()),
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Array(a)) => Ok(a),
+            _ => Err(invalid()),
+        },
+        _ => Err(invalid()),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -719,10 +1049,8 @@ mod read_only_query_tests {
         ).is_ok());
     }
 
-    // exact bypass: a WITH clause whose CTE body is a harmless SELECT,
-    // but whose trailing statement (the thing the WITH clause actually
-    // prefixes) is a DELETE. The original sqlite check only inspected the
-    // first keyword ("WITH") and let this straight through.
+    // A WITH clause whose CTE body is a harmless SELECT but whose trailing
+    // statement is a DELETE: checking only the first keyword would accept it.
     #[test]
     fn with_select_then_delete_rejected() {
         assert!(enforce_read_only_query(
@@ -746,9 +1074,8 @@ mod read_only_query_tests {
 
     // PostgreSQL-specific bypass: a data-modifying CTE body (legal Postgres
     // syntax -- INSERT/UPDATE/DELETE with RETURNING inside a WITH) whose
-    // trailing statement is an innocent-looking SELECT. Only checking the
-    // trailing keyword is not enough once
-    // postgres is in scope -- the fix must also reject the body itself.
+    // trailing statement is an innocent-looking SELECT. Checking only the
+    // trailing keyword would miss it, so the body must be rejected too.
     #[test]
     fn postgres_writable_cte_delete_rejected() {
         assert!(enforce_read_only_query(
@@ -826,6 +1153,37 @@ mod read_only_query_tests {
         }
         q.push_str(" SELECT 1");
         assert!(enforce_read_only_query(&q).is_err());
+    }
+}
+
+#[cfg(test)]
+mod result_value_tests {
+    use super::{f32_json, f64_json, result_warnings};
+    use serde_json::json;
+
+    #[test]
+    fn non_finite_floats_are_strings_and_finite_floats_stay_numbers() {
+        assert_eq!(f64_json(1.5), json!(1.5));
+        assert_eq!(f64_json(f64::NAN), json!("NaN"));
+        assert_eq!(f64_json(f64::INFINITY), json!("Infinity"));
+        assert_eq!(f64_json(f64::NEG_INFINITY), json!("-Infinity"));
+        assert_eq!(f32_json(f32::NAN), json!("NaN"));
+    }
+
+    #[test]
+    fn duplicate_columns_and_integers_past_2_pow_53_are_reported() {
+        let columns = ["id", "name", "id", "big", "edge", "negative"].map(String::from);
+        let rows = [json!({
+            "id": 1,
+            "name": "a",
+            "big": 9007199254740993_i64,
+            "edge": 9007199254740991_i64,
+            "negative": -9007199254740991_i64
+        })];
+        let logs = result_warnings(&columns, &rows);
+        assert_eq!(logs.len(), 2, "got: {logs:?}");
+        assert!(logs.iter().any(|l| l.contains("[DUPLICATE_COLUMN]") && l.contains("'id'")));
+        assert!(logs.iter().any(|l| l.contains("[PRECISION]") && l.contains("'big'")));
     }
 }
 
@@ -911,5 +1269,79 @@ mod scan_tests {
     fn unc_db_path_is_rejected() {
         let e = super::pool::validate_db_path("//host/share/x.db").unwrap_err();
         assert!(e.contains("network"), "got: {e}");
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::{parse_params, url_with_password};
+    use serde_json::json;
+
+    #[test]
+    fn params_accept_an_array_or_its_json_text_and_treat_blank_as_none() {
+        assert_eq!(parse_params(&json!([1, "a"])).ok(), Some(vec![json!(1), json!("a")]));
+        assert_eq!(parse_params(&json!("[42, \"Alice\"]")).ok(), Some(vec![json!(42), json!("Alice")]));
+        for blank in [json!(null), json!(""), json!("  ")] {
+            assert_eq!(parse_params(&blank).ok(), Some(Vec::new()));
+        }
+    }
+
+    #[test]
+    fn malformed_params_fail_instead_of_being_dropped() {
+        for bad in [json!("[1,"), json!("{\"a\":1}"), json!(5), json!({"a": 1}), json!("42")] {
+            let out = parse_params(&bad).unwrap_err();
+            assert_eq!(out.error.expect("error").code, "INVALID_PARAMS");
+        }
+    }
+
+    #[test]
+    fn password_field_replaces_the_url_password_and_is_percent_encoded() {
+        let url = url_with_password("postgres://app:old@db.example.com/x?sslmode=require", &json!("p@ss/w:rd")).ok();
+        let url = url.expect("password applied");
+        assert!(url.starts_with("postgres://app:p%40ss%2Fw%3Ard@db.example.com/x"), "got: {url}");
+        assert!(url.ends_with("sslmode=require"));
+        assert_eq!(
+            url_with_password("redis://cache:6379", &json!("")).ok().as_deref(),
+            Some("redis://cache:6379")
+        );
+        assert!(url_with_password("not a url", &json!("x")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod connection_target_tests {
+    use super::pool::check_sqlx_target;
+    use crate::nodes::util::SsrfPolicy;
+
+    #[tokio::test]
+    async fn query_parameters_cannot_redirect_the_connection_past_the_check() {
+        let blocked = [
+            ("postgres://u@8.8.8.8/db?host=169.254.169.254", false),
+            ("postgres://u@8.8.8.8/db?hostaddr=169.254.169.254", false),
+            ("postgres://u@8.8.8.8/db?host=2130706433", false),
+            ("postgres://u@8.8.8.8/db?host=::1", false),
+            ("postgres://u@8.8.8.8/db?host=/var/run/postgresql", false),
+            ("postgres://u@%2Fvar%2Frun%2Fpostgresql/db", false),
+            ("mysql://u@8.8.8.8/db?socket=/var/run/mysqld/mysqld.sock", true),
+        ];
+        for (url, mysql) in blocked {
+            assert!(
+                check_sqlx_target(url, mysql, SsrfPolicy::Strict).await.is_err(),
+                "should block: {url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_host_the_driver_dials_is_judged_by_the_policy() {
+        assert!(check_sqlx_target("postgres://u@8.8.8.8/db", false, SsrfPolicy::Strict).await.is_ok());
+        assert!(check_sqlx_target("mysql://u@[2001:4860:4860::8888]/db", true, SsrfPolicy::Strict).await.is_ok());
+        assert!(check_sqlx_target("postgres://u@8.8.8.8/db?host=10.0.0.5", false, SsrfPolicy::Strict).await.is_err());
+        assert!(check_sqlx_target("postgres://u@8.8.8.8/db?host=10.0.0.5", false, SsrfPolicy::AllowLocal).await.is_ok());
+        assert!(
+            check_sqlx_target("postgres://u@8.8.8.8/db?host=169.254.169.254", false, SsrfPolicy::AllowLocal)
+                .await
+                .is_err()
+        );
     }
 }

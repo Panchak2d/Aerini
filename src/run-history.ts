@@ -270,13 +270,16 @@ function buildItem(
   item.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).closest(".history-del-btn, .history-replay-btn")) return;
     if (isInterrupted) return;
-    let result: WorkflowResult;
+    let result: WorkflowResult | undefined;
     try {
-      result = JSON.parse(record.result_json) as WorkflowResult;
+      const parsed = JSON.parse(record.result_json) as WorkflowResult;
+      if (parsed.node_outputs !== undefined) result = parsed;
     } catch (err) {
       console.warn("Aerini: run record result is unreadable", record.id, err);
+    }
+    if (result === undefined) {
       item.classList.add("history-unreadable");
-      item.title = "This run's recorded result could not be read";
+      item.title = "This run's recorded result could not be read or is too large to list";
       item.setAttribute("aria-disabled", "true");
       return;
     }

@@ -3,6 +3,15 @@ use serde_json::Value;
 use crate::error::NodeError;
 use crate::model::{ExecutionContext, NodeOutput};
 
+/// Compares two secrets without leaking their length or content through
+/// timing: both are hashed to a fixed width first, because the byte-slice
+/// `ct_eq` returns early when the lengths differ.
+pub(crate) fn secrets_equal(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+    let (a, b) = (blake3::hash(a.as_bytes()), blake3::hash(b.as_bytes()));
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
 /// Runs a closure when dropped unless disarmed first. Releases external
 /// resources (child process groups, running DB statements) when a node future
 /// is dropped mid-flight by cancellation or a workflow-level timeout.
@@ -26,12 +35,19 @@ impl Drop for OnDrop {
     }
 }
 
-/// Guard that SIGKILLs the whole process group led by `pid` when dropped.
-/// The child must have been spawned with `process_group(0)`. Does nothing
-/// on non-Unix targets or when `pid` is `None`.
+/// Guard that kills a spawned command and everything it started when dropped
+/// (a timeout, a cancelled run or a dropped node future). `disarm` leaves the
+/// processes running, for a command that finished on its own.
+///
+/// Unix: the child must have been spawned with `process_group(0)`; the whole
+/// group gets SIGKILL. Windows: the child is placed in a Job Object that is
+/// terminated. Does nothing on other targets, or when the child has no handle.
+#[cfg(not(windows))]
+pub(crate) type TreeGuard = OnDrop;
+
 #[cfg(unix)]
-pub(crate) fn kill_group_on_drop(pid: Option<u32>) -> OnDrop {
-    match pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0) {
+pub(crate) fn kill_tree_on_drop(child: &tokio::process::Child) -> TreeGuard {
+    match child.id().and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0) {
         Some(pgid) => OnDrop::new(move || {
             // SAFETY: kill(2) takes plain integers and has no memory-safety preconditions.
             unsafe {
@@ -42,9 +58,131 @@ pub(crate) fn kill_group_on_drop(pid: Option<u32>) -> OnDrop {
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn kill_group_on_drop(_pid: Option<u32>) -> OnDrop {
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) fn kill_tree_on_drop(_child: &tokio::process::Child) -> TreeGuard {
     OnDrop(None)
+}
+
+/// Stops a child process from inheriting the server's own `AERINI_*`
+/// variables: they hold the admin API token and the credential values, which a
+/// workflow author with only a write token must not be able to print. Names
+/// the operator listed with `--allow-env-vars` (`__allowed_env_vars` in the
+/// execution metadata) are put back. Everything else is inherited as usual.
+pub(crate) fn withhold_server_env(
+    cmd: &mut tokio::process::Command,
+    metadata: &std::collections::HashMap<String, Value>,
+) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().to_ascii_uppercase().starts_with("AERINI_") {
+            cmd.env_remove(&name);
+        }
+    }
+    if let Some(Value::Array(allowed)) = metadata.get("__allowed_env_vars") {
+        for name in allowed.iter().filter_map(Value::as_str) {
+            if let Ok(val) = std::env::var(name) {
+                cmd.env(name, val);
+            }
+        }
+    }
+}
+
+/// Owns a Windows Job Object holding a command and its descendants. The handle
+/// is kept as an integer so the guard stays `Send` across the node's awaits.
+#[cfg(windows)]
+pub(crate) struct TreeGuard(Option<usize>);
+
+#[cfg(windows)]
+impl TreeGuard {
+    pub(crate) fn disarm(mut self) {
+        if let Some(job) = self.0.take() {
+            windows_job::release(job);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        if let Some(job) = self.0.take() {
+            windows_job::terminate(job);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn kill_tree_on_drop(child: &tokio::process::Child) -> TreeGuard {
+    TreeGuard(child.raw_handle().and_then(windows_job::create_with))
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// Sets or clears "kill every process in the job when its last handle closes".
+    fn set_kill_on_close(job: HANDLE, on: bool) -> bool {
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        if on {
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        }
+        // SAFETY: `info` is a live, correctly sized `repr(C)` struct for the whole call.
+        unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+        }
+    }
+
+    /// Puts `process` in a new kill-on-close Job Object. `None` (the command then
+    /// falls back to `kill_on_drop`, which kills only itself) when any step fails.
+    pub(super) fn create_with(process: HANDLE) -> Option<usize> {
+        // SAFETY: both arguments may be null; the returned handle is owned here.
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        if job.is_null() {
+            tracing::warn!("could not create a Job Object; only the command itself will be killed on stop");
+            return None;
+        }
+        // SAFETY: `job` is the valid handle created above; `process` is the live handle of a child tokio still owns.
+        let assigned = set_kill_on_close(job, true) && unsafe { AssignProcessToJobObject(job, process) } != 0;
+        if !assigned {
+            tracing::warn!("could not place the command in a Job Object; only the command itself will be killed on stop");
+            // SAFETY: closing the handle created above, once.
+            unsafe { CloseHandle(job) };
+            return None;
+        }
+        Some(job as usize)
+    }
+
+    /// Kills every process in the job, then closes it.
+    pub(super) fn terminate(job: usize) {
+        let job = job as HANDLE;
+        // SAFETY: `job` is a handle this module created and has not closed.
+        unsafe {
+            TerminateJobObject(job, 1);
+            CloseHandle(job);
+        }
+    }
+
+    /// Closes the job and leaves its processes running, as a Unix command that
+    /// finished on its own leaves its background processes.
+    pub(super) fn release(job: usize) {
+        let job = job as HANDLE;
+        if !set_kill_on_close(job, false) {
+            tracing::warn!("could not release the Job Object; processes the command left running may be stopped");
+        }
+        // SAFETY: `job` is a handle this module created and has not closed.
+        unsafe { CloseHandle(job) };
+    }
 }
 
 #[cfg(test)]
@@ -450,7 +588,12 @@ fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), Str
                     ));
                 }
             }
-            let always_blocked = v6.is_unspecified()
+            // fd00:ec2::254 is AWS's IPv6 metadata endpoint. It sits in the
+            // unique-local range that `AllowLocal` permits, so it is listed
+            // here, as the IPv4 metadata addresses are in `ipv4_blocked`.
+            let aws_imds_v6 = std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+            let always_blocked = v6 == aws_imds_v6
+                || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unicast_link_local();
             let local_only_blocked = !allow_local && (v6.is_loopback() || v6.is_unique_local());
@@ -738,7 +881,9 @@ fn system_proxy_opted_in() -> bool {
 /// [`check_host_ssrf`] or [`check_host_ssrf_from_url`] first for those.
 pub(crate) fn guarded_client_builder(policy: SsrfPolicy) -> reqwest::ClientBuilder {
     let allow_local = policy.allow_local();
-    let builder = reqwest::Client::builder().redirect(ssrf_redirect_policy(allow_local));
+    let builder = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(ssrf_redirect_policy(allow_local));
     if system_proxy_opted_in() {
         return builder;
     }
@@ -759,6 +904,13 @@ pub(crate) fn is_ssrf_blocked(e: &reqwest::Error) -> bool {
     }
     false
 }
+
+/// Longest a connection may take to be made, counting the name lookup, the TCP
+/// handshake and TLS. Past it the attempt fails as a connection error, which
+/// every retry policy may retry because nothing was sent; the clients' total
+/// timeout alone would report it as a plain timeout, which a send node never
+/// retries.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A failed connection is always worth retrying, since nothing was sent. A
 /// timeout can follow a request the provider already acted on, so it is
@@ -841,6 +993,24 @@ pub async fn check_db_url_ssrf(raw_url: &str, policy: SsrfPolicy) -> Result<(), 
     });
 
     check_host_ssrf_impl(host, port, policy.allow_local()).await
+}
+
+/// SSRF check for a host and port a database driver has already resolved from a
+/// connection URL, including any query-parameter override. Numeric spellings
+/// such as `2130706433` or `0x7f.1` are read the way URL hosts are, and an
+/// unbracketed IPv6 literal is accepted.
+pub async fn check_db_host_ssrf(host: &str, port: u16, policy: SsrfPolicy) -> Result<(), String> {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return check_ssrf_ip_impl(ip, policy.allow_local());
+    }
+    let parsed = url::Host::parse(host).map_err(|e| format!("Invalid database host: {}", e))?;
+    let borrowed = match &parsed {
+        url::Host::Domain(d) => url::Host::Domain(d.as_str()),
+        url::Host::Ipv4(ip) => url::Host::Ipv4(*ip),
+        url::Host::Ipv6(ip) => url::Host::Ipv6(*ip),
+    };
+    check_host_ssrf_impl(borrowed, port, policy.allow_local()).await
 }
 
 /// Renders a `reqwest::Error` as a message that is safe to store and show.
@@ -1733,6 +1903,46 @@ mod guarded_client_tests {
         assert!(http_err_output(Replay::Safe, &err).error.unwrap().recoverable);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connect_timeout_is_a_failed_connection_that_every_call_may_retry() {
+        use std::time::Duration;
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut filler = Vec::new();
+        let mut stalled = false;
+        for _ in 0..8 {
+            match tokio::time::timeout(Duration::from_millis(300), tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => filler.push(stream),
+                _ => {
+                    stalled = true;
+                    break;
+                }
+            }
+        }
+        if !stalled {
+            eprintln!("skipped: this kernel never stalled a connection to a full backlog");
+            return;
+        }
+        let client = guarded_client_builder(SsrfPolicy::AllowLocal)
+            .connect_timeout(Duration::from_millis(300))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let err = client
+            .post(format!("http://{addr}/"))
+            .body("x")
+            .send()
+            .await
+            .expect_err("the connection is never accepted");
+        assert!(err.is_connect() && err.is_timeout(), "{}", reqwest_err_msg(&err));
+        assert!(is_retryable_network_error(Replay::Never, &err));
+        assert!(http_err_output(Replay::Never, &err).error.unwrap().recoverable);
+        drop((filler, listener));
+    }
+
     #[tokio::test]
     async fn redirect_to_a_blocked_ip_literal_is_refused() {
         let port = spawn_redirecting_server("http://169.254.169.254/latest/meta-data".into()).await;
@@ -1858,6 +2068,8 @@ mod ssrf_allow_local_tests {
     fn cloud_metadata_ip_still_blocked() { assert!(check_ssrf_ip(v4(169, 254, 169, 254), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
     fn azure_imds_still_blocked()     { assert!(check_ssrf_ip(v4(168, 63, 129, 16), SsrfPolicy::AllowLocal).is_err()); }
+    #[test]
+    fn aws_imds_ipv6_still_blocked()  { assert!(check_ssrf_ip(v6("fd00:ec2::254"), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
     fn rfc6598_still_blocked()        { assert!(check_ssrf_ip(v4(100, 64, 0, 0), SsrfPolicy::AllowLocal).is_err()); }
     #[test]
@@ -2226,5 +2438,19 @@ mod file_batch_helper_tests {
         assert_eq!(tagged.claim("f.txt", Some(1)), "f_1_2.txt");
         assert_eq!(tagged.claim("f.txt", Some(1)), "f_1_3.txt");
         assert_eq!(tagged.claim("f_1.txt", Some(1)), "f_1_1.txt");
+    }
+}
+
+#[cfg(test)]
+mod secrets_equal_tests {
+    use super::secrets_equal;
+
+    #[test]
+    fn secrets_compare_equal_only_when_identical() {
+        assert!(secrets_equal("abc123", "abc123"));
+        assert!(!secrets_equal("abc123", "abc124"));
+        assert!(!secrets_equal("abc", "abcd"));
+        assert!(!secrets_equal("", "abc"));
+        assert!(secrets_equal("", ""));
     }
 }

@@ -1,4 +1,4 @@
-import { escapeHtml } from "../utils";
+import { escapeHtml, copyWithButtonFeedback } from "../utils";
 import { getOAuthRedirectPort } from "../ipc/oauth";
 
 // ---------------------------------------------------------------------------
@@ -239,19 +239,11 @@ function renderGuide(el: HTMLElement): void {
     code.title = "Click to copy";
     code.setAttribute("data-tooltip", "Click to copy");
     code.style.cursor = "pointer";
-    code.addEventListener("click", () => {
-      navigator.clipboard.writeText(code.dataset.value ?? code.textContent ?? "").catch(() => {});
-      const orig = code.textContent;
-      code.textContent = "Copied!";
-      setTimeout(() => { code.textContent = orig; }, 1500);
-    });
+    code.addEventListener("click", () => void copyWithButtonFeedback(code, code.dataset.value ?? code.textContent ?? ""));
   });
 
   // Copy redirect URI button
   el.querySelector<HTMLButtonElement>("#ssg-copy-uri")!.addEventListener("click", e => {
-    const btn = e.currentTarget as HTMLButtonElement;
-    navigator.clipboard.writeText(_liveRedirectUri).catch(() => {});
-    btn.textContent = "Copied!";
-    setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    void copyWithButtonFeedback(e.currentTarget as HTMLButtonElement, _liveRedirectUri);
   });
 }

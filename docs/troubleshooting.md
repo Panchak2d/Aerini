@@ -52,6 +52,16 @@ For most nodes, a field described as coming from your saved credentials shows a 
 
 A related symptom: the dropdown is there and had something selected, but the node behaves as if the field is empty when it runs (an auth error, a rejected request). Check the run's log first. It's the same kind of warning as [any other blank-field warning](#a-field-comes-out-empty-or-you-see-a-warning-in-the-runs-log-you-dont-recognize), naming the credential and the reason it didn't resolve: not found, unreadable, or a store-level error. "Not found" is the most common of the three, and it happens when the credential ID the workflow points at no longer exists in the store it's actually running against, most often after copying a workflow file to a different Aerini install (a fresh profile, or the machine running `aerini-server`) without adding a credential with the same ID there first. Reopen the node's Connection section and reselect the credential to fix it.
 
+## `aerini-server serve` refuses to start over credentials
+
+The server checks every variable in `credential_env_vars` (see [the config file](operations/server-deploy.md#the-aerini-serverjson-file)) before it does anything else. It prints one of these and exits:
+
+- **`Credential environment variables are not usable: AERINI_CRED_X is not set`**: the variable is missing from the server's environment. Set it, or check that the `.env` file or `environment:` block reaches the process. A systemd unit only sees what its `EnvironmentFile=` loads.
+- **`... is set but empty`**: the variable exists with no value. Give it the secret, or re-export without that credential.
+- **`... is not valid Unicode`**: the value contains bytes that aren't valid text, usually from a binary paste or a wrong file encoding. Re-enter it.
+- **`Invalid credential_env_vars in <file>: ... must start with AERINI_CRED_`**: a name in the mapping lacks the prefix, or uses characters other than uppercase letters, digits and underscores. Rename the variable in both the file and the environment.
+- **`credentials 'a-b' and 'a_b' both map to environment variable AERINI_CRED_A_B`**: two credential IDs turn into the same variable name. Rename one of them in the Credentials panel, then export again. The export itself fails with the same message.
+
 ## The "this workflow runs code on your computer" dialog shows up unexpectedly, or doesn't show up when you'd expect it
 
 [Background Runs](guide/background-runs.md#unattended-execution-and-dangerous-nodes) already covers the core rule: a manual Run shows this confirmation once per session, a scheduled or webhook-triggered background fire skips it and only logs a warning instead. Two things worth adding:

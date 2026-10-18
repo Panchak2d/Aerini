@@ -5,6 +5,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "rust"
@@ -13,20 +15,42 @@ updates:
         patterns:
           - "wasmtime*"
 
+  # Standalone example plugins (excluded from the root workspace, so they have their own manifests)
+  - package-ecosystem: "cargo"
+    directories:
+      - "/examples/plugin-template"
+      - "/examples/plugin-template/trigger-example"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    labels:
+      - "dependencies"
+      - "rust"
+
   # Node.js / npm dependencies (root package.json)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "javascript"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # Docker base image digest updates (keeps Dockerfile digests current)
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "docker"
@@ -36,6 +60,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

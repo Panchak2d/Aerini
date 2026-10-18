@@ -46,7 +46,7 @@ If you want to customize the `Dockerfile` itself, the repository also ships it w
 ```bash
 git clone https://github.com/Panchak2d/aerini
 cd aerini
-cp .env.example .env   # set AERINI_TOKEN
+cp .env.example .env   # set AERINI_TOKEN (32+ characters: openssl rand -base64 32)
 docker compose up -d
 ```
 
@@ -103,7 +103,42 @@ Unzip the package from Export for Server (**Export → Export for Server → �
 ./aerini-server serve --config aerini-server.json --port 7700
 ```
 
-The status page, plain HTML at `/`, is public by default and shows workflow name, run count, last/next run. `POST /api/run` (manual trigger), `GET /api/logs`, and `GET /api/runs` all require the `run_secret` you set at export time, sent as `Authorization: Bearer <run_secret>`. If the workflow contains a File node, pass `--file-sandbox-dir` or File nodes can read and write anywhere the server process can reach; if it contains Shell Command, Code, or Database nodes, they stay disabled until you pass the matching `--allow-*` flag after auditing the workflow (the generated `aerini.service` and `README.txt` both name the exact flag needed, but neither adds it for you).
+The status page, plain HTML at `/`, is public by default and shows workflow name, run count, last/next run. `POST /api/run` (manual trigger), `GET /api/logs` (the last 50 entries; `?n=` takes 1 to 1000), and `GET /api/runs` all require the `run_secret` you set at export time, sent as `Authorization: Bearer <run_secret>`. If the workflow contains a File node, pass `--file-sandbox-dir` or File nodes can read and write anywhere the server process can reach; if it contains Shell Command, Code, or Database nodes, they stay disabled until you pass the matching `--allow-*` flag after auditing the workflow (the generated `aerini.service` and `README.txt` both name the exact flag needed, but neither adds it for you).
+
+### The `aerini-server.json` file
+
+The export writes one config file, and `serve` mode reads it at start-up. You rarely edit it, but every field is plain JSON:
+
+| Field | What it holds |
+|---|---|
+| `workflow_name` | Name shown on the status page. |
+| `workflow_json` | The whole workflow, in the same format the desktop app saves. |
+| `status_port` | Port for the status page. `--port` overrides it. |
+| `exported_at` | When the package was generated, shown on the status page. |
+| `credential_env_vars` | Maps each saved credential's ID to the environment variable the server reads its secret from. |
+| `run_secret` | argon2id hash of the secret that guards `POST /api/run`, `/api/logs` and `/api/runs`. Optional: with no `run_secret` those endpoints stay disabled. The raw secret is shown once in the desktop app and is not in this file. |
+
+`credential_env_vars` looks like this:
+
+```json
+"credential_env_vars": {
+  "openai-prod": "AERINI_CRED_OPENAI_PROD",
+  "slack-bot":   "AERINI_CRED_SLACK_BOT"
+}
+```
+
+The export fills it in from the credentials your workflow uses, and the generated `.env.example` lists the same variables. Set each one in the server's environment (the `.env` file the systemd unit loads, `docker run -e`, the `environment:` block in Compose) before starting. The file holds names only, never secrets.
+
+Rules the server checks at start-up:
+
+- It reads only the variables listed in the mapping. A credential ID that isn't in it is not looked up by its name, so a node using that credential runs with the field left empty and a warning in the log.
+- Every variable name must start with `AERINI_CRED_`, followed by uppercase letters, digits or underscores. This stops the file from pointing a credential at an unrelated variable such as `AERINI_TOKEN`.
+- Two credential IDs can't share one variable.
+- Each variable must be set, non-empty and valid Unicode.
+
+You can edit a variable name to match how you store secrets, for example `AERINI_CRED_OPENAI_PROD` to `AERINI_CRED_OPENAI_LIVE`, as long as you keep the prefix and set the new name in the environment. Don't change the credential ID keys, since they must match the IDs inside `workflow_json`. Re-exporting from the desktop app regenerates the file and overwrites such edits.
+
+If `serve` refuses to start, [Troubleshooting](../troubleshooting.md#aerini-server-serve-refuses-to-start-over-credentials) lists the messages and fixes.
 
 ### `api` mode
 
@@ -120,6 +155,8 @@ export AERINI_TOKEN=$(openssl rand -base64 32)
 ./aerini-server tokens create --label ci --scopes read,write --token $AERINI_TOKEN
 ```
 
+Changing `AERINI_TOKEN` does not replace the token it held before: the server adds each value to its token store the first time it starts with it, and the earlier one stays valid until you revoke it. A token you revoked stays revoked even if `AERINI_TOKEN` still holds it. To rotate the first token, create a new one with `--scopes read,write,admin`, use that one to run `tokens revoke <token_id>` on the old one (its id is in `tokens list`; a call can't revoke the token it authenticates with), then set `AERINI_TOKEN` to the new value.
+
 Once running, manage workflows from another terminal without touching the REST API directly:
 
 ```bash
@@ -134,6 +171,8 @@ These accept a partial name or ID match and only fail if that's ambiguous, in wh
 ### Code (JS) nodes need a bundled runtime, not a system Node install
 
 Aerini's Code node never searches `PATH` for `node`, on the desktop app or on the server. It looks for exactly one thing: a binary named `node-bundled` (or `node-bundled.exe` on Windows) sitting in the same directory as the running executable, or an `AERINI_NODE_BIN` environment variable pointing at a Node binary directly. `install.sh`'s own check (`command -v node`) tests for something the server code doesn't actually use, so a system-wide `apt install nodejs` alone will not make Code nodes work; that warning is misleading, not the actual requirement. Building from source doesn't fetch Node.js either; only the official Docker image and the desktop's Docker export do that automatically. To make Code nodes work in a bare-metal deployment, do one of:
+
+`<workflow>` in these paths is the workflow's name in lowercase letters and digits, with every run of other characters replaced by one hyphen and at most 48 characters, so `My Flow!` becomes `my-flow`. The service is named `aerini-<workflow>`.
 
 ```bash
 # Option A: point at any working Node.js install (simplest)

@@ -9,6 +9,7 @@ SAVE_BODY_FILE=""
 
 [ -f Dockerfile ] || { echo "Run this from the repo root (Dockerfile not found in $(pwd))."; exit 1; }
 
+# shellcheck disable=SC2329 # invoked through the EXIT trap
 cleanup() {
   [ -n "$CONTAINER" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   [ -n "$SAVE_BODY_FILE" ] && rm -f "$SAVE_BODY_FILE" || true

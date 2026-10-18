@@ -667,7 +667,7 @@ fn classify_callback(request: &str, expected_state: &str) -> CallbackDecision {
     }
 
     let state_matches = extract_query_param(query, "state")
-        .is_some_and(|s| constant_time_eq(&s, expected_state));
+        .is_some_and(|s| super::util::secrets_equal(&s, expected_state));
     if !state_matches {
         return ("400 Bad Request", PAGE_FAILED, None);
     }
@@ -698,16 +698,6 @@ fn classify_callback(request: &str, expected_state: &str) -> CallbackDecision {
             ))),
         ),
     }
-}
-
-/// Constant-time equality check, used to compare the OAuth CSRF `state` value
-/// so the comparison can't leak information via a short-circuiting `==`.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn extract_query_param(qs: &str, key: &str) -> Option<String> {
@@ -888,21 +878,6 @@ pub async fn get_tokens(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn constant_time_eq_matches_for_equal_strings() {
-        assert!(constant_time_eq("abc123", "abc123"));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects_different_length() {
-        assert!(!constant_time_eq("abc", "abcd"));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects_same_length_different_content() {
-        assert!(!constant_time_eq("abc123", "abc124"));
-    }
 
     #[test]
     fn build_auth_url_google_sheets_has_correct_scope_and_params() {

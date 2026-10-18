@@ -369,6 +369,7 @@
 .workflow-item:focus-visible { outline-offset: -2px; }
 .workflow-item-name {
   flex: 1;
+  min-width: 56px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -377,7 +378,9 @@
   display: flex;
   align-items: center;
   gap: 3px;
-  flex-shrink: 0;
+  flex: 0 10 auto;
+  min-width: 0;
+  overflow: hidden;
   margin: 0 6px;
 }
 .workflow-item-tag {
@@ -395,6 +398,76 @@
 .workflow-item.active .workflow-item-tag,
 .workflow-item:hover .workflow-item-tag { background: var(--bg3); color: var(--t2); }
 .workflow-item-tag-more { padding-left: 4px; padding-right: 4px; }
+.workflow-item-tag:not(.workflow-item-tag-more) { cursor: pointer; }
+.workflow-item-tag.selected { background: var(--bg3); color: var(--t1); box-shadow: inset 0 0 0 1px var(--accent); }
+.workflow-item-more {
+  background: none;
+  border: none;
+  color: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 120ms ease, background 120ms ease;
+  flex-shrink: 0;
+}
+.workflow-item:hover .workflow-item-more,
+.workflow-item:focus-within .workflow-item-more,
+.workflow-item-more[aria-expanded="true"] { color: var(--t3); }
+.workflow-item-more:hover,
+.workflow-item-more[aria-expanded="true"] { color: var(--t1); background: var(--bg3); }
+.workflow-item-more:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.workflow-collection-new-btn:focus-visible { opacity: 1; }
+.menu-item-check { margin-left: auto; padding-left: 10px; color: var(--t2); }
+.ctx-menu-item[aria-disabled="true"],
+.filter-dropdown-item[aria-disabled="true"] { opacity: .6; cursor: default; }
+.ctx-menu-item:focus-visible,
+.filter-dropdown-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+
+/* -- Tag filter bar -- */
+.wf-tag-filter { display: flex; flex-direction: column; gap: 4px; padding: 2px 10px 6px; }
+.wf-tag-filter.hidden { display: none; }
+.wf-tag-filter-chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.wf-tag-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: var(--bg4);
+  color: var(--t2);
+  cursor: pointer;
+}
+.wf-tag-filter-chip:hover { color: var(--t1); }
+.wf-tag-filter-chip.selected { background: var(--bg3); color: var(--t1); border-color: var(--accent); }
+.wf-tag-filter-chip:focus-visible,
+.wf-tag-filter-toggle:focus-visible,
+.wf-tag-filter-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.wf-tag-filter-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-tag-filter-count { flex-shrink: 0; color: var(--t3); }
+.wf-tag-filter-x { flex-shrink: 0; font-size: 9px; color: var(--t3); }
+.wf-tag-filter-actions { display: flex; align-items: center; gap: 8px; }
+.wf-tag-filter-toggle,
+.wf-tag-filter-clear {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 10.5px;
+  color: var(--t3);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.wf-tag-filter-toggle:hover,
+.wf-tag-filter-clear:hover { color: var(--t1); }
+.wf-tag-filter-clear { margin-left: auto; }
+
 .workflow-item-del {
   background: none;
   border: none;

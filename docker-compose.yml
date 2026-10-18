@@ -8,6 +8,10 @@ services:
     environment:
       AERINI_TOKEN: ${AERINI_TOKEN:?Set AERINI_TOKEN in .env or environment}
       AERINI_PORT: 7700
+      # Number of reverse proxies in front of this container (Caddy, Nginx, ...).
+      # Leave at 0 only when nothing sits in front; behind a proxy, 0 makes every
+      # client share one rate-limit allowance.
+      AERINI_TRUSTED_PROXY_COUNT: ${AERINI_TRUSTED_PROXY_COUNT:-0}
       RUST_LOG: info
     restart: unless-stopped
 

@@ -186,7 +186,7 @@ impl Node for GoogleSheetsNode {
                 "values":         { "x-aerini-multiline": true, "description": "Row data for append_row — rows of cells as JSON, e.g. [[\"a\",\"b\"]]. Stored as typed (RAW) unless value_input is USER_ENTERED." },
                 "value_input":    { "type": "string", "enum": ["RAW", "USER_ENTERED"], "description": "append_row only. RAW (default) stores values as typed. USER_ENTERED parses them as if typed in the sheet: formulas run, dates and numbers are converted. Do not use USER_ENTERED with data you do not control: a value starting with = becomes a formula." },
                 "client_id":      { "type": "string", "description": "Google OAuth client ID — enables automatic token refresh (recommended). Entered directly here; not currently offered as a saved-credential picker field." },
-                "client_secret":  { "type": "string", "description": "Google OAuth client secret — enables automatic token refresh (recommended). Entered directly here; not currently offered as a saved-credential picker field." },
+                "client_secret":  { "type": "string", "description": "Google OAuth client secret — enables automatic token refresh (recommended). Pick a saved credential or enter it directly.", "x-aerini-credential": { "inline": true } },
                 "api_key":        { "type": "string", "description": "Google OAuth 2.0 access token, pasted directly. Does not auto-refresh (expires after ~1 hour). Only used when client_id/client_secret are not set." }
             }
         })

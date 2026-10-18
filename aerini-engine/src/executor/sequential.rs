@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::context::{new_shared_state, LogLevel};
+use crate::context::{new_shared_state, LogLevel, SharedExecutionState};
 use crate::error::EngineError;
 use crate::graph::{validate_port_arity, ExecutionGraph};
 use crate::model::{NodeOutput, Workflow};
@@ -21,13 +21,25 @@ impl WorkflowExecutor {
     ) -> Result<WorkflowResult, EngineError> {
         validate_port_arity(&workflow, &self.registry)?;
 
-        if self.config.parallel_execution {
-            let executor_arc = Arc::new(self.clone());
-            return run_inner_parallel(executor_arc, workflow, initial_variables).await;
-        }
-
-        let graph = ExecutionGraph::build(&workflow)?;
         let state = new_shared_state(&workflow.id, initial_variables);
+        let result = if self.config.parallel_execution {
+            let executor_arc = Arc::new(self.clone());
+            run_inner_parallel(executor_arc, workflow, state.clone()).await
+        } else {
+            self.run_inner_sequential(workflow, state.clone()).await
+        };
+        match result {
+            Ok(r) => Ok(Self::redact_result(&state, r).await),
+            Err(e) => Err(Self::redact_error(&state, e).await),
+        }
+    }
+
+    async fn run_inner_sequential(
+        &self,
+        workflow: Arc<Workflow>,
+        state: SharedExecutionState,
+    ) -> Result<WorkflowResult, EngineError> {
+        let graph = ExecutionGraph::build(&workflow)?;
 
         // Accumulates schema validation warnings (warn mode) or errors (strict mode).
         let mut validation_warnings: Vec<String> = Vec::new();
@@ -226,10 +238,12 @@ impl WorkflowExecutor {
             // Validate resolved input against the node's declared input schema.
             // In non-strict mode: logs warnings and continues.
             // In strict mode: returns Some(failure) → treated identically to a node execution failure.
-            if let Some(validation_failure) = self
-                .check_schema(&node_def.input_schema, &resolved_input.input, node_id, &state, &mut validation_warnings)
-                .await
-            {
+            let schema_failure = {
+                let schema_input = self.schema_view(node_def, &resolved_input);
+                self.check_schema(&node_def.input_schema, &schema_input, node_id, &state, &mut validation_warnings)
+                    .await
+            };
+            if let Some(validation_failure) = schema_failure {
                 let err_msg = validation_failure
                     .error
                     .as_ref()

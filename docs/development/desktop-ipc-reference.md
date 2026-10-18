@@ -37,7 +37,7 @@ The desktop app's frontend never touches the filesystem, a database, or the Rust
 
 `run_workflow` does the most work of any command in this file:
 
-- Generates its own `run_id` (a UUID) when the caller omits one. Omit it for a fire-and-forget run (a popover node preview) that will never need to be cancelled by id; the frontend's own `cancelRun` convention requires a known `run_id` to target, so any run that should be independently stoppable must pass one.
+- Generates its own `run_id` (a UUID) when the caller omits one. Omit it for a fire-and-forget run (a popover node preview) that will never need to be cancelled by id; the frontend's own `cancelRun` convention requires a known `run_id` to target, so any run that should be independently stoppable must pass one. A `run_id` that is empty, longer than 128 bytes, or already in use by a run still in flight fails with an error and starts nothing; the run's cancel entry is removed however the call ends.
 - Rejects a second concurrent run of the same `workflow_id` with a 5-second wait on an internal exec lock before failing, matching the equivalent reject-if-busy behavior in `aerini-server`'s own run route. A single-node test run uses a distinct `${workflow_id}_sub` id internally, so it never contends with a full run of the same open canvas.
 - Always sets `caller_is_admin(true)` on the executor, since the desktop app is single-tenant: whoever is running a workflow on their own machine already has full access to it. This unlocks node-level admin gates (for example, a Database node's `allow_raw_sql`) unconditionally on desktop, unlike `aerini-server`, where the same gate depends on the calling token's scope.
 - A cancelled run (via `cancel_run`, below) does not surface as an `Err`. It resolves `Ok` with a `WorkflowResult` whose `success` is `false` and `error` is `"Run cancelled by user"`, the same shape a normal failed run would have.
@@ -74,7 +74,7 @@ None of these six are wrapped in `src/ipc/workflow.ts`; `src/run-history.ts` cal
 | `set_setting` | `key: String`, `value: String` | `Result<(), String>` | `setSetting` (`ipc/workflow.ts`) |
 | `clear_chat_session` | `session_id: String` | `Result<(), String>` | `clearChatSession` (`ipc/workflow.ts`) |
 
-`clear_chat_session` clears AI Memory rows for a chat session by looking up the registered `ai_memory` node type and invoking its `execute` directly with a synthetic `NodeInput`, rather than opening a second database connection to reimplement the delete. This is the one command in the whole surface that runs a node outside an actual workflow run. The `clear` operation deletes the session's remembered files together with its messages, in one transaction.
+`set_setting` fails for a key over 256 bytes or a value over 1 MiB, and always refuses the `plugin_dir` key: the plugin folder can only be set through `choose_plugin_dir` (see [Plugins](#plugins)). `clear_chat_session` clears AI Memory rows for a chat session by looking up the registered `ai_memory` node type and invoking its `execute` directly with a synthetic `NodeInput`, rather than opening a second database connection to reimplement the delete. This is the one command in the whole surface that runs a node outside an actual workflow run. The `clear` operation deletes the session's remembered files together with its messages, in one transaction.
 
 ## Chat
 
@@ -100,12 +100,12 @@ None of these six are wrapped in `src/ipc/workflow.ts`; `src/run-history.ts` cal
 | `list_credentials` | none | `Result<Vec<CredentialEntry>, String>` | `listCredentials` |
 | `list_credential_usage` | none | `Result<HashMap<String, Vec<String>>, String>` | `listCredentialUsage` |
 | `get_credential_metadata` | `id: String` | `Result<Option<CredentialMetadata>, String>` | `getCredentialMetadata` |
-| `get_credential_secret` | `id: String` | `Result<Option<String>, String>` | `getCredentialSecret` |
-| `save_credential` | `req: CreateCredentialRequest` | `Result<(), String>` | `saveCredential` |
+| `list_credential_models` | `id: String`, `provider: String`, `base_url: String` | `Result<Vec<String>, String>` | `listCredentialModels` |
+| `save_credential` | `req: CreateCredentialRequest`, `update: bool` | `Result<(), String>` | `saveCredential` |
 | `delete_credential` | `id: String` | `Result<(), String>` | `deleteCredential` |
 | `export_encryption_key` | none | `Result<String, String>` | `exportEncryptionKey` |
 
-`list_credential_usage` scans every saved workflow once and maps each credential id to the distinct workflow names referencing it; it shares that same scan function with `delete_credential`'s own guard, so both read the same signal instead of the two drifting apart independently. `delete_credential` refuses to delete (returning `Err` with the count and names) a credential still referenced by at least one workflow. `export_encryption_key` returns the raw AES-256 credential-encryption key, base64-encoded; it's the only recovery path if the OS keychain entry holding it is ever lost, and it is a thin pass-through with no logic of its own beyond that encoding.
+`list_credential_usage` scans every saved workflow once and maps each credential id to the distinct workflow names referencing it; it shares that same scan function with `delete_credential`'s own guard, so both read the same signal instead of the two drifting apart independently. `delete_credential` refuses to delete (returning `Err` with the count and names) a credential still referenced by at least one workflow. `delete_credential` also refuses when any workflow could not be read, since its references are unknown. `save_credential` creates a credential and fails when the id already exists; with `update: true` it replaces an existing one, keeps its creation time, and keeps the stored secret when `req.value` is empty. The store validates every field (id `A-Za-z0-9_-`, 1-128 characters; name 1-256 characters; value up to 65,536 bytes; `cred_type` one of `api_key`, `bearer`, `basic`, `oauth`, `other`; `base_url` an `http(s)` URL without a username or password). There is no command that returns a saved secret: `list_credential_models` reads the secret in the backend to fetch a provider's model list for a saved credential. `export_encryption_key` shows a native confirmation dialog and, only if confirmed, returns the raw AES-256 credential-encryption key, base64-encoded (it rejects with `CANCELLED` otherwise); it's the only recovery path if the OS keychain entry holding it is ever lost.
 
 ## OAuth
 
@@ -148,7 +148,7 @@ Reports the port an OAuth callback listener would actually bind if a flow starte
 
 ## Plugins
 
-`plugins.rs` (1,676 lines, by far the largest command file), six commands, all wrapped in `src/ipc/workflow.ts` rather than a `plugins.ts` file of their own.
+`plugins.rs` (1,676 lines, by far the largest command file), seven commands, all wrapped in `src/ipc/workflow.ts` rather than a `plugins.ts` file of their own.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
@@ -158,14 +158,19 @@ Reports the port an OAuth callback listener would actually bind if a flow starte
 | `remove_plugin` | `filename: String`, `plugin_dir: String` | `Result<(), String>` | `removePlugin` (`src/plugin-settings.ts`) |
 | `remove_plugin_pack` | `pack_id: String`, `plugin_dir: String` | `Result<(), String>` | `removePluginPack` (`src/plugin-settings.ts`) |
 | `reload_plugins` | `plugin_dir: String` | `Result<PluginLoadReport, String>` | `reloadPlugins`, called after every successful install or removal (`src/plugin-settings.ts`) |
+| `choose_plugin_dir` | none (takes a `tauri::AppHandle`) | `Result<Option<String>, String>` | `choosePluginDir` (`ipc/workflow.ts`), called from the **Browse** button in `src/plugin-settings.ts` |
+
+`choose_plugin_dir` opens the native folder picker and saves the chosen folder as the `plugin_dir` setting, returning its path, or `None` when the user cancels. It is the only way to set that setting. The install, install-pack, remove, remove-pack and reload commands fail unless the `plugin_dir` they receive is the folder saved in Settings (compared after resolving the path), so a compromised webview cannot point them at another directory.
 
 `list_installed_plugins` returns an empty list, not an error, for a `plugin_dir` that doesn't exist yet. Each `PluginInfo` carries a `load_error` (set when the file failed to describe at all), a `registry_warning` (set when the plugin's `type_id` lost a collision against a built-in or another plugin at last reload, so the file is installed but inactive), and a `signature_status` string for display, independently of each other.
 
 `install_plugin_from_path` and `install_plugin_pack_from_path` share the same ordering: every signature and trust check runs before any file on disk is touched. See [Conventions](#conventions) for the prefixed error strings both can return, and [Writing a Plugin Node](plugin-authoring.md) for the trust-on-first-use model those checks enforce. `overwrite` must be explicitly passed `true` to replace an existing install; without it, a matching existing plugin or pack fails with a `plugin_already_installed:`/`pack_already_installed:` prefixed error rather than silently updating.
 
+A single install reads the `.wasm` file and its `.sig` once into a hidden staging file (`.aerini-install-*.part`) in the plugin folder, runs every check on that copy, then renames it into place, the `.wasm` before its `.sig`. A pack's manifest and members are written the same way. A staging file left by an interrupted install is deleted the next time an install runs and is more than an hour old.
+
 `reload_plugins` rebuilds the node registry from scratch (built-ins plus every `.wasm` in `plugin_dir`) and swaps it in atomically, no restart needed; a workflow run already in progress keeps executing against the registry it started with. An internal lock serializes overlapping reload calls so a slower call started first can't finish after, and overwrite, a faster one started later.
 
-Two more commands the Plugins settings panel depends on, `pick_folder_dialog` and `pick_plugin_file_dialog`, are not in this file. They're declared at the top level in `lib.rs`; see [Top-level commands](#top-level-commands) below.
+One more command the Plugins settings panel depends on, `pick_plugin_file_dialog`, is not in this file. They're declared at the top level in `lib.rs`; see [Top-level commands](#top-level-commands) below.
 
 ## Memory
 
@@ -247,12 +252,12 @@ Discovers a provider's available models by calling its `/models`-style endpoint.
 | `cancel_run` | `run_id: String` | none (no return value) | `cancelRun` (`ipc/workflow.ts`), called from `src/run-manager/` |
 | `get_autostart` | none | `bool` | `getAutostart` (`ipc/autostart.ts`), called from `toolbar.ts` |
 | `set_autostart` | `enabled: bool` | `Result<(), String>` | `setAutostart` (`ipc/autostart.ts`), called from `toolbar.ts` |
-| `pick_folder_dialog` | none | `Option<String>` | `pickFolderDialog` (`ipc/workflow.ts`), called from `plugin-settings.ts` |
+| `pick_folder_dialog` | none | `Option<String>` | `src/node-configs/save-to-folder-config.ts` and `src/popover/field-renderer.ts`, bare `invoke()` calls behind their "Choose Folder" buttons |
 | `pick_plugin_file_dialog` | none | `Option<String>` | `pickPluginFileDialog` (`ipc/workflow.ts`), called from `plugin-settings.ts` |
 | `pick_file_dialog` | none | `Option<String>` | `src/popover/field-renderer.ts`, a bare `invoke()` behind the "Choose File…" button |
 | `write_temp_file` | `filename: String`, `data: String` (base64) | `Result<String, String>` | `output-renderer.ts`, for rendering video/audio output |
 
-`read_text_file` only opens a path ending in `.aerini` or `.json`, rejecting anything else outright, and only after canonicalizing the path first. `save_export_zip` requires its `zip_path` to canonicalize to somewhere inside the system temp directory, refusing anything else; it always deletes the source temp file afterward, whether the save succeeded or the user cancelled the dialog. `write_temp_file` strips `/`, `\`, and any `..` sequence from the filename before writing, caps the decoded payload at 50 MiB, and writes into a fixed `aerini_media` subdirectory of the system temp directory, never a caller-chosen location. `pick_folder_dialog` and `pick_plugin_file_dialog` both return `None`, not an error, when the user cancels the native dialog; `pick_plugin_file_dialog` filters the picker to `.wasm` and `.aerinipkg` files.
+`read_text_file` only opens a path ending in `.aerini` or `.json`, rejecting anything else outright, and only after canonicalizing the path first. `save_export_zip` accepts only a `zip_path` that one of the export commands created in this session (the export commands create an owner-only file with a random name, `aerini-export-*.zip`, in the system temp directory and remember its resolved path), refusing anything else; it deletes that temp file whether the save succeeded, failed or was cancelled, so a failed save means exporting again. An export that is never saved is deleted by the next export once it is more than an hour old. `write_temp_file` keeps only the last path segment of the filename and replaces every character other than letters, digits, `.`, `-`, `_` and space with `_`, caps the decoded payload at 50 MiB, and stores the file in an `aerini_media` subdirectory of the system temp directory, never a caller-chosen location. The directory is created readable by the current user only (on Unix an existing one is tightened to that, and a symlink or a directory owned by another user is refused), and the file is named `<hash of its bytes>-<sanitized name>`, so identical media is stored once and a file or symlink already at that path is replaced rather than written through. Files older than 24 hours are deleted at startup. `pick_folder_dialog` and `pick_plugin_file_dialog` both return `None`, not an error, when the user cancels the native dialog; `pick_plugin_file_dialog` filters the picker to `.wasm` and `.aerinipkg` files.
 
 ## What this page doesn't cover
 

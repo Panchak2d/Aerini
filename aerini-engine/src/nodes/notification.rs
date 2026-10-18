@@ -92,6 +92,20 @@ const STDERR_CAP: usize = 4096;
 #[cfg(any(windows, test))]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[cfg(windows)]
+const TOAST_APP_ID: &str = "Aerini";
+
+/// Windows shows a toast only for an application id it knows. A per-user
+/// registry key naming the id is enough, and needs no administrator rights.
+#[cfg(windows)]
+async fn register_app_id() -> Result<(), String> {
+    let key = format!(r"HKCU\Software\Classes\AppUserModelId\{TOAST_APP_ID}");
+    let mut cmd = Command::new("reg");
+    cmd.args(["add", key.as_str(), "/v", "DisplayName", "/t", "REG_SZ", "/d", TOAST_APP_ID, "/f"]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    run_notifier(cmd, "reg", NOTIFY_TIMEOUT).await
+}
+
 async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut buf = [0u8; 1024];
@@ -145,19 +159,22 @@ async fn run_notifier(mut cmd: Command, name: &str, timeout: Duration) -> Result
     }
 }
 
-/// The notification spec gives the body a small XML-based markup and notify-send
-/// has no option to turn it off, so the body is escaped. The title is escaped
-/// too, because some daemons read markup in the summary as well.
+/// A daemon that reports the `body-markup` capability reads a small XML-based
+/// markup in the body, and notify-send has no option to turn that off, so the
+/// text is escaped for it. The title is escaped too, because some daemons read
+/// markup in the summary as well. A daemon without the capability shows the
+/// text as it is.
 #[cfg(any(target_os = "linux", test))]
 fn escape_markup(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn notify_send_args(title: &str, body: &str, urgency: &str) -> Vec<String> {
-    let mut args = vec!["--urgency".to_string(), urgency.to_string(), "--".to_string(), escape_markup(title)];
+fn notify_send_args(title: &str, body: &str, urgency: &str, markup: bool) -> Vec<String> {
+    let text = |s: &str| if markup { escape_markup(s) } else { s.to_string() };
+    let mut args = vec!["--urgency".to_string(), urgency.to_string(), "--".to_string(), text(title)];
     if !body.is_empty() {
-        args.push(escape_markup(body));
+        args.push(text(body));
     }
     args
 }
@@ -197,8 +214,9 @@ fn toast_xml(title: &str, body: &str) -> String {
 async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] urgency: &str) -> Result<&'static str, String> {
     #[cfg(target_os = "linux")]
     {
+        let markup = crate::session_bus::notification_body_markup().await.unwrap_or(true);
         let mut cmd = Command::new("notify-send");
-        cmd.args(notify_send_args(title, body, urgency));
+        cmd.args(notify_send_args(title, body, urgency, markup));
         run_notifier(cmd, "notify-send", NOTIFY_TIMEOUT).await?;
         return Ok("notify-send");
     }
@@ -237,6 +255,9 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
         // XML special characters in title/body are entity-escaped, and characters
         // XML 1.0 forbids are dropped, so the document stays well-formed even
         // with arbitrary input.
+        if let Err(e) = register_app_id().await {
+            tracing::warn!("could not register the notification application id: {e}");
+        }
         let xml = toast_xml(title, body);
         // Write XML to a temp file. Only the file path (not the content) is
         // placed into the PowerShell -Command string.
@@ -256,9 +277,9 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
              $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
              $xml.LoadXml([System.IO.File]::ReadAllText(\"{}\")); \
-             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Aerini').Show(\
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{}').Show(\
              [Windows.UI.Notifications.ToastNotification]::new($xml))",
-            path
+            path, TOAST_APP_ID
         );
         let mut cmd = Command::new("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd]);
@@ -308,12 +329,16 @@ mod tests {
     }
 
     #[test]
-    fn notify_send_receives_title_and_body_as_text_not_markup() {
+    fn notify_send_escapes_markup_only_when_the_daemon_reads_it() {
         assert_eq!(
-            notify_send_args("a < b <i>", "x & <b>y</b>", "low"),
+            notify_send_args("a < b <i>", "x & <b>y</b>", "low", true),
             ["--urgency", "low", "--", "a &lt; b &lt;i&gt;", "x &amp; &lt;b&gt;y&lt;/b&gt;"],
         );
-        assert_eq!(notify_send_args("t", "", "normal").len(), 4);
+        assert_eq!(
+            notify_send_args("a < b", "x & <b>y</b>", "low", false),
+            ["--urgency", "low", "--", "a < b", "x & <b>y</b>"],
+        );
+        assert_eq!(notify_send_args("t", "", "normal", true).len(), 4);
     }
 
     #[test]
@@ -374,6 +399,26 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let pid = std::fs::read_to_string(pid_file.path()).unwrap().trim().to_string();
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process {pid} still exists");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn registering_the_app_id_writes_its_display_name_to_the_user_hive() {
+        register_app_id().await.unwrap();
+        let out = std::process::Command::new("reg")
+            .args(["query", r"HKCU\Software\Classes\AppUserModelId\Aerini", "/v", "DisplayName"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Aerini"));
+    }
+
+    #[cfg(windows)]
+    #[ignore = "needs a Windows desktop session"]
+    #[tokio::test]
+    async fn the_windows_toast_command_runs_to_completion() {
+        let method = send_notification("Aerini test", "a < b & c", "normal").await.unwrap();
+        assert_eq!(method, "powershell");
     }
 
     #[tokio::test]

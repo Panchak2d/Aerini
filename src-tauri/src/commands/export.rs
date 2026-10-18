@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use argon2::{
     password_hash::{rand_core::{OsRng, RngCore}, PasswordHasher, SaltString},
@@ -9,6 +10,7 @@ use argon2::{
 use base64::Engine as _;
 
 use aerini_engine::{
+    credential_env::assign_env_vars,
     db::WorkflowDb,
     model::Workflow,
     scheduler::extract_trigger,
@@ -18,6 +20,78 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 mod templates;
+
+const EXPORT_PREFIX: &str = "aerini-export-";
+const EXPORT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+static ISSUED_EXPORTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn issued_exports() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    ISSUED_EXPORTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Creates an owner-only zip file with a random name in the temp folder and
+/// records it, so `save_export_zip` accepts only files made here.
+fn create_export_file() -> Result<(std::fs::File, PathBuf), String> {
+    sweep_stale_exports();
+    let (file, path) = tempfile::Builder::new()
+        .prefix(EXPORT_PREFIX)
+        .suffix(".zip")
+        .tempfile()
+        .map_err(|e| format!("Cannot create zip: {}", e))?
+        .keep()
+        .map_err(|e| format!("Cannot create zip: {}", e.error))?;
+    issued_exports().push(path.canonicalize().unwrap_or_else(|_| path.clone()));
+    Ok((file, path))
+}
+
+/// Deletes export zips that were never saved, such as after a crash.
+fn sweep_stale_exports() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(EXPORT_PREFIX) || !name.ends_with(".zip") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > EXPORT_MAX_AGE);
+        if old {
+            let path = entry.path();
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            discard_export(&canonical);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Resolves `path` to an export zip created by this module, or fails.
+pub fn issued_export(path: &str) -> Result<PathBuf, String> {
+    let canonical = Path::new(path)
+        .canonicalize()
+        .map_err(|_| format!("Export zip not found at: {}", path))?;
+    if issued_exports().contains(&canonical) {
+        Ok(canonical)
+    } else {
+        Err("zip_path is not an export created by this session".to_string())
+    }
+}
+
+/// Deletes an issued export zip and forgets it.
+pub fn discard_export(canonical: &Path) {
+    let _ = std::fs::remove_file(canonical);
+    issued_exports().retain(|p| p != canonical);
+}
+
+/// Deletes a zip returned by `create_export_file` that will not be handed out.
+fn discard_unissued(path: &Path) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    discard_export(&canonical);
+}
 
 /// Request from the frontend — workflow ID + user choices.
 #[derive(Debug, Deserialize)]
@@ -68,7 +142,7 @@ pub async fn validate_workflow_for_export(
     }
 
     let trigger_desc = trigger.describe();
-    let credentials  = collect_credentials(&wf);
+    let credentials  = collect_credentials(&wf)?;
     let variables    = collect_vars(&wf)?;
 
     Ok(ValidateResult { trigger_desc, credentials, variables })
@@ -104,7 +178,7 @@ pub async fn generate_server_package(
     }
 
     let trigger_desc  = trigger.describe();
-    let credentials   = collect_credentials(&wf);
+    let credentials   = collect_credentials(&wf)?;
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
     // same canonical list every other execution entry point
@@ -152,12 +226,7 @@ pub async fn generate_server_package(
 
     let readme = templates::build_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous);
 
-    let temp_dir  = std::env::temp_dir();
-    let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
-    let zip_path  = temp_dir.join(format!("aerini-server-{}.zip", safe_name));
-
-    let zip_file = std::fs::File::create(&zip_path)
-        .map_err(|e| format!("Cannot create zip: {}", e))?;
+    let (zip_file, zip_path) = create_export_file()?;
 
     // Write all zip entries inside a closure so we can clean up the temp file
     // on any failure without duplicating the remove_file call at every ? site.
@@ -217,7 +286,7 @@ pub async fn generate_server_package(
     })();
 
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&zip_path);
+        discard_unissued(&zip_path);
         return Err(e);
     }
 
@@ -230,29 +299,27 @@ pub async fn generate_server_package(
     })
 }
 
-fn collect_credentials(wf: &Workflow) -> Vec<CredentialExport> {
-    let mut out = Vec::new();
+fn collect_credentials(wf: &Workflow) -> Result<Vec<CredentialExport>, String> {
+    let mut found: Vec<(&str, &str)> = Vec::new();
     for node in &wf.nodes {
-        for cred_id in node.credentials.values() {
-            let env_var = credential_id_to_env_var(cred_id);
-            if !out.iter().any(|c: &CredentialExport| &c.credential_id == cred_id) {
-                out.push(CredentialExport {
-                    credential_id: cred_id.clone(),
-                    env_var_name:  env_var,
-                    node_name:     node.name.clone(),
-                });
+        let mut fields: Vec<(&String, &String)> = node.credentials.iter().collect();
+        fields.sort();
+        for (_, cred_id) in fields {
+            if !found.iter().any(|(id, _)| *id == cred_id.as_str()) {
+                found.push((cred_id.as_str(), node.name.as_str()));
             }
         }
     }
-    out
-}
-
-fn credential_id_to_env_var(id: &str) -> String {
-    let cleaned: String = id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-        .collect();
-    format!("AERINI_CRED_{}", cleaned)
+    let names = assign_env_vars(found.iter().map(|(id, _)| *id)).map_err(|e| e.to_string())?;
+    Ok(found
+        .into_iter()
+        .zip(names)
+        .map(|((id, node_name), (_, env_var))| CredentialExport {
+            credential_id: id.to_string(),
+            env_var_name:  env_var,
+            node_name:     node_name.to_string(),
+        })
+        .collect())
 }
 
 /// Scans the full serialized workflow JSON for `$vars.<name>` references and
@@ -303,7 +370,7 @@ pub async fn generate_docker_package(
     }
 
     let trigger_desc  = trigger.describe();
-    let credentials   = collect_credentials(&wf);
+    let credentials   = collect_credentials(&wf)?;
     let workflow_json = wf.to_json_pretty().map_err(|e| e.to_string())?;
 
     // same canonical list every other execution entry point
@@ -342,12 +409,7 @@ pub async fn generate_docker_package(
     let env_example     = templates::build_docker_env_example(&credentials);
     let readme          = templates::build_docker_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous);
 
-    let temp_dir  = std::env::temp_dir();
-    let safe_name = wf.name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
-    let zip_path  = temp_dir.join(format!("aerini-docker-{}.zip", safe_name));
-
-    let zip_file = std::fs::File::create(&zip_path)
-        .map_err(|e| format!("Cannot create zip: {}", e))?;
+    let (zip_file, zip_path) = create_export_file()?;
 
     let write_result: Result<(), String> = (|| {
         let mut zip = zip::ZipWriter::new(zip_file);
@@ -384,7 +446,7 @@ pub async fn generate_docker_package(
     })();
 
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&zip_path);
+        discard_unissued(&zip_path);
         return Err(e);
     }
 
@@ -416,13 +478,7 @@ pub async fn export_all_workflows(
     let (zip_path, count) = tokio::task::spawn_blocking(move || -> Result<(std::path::PathBuf, usize), String> {
         let summaries = db_clone.list()?;
 
-        let temp_dir = std::env::temp_dir();
-        let zip_path = temp_dir.join(format!(
-            "aerini-backup-{}.zip",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
-        ));
-        let zip_file = std::fs::File::create(&zip_path)
-            .map_err(|e| format!("Cannot create zip: {}", e))?;
+        let (zip_file, zip_path) = create_export_file()?;
 
         let write_result: Result<usize, String> = (|| {
             let mut zip = zip::ZipWriter::new(zip_file);
@@ -463,7 +519,7 @@ pub async fn export_all_workflows(
         match write_result {
             Ok(count) => Ok((zip_path, count)),
             Err(e) => {
-                let _ = std::fs::remove_file(&zip_path);
+                discard_unissued(&zip_path);
                 Err(e)
             }
         }
@@ -496,4 +552,30 @@ fn hash_run_secret(raw: &str) -> Result<String, argon2::password_hash::Error> {
     let salt   = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     Ok(argon2.hash_password(raw.as_bytes(), &salt)?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_file_is_owner_only_and_only_issued_files_are_accepted() {
+        let (_file, path) = create_export_file().expect("export file should be created");
+        let as_text = path.to_str().expect("temp path is UTF-8");
+        let canonical = issued_export(as_text).expect("an issued export is accepted");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("metadata failed").permissions().mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+
+        let other = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        assert!(issued_export(other.path().to_str().expect("temp path is UTF-8")).is_err());
+
+        discard_export(&canonical);
+        assert!(!path.exists());
+        assert!(issued_export(as_text).is_err());
+    }
 }

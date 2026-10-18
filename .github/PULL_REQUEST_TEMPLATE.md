@@ -20,6 +20,7 @@ Closes #<!-- issue number, or delete this line -->
 
 - [ ] `cargo clippy -p aerini-engine -p aerini-server -- -D warnings` passes
 - [ ] `cargo test -p aerini-engine` and `cargo test -p aerini-server` pass
+- [ ] **Desktop shell change (`src-tauri/`):** `cargo test -p aerini` and `cargo clippy -p aerini --locked -- -D warnings` pass
 - [ ] No `.unwrap()` in production paths
 - [ ] **Frontend change only:** `npm run typecheck` and `npm test` pass; `dist/` rebuilt with `npm run vite:build` and committed (CI fails on a stale one)
 - [ ] **New node only:** registered in `nodes/mod.rs`, icon added in `src/utils.ts`, at least one `#[cfg(test)]` block added

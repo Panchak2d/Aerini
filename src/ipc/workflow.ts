@@ -53,10 +53,7 @@ export interface WorkflowSummary {
   name: string;
   updated_at: string;
   tags: string[];
-  /** Exclusive Workflows-sidebar collection membership. null/absent = Uncategorized.
-   *  Populated today in browser/localStorage mode. In Tauri/desktop mode this is
-   *  `undefined` until the backend (workflows.collection_id column + WorkflowSummary
-   *  Rust struct) ships. */
+  /** Exclusive Workflows-sidebar collection membership. null/absent = Uncategorized. */
   collection_id?: string | null;
 }
 
@@ -219,8 +216,8 @@ export interface PluginInfo {
   pack_display_name: string | null;
 }
 
-export const pickFolderDialog = () =>
-  invoke<string | null>("pick_folder_dialog");
+export const choosePluginDir = () =>
+  invoke<string | null>("choose_plugin_dir");
 
 export const pickPluginFileDialog = () =>
   invoke<string | null>("pick_plugin_file_dialog");

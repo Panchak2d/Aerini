@@ -48,6 +48,15 @@ fn forwarded_client_ip(xff: &str, trusted_proxy_count: usize) -> Option<IpAddr> 
     ips[idx].parse::<IpAddr>().ok()
 }
 
+/// `host:port` for display and logs, with an IPv6 literal in brackets.
+pub(crate) fn join_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Extracts the credential from an `Authorization: Bearer <token>` value.
 /// The scheme name is case-insensitive and one or more spaces may precede the
 /// token (RFC 7235 §2.1, §5.1.2); a value with no token after the scheme is
@@ -60,7 +69,7 @@ pub(crate) fn parse_bearer(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_client_ip, forwarded_client_ip, parse_bearer};
+    use super::{extract_client_ip, forwarded_client_ip, join_host_port, parse_bearer};
     use axum::body::Body;
     use axum::extract::Request;
     use axum::http::HeaderValue;
@@ -118,5 +127,13 @@ mod tests {
         assert_eq!(parse_bearer("Bearer "), None);
         assert_eq!(parse_bearer("Bearer    "), None);
         assert_eq!(parse_bearer("Basic abc"), None);
+    }
+
+    #[test]
+    fn ipv6_literal_is_bracketed_and_other_hosts_are_not() {
+        assert_eq!(join_host_port("::1", 8080), "[::1]:8080");
+        assert_eq!(join_host_port("[::1]", 8080), "[::1]:8080");
+        assert_eq!(join_host_port("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(join_host_port("localhost", 80), "localhost:80");
     }
 }

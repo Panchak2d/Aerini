@@ -27,8 +27,8 @@ Click **Add a credential** (or, if this is your first one, **Add your first cred
   - **OAuth Token**: an OAuth access or refresh token
   - **Other / Custom**: anything else
 - **Name**: a label for your own reference, like "OpenAI Production Key."
-- **ID**: a short identifier used internally to attach this credential to a node. It's auto-filled from the name (lowercased, spaces turned into underscores) but you can edit it before saving. Letters, numbers, underscores, and hyphens only. You can't change it later, so if you need a different ID, delete the credential and add it again.
-- **Secret Value**: the actual key or token. Click the eye icon to reveal it while typing. Required for every Advanced Provider value except one: if Advanced Provider (below) is set to `local`, this field is optional — see [Local Models](local-models.md#reusing-this-setup-with-a-saved-credential).
+- **ID**: a short identifier used internally to attach this credential to a node. It's auto-filled from the name (lowercased, spaces turned into underscores) but you can edit it before saving. Letters, numbers, underscores, and hyphens only, up to 128 characters. You can't change it later, so if you need a different ID, delete the credential and add it again.
+- **Secret Value**: the actual key or token. Click the eye icon to reveal it while typing. A saved secret is never shown again. Required for every Advanced Provider value except one: if Advanced Provider (below) is set to `local`, this field is optional — see [Local Models](local-models.md#reusing-this-setup-with-a-saved-credential).
 
 ![The form filled in, Secret Value masked behind the eye icon](../public/images/credentials-add-filled-masked.png)
 
@@ -40,15 +40,15 @@ Click **Save Credential**. That's it: the credential now shows up in the panel a
 
 ## Viewing, editing, and deleting
 
-Click **Edit** on any saved credential to see its secret value again (still masked behind the eye icon) and change it. The name and secret can be edited; the ID can't.
+Click **Edit** on any saved credential to change it. The secret is never loaded back into the window: **Secret Value** shows "(unchanged)", and leaving it blank keeps the saved secret. Type a new value to replace it. The name, type, secret and Advanced fields can be edited; the ID can't. Saving a new credential with an ID that already exists is refused instead of overwriting it.
 
-Click **Delete** to remove one. If any workflow still references it, Aerini refuses and tells you which workflow(s) are using it, so you won't accidentally break a node without knowing why. Delete or reassign the credential on those nodes first, then delete it.
+Click **Delete** to remove one. If any workflow still references it, Aerini refuses and tells you which workflow(s) are using it, so you won't accidentally break a node without knowing why. Delete or reassign the credential on those nodes first, then delete it. It also refuses when a workflow can't be read, since Aerini can't tell whether that workflow uses it.
 
 ## Using a credential in a node
 
 Open a node's settings and look for a **Connection** section. If the node has one, it shows a **Use Saved Credential** dropdown listing every credential you've saved, filtered by type only if that specific field requires one (most don't, so you'll usually see your full list) — except on AI Prompt, AI Agent, and Image Generation, which filter differently; see [AI nodes: auto-fill and one-off keys](#ai-nodes-auto-fill-and-one-off-keys) below. Pick one and the node uses it at run time. The secret itself is never written into the workflow file; only the credential's ID is, and that ID is resolved back to the real value the moment the workflow runs.
 
-Here's the part that trips people up: **not every field described as "resolved from Connections" actually gets a dropdown.** Only a field literally named `api_key` or `password` gets the automatic picker. Everything else on a node, however it's labeled, is a plain text box you type into directly, and whatever you type is saved in the workflow file unencrypted. This is a real gap between how a few node descriptions read and how the picker currently works, not something you're doing wrong.
+Here's the part that trips people up: **not every field described as "resolved from Connections" actually gets a dropdown.** Only a field named `api_key` or `password`, or one the node marks as a credential field (S3 Secret Access Key, and Client Secret on Google Sheets and Social Upload), gets the picker. Everything else on a node, however it's labeled, is a plain text box you type into directly, and whatever you type is saved in the workflow file unencrypted. This is a real gap between how a few node descriptions read and how the picker currently works, not something you're doing wrong.
 
 Here's how it breaks down across the nodes people connect credentials to most:
 
@@ -61,14 +61,19 @@ Here's how it breaks down across the nodes people connect credentials to most:
 | SendGrid | `api_key` | Saved Credential dropdown |
 | Stripe | `api_key` (secret key) | Saved Credential dropdown |
 | Send Email | `password` (paired with a plain `username` field) | Saved Credential dropdown |
+| Database (Postgres, MySQL, Redis) | `password` (replaces any password written in the Connection URL) | Saved Credential dropdown |
 | AI Prompt, AI Agent, Image Generation | `api_key` | Saved Credential dropdown, plus a one-off unencrypted option (see below) |
 | HTTP Request | `api_key` | Saved Credential dropdown, combined with an **Auth Mode** setting (see below) |
 | Discord | `webhook_url` | Typed directly into the node, no credential store involved |
-| S3 Storage | `access_key_id`, `secret_access_key` | Typed directly into the node fields |
-| Google Sheets | `api_key` (raw access token), or `client_id` + `client_secret` (OAuth app) | `api_key` via dropdown; `client_id`/`client_secret` typed directly |
-| Social Upload | `client_id`, `client_secret` | Typed directly into the node fields |
+| S3 Storage | `access_key_id`, `secret_access_key` | `secret_access_key` via dropdown or typed directly; `access_key_id` typed directly |
+| Google Sheets | `api_key` (raw access token), or `client_id` + `client_secret` (OAuth app) | `api_key` and `client_secret` via dropdown (`client_secret` can also be typed directly); `client_id` typed directly |
+| Social Upload | `client_id`, `client_secret` | `client_secret` via dropdown or typed directly; `client_id` typed directly |
 
-For Discord, S3, and the OAuth app fields on Google Sheets and Social Upload, there's nothing wrong with typing the value straight into the node. It's just worth knowing it isn't encrypted the way a saved credential is, since it lives in the workflow's `.aerini`/`.json` file in plain text.
+For Discord and the fields marked "typed directly", there's nothing wrong with typing the value straight into the node. It's just worth knowing it isn't encrypted the way a saved credential is, since it lives in the workflow's `.aerini`/`.json` file in plain text. Where a node offers both, **Or enter a value directly** sits under the dropdown, and a selected saved credential wins.
+
+A saved credential can fill only a node's credential fields: `api_key`, `password`, or a field the node type marks as a credential. A workflow that wires one into any other field, such as a URL or headers, makes that node fail with `CREDENTIAL_FIELD_NOT_ALLOWED`. If the credential no longer exists, the node still runs with the field empty and the run log says so. If it exists but can't be read (damaged, or the encryption key doesn't match it), or the credential store can't be reached, the node fails instead of running without it.
+
+After a run, any saved credential value, and any value typed into an `api_key` or `password` field, an S3 Secret Access Key, a Google Sheets or Social Upload Client Secret, or a field a plugin node marks `x-aerini-credential`, of 8 or more characters is replaced with `[redacted]` in the run's outputs, logs, error messages and the error a failed run returns, so a node that echoes its input can't write the secret into run history. This is an exact-text match, extended to the URL-encoded and Base64 forms of the value: a secret a node has split or hashed isn't recognised.
 
 ### HTTP Request's Auth Mode
 
@@ -105,7 +110,7 @@ On a Social Upload node, open its **Platform Setup** section and click **Open Se
 - **TikTok** apps start in sandbox mode: posts are private and visible only to your own account until the app passes review.
 - **YouTube** apps start in Google's "Testing" status, capped at whatever test users you've added, until you submit for verification.
 
-Once you have a Client ID and Client Secret, paste them directly into the node's **Client ID** and **Client Secret** fields. These aren't saved-credential fields (see the table above), so there's no dropdown step. Type them in, and Aerini handles the OAuth flow the first time the node runs.
+Once you have a Client ID and Client Secret, paste them directly into the node's **Client ID** and **Client Secret** fields. Type the Client ID in. For the Client Secret, either pick a saved credential or type it under **Or enter a value directly**. Aerini handles the OAuth flow the first time the node runs.
 
 ### Google Sheets
 
@@ -122,7 +127,9 @@ If you set `client_id`, also set `client_secret`, and vice versa. Setting only o
 
 Everything above describes the desktop app. If you export a workflow to run unattended with `aerini-server`, credentials work differently: the server doesn't read your encrypted credential store at all. Instead, it reads environment variables.
 
-Each credential ID maps to a variable named `AERINI_CRED_<ID>`, with the ID uppercased and anything that isn't a letter or digit turned into an underscore. A credential with ID `openai-prod` becomes `AERINI_CRED_OPENAI_PROD`. If a required variable isn't set when the server starts, it fails immediately with the exact variable name it's missing, rather than running with a silently broken node.
+Each credential ID maps to a variable named `AERINI_CRED_<ID>`, with the ID uppercased and anything that isn't a letter or digit turned into an underscore. A credential with ID `openai-prod` becomes `AERINI_CRED_OPENAI_PROD`. If a required variable isn't set, is set to an empty value, or isn't valid Unicode when the server starts, it fails immediately and says which of the three it is for each variable, rather than running with a silently broken node.
+
+The server reads only the variables listed in the package's `credential_env_vars` mapping, and every name in it must start with `AERINI_CRED_`. Two credential IDs that would share one variable, such as `a-b` and `a_b`, make the export fail and the server refuse to start, naming both IDs. Rename one of them in the Credentials panel.
 
 You don't have to work out these names by hand. When you export a workflow for server deployment, Aerini scans it for every node that uses a saved credential and generates the matching environment variable names for you, along with a `.env.example` file listing exactly what to set before you start the server.
 
@@ -134,7 +141,7 @@ Full deployment steps (starting the server, the status page, ports, and the rest
 
 Every credential is encrypted with one AES-256 key, normally stored in your OS keychain. If that keychain entry is ever lost (OS reset, migrating to a new machine, a Linux setup with no keychain running), there's no way to decrypt your saved credentials again, unless you've backed up the key yourself beforehand.
 
-In the Credentials panel, click **Backup Encryption Key**. Aerini asks you to confirm, since anyone holding this value can decrypt everything in your credential store, then shows it once. Copy it into a password manager, not a plain text file on the same machine. If you ever do lose the keychain entry, restoring from this backup is what lets Aerini decrypt your existing credentials again instead of starting from a blank store.
+In the Credentials panel, click **Backup Encryption Key**. Aerini asks you to confirm in a system dialog, since anyone holding this value can decrypt everything in your credential store, then shows it for 60 seconds. If you copy it, the clipboard is cleared after 60 seconds. Copy it into a password manager, not a plain text file on the same machine. If you ever do lose the keychain entry, restoring from this backup is what lets Aerini decrypt your existing credentials again instead of starting from a blank store.
 
 ### If Aerini can't read the key
 
@@ -143,8 +150,19 @@ When credentials are saved and Aerini can't get the key (you clicked **Deny** on
 - **macOS, access denied or prompt dismissed:** open Aerini again and choose **Always Allow** when macOS asks for Keychain access.
 - **Keychain locked or not running:** unlock or start it, then open Aerini again.
 - **Keychain entry lost:** save the key from your backup, exactly as it was shown, into a file named `.cred.key` in Aerini's [data folder](../getting-started/installation.md#uninstalling), then open Aerini. It moves the key back into the keychain and deletes the file.
+- **Headless server (`api` mode):** stop the server and run `aerini-server restore-key --key-file <backup file>`, adding `--keychain` if you start the server with it. See the [CLI reference](../operations/server-cli-reference.md#restore-key).
+- **The key doesn't match your credentials:** Aerini checks the key against a value stored with your credentials before it reads any of them. If the key it found decrypts none of them, it stops with a message saying so, and nothing is changed. This can happen when a stale key file or keychain entry survives a restore or a copy of the data folder. Put the key from your backup in place, as in *Keychain entry lost* above, after removing the keychain entry or key file that holds the wrong key.
+- **Key file and keychain hold different keys:** if a `.cred.key` file sits next to a working keychain entry and the two keys differ, Aerini stops rather than guess which one encrypted your credentials. Delete the `.cred.key` file if the keychain key is the right one, or delete the keychain entry if the file is.
 
 A fresh install, or a store with no saved credentials, isn't affected: Aerini creates its key the first time it runs.
+
+Each credential is encrypted together with its ID and type, so a stored secret copied onto another credential, or a credential whose type was changed outside Aerini, no longer decrypts and fails the node that uses it, as an unreadable credential does. Credentials saved by earlier versions are rewritten in this format the first time a workflow reads them, and from then on an older version of Aerini cannot read them. Back up the data folder before updating if you may go back.
+
+`aerini-server` in `api` mode keeps its key in the file `aerini.key` in the data folder (`--data-dir`). Back that file up with the rest of the folder; the server has no request that returns the key, because a token with the admin scope would then be able to read every credential.
+
+A build for a platform without a native keychain (anything other than Windows, macOS, Linux, FreeBSD and OpenBSD) keeps the key in the file `.cred.key` in the data folder and logs a warning at start-up. Back that file up and keep it private. If Aerini is stopped between writing the key and renaming it into place, a small `.tmp*` file holding the key can stay in that folder; Aerini removes such files once they are 10 minutes old.
+
+Each data folder has its own keychain entry, so two copies of Aerini that use different data folders never share or overwrite a key. A folder that already holds credentials from an earlier version keeps working: Aerini copies the key from the older shared entry into the folder's own entry the first time it starts, after checking that it decrypts your credentials, and leaves the shared entry in place.
 
 ## See also
 

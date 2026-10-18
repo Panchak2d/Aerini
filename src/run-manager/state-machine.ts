@@ -12,7 +12,7 @@ import type { WorkflowResult } from "../ipc/workflow";
 export class RunStateMachine {
   private _isRunning = false;
   private _activeRunId: string | null = null;
-  private _cancelRequested = false;
+  private _cancelledRuns = new Set<string>();
   private _lastResult: WorkflowResult | null = null;
   private _currentWorkflowName       = "Untitled";
   private _currentWorkflowId         = "";
@@ -54,15 +54,16 @@ export class RunStateMachine {
   start(runId: string): void { this._isRunning = true; this._activeRunId = runId; }
   stop(): void { this._isRunning = false; this._activeRunId = null; }
 
-  requestCancel(): void { this._cancelRequested = true; }
+  // Marks the run in flight as cancelled. The mark belongs to that run's id,
+  // so it can neither be missed by that run nor discard a later run's result.
+  requestCancel(): void {
+    if (this._activeRunId) this._cancelledRuns.add(this._activeRunId);
+  }
 
-  // Returns true (and clears the flag) if a cancel was requested — a
-  // check-then-reset pattern; callers use this to discard a run's result
-  // silently once Stop has already reset the UI.
-  consumeCancelRequest(): boolean {
-    const wasRequested = this._cancelRequested;
-    this._cancelRequested = false;
-    return wasRequested;
+  // Returns true (and clears the mark) if this run was cancelled — callers
+  // use it to discard the result or error of a run Stop has already reset.
+  consumeCancelRequest(runId: string): boolean {
+    return this._cancelledRuns.delete(runId);
   }
 
   setLastResult(result: WorkflowResult | null): void { this._lastResult = result; }

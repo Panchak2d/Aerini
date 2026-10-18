@@ -20,8 +20,7 @@ const WF_SETTINGS_HTML = `
     <input id="wf-setting-chat-max-length" type="number" />
     <input id="wf-setting-chat-persistence" type="checkbox" />
     <input id="wf-setting-chat-branding" type="checkbox" />
-    <div id="wf-setting-tags-chips"></div>
-    <input id="wf-setting-tags-input" />
+    <div id="wf-setting-tags-editor"></div>
   </div>
 `;
 

@@ -56,6 +56,12 @@ pub enum EngineError {
     #[error("Credential '{0}' not found")]
     CredentialNotFound(String),
 
+    #[error("{0}")]
+    CredentialInvalid(String),
+
+    #[error("Credential '{0}' already exists")]
+    CredentialExists(String),
+
     #[error("Execution cancelled")]
     ExecutionCancelled,
 
@@ -70,6 +76,9 @@ pub enum EngineError {
 
     #[error("Credential encryption key unavailable: {0}")]
     KeyUnavailable(String),
+
+    #[error("Credential encryption key does not match the credential store: {0}")]
+    KeyMismatch(String),
 
     #[error("Internal executor error: {0}")]
     Internal(String),

@@ -28,7 +28,7 @@ r2d2_sqlite = { version = "0.32", features = ["bundled"] }
 dashmap     = "6.1"
 
 # Encryption (credential store)
-aes-gcm = "0.11.0"
+aes-gcm = { version = "0.11.0", features = ["zeroize"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64  = "0.22"
 zeroize = "1"
@@ -46,7 +46,7 @@ http-body-util = "0.1"
 futures-util = { version = "0.3", default-features = false }
 
 # Email node
-lettre = { version = "0.11.22", default-features = false, features = [
+lettre = { version = "0.11.23", default-features = false, features = [
     "builder",
     "smtp-transport",
     "tokio1",
@@ -79,7 +79,7 @@ once_cell = "1"
 # Code node sandbox
 # tempfile: named temp files for the ESM loader script (non-Windows only)
 # libc: setrlimit() for Linux resource limits in sandbox mode; killing a
-# command's process group on Unix (nodes::util::kill_group_on_drop)
+# command's process group on Unix (nodes::util::kill_tree_on_drop)
 tempfile = "3"
 
 # Text to File node — PDF/DOCX export
@@ -169,7 +169,7 @@ aws-smithy-runtime-api = "1"
 # listed explicitly because "p3" does not imply it and both linkers register
 # `wasmtime_wasi::p2`.
 #
-# All three pinned to an EXACT version (`=49.0.2`) rather than a caret range:
+# All three pinned to an EXACT version (`=49.0.3`) rather than a caret range:
 # both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as
 # "not compliant with semver and not ready for production use" with no
 # patch-release guarantee even for security fixes. A caret range on a crate
@@ -180,12 +180,12 @@ aws-smithy-runtime-api = "1"
 # depends on (plugin_loader.rs's trigger-engine linking) before doing so.
 # Wasmtime only patches its two most recent releases (plus periodic LTS
 # lines), so an exact pin also has to be moved forward when the next major ships.
-wasmtime           = { version = "=49.0.2", features = ["component-model"] }
-wasmtime-wasi      = { version = "=49.0.2", features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=49.0.2", features = ["p2", "p3"] }
+wasmtime           = { version = "=49.0.3", features = ["component-model"] }
+wasmtime-wasi      = { version = "=49.0.3", features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=49.0.3", features = ["p2", "p3"] }
 
 # plugin_http.rs needs these directly. They are declared the way
-# wasmtime-wasi-http 49.0.2 declares them (ring, no default features), so no
+# wasmtime-wasi-http 49.0.3 declares them (ring, no default features), so no
 # second crypto backend is pulled in. The tree also links aws-lc-rs, so
 # plugin_http.rs names the ring provider explicitly instead of relying on a
 # process-wide default.
@@ -209,9 +209,15 @@ rustls-webpki = "0.103.13"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Session-bus queries (session_bus.rs). Already built through keyring's
+# async-secret-service, so this adds no new crate; the tokio feature is the
+# one it enables.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
-serial_test = "3"
+serial_test = "4"
 # hooks: Connection::authorizer, used only by
 # nodes::ai_memory::tests::append_fails_cleanly_when_seq_lookup_errors to
 # force get_next_seq's SELECT to fail without a trigger (triggers don't fire
@@ -225,5 +231,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

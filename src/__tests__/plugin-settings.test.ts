@@ -8,14 +8,12 @@ const mocks = vi.hoisted(() => ({
   removePluginPack: vi.fn(),
   reloadPlugins: vi.fn(),
   showConfirm: vi.fn(),
-  pickFolderDialog: vi.fn(),
-  setSetting: vi.fn(),
+  choosePluginDir: vi.fn(),
   listInstalledPlugins: vi.fn(),
 }));
 vi.mock("../ipc/workflow", () => ({
   getSetting: vi.fn(),
-  setSetting: mocks.setSetting,
-  pickFolderDialog: mocks.pickFolderDialog,
+  choosePluginDir: mocks.choosePluginDir,
   pickPluginFileDialog: vi.fn(),
   listInstalledPlugins: mocks.listInstalledPlugins,
   installPluginFromPath: mocks.installPluginFromPath,
@@ -234,8 +232,7 @@ describe("plugin-settings Browse, plugin folder selection", () => {
     document.body.innerHTML = `
       <button id="btn-plugin-dir-browse"></button>
       <div id="plugin-restart-banner" hidden></div>`;
-    mocks.pickFolderDialog.mockReset().mockResolvedValue("/my/plugins");
-    mocks.setSetting.mockReset().mockResolvedValue(undefined);
+    mocks.choosePluginDir.mockReset().mockResolvedValue("/my/plugins");
     mocks.listInstalledPlugins.mockReset().mockResolvedValue([]);
     mocks.reloadPlugins.mockReset();
   });
@@ -254,7 +251,6 @@ describe("plugin-settings Browse, plugin folder selection", () => {
     mocks.reloadPlugins.mockResolvedValue({ loaded: ["a", "b"], builtin_rejected: [], plugin_collisions: [] });
     const { toast, onNodesReloaded } = await browse();
 
-    expect(mocks.setSetting).toHaveBeenCalledWith("plugin_dir", "/my/plugins");
     expect(mocks.reloadPlugins).toHaveBeenCalledWith("/my/plugins");
     expect(onNodesReloaded).toHaveBeenCalledTimes(1);
     expect(toast).toHaveBeenCalledWith("Plugin folder set. 2 plugins loaded.", "success");
@@ -271,10 +267,32 @@ describe("plugin-settings Browse, plugin folder selection", () => {
     mocks.reloadPlugins.mockRejectedValue(new Error("engine busy"));
     const { toast, onNodesReloaded } = await browse();
 
-    expect(mocks.setSetting).toHaveBeenCalledWith("plugin_dir", "/my/plugins");
     expect(onNodesReloaded).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith(expect.stringContaining("reload failed"), "info");
     expect(document.getElementById("plugin-restart-banner")!.hidden).toBe(false);
+  });
+});
+
+describe("plugin-settings Browse, folder not saved", () => {
+  const flush = () => new Promise(r => setTimeout(r, 0));
+
+  it("reloads nothing and reports the error when the folder cannot be saved, and does nothing on cancel", async () => {
+    document.body.innerHTML = `<button id="btn-plugin-dir-browse"></button><div id="plugin-restart-banner" hidden></div>`;
+    mocks.reloadPlugins.mockReset();
+    mocks.choosePluginDir.mockReset().mockRejectedValueOnce("disk full").mockResolvedValueOnce(null);
+    const { bindPluginSettings } = await import("../plugin-settings");
+    const toast = vi.fn();
+    bindPluginSettings(toast, vi.fn());
+    const button = document.getElementById("btn-plugin-dir-browse")!;
+
+    button.click();
+    await flush();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("disk full"), "error");
+
+    button.click();
+    await flush();
+    expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -29,6 +29,22 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
+## v0.4.2 — Workflow organization and in-app updates (shipped — v0.4.2)
+
+- [x] In-app updates (check, verify signature, install and restart)
+- [x] Workflows sidebar: tags, tag filter and per-row actions menu
+- [x] Canvas undo / redo and one-click wire disconnect
+- [x] Chat panel file attachments saved with the session
+- [x] Trigger plugins can report metadata and their next event
+
+---
+
+## v0.4.3 — Canvas polish
+
+- [ ] Improved minimap
+
+---
+
 ## v0.5 — Sub-workflows
 
 - [ ] Sub-workflows (in progress)

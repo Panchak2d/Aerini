@@ -12,8 +12,8 @@
 //!   Manages many workflows via HTTP API + bearer token auth.
 //!   Useful for power users running multiple workflows on one machine.
 //!
-//!   aerini-server api --token mytoken --port 7700
-//!   AERINI_TOKEN=mytoken aerini-server api
+//!   aerini-server api --token "$(openssl rand -base64 32)" --port 7700
+//!   AERINI_TOKEN="$(openssl rand -base64 32)" aerini-server api
 //!
 //! CONTROL COMMANDS (for MODE 2):
 //!   aerini-server list                           — list all scheduled jobs
@@ -366,6 +366,24 @@ enum Command {
         token: String,
     },
 
+    /// Put a backed-up credential encryption key back (API mode data folder).
+    /// Stop the server first. The key is read from --key-file or standard input
+    /// and is checked against the saved credentials before anything changes.
+    RestoreKey {
+        /// Data directory of the `api` server
+        #[arg(long, env = "AERINI_DATA_DIR", default_value = "~/.aerini-server")]
+        data_dir: String,
+
+        /// File holding the backup key (the value shown by Backup Encryption Key).
+        /// Omit to read it from standard input.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+
+        /// Restore into the OS keychain, as `api --keychain` does, instead of aerini.key.
+        #[arg(long, default_value_t = false)]
+        keychain: bool,
+    },
+
     /// Manage API tokens (API mode only).
     Tokens {
         #[command(subcommand)]
@@ -462,6 +480,7 @@ async fn main() {
         Command::Restart { workflow, server, token } => ctl_restart(&workflow, &server, &token).await,
         Command::Status  { server, token }       => ctl_status(&server, &token).await,
         Command::Tokens  { action }              => ctl_tokens(action).await,
+        Command::RestoreKey { data_dir, key_file, keychain } => api_server::restore_key(&data_dir, key_file.as_deref(), keychain).await,
     }
 }
 
@@ -496,13 +515,15 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
 
     let status_port = port_override.unwrap_or(config.status_port);
 
-    // Validate credentials
-    let cred_resolver = Arc::new(EnvCredentialResolver::new(
-        config.credential_env_vars.clone()
-    ));
-    if let Err(missing) = cred_resolver.validate_all() {
-        let vars = missing.iter().map(|v| format!("export {}=<value>", v)).collect::<Vec<_>>().join(", ");
-        tracing::error!("Missing required environment variables: {}. See .env.example in your deployment package.", vars);
+    let cred_resolver = match EnvCredentialResolver::new(config.credential_env_vars.clone()) {
+        Ok(r)  => Arc::new(r),
+        Err(e) => { tracing::error!("Invalid credential_env_vars in {:?}: {}", config_path, e); std::process::exit(1); }
+    };
+    if let Err(problems) = cred_resolver.validate_all() {
+        tracing::error!(
+            "Credential environment variables are not usable: {}. See .env.example in your deployment package.",
+            problems.join("; ")
+        );
         std::process::exit(1);
     }
 
@@ -560,11 +581,9 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     let db = Arc::clone(&workflow_db) as Arc<dyn SchedulerDb>;
 
     // Warn if the workflow contains Shell, Code, or Database nodes and the
-    // operator has not explicitly opted in with --allow-shell / --allow-code /
-    // --allow-database.: derived from the one canonical dangerous-
-    // node list (aerini_engine::nodes::DANGEROUS_NODE_TYPE_IDS) instead of a
-    // locally hardcoded pair of checks, so this can't independently drift
-    // from api_mode's own gate again the way it did for Database.
+    // operator has not opted in with --allow-shell / --allow-code /
+    // --allow-database. The node list is the engine's single canonical one
+    // (`DANGEROUS_NODE_TYPE_IDS`), shared with api mode's gate.
     let dangerous_present = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
     let has_shell_node    = dangerous_present.contains(&"shell_exec");
     let has_code_node     = dangerous_present.contains(&"code");
@@ -674,6 +693,12 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     tokio::spawn(async move {
         loop {
             run_trig.notified().await;
+            // stop_job aborts a run in progress, so a Run Now click during one
+            // must not restart the job.
+            if daemon_rt.active_runs() > 0 {
+                log_rt.push("WARN", None, "Run Now ignored: a run is already in progress");
+                continue;
+            }
             if let Err(e) = daemon_rt.stop_job(&wf_id_rt) {
                 log_rt.push("ERROR", None, format!("Manual trigger: stop_job failed: {}", e));
             }
@@ -729,17 +754,27 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
                     break;
                 }
                 tracing::info!("SIGHUP received — reloading plugins");
-                let mut new_registry = NodeRegistry::new();
-                register_builtins(&mut new_registry, &data_dir_hup, None);
-                if let Some(ref dir) = plugin_dir_hup {
-                    if !dir.exists() {
-                        tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
-                    } else {
-                        load_plugins(&mut new_registry, dir);
+                let data_dir   = data_dir_hup.clone();
+                let plugin_dir = plugin_dir_hup.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    let mut new_registry = NodeRegistry::new();
+                    register_builtins(&mut new_registry, &data_dir, None);
+                    if let Some(ref dir) = plugin_dir {
+                        if !dir.exists() {
+                            tracing::warn!("plugin_dir {:?} does not exist — no plugins loaded", dir);
+                        } else {
+                            load_plugins(&mut new_registry, dir);
+                        }
                     }
+                    new_registry
+                }).await;
+                match built {
+                    Ok(new_registry) => {
+                        registry_hup.reload(new_registry);
+                        tracing::info!("Plugin reload complete");
+                    }
+                    Err(e) => tracing::error!("Plugin reload failed: {}", e),
                 }
-                registry_hup.reload(new_registry);
-                tracing::info!("Plugin reload complete");
             }
         });
     }
@@ -747,7 +782,7 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     tracing::info!(
         workflow = %config.workflow_name,
         trigger  = %trigger_desc,
-        status_url = %format!("http://{}:{}", bind, status_port),
+        status_url = %format!("http://{}", util::join_host_port(&bind, status_port)),
         "Aerini Server started in serve mode"
     );
 
@@ -772,25 +807,21 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
             );
         }
     } else if let Some(ref secret) = config.run_secret {
-        if !secret.starts_with("$argon2") {
+        if let Some(what) = status_server::RunSecretFormat::of(secret).legacy_description() {
             if !allow_legacy_run_secret {
                 tracing::error!(
-                    "Refusing to start: run_secret in {:?} uses a legacy BLAKE3 hash \
-                     (not brute-force resistant). Re-export this workflow from the Aerini \
-                     desktop app to upgrade to argon2id, or pass --allow-legacy-run-secret \
-                     to start anyway.",
-                    config_path
+                    "Refusing to start: run_secret in {:?} is stored as {}. Re-export this \
+                     workflow from the Aerini desktop app to upgrade to argon2id, or pass \
+                     --allow-legacy-run-secret to start anyway.",
+                    config_path, what
                 );
                 std::process::exit(1);
             }
-            // Legacy config (pre-0.3): run_secret stored as BLAKE3 hex, which is a fast
-            // hash and not brute-force resistant. Re-export to upgrade to argon2id.
             tracing::warn!(
-                "run_secret in {:?} uses a legacy BLAKE3 hash (not brute-force resistant). \
-                 Re-export this workflow from the Aerini desktop app to upgrade to argon2id. \
-                 A short run_secret can be cracked quickly if the config file is read by an \
-                 attacker. Continuing because --allow-legacy-run-secret was passed.",
-                config_path
+                "run_secret in {:?} is stored as {}. Anyone who can read the config file can \
+                 recover it. Re-export this workflow from the Aerini desktop app to upgrade to \
+                 argon2id. Continuing because --allow-legacy-run-secret was passed.",
+                config_path, what
             );
         }
     }
@@ -814,6 +845,7 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         workflow_name: config.workflow_name,
         workflow_id:   workflow.id.clone(),
         trigger_desc,
+        exported_at:   config.exported_at,
         run_state:     Arc::clone(&state),
         log_buffer:    log,
         run_trigger,
@@ -828,7 +860,7 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     };
 
     let app      = status_server::router(status_state);
-    let addr     = format!("{}:{}", bind, status_port);
+    let addr     = util::join_host_port(&bind, status_port);
     let listener = tokio::net::TcpListener::bind(&addr).await
         .unwrap_or_else(|e| { tracing::error!("Cannot bind {}: {}", addr, e); std::process::exit(1); });
 
@@ -888,7 +920,7 @@ async fn api_mode(cfg: api_server::ServerConfig) {
         eprintln!("  If behind a reverse proxy (nginx, Caddy, etc.), the rate limiter will use");
         eprintln!("  the proxy's IP for all clients — per-IP rate limiting will not work.");
         eprintln!("  Set --trusted-proxy-count to the number of proxies in front of this server.");
-        eprintln!("  See docs/security.md for details.");
+        eprintln!("  See docs/guide/security.md for details.");
         eprintln!();
     }
     if is_public_bind(&bind) && !ssrf_firewall_acknowledged {
@@ -951,8 +983,7 @@ async fn ctl_stop(workflow: &str, server: &str, token: &str) {
 
 async fn ctl_start(workflow: &str, server: &str, token: &str) {
     let id = resolve_workflow_id(workflow, server, token).await;
-    match api_post(server, token, &format!("/api/scheduler/{}/start", id),
-        r#"{"always_on":false}"#).await {
+    match api_post(server, token, &format!("/api/scheduler/{}/start", id), "{}").await {
         Ok(_) => println!("Started '{}'.", workflow),
         Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
     }
@@ -963,8 +994,7 @@ async fn ctl_restart(workflow: &str, server: &str, token: &str) {
     if let Err(e) = api_post(server, token, &format!("/api/scheduler/{}/stop", id), "{}").await {
         eprintln!("WARNING: stop failed before restart (proceeding anyway): {}", e);
     }
-    match api_post(server, token, &format!("/api/scheduler/{}/start", id),
-        r#"{"always_on":false}"#).await {
+    match api_post(server, token, &format!("/api/scheduler/{}/start", id), "{}").await {
         Ok(_) => println!("Restarted '{}'.", workflow),
         Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
     }
@@ -980,26 +1010,29 @@ async fn ctl_tokens(action: TokenAction) {
             let res = api_get_raw(&server, &token, "/api/tokens").await;
             match res {
                 Ok(body) => {
-                    let tokens: Vec<serde_json::Value> =
-                        serde_json::from_str(&body).unwrap_or_else(|_| vec![]);
+                    let tokens = parse_token_list(&body).unwrap_or_else(|e| {
+                        eprintln!("ERROR: {}", e);
+                        std::process::exit(1);
+                    });
                     if tokens.is_empty() {
                         println!("No tokens.");
                         return;
                     }
-                    println!("{:<36}  {:<20}  {:<24}  {:<8}  Revoked",
-                        "ID", "Label", "Scopes", "Created");
-                    println!("{}", "-".repeat(120));
+                    println!("{:<36}  {:<20}  {:<24}  {:<10}  {:<10}  Revoked",
+                        "ID", "Label", "Scopes", "Created", "Expires");
+                    println!("{}", "-".repeat(124));
                     for t in tokens {
                         let scopes = t["scopes"]
                             .as_array()
                             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
                             .unwrap_or_default();
-                        println!("{:<36}  {:<20}  {:<24}  {:<8}  {}",
+                        println!("{:<36}  {:<20}  {:<24}  {:<10}  {:<10}  {}",
                             t["token_id"].as_str().unwrap_or("?"),
                             truncate(t["label"].as_str().unwrap_or("?"), 20),
                             truncate(&scopes, 24),
-                            truncate(t["created_at"].as_str().unwrap_or("?"), 8),
-                            t["revoked_at"].as_str().unwrap_or("—"),
+                            date_part(t["created_at"].as_str().unwrap_or("?")),
+                            date_part(t["expires_at"].as_str().unwrap_or("—")),
+                            date_part(t["revoked_at"].as_str().unwrap_or("—")),
                         );
                     }
                 }
@@ -1032,6 +1065,12 @@ async fn ctl_tokens(action: TokenAction) {
             }
         }
     }
+}
+
+/// Parses the `GET /api/tokens` body. A reply that is not a JSON array (a proxy
+/// error page, an older server) is an error, not an empty list.
+fn parse_token_list(body: &str) -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_str(body).map_err(|e| format!("unexpected response from /api/tokens: {e}"))
 }
 
 /// Resolves a workflow name or partial ID to a full workflow ID.
@@ -1115,6 +1154,17 @@ async fn resolve_workflow_id(name_or_id: &str, server: &str, token: &str) -> Str
 
 static CLI_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Joins `--server` and an API path, so a trailing slash on the server URL
+/// does not produce `//api/...`.
+fn cli_url(server: &str, path: &str) -> String {
+    format!("{}{}", server.trim_end_matches('/'), path)
+}
+
+/// The `YYYY-MM-DD` part of an RFC 3339 timestamp; anything shorter is returned as is.
+fn date_part(ts: &str) -> &str {
+    ts.get(..10).unwrap_or(ts)
+}
+
 fn cli_http_client() -> &'static reqwest::Client {
     CLI_HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -1127,7 +1177,7 @@ fn cli_http_client() -> &'static reqwest::Client {
 async fn api_get<T: serde::de::DeserializeOwned>(
     server: &str, token: &str, path: &str
 ) -> Result<T, String> {
-    let res = cli_http_client().get(format!("{}{}", server, path))
+    let res = cli_http_client().get(cli_url(server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
@@ -1168,7 +1218,7 @@ async fn api_get_items(
 async fn api_post(
     server: &str, token: &str, path: &str, body: &str
 ) -> Result<String, String> {
-    let res = cli_http_client().post(format!("{}{}", server, path))
+    let res = cli_http_client().post(cli_url(server, path))
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(body.to_string())
@@ -1180,7 +1230,7 @@ async fn api_post(
 }
 
 async fn api_get_raw(server: &str, token: &str, path: &str) -> Result<String, String> {
-    let res = cli_http_client().get(format!("{}{}", server, path))
+    let res = cli_http_client().get(cli_url(server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
@@ -1197,7 +1247,7 @@ async fn api_post_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn api_delete(server: &str, token: &str, path: &str) -> Result<String, String> {
-    let res = cli_http_client().delete(format!("{}{}", server, path))
+    let res = cli_http_client().delete(cli_url(server, path))
         .header("Authorization", format!("Bearer {}", token))
         .send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
@@ -1233,5 +1283,31 @@ fn init_tracing() {
             .with(filter)
             .with(fmt::layer())
             .init();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_token_list_rejects_a_body_that_is_not_an_array() {
+        assert!(parse_token_list("[]").unwrap().is_empty());
+        assert_eq!(parse_token_list(r#"[{"token_id":"a"}]"#).unwrap().len(), 1);
+        assert!(parse_token_list("<html>502 Bad Gateway</html>").is_err());
+        assert!(parse_token_list(r#"{"items":[]}"#).is_err());
+    }
+
+    #[test]
+    fn cli_url_ignores_trailing_slashes_on_the_server() {
+        assert_eq!(cli_url("http://h:7700/", "/api/tokens"), "http://h:7700/api/tokens");
+        assert_eq!(cli_url("http://h:7700", "/api/tokens"), "http://h:7700/api/tokens");
+    }
+
+    #[test]
+    fn date_part_keeps_the_day_and_tolerates_short_or_non_ascii_text() {
+        assert_eq!(date_part("2026-10-15T09:48:00+00:00"), "2026-10-15");
+        assert_eq!(date_part("—"), "—");
+        assert_eq!(date_part("日本語の日付です。日本語の日付です。"), "日本語の日付です。日本語の日付です。");
     }
 }

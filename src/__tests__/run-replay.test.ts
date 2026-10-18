@@ -62,6 +62,17 @@ describe("RunManager.replayRun", () => {
     expect(handleRun).not.toHaveBeenCalled();
     expect(onToast).toHaveBeenCalledWith(expect.stringContaining("no recorded trigger output"), "error");
   });
+
+  it("edge case: trigger output was dropped from history for size — toasts an error and never calls handleRun", async () => {
+    const rm = makeManager(triggerCanvas());
+    const handleRun = vi.spyOn(rm, "handleRun").mockResolvedValue(undefined);
+    const onToast = (rm as unknown as { onToast: ReturnType<typeof vi.fn> }).onToast;
+
+    await rm.replayRun(recordWith({ n1: { $truncated: { original_bytes: 40_000_000 } } }));
+
+    expect(handleRun).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining("too large to keep"), "error");
+  });
 });
 
 describe("RunManager.replayRun — dangerous-node confirmation", () => {

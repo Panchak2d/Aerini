@@ -3,14 +3,30 @@ use once_cell::sync::Lazy;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 use crate::nodes::util::{scrub_url_in_error, Replay, SsrfPolicy, SsrfRedisResolver};
 
 const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REDIS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Most pools or connections cached per backend. A workflow that dials a
+/// different URL or file each run replaces the least recently used entry
+/// instead of growing the cache until the idle timeout.
+const MAX_CACHED_POOLS: usize = 64;
+
+fn make_room<P>(map: &mut HashMap<String, PoolEntry<P>>) {
+    if map.len() < MAX_CACHED_POOLS {
+        return;
+    }
+    let oldest = map.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone());
+    if let Some(key) = oldest {
+        map.remove(&key);
+    }
+}
 
 /// Returns a BLAKE3 hex hash of the connection URL, used as the DashMap pool
 /// cache key. This prevents the plaintext URL (which may contain a password)
@@ -50,21 +66,95 @@ struct PoolEntry<P> {
 static SQLITE_POOLS: Lazy<DashMap<String, PoolEntry<Pool<SqliteConnectionManager>>>> =
     Lazy::new(DashMap::new);
 
-/// PG and MySQL pool maps use `Mutex<HashMap>` rather than DashMap so that
-/// pool creation is atomic: the lock is held across the async `connect()` call,
-/// preventing two concurrent callers from both racing to open a new connection
-/// to the same URL. The lock is released immediately after insertion, so it is
-/// only contended during first-connect to a new URL.
-static PG_POOLS:    Lazy<Mutex<HashMap<String, PoolEntry<sqlx::PgPool>>>>    = Lazy::new(|| Mutex::new(HashMap::new()));
-static MYSQL_POOLS: Lazy<Mutex<HashMap<String, PoolEntry<sqlx::MySqlPool>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+/// Pools that need an async connect to create. Each key is dialled by one task
+/// at a time, so concurrent callers for the same URL share one connection
+/// attempt, while a slow or unreachable host never delays a different one.
+struct PoolCache<P> {
+    ready:   Mutex<HashMap<String, PoolEntry<P>>>,
+    dialing: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl<P: Clone> PoolCache<P> {
+    fn new() -> Self {
+        Self { ready: Mutex::new(HashMap::new()), dialing: DashMap::new() }
+    }
+
+    fn ready(&self) -> std::sync::MutexGuard<'_, HashMap<String, PoolEntry<P>>> {
+        self.ready.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn touch(&self, key: &str) -> Option<P> {
+        self.ready().get_mut(key).map(|entry| {
+            entry.last_used = Instant::now();
+            entry.pool.clone()
+        })
+    }
+
+    fn remove(&self, key: &str) {
+        self.ready().remove(key);
+    }
+
+    fn retain_recent(&self, max_idle: Duration) {
+        self.ready().retain(|_, entry| entry.last_used.elapsed() < max_idle);
+        self.dialing.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+
+    async fn get_or_connect<F, Fut>(&self, key: String, connect: F) -> Result<P, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<P, String>>,
+    {
+        if let Some(pool) = self.touch(&key) {
+            return Ok(pool);
+        }
+        let dial_lock = Arc::clone(&*self.dialing.entry(key.clone()).or_default());
+        let outcome = {
+            let _turn = dial_lock.lock().await;
+            match self.touch(&key) {
+                Some(pool) => Ok(pool),
+                None => connect().await.inspect(|pool| {
+                    let mut ready = self.ready();
+                    make_room(&mut ready);
+                    ready.insert(key.clone(), PoolEntry { pool: pool.clone(), last_used: Instant::now() });
+                }),
+            }
+        };
+        self.dialing.remove(&key);
+        outcome
+    }
+}
+
+static PG_POOLS:    Lazy<PoolCache<sqlx::PgPool>>    = Lazy::new(PoolCache::new);
+static MYSQL_POOLS: Lazy<PoolCache<sqlx::MySqlPool>> = Lazy::new(PoolCache::new);
 
 /// Redis client objects hold no connection state — cheap to create, no async op.
 static REDIS_CLIENTS: Lazy<DashMap<String, redis::Client>> = Lazy::new(DashMap::new);
 
-/// Redis multiplexed connections use `Mutex<HashMap>` for the same reason as
-/// PG/MySQL: creation requires an async connect that must not be raced.
-static REDIS_CONNS: Lazy<Mutex<HashMap<String, PoolEntry<redis::aio::MultiplexedConnection>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Redis multiplexed connections, cached like the Postgres and MySQL pools.
+static REDIS_CONNS: Lazy<PoolCache<redis::aio::MultiplexedConnection>> = Lazy::new(PoolCache::new);
+
+// ── Connection target check ───────────────────────────────────────────────────
+
+/// SSRF check on the host and port the Postgres or MySQL driver will dial. The
+/// driver lets query parameters (`?host=`, `?hostaddr=`, `?port=`, `?socket=`)
+/// override the URL's own host, so the URL host alone proves nothing. Unix
+/// sockets are refused: they bypass every network check.
+pub(super) async fn check_sqlx_target(url: &str, mysql: bool, policy: SsrfPolicy) -> Result<(), String> {
+    use std::str::FromStr;
+    let (host, port, socket) = if mysql {
+        let o = sqlx::mysql::MySqlConnectOptions::from_str(url)
+            .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
+        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some())
+    } else {
+        let o = sqlx::postgres::PgConnectOptions::from_str(url)
+            .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
+        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some() || o.get_host().starts_with('/'))
+    };
+    if socket {
+        return Err("Unix socket connections are not permitted. Use a host name or IP address.".to_string());
+    }
+    crate::nodes::util::check_db_host_ssrf(&host, port, policy).await
+}
 
 // ── SQLite helpers ────────────────────────────────────────────────────────────
 
@@ -105,8 +195,16 @@ pub(super) fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager
         .with_init(|conn| conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;"));
     let pool = Pool::builder()
         .max_size(4)
+        .min_idle(Some(0))
+        .connection_timeout(POOL_CONNECT_TIMEOUT)
         .build(manager)
         .map_err(|e| format!("Could not create pool for '{}': {}", path, e))?;
+    if SQLITE_POOLS.len() >= MAX_CACHED_POOLS {
+        let oldest = SQLITE_POOLS.iter().min_by_key(|e| e.value().last_used).map(|e| e.key().clone());
+        if let Some(key) = oldest {
+            SQLITE_POOLS.remove(&key);
+        }
+    }
     SQLITE_POOLS.insert(path.to_string(), PoolEntry { pool: pool.clone(), last_used: Instant::now() });
     Ok(pool)
 }
@@ -128,45 +226,36 @@ pub fn start_pool_eviction_task(rt: &tokio::runtime::Handle) {
             let evict_after = Duration::from_secs(1800);
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;
+                REDIS_CLIENTS.clear();
                 SQLITE_POOLS.retain(|_, v| v.last_used.elapsed() < evict_after);
-                PG_POOLS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);
-                MYSQL_POOLS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);
-                REDIS_CONNS.lock().await.retain(|_, v| v.last_used.elapsed() < evict_after);
+                PG_POOLS.retain_recent(evict_after);
+                MYSQL_POOLS.retain_recent(evict_after);
+                REDIS_CONNS.retain_recent(evict_after);
             }
         });
     });
 }
 
 pub(super) async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
-    let key = pool_key(url);
-    let mut map = PG_POOLS.lock().await;
-    if let Some(entry) = map.get_mut(&key) {
-        entry.last_used = Instant::now();
-        return Ok(entry.pool.clone());
-    }
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .acquire_timeout(POOL_CONNECT_TIMEOUT)
-        .connect(url)
-        .await
-        .map_err(|e| scrub_url_in_error(&format!("Postgres connection failed: {}", e)))?;
-    map.insert(key, PoolEntry { pool: pool.clone(), last_used: Instant::now() });
-    Ok(pool)
+    PG_POOLS.get_or_connect(pool_key(url), || async {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(POOL_CONNECT_TIMEOUT)
+            .connect(url)
+            .await
+            .map_err(|e| scrub_url_in_error(&format!("Postgres connection failed: {}", e)))
+    })
+    .await
 }
 
 pub(super) async fn get_mysql_pool(url: &str) -> Result<sqlx::MySqlPool, String> {
-    let key = pool_key(url);
-    let mut map = MYSQL_POOLS.lock().await;
-    if let Some(entry) = map.get_mut(&key) {
-        entry.last_used = Instant::now();
-        return Ok(entry.pool.clone());
-    }
-    let pool = sqlx::mysql::MySqlPoolOptions::new()
-        .acquire_timeout(POOL_CONNECT_TIMEOUT)
-        .connect(url)
-        .await
-        .map_err(|e| scrub_url_in_error(&format!("MySQL connection failed: {}", e)))?;
-    map.insert(key, PoolEntry { pool: pool.clone(), last_used: Instant::now() });
-    Ok(pool)
+    MYSQL_POOLS.get_or_connect(pool_key(url), || async {
+        sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(POOL_CONNECT_TIMEOUT)
+            .connect(url)
+            .await
+            .map_err(|e| scrub_url_in_error(&format!("MySQL connection failed: {}", e)))
+    })
+    .await
 }
 
 // ── Redis client + connection helpers ────────────────────────────────────────
@@ -178,29 +267,27 @@ fn get_redis_client(url: &str) -> Result<redis::Client, String> {
     }
     let client = redis::Client::open(url)
         .map_err(|e| scrub_url_in_error(&format!("Redis URL invalid: {}", e)))?;
+    if REDIS_CLIENTS.len() >= MAX_CACHED_POOLS {
+        REDIS_CLIENTS.clear();
+    }
     let entry = REDIS_CLIENTS.entry(key).or_insert(client);
     Ok(entry.clone())
 }
 
 /// Returns a cached MultiplexedConnection for `url`, creating one if absent.
 async fn get_redis_conn(url: &str, policy: SsrfPolicy) -> Result<redis::aio::MultiplexedConnection, String> {
-    let key = redis_pool_key(url, policy);
-    let mut map = REDIS_CONNS.lock().await;
-    if let Some(entry) = map.get_mut(&key) {
-        entry.last_used = Instant::now();
-        return Ok(entry.pool.clone());
-    }
-    let client = get_redis_client(url)?;
-    let config = redis::AsyncConnectionConfig::new().set_dns_resolver(SsrfRedisResolver(policy));
-    let conn = tokio::time::timeout(
-        REDIS_CONNECT_TIMEOUT,
-        client.get_multiplexed_async_connection_with_config(&config),
-    )
+    REDIS_CONNS.get_or_connect(redis_pool_key(url, policy), || async {
+        let client = get_redis_client(url)?;
+        let config = redis::AsyncConnectionConfig::new().set_dns_resolver(SsrfRedisResolver(policy));
+        tokio::time::timeout(
+            REDIS_CONNECT_TIMEOUT,
+            client.get_multiplexed_async_connection_with_config(&config),
+        )
+        .await
+        .map_err(|_| "Redis connection failed: timed out".to_string())?
+        .map_err(|e| scrub_url_in_error(&format!("Redis connection failed: {}", e)))
+    })
     .await
-    .map_err(|_| "Redis connection failed: timed out".to_string())?
-    .map_err(|e| scrub_url_in_error(&format!("Redis connection failed: {}", e)))?;
-    map.insert(key, PoolEntry { pool: conn.clone(), last_used: Instant::now() });
-    Ok(conn)
 }
 
 /// Runs `build_cmd()` on a cached connection for `url`, bounded by a command timeout.
@@ -221,7 +308,7 @@ where
     match run_bounded::<T>(build_cmd(), &mut conn).await {
         Ok(val) => Ok(val),
         Err(e) if e.is_connection_dropped() || e.is_io_error() => {
-            REDIS_CONNS.lock().await.remove(&redis_pool_key(url, policy));
+            REDIS_CONNS.remove(&redis_pool_key(url, policy));
             if replay == Replay::Never {
                 return Err(e);
             }
@@ -244,5 +331,90 @@ async fn run_bounded<T: redis::FromRedisValue>(
             std::io::ErrorKind::TimedOut,
             "command timed out",
         ))),
+    }
+}
+
+#[cfg(test)]
+mod cache_cap_tests {
+    use super::{make_room, PoolEntry, MAX_CACHED_POOLS};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    fn filled_map() -> HashMap<String, PoolEntry<()>> {
+        let base = Instant::now();
+        (0..MAX_CACHED_POOLS)
+            .map(|i| (i.to_string(), PoolEntry { pool: (), last_used: base + Duration::from_millis(i as u64) }))
+            .collect()
+    }
+
+    #[test]
+    fn full_cache_drops_least_recently_used_entry() {
+        let mut map = filled_map();
+        make_room(&mut map);
+        assert_eq!(map.len(), MAX_CACHED_POOLS - 1);
+        assert!(!map.contains_key("0"));
+        assert!(map.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn slow_connect_blocks_only_its_own_key_and_a_key_is_dialled_once() {
+        use super::PoolCache;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let cache: Arc<PoolCache<u32>> = Arc::new(PoolCache::new());
+        let dials = Arc::new(AtomicUsize::new(0));
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+
+        let slow = {
+            let (cache, dials) = (Arc::clone(&cache), Arc::clone(&dials));
+            tokio::spawn(async move {
+                cache
+                    .get_or_connect("a".to_string(), || async {
+                        dials.fetch_add(1, Ordering::SeqCst);
+                        gate.await.ok();
+                        Ok(1)
+                    })
+                    .await
+            })
+        };
+        while dials.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let other = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.get_or_connect("b".to_string(), || async { Ok(2) }),
+        )
+        .await
+        .expect("a different key must not wait for the slow connect");
+        assert_eq!(other, Ok(2));
+
+        let waiter = {
+            let (cache, dials) = (Arc::clone(&cache), Arc::clone(&dials));
+            tokio::spawn(async move {
+                cache
+                    .get_or_connect("a".to_string(), || async {
+                        dials.fetch_add(1, Ordering::SeqCst);
+                        Ok(9)
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+
+        assert_eq!(slow.await.unwrap(), Ok(1));
+        assert_eq!(waiter.await.unwrap(), Ok(1));
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cache_below_cap_is_left_alone() {
+        let mut map = filled_map();
+        map.remove("5");
+        make_room(&mut map);
+        assert_eq!(map.len(), MAX_CACHED_POOLS - 1);
+        assert!(map.contains_key("0"));
     }
 }

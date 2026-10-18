@@ -233,12 +233,8 @@ pub async fn run_workflow(
 
     let workflow = Workflow::from_json(&workflow_json).map_err(|e| e.to_string())?;
 
-    // log the same dangerous-node signal at every execution entry
-    // point. Desktop's design posture is intentional full host access (no
-    // default block, no opt-in flag exists) — this does not change execution
-    // behavior, it only closes the gap where a manual run left zero backend
-    // signal, unlike the frontend confirm dialog or the server's
-    // own startup warnings for the same node types.
+    // Desktop runs dangerous node types unconditionally by design; log them so
+    // an imported or shared workflow leaves a trace in the backend.
     let dangerous = aerini_engine::nodes::dangerous_node_types_present(&workflow.nodes);
     if !dangerous.is_empty() {
         tracing::warn!(
@@ -261,13 +257,13 @@ pub async fn run_workflow(
     // so they get their own lock bucket and are never rejected by, or block,
     // a concurrent full run of the same open canvas; that overlap is instead
     // prevented client-side by the shared isRunning guard.
+    let token = CancellationToken::new();
+    let _registration = active_run.track(&run_id, token.clone())?;
+
     let _exec_guard = active_run
         .acquire_exec_lock(&workflow.id, std::time::Duration::from_secs(5))
         .await
         .map_err(String::from)?;
-
-    let token = CancellationToken::new();
-    active_run.register(&run_id, token.clone());
 
     let executor = WorkflowExecutor::new(
         registry.current(),
@@ -288,11 +284,6 @@ pub async fn run_workflow(
 
     let workflow_id = workflow.id.clone();
     let result = executor.run(Arc::new(workflow), initial_variables).await;
-
-    // Remove only this run's own token — never a different, still-in-flight
-    // run's (see ActiveRunToken's doc comment).
-    active_run.unregister(&run_id);
-    // _exec_guard drops here (end of scope), releasing this workflow_id's lock.
 
     match result {
         Ok(r) => Ok(r),
@@ -318,6 +309,9 @@ pub async fn get_node_types(
     Ok(descriptors)
 }
 
+const MAX_SETTING_KEY_BYTES: usize = 256;
+const MAX_SETTING_VALUE_BYTES: usize = 1024 * 1024;
+
 #[tauri::command]
 pub async fn get_setting(
     key: String,
@@ -334,6 +328,15 @@ pub async fn set_setting(
     value: String,
     db:    tauri::State<'_, Arc<WorkflowDb>>,
 ) -> Result<(), String> {
+    if key.is_empty() || key.len() > MAX_SETTING_KEY_BYTES {
+        return Err(format!("Setting key must be 1-{MAX_SETTING_KEY_BYTES} bytes"));
+    }
+    if value.len() > MAX_SETTING_VALUE_BYTES {
+        return Err(format!("Setting value is larger than {} KiB", MAX_SETTING_VALUE_BYTES / 1024));
+    }
+    if key == super::plugins::PLUGIN_DIR_SETTING {
+        return Err("The plugin folder is chosen with its own folder picker".to_string());
+    }
     let db = Arc::clone(&db);
     tokio::task::spawn_blocking(move || db.set_setting(&key, &value))
         .await.map_err(|e| e.to_string())?

@@ -15,6 +15,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 use zip::ZipArchive;
 
 #[derive(Serialize)]
@@ -103,6 +104,7 @@ fn node_type_to_category(nt: &NodeType) -> &'static str {
 // ordinary single-node components that happen to be installed, removed,
 // and updated as a group by the commands below.
 
+pub(crate) const PLUGIN_DIR_SETTING: &str = "plugin_dir";
 const PACK_SCHEMA_VERSION: u32 = 1;
 const PACK_MAX_ENTRIES: usize = 64;
 const PACK_MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
@@ -136,6 +138,22 @@ fn is_valid_pack_id(id: &str) -> bool {
 /// `pack_id`, an empty/oversized/duplicate member list, or a member
 /// filename that isn't a bare `.wasm` name — rather than sanitizing or
 /// mangling any of it.
+fn is_portable_filename(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if name.chars().any(|c| c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
+        return false;
+    }
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    if stem.is_empty() || stem.ends_with([' ', '.']) {
+        return false;
+    }
+    let device = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    !RESERVED.contains(&device.as_str())
+}
+
 fn parse_pack_manifest(raw: &[u8]) -> Result<PackManifest, String> {
     if raw.len() as u64 > PACK_MANIFEST_MAX_BYTES {
         return Err(format!("pack_invalid: {PACK_MANIFEST_ENTRY_NAME} exceeds the maximum manifest size"));
@@ -171,6 +189,11 @@ fn parse_pack_manifest(raw: &[u8]) -> Result<PackManifest, String> {
         }
         if !name.to_lowercase().ends_with(".wasm") {
             return Err(format!("pack_invalid: member filename '{name}' must end in .wasm"));
+        }
+        if !is_portable_filename(name) {
+            return Err(format!(
+                "pack_invalid: member filename '{name}' uses a character or name that is not valid on every platform"
+            ));
         }
         if !seen.insert(name.clone()) {
             return Err(format!("pack_invalid: member filename '{name}' is listed more than once"));
@@ -213,7 +236,7 @@ fn scan_installed_packs(plugin_dir: &Path) -> HashMap<String, PackManifest> {
 /// have been seen. Never trusts a zip entry's declared (attacker-controlled)
 /// size — this is what actually bounds a zip-bomb member, not the size
 /// field in the archive's central directory.
-fn read_bounded(mut r: impl std::io::Read, cap: u64) -> Result<Vec<u8>, String> {
+fn read_entry_bounded(mut r: impl std::io::Read, cap: u64) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     let mut total: u64 = 0;
@@ -267,7 +290,10 @@ fn extract_pack_zip(src: &Path) -> Result<PackZipContents, String> {
         if entry.is_dir() {
             return Err("pack_invalid: archive contains a directory entry — packages must be flat".to_string());
         }
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|e| format!("pack_invalid: archive entry has an unreadable name ({e})"))?
+            .into_owned();
         if raw_name.contains('/') || raw_name.contains('\\') {
             return Err("pack_invalid: archive entries must be flat (no directories)".to_string());
         }
@@ -290,7 +316,7 @@ fn extract_pack_zip(src: &Path) -> Result<PackZipContents, String> {
             return Err(format!("pack_invalid: unexpected entry '{name}' in package"));
         };
 
-        let bytes = read_bounded(&mut entry, cap)?;
+        let bytes = read_entry_bounded(&mut entry, cap)?;
         total_bytes += bytes.len() as u64;
         if total_bytes > PACK_MAX_TOTAL_BYTES {
             return Err("pack_invalid: package exceeds its maximum total size".to_string());
@@ -391,16 +417,33 @@ static TRUST_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// transfer), not a local attacker who already has write access to
 /// `plugin_dir` — that attacker could bypass this file, or the plugins
 /// themselves, by other means regardless.
+fn read_trust_store(plugin_dir: &Path) -> Result<HashMap<String, String>, String> {
+    let path = trust_store_path(plugin_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
+            format!("Plugin trust store {} is unreadable ({e}). Repair or delete it to continue.", path.display())
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(e) => Err(format!("Failed to read plugin trust store: {e}")),
+    }
+}
+
 fn load_trust_store(plugin_dir: &Path) -> HashMap<String, String> {
-    std::fs::read_to_string(trust_store_path(plugin_dir))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    read_trust_store(plugin_dir).unwrap_or_else(|e| {
+        tracing::warn!("{e}");
+        HashMap::new()
+    })
 }
 
 fn save_trust_store(plugin_dir: &Path, store: &HashMap<String, String>) -> Result<(), String> {
     let raw = serde_json::to_string_pretty(store).map_err(|e| format!("Failed to serialize plugin trust store: {e}"))?;
-    std::fs::write(trust_store_path(plugin_dir), raw).map_err(|e| format!("Failed to write plugin trust store: {e}"))
+    let path = trust_store_path(plugin_dir);
+    let staged = path.with_extension("json.tmp");
+    std::fs::write(&staged, raw).map_err(|e| format!("Failed to write plugin trust store: {e}"))?;
+    std::fs::rename(&staged, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&staged);
+        format!("Failed to write plugin trust store: {e}")
+    })
 }
 
 /// Human-readable status for `list_installed_plugins`'s `signature_status`
@@ -537,13 +580,41 @@ fn warn_on_untrusted_plugins(dir: &Path) {
 /// Lists all `.wasm` files in `plugin_dir`. Files that fail to load are still
 /// returned with `load_error` set so the UI can surface broken plugins.
 /// A non-existent `plugin_dir` returns an empty list, not an error.
+async fn run_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await.map_err(|e| format!("Plugin task failed: {e}"))?
+}
+
+/// Rejects a `plugin_dir` sent by the webview that is not the folder saved in
+/// Settings, so these commands cannot be pointed at another directory.
+fn require_configured_dir(db: &WorkflowDb, requested: &str) -> Result<(), String> {
+    let configured = super::scheduler::configured_plugin_dir(db)
+        .ok_or_else(|| "No plugin folder is set in Settings".to_string())?;
+    let same = match (std::fs::canonicalize(&configured), std::fs::canonicalize(requested.trim())) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => configured == Path::new(requested.trim()),
+    };
+    if same {
+        Ok(())
+    } else {
+        Err("plugin_dir does not match the plugin folder set in Settings".to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn list_installed_plugins(
     plugin_dir: String,
     load_report: tauri::State<'_, Arc<Reloadable<PluginLoadReport>>>,
 ) -> Result<Vec<PluginInfo>, String> {
-    let dir = PathBuf::from(&plugin_dir);
     let load_report = load_report.current();
+    run_blocking(move || list_installed_plugins_blocking(plugin_dir, &load_report)).await
+}
+
+fn list_installed_plugins_blocking(plugin_dir: String, load_report: &PluginLoadReport) -> Result<Vec<PluginInfo>, String> {
+    let dir = PathBuf::from(&plugin_dir);
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -627,6 +698,91 @@ pub async fn list_installed_plugins(
     Ok(out)
 }
 
+const STAGED_PREFIX: &str = ".aerini-install-";
+const STAGED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const SIDECAR_MAX_BYTES: u64 = 64 * 1024;
+
+/// Writes `bytes` to a hidden file beside `dest`, flushes it to disk and
+/// renames it over `dest`, so a reader sees the old file or the whole new one.
+fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = dest.parent().ok_or_else(|| "Destination has no parent folder".to_string())?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(STAGED_PREFIX)
+        .suffix(".part")
+        .tempfile_in(dir)
+        .map_err(|e| format!("Failed to stage '{}': {e}", dest.display()))?;
+    std::io::Write::write_all(&mut tmp, bytes).map_err(|e| format!("Failed to stage '{}': {e}", dest.display()))?;
+    tmp.as_file().sync_all().map_err(|e| format!("Failed to stage '{}': {e}", dest.display()))?;
+    tmp.persist(dest).map_err(|e| format!("Failed to write '{}': {}", dest.display(), e.error))?;
+    Ok(())
+}
+
+/// Reads a whole file, failing when it is longer than `limit` bytes.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes)
+        .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("'{}' is larger than {} MiB", path.display(), limit / (1024 * 1024)));
+    }
+    Ok(bytes)
+}
+
+/// Removes staging files that an interrupted install left in `dir`.
+fn sweep_stale_installs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(STAGED_PREFIX) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STAGED_MAX_AGE);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+struct StagedSidecar(PathBuf);
+
+impl Drop for StagedSidecar {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Opens a native folder picker and saves the chosen folder as the plugin
+/// folder. `set_setting` refuses `plugin_dir`, so only a folder picked in this
+/// dialog can become the folder the install commands accept. Returns `None`
+/// when the user cancels.
+#[tauri::command]
+pub async fn choose_plugin_dir(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<tauri_plugin_dialog::FilePath>>();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path);
+    });
+    let Ok(Some(picked)) = rx.await else { return Ok(None) };
+    let dir = picked
+        .as_path()
+        .ok_or_else(|| "Invalid folder".to_string())?
+        .display()
+        .to_string();
+    let db = Arc::clone(&db);
+    let saved = dir.clone();
+    run_blocking(move || db.set_setting(PLUGIN_DIR_SETTING, &saved)).await?;
+    Ok(Some(dir))
+}
+
 /// Scans `plugin_dir` for `.wasm` files and returns `(filename, type_id)` for
 /// every one that loads successfully. A file that fails to describe is
 /// omitted — it has no `type_id` to match against.
@@ -670,7 +826,17 @@ pub async fn install_plugin_from_path(
     src_path: String,
     plugin_dir: String,
     overwrite: bool,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
 ) -> Result<String, String> {
+    let db = Arc::clone(&db);
+    run_blocking(move || {
+        require_configured_dir(&db, &plugin_dir)?;
+        install_plugin_blocking(src_path, plugin_dir, overwrite)
+    })
+    .await
+}
+
+fn install_plugin_blocking(src_path: String, plugin_dir: String, overwrite: bool) -> Result<String, String> {
     let src = Path::new(&src_path);
 
     if src.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("wasm")) != Some(true) {
@@ -680,8 +846,8 @@ pub async fn install_plugin_from_path(
         return Err(format!("Source file not found: {src_path}"));
     }
 
-    // Strip any directory components — only the bare filename is used for the
-    // destination, preventing path traversal via a crafted src_path.
+    // Only the bare filename is used for the destination, so a crafted
+    // src_path cannot place the file elsewhere.
     let filename = src
         .file_name()
         .and_then(|f| f.to_str())
@@ -690,25 +856,41 @@ pub async fn install_plugin_from_path(
 
     let dir = PathBuf::from(&plugin_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create plugin directory: {e}"))?;
+    sweep_stale_installs(&dir);
+
+    // The source and its signature file are read once. Every check below runs
+    // on the staged copy, and that same copy is what gets installed.
+    let wasm_bytes = read_bounded(src, PACK_MAX_MEMBER_BYTES)?;
+    let sig_src = sig_sidecar_path(src);
+    let sig_bytes = if sig_src.is_file() { Some(read_bounded(&sig_src, SIDECAR_MAX_BYTES)?) } else { None };
+
+    let mut staged = tempfile::Builder::new()
+        .prefix(STAGED_PREFIX)
+        .suffix(".part")
+        .tempfile_in(&dir)
+        .map_err(|e| format!("Failed to stage plugin: {e}"))?;
+    std::io::Write::write_all(&mut staged, &wasm_bytes).map_err(|e| format!("Failed to stage plugin: {e}"))?;
+    staged.as_file().sync_all().map_err(|e| format!("Failed to stage plugin: {e}"))?;
+    let staged_path = staged.path().to_path_buf();
+    let staged_sig = StagedSidecar(sig_sidecar_path(&staged_path));
+    if let Some(bytes) = &sig_bytes {
+        std::fs::write(&staged_sig.0, bytes).map_err(|e| format!("Failed to stage plugin signature file: {e}"))?;
+    }
 
     let loader = PluginLoader::shared()?;
-    let incoming_type_id = loader.describe_plugin(src).ok().map(|d| d.type_id);
+    let incoming_type_id = loader.describe_plugin(&staged_path).ok().map(|d| d.type_id);
+    loader.forget_path(&staged_path);
 
-    // Signature/integrity verification, before any filesystem mutation below.
-    // Already-published plugins with no signature at all still install
-    // (Unsigned/Unrecognized fall through) — only a positively bad signal
-    // (corrupted content, an invalid signature, or a publisher key that
-    // doesn't match what was previously trusted for this type_id) blocks.
-    let wasm_bytes = std::fs::read(src).map_err(|e| format!("Failed to read plugin file: {e}"))?;
-    let sig_check = check_signature(src, &wasm_bytes);
+    // Signature and integrity verification, before anything in `dir` changes.
+    // A file with no signature still installs; only corrupted content, an
+    // invalid signature, or a publisher key that differs from the one trusted
+    // for this type_id blocks.
+    let sig_check = check_signature(&staged_path, &wasm_bytes);
     {
-        // Holds TRUST_STORE_LOCK for this whole read-decide-write section —
-        // see the lock's own doc comment. Everything inside is synchronous
-        // std::fs/serde_json work, no `.await` point, so holding a
-        // std::sync::Mutex guard across it is safe.
-        let _trust_guard = TRUST_STORE_LOCK
-            .lock()
-            .map_err(|_| "Plugin trust store lock was poisoned by an earlier failure".to_string())?;
+        // Holds TRUST_STORE_LOCK for the whole read-decide-write section.
+        // Everything inside is synchronous, so the guard is never held across
+        // an `.await`.
+        let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         match sig_check {
             SigCheckResult::IntegrityMismatch => {
                 return Err(
@@ -724,7 +906,7 @@ pub async fn install_plugin_from_path(
             }
             SigCheckResult::Valid(verifying_key) => {
                 if let Some(type_id) = &incoming_type_id {
-                    let mut store = load_trust_store(&dir);
+                    let mut store = read_trust_store(&dir)?;
                     let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
                     match store.get(type_id) {
                         Some(pinned) if *pinned != incoming_key_b64 => {
@@ -753,7 +935,7 @@ pub async fn install_plugin_from_path(
                 // who can't forge a new signature just ship a plain
                 // unsigned "update" instead.
                 if let Some(type_id) = &incoming_type_id {
-                    if load_trust_store(&dir).contains_key(type_id) {
+                    if read_trust_store(&dir)?.contains_key(type_id) {
                         return Err(format!(
                             "plugin_signature_downgrade: '{type_id}' was previously installed with a verified publisher \
                              signature; this file has none. Remove the existing install first if this is intentional."
@@ -802,31 +984,26 @@ pub async fn install_plugin_from_path(
         None => {}
     }
 
-    // `src` and `dest` can resolve to the same file: native file dialogs
-    // remember their last-browsed folder, so re-selecting a plugin that
-    // already lives in `plugin_dir` points `src_path` straight at `dest`.
-    // std::fs::copy(p, p) truncates the destination before reading from the
-    // (identical) source and "succeeds" with 0 bytes copied — it does not
-    // detect or reject a same-path copy. Content is already in place in
-    // that case, so skip both copies entirely rather than self-destruct.
+    // Re-selecting a plugin that already lives in `plugin_dir` points
+    // `src_path` straight at `dest`; its content is already in place.
     let same_file = std::fs::canonicalize(src)
         .ok()
         .zip(std::fs::canonicalize(&dest).ok())
         .is_some_and(|(a, b)| a == b);
 
     if !same_file {
-        std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
-
-        let sig_src = sig_sidecar_path(src);
         let sig_dest = sig_sidecar_path(&dest);
-        if sig_src.is_file() {
-            std::fs::copy(&sig_src, &sig_dest).map_err(|e| format!("Failed to copy plugin signature file: {e}"))?;
-        } else if sig_dest.is_file() {
-            // No sidecar for the incoming file, but a stale one from a previous
-            // install sits at dest — drop it so it doesn't get misattributed to
-            // this file (the checks above already refused this path if it would
-            // have been a signed-to-unsigned downgrade for a trusted type_id).
-            let _ = std::fs::remove_file(&sig_dest);
+        staged.persist(&dest).map_err(|e| format!("Failed to install plugin: {}", e.error))?;
+        if sig_bytes.is_some() {
+            std::fs::rename(&staged_sig.0, &sig_dest)
+                .map_err(|e| format!("Failed to install plugin signature file: {e}"))?;
+        } else {
+            // A sidecar left by an earlier install would be matched to this file.
+            match std::fs::remove_file(&sig_dest) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Failed to remove the old plugin signature file: {e}")),
+            }
         }
     }
 
@@ -858,7 +1035,17 @@ pub async fn install_plugin_pack_from_path(
     src_path: String,
     plugin_dir: String,
     overwrite: bool,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
 ) -> Result<String, String> {
+    let db = Arc::clone(&db);
+    run_blocking(move || {
+        require_configured_dir(&db, &plugin_dir)?;
+        install_pack_blocking(src_path, plugin_dir, overwrite)
+    })
+    .await
+}
+
+fn install_pack_blocking(src_path: String, plugin_dir: String, overwrite: bool) -> Result<String, String> {
     let src = Path::new(&src_path);
 
     if src.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("aerinipkg")) != Some(true) {
@@ -902,9 +1089,7 @@ pub async fn install_plugin_pack_from_path(
         // from plain `type_id` pins sharing the same flat store, since a
         // `pack_id` and a `type_id` both pass the same charset check and
         // could otherwise collide on the same string.
-        let _trust_guard = TRUST_STORE_LOCK
-            .lock()
-            .map_err(|_| "Plugin trust store lock was poisoned by an earlier failure".to_string())?;
+        let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         match sig_check {
             SigCheckResult::IntegrityMismatch => {
                 return Err(
@@ -919,7 +1104,7 @@ pub async fn install_plugin_pack_from_path(
                 return Err(format!("pack_signature_invalid: the package's signature file is malformed ({reason})"));
             }
             SigCheckResult::Valid(verifying_key) => {
-                let mut store = load_trust_store(&dir);
+                let mut store = read_trust_store(&dir)?;
                 let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
                 match store.get(&trust_key) {
                     Some(pinned) if *pinned != incoming_key_b64 => {
@@ -937,7 +1122,7 @@ pub async fn install_plugin_pack_from_path(
                 }
             }
             SigCheckResult::Unsigned | SigCheckResult::Unrecognized => {
-                if load_trust_store(&dir).contains_key(&trust_key) {
+                if read_trust_store(&dir)?.contains_key(&trust_key) {
                     return Err(format!(
                         "pack_signature_downgrade: '{}' was previously installed with a verified publisher signature; \
                          this package has none. Remove the existing install first if this is intentional.",
@@ -956,9 +1141,8 @@ pub async fn install_plugin_pack_from_path(
 
     // Everything past this point needs to instantiate each member to read
     // its `type_id` for conflict checking, which requires a real path on
-    // disk (`PluginLoader::describe_plugin` takes `&Path`, and
-    // `aerini-engine`/`plugin_loader.rs` are out of this batch's scope to
-    // extend with an in-memory-bytes entry point). Staged into a tempdir
+    // disk (`PluginLoader::describe_plugin` takes `&Path`, with no
+    // in-memory-bytes entry point). Staged into a tempdir
     // rather than `plugin_dir` itself so a member that fails every check
     // below never touches the real install directory.
     let loader = PluginLoader::shared()?;
@@ -970,6 +1154,7 @@ pub async fn install_plugin_pack_from_path(
         if let Ok(desc) = loader.describe_plugin(&staged_path) {
             member_type_ids.insert(name.clone(), desc.type_id);
         }
+        loader.forget_path(&staged_path);
         // A member that fails to describe is still installed (matching
         // `install_plugin_from_path`'s "install a broken plugin so the UI
         // can surface why" behavior) — it just has no `type_id` to run a
@@ -1035,16 +1220,15 @@ pub async fn install_plugin_pack_from_path(
             }
         }
     }
-    for name in members.keys() {
-        std::fs::copy(staging.path().join(name), dir.join(name))
-            .map_err(|e| format!("Failed to install package member '{name}': {e}"))?;
+    for (name, bytes) in &members {
+        write_atomic(&dir.join(name), bytes).map_err(|e| format!("Failed to install package member '{name}': {e}"))?;
     }
     let manifest_dest = pack_manifest_path(&dir, &manifest.pack_id);
-    std::fs::write(&manifest_dest, &manifest_bytes).map_err(|e| format!("Failed to write pack manifest: {e}"))?;
+    write_atomic(&manifest_dest, &manifest_bytes).map_err(|e| format!("Failed to write pack manifest: {e}"))?;
 
     let sig_dest = sig_sidecar_path(&manifest_dest);
     match &sig_bytes {
-        Some(bytes) => std::fs::write(&sig_dest, bytes).map_err(|e| format!("Failed to write pack signature file: {e}"))?,
+        Some(bytes) => write_atomic(&sig_dest, bytes).map_err(|e| format!("Failed to write pack signature file: {e}"))?,
         None if sig_dest.is_file() => {
             let _ = std::fs::remove_file(&sig_dest);
         }
@@ -1058,7 +1242,13 @@ pub async fn install_plugin_pack_from_path(
 /// no path separators, must resolve to a path within `plugin_dir`, and must
 /// have a `.wasm` extension.
 #[tauri::command]
-pub async fn remove_plugin(filename: String, plugin_dir: String) -> Result<(), String> {
+pub async fn remove_plugin(
+    filename: String,
+    plugin_dir: String,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<(), String> {
+    let (db, dir_arg) = (Arc::clone(&db), plugin_dir.clone());
+    run_blocking(move || require_configured_dir(&db, &dir_arg)).await?;
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err("Invalid plugin filename".to_string());
     }
@@ -1134,13 +1324,23 @@ pub async fn remove_plugin(filename: String, plugin_dir: String) -> Result<(), S
 /// this command's `Result`, matching `remove_plugin`'s "removal must not
 /// stall on anything but the file itself" shape.
 #[tauri::command]
-pub async fn remove_plugin_pack(pack_id: String, plugin_dir: String) -> Result<(), String> {
-    if !is_valid_pack_id(&pack_id) {
+pub async fn remove_plugin_pack(
+    pack_id: String,
+    plugin_dir: String,
+    db: tauri::State<'_, Arc<WorkflowDb>>,
+) -> Result<(), String> {
+    let (db, dir_arg) = (Arc::clone(&db), plugin_dir.clone());
+    run_blocking(move || require_configured_dir(&db, &dir_arg)).await?;
+    remove_pack_files(&pack_id, &plugin_dir)
+}
+
+fn remove_pack_files(pack_id: &str, plugin_dir: &str) -> Result<(), String> {
+    if !is_valid_pack_id(pack_id) {
         return Err("Invalid pack_id".to_string());
     }
 
-    let dir = PathBuf::from(&plugin_dir);
-    let manifest_path = pack_manifest_path(&dir, &pack_id);
+    let dir = PathBuf::from(plugin_dir);
+    let manifest_path = pack_manifest_path(&dir, pack_id);
 
     if !manifest_path.is_file() {
         return Err(format!("Pack '{pack_id}' not found"));
@@ -1201,6 +1401,10 @@ pub async fn reload_plugins(
     reload_lock: tauri::State<'_, Arc<tokio::sync::Mutex<()>>>,
 ) -> Result<PluginLoadReport, String> {
     let _guard = reload_lock.lock().await;
+    {
+        let (db, dir_arg) = (Arc::clone(&db), plugin_dir.clone());
+        run_blocking(move || require_configured_dir(&db, &dir_arg)).await?;
+    }
 
     let data_dir = app.path().app_data_dir()
         .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
@@ -1209,12 +1413,16 @@ pub async fn reload_plugins(
     register_builtins(&mut new_registry, &data_dir, Some(Arc::clone(&db)));
 
     let dir = PathBuf::from(&plugin_dir);
-    let report = if !dir.exists() {
-        PluginLoadReport::default()
-    } else {
-        warn_on_untrusted_plugins(&dir);
-        load_plugins(&mut new_registry, &dir)
-    };
+    let (new_registry, report) = run_blocking(move || {
+        let report = if !dir.exists() {
+            PluginLoadReport::default()
+        } else {
+            warn_on_untrusted_plugins(&dir);
+            load_plugins(&mut new_registry, &dir)
+        };
+        Ok((new_registry, report))
+    })
+    .await?;
 
     registry.reload(new_registry);
     load_report.reload(report.clone());
@@ -1268,6 +1476,57 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn parse_pack_manifest_rejects_device_and_stream_member_names() {
+        for bad in ["CON.wasm", "nul.wasm", "com1.wasm", "a:b.wasm", "a<b.wasm", "a .wasm", ".wasm"] {
+            let manifest = sample_manifest_json("pack", &[bad]);
+            assert!(parse_pack_manifest(&manifest).is_err(), "{bad} should be rejected");
+        }
+        let manifest = sample_manifest_json("pack", &["my_plugin-1.wasm"]);
+        assert!(parse_pack_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn atomic_write_replaces_the_file_and_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let dest = dir.path().join("p.wasm");
+        std::fs::write(&dest, b"old").expect("write failed");
+        write_atomic(&dest, b"new content").expect("atomic write failed");
+        assert_eq!(std::fs::read(&dest).expect("read failed"), b"new content");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).expect("read_dir failed").flatten().collect();
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn bounded_read_refuses_a_file_over_the_limit() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, [0u8; 11]).expect("write failed");
+        assert!(read_bounded(&path, 10).is_err());
+        assert_eq!(read_bounded(&path, 11).expect("at the limit is allowed").len(), 11);
+    }
+
+    #[test]
+    fn corrupt_trust_store_is_an_error_and_a_missing_one_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        assert!(read_trust_store(dir.path()).expect("missing store should read as empty").is_empty());
+
+        std::fs::write(trust_store_path(dir.path()), b"{ not json").expect("write failed");
+        assert!(read_trust_store(dir.path()).is_err());
+    }
+
+    #[test]
+    fn saved_trust_store_round_trips_without_a_leftover_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let mut store = HashMap::new();
+        store.insert("pack:sample".to_string(), "key".to_string());
+        save_trust_store(dir.path(), &store).expect("save failed");
+
+        assert_eq!(read_trust_store(dir.path()).expect("read failed"), store);
+        let leftovers = std::fs::read_dir(dir.path()).expect("read_dir failed").flatten().count();
+        assert_eq!(leftovers, 1);
     }
 
     fn signing_key_fixture() -> ed25519_dalek::SigningKey {
@@ -1358,19 +1617,19 @@ mod tests {
         assert!(err.starts_with("pack_invalid:"));
     }
 
-    // --- read_bounded ---
+    // --- read_entry_bounded ---
 
     #[test]
-    fn read_bounded_reads_all_bytes_under_cap() {
+    fn read_entry_bounded_reads_all_bytes_under_cap() {
         let data = b"hello world";
-        let result = read_bounded(&data[..], 100).expect("should read fully under cap");
+        let result = read_entry_bounded(&data[..], 100).expect("should read fully under cap");
         assert_eq!(result, data);
     }
 
     #[test]
-    fn read_bounded_errors_when_exceeding_cap() {
+    fn read_entry_bounded_errors_when_exceeding_cap() {
         let data = [0u8; 20];
-        let err = read_bounded(&data[..], 10).expect_err("should reject data over cap");
+        let err = read_entry_bounded(&data[..], 10).expect_err("should reject data over cap");
         assert!(err.starts_with("pack_invalid:"));
     }
 
@@ -1542,8 +1801,8 @@ mod tests {
 
     // --- remove_plugin_pack ---
 
-    #[tokio::test]
-    async fn remove_plugin_pack_removes_manifest_members_and_sig() {
+    #[test]
+    fn remove_plugin_pack_removes_manifest_members_and_sig() {
         let dir = tempfile::tempdir().expect("tempdir create failed");
         let pack_id = "com.example.pack";
         let manifest = sample_manifest_json(pack_id, &["a.wasm", "b.wasm"]);
@@ -1552,7 +1811,7 @@ mod tests {
         std::fs::write(dir.path().join("a.wasm"), b"wasm-a").expect("member write failed");
         std::fs::write(dir.path().join("b.wasm"), b"wasm-b").expect("member write failed");
 
-        let result = remove_plugin_pack(pack_id.to_string(), dir.path().display().to_string()).await;
+        let result = remove_pack_files(pack_id, &dir.path().display().to_string());
         assert!(result.is_ok(), "expected removal to succeed, got: {result:?}");
         assert!(!dir.path().join(format!("{pack_id}.aerini-pack.json")).exists());
         assert!(!dir.path().join(format!("{pack_id}.aerini-pack.json.sig")).exists());
@@ -1560,62 +1819,62 @@ mod tests {
         assert!(!dir.path().join("b.wasm").exists());
     }
 
-    #[tokio::test]
-    async fn remove_plugin_pack_errors_when_pack_not_found() {
+    #[test]
+    fn remove_plugin_pack_errors_when_pack_not_found() {
         let dir = tempfile::tempdir().expect("tempdir create failed");
-        let result = remove_plugin_pack("com.example.missing".to_string(), dir.path().display().to_string()).await;
+        let result = remove_pack_files("com.example.missing", &dir.path().display().to_string());
         assert!(result.is_err(), "expected an error for a pack that was never installed");
     }
 
-    #[tokio::test]
-    async fn remove_plugin_pack_rejects_invalid_pack_id() {
+    #[test]
+    fn remove_plugin_pack_rejects_invalid_pack_id() {
         let dir = tempfile::tempdir().expect("tempdir create failed");
-        let result = remove_plugin_pack("../escape".to_string(), dir.path().display().to_string()).await;
+        let result = remove_pack_files("../escape", &dir.path().display().to_string());
         assert!(result.is_err(), "expected an invalid pack_id to be rejected");
     }
 
     // --- install_plugin_pack_from_path (early-exit paths only — see module doc) ---
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_bad_source_file() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_bad_source_file() {
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
         let mut wrong_ext = tempfile::NamedTempFile::new().expect("tempfile create failed");
         wrong_ext.write_all(b"not a real package").expect("tempfile write failed");
         wrong_ext.flush().expect("tempfile flush failed");
-        let result = install_plugin_pack_from_path(wrong_ext.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(wrong_ext.path().display().to_string(), dir.path().display().to_string(), false);
         assert!(result.is_err(), "expected a non-.aerinipkg file to be rejected");
 
-        let result = install_plugin_pack_from_path("/nonexistent/path/pack.aerinipkg".to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking("/nonexistent/path/pack.aerinipkg".to_string(), dir.path().display().to_string(), false);
         assert!(result.is_err(), "expected a missing source file to be rejected");
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_malformed_manifest() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_malformed_manifest() {
         let manifest = serde_json::json!({
             "schema_version": 2, "pack_id": "com.example.pack", "display_name": "P", "files": ["a.wasm"]
         }).to_string();
         let tmp = write_pack_file(&[("pack.json", manifest.as_bytes()), ("a.wasm", b"x")]);
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
         let err = result.expect_err("unsupported schema_version should be rejected");
         assert!(err.starts_with("pack_invalid:"));
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_content_not_matching_manifest() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_content_not_matching_manifest() {
         let manifest = sample_manifest_json("com.example.pack", &["a.wasm", "b.wasm"]);
         let tmp = write_pack_file(&[("pack.json", &manifest), ("a.wasm", b"x")]);
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
         let err = result.expect_err("a member set that doesn't match the manifest should be rejected");
         assert!(err.starts_with("pack_invalid:"));
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_when_already_installed_without_overwrite() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_when_already_installed_without_overwrite() {
         let pack_id = "com.example.pack";
         let manifest = sample_manifest_json(pack_id, &["a.wasm"]);
         let dir = tempfile::tempdir().expect("tempdir create failed");
@@ -1623,13 +1882,13 @@ mod tests {
         std::fs::write(dir.path().join("a.wasm"), b"existing-wasm").expect("member write failed");
 
         let tmp = write_pack_file(&[("pack.json", &manifest), ("a.wasm", b"new-wasm")]);
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
         let err = result.expect_err("reinstalling without overwrite should be rejected");
         assert!(err.starts_with("pack_already_installed:"));
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_integrity_mismatch() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_integrity_mismatch() {
         let signing_key = signing_key_fixture();
         let manifest = sample_manifest_json("com.example.pack", &["a.wasm"]);
         let signed = vec![
@@ -1641,13 +1900,13 @@ mod tests {
         let tmp = write_pack_file(&[("pack.json", &manifest), ("a.wasm", b"tampered"), ("pack.json.sig", &sig_raw)]);
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
         let err = result.expect_err("tampered member content should fail the integrity check");
         assert!(err.starts_with("pack_integrity_failed:"));
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_invalid_signature() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_invalid_signature() {
         let manifest = sample_manifest_json("com.example.pack", &["a.wasm"]);
         let bad_sig = serde_json::json!({
             "schema_version": SIG_SCHEMA_VERSION,
@@ -1662,13 +1921,13 @@ mod tests {
         let tmp = write_pack_file(&[("pack.json", &manifest), ("a.wasm", b"wasm-a"), ("pack.json.sig", bad_sig.as_bytes())]);
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), false).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
         let err = result.expect_err("a signature that doesn't verify should be rejected");
         assert!(err.starts_with("pack_signature_invalid:"));
     }
 
-    #[tokio::test]
-    async fn install_plugin_pack_from_path_rejects_signature_downgrade_even_with_overwrite() {
+    #[test]
+    fn install_plugin_pack_from_path_rejects_signature_downgrade_even_with_overwrite() {
         let pack_id = "com.example.pack";
         let dir = tempfile::tempdir().expect("tempdir create failed");
 
@@ -1683,8 +1942,74 @@ mod tests {
 
         // overwrite: true — proves the downgrade guard isn't bypassable by
         // the same flag that authorizes a legitimate update.
-        let result = install_plugin_pack_from_path(tmp.path().display().to_string(), dir.path().display().to_string(), true).await;
+        let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), true);
         let err = result.expect_err("an unsigned update to a previously-trusted pack should be rejected");
         assert!(err.starts_with("pack_signature_downgrade:"));
+    }
+
+    // --- configured plugin folder guard, through managed State ---
+
+    fn mock_app_with_db(configured_dir: Option<&Path>) -> (tauri::App<tauri::test::MockRuntime>, tempfile::TempDir) {
+        let db_dir = tempfile::tempdir().expect("tempdir create failed");
+        let db = WorkflowDb::open(&db_dir.path().join("test.db"), 2).expect("db open failed");
+        if let Some(dir) = configured_dir {
+            db.set_setting(PLUGIN_DIR_SETTING, &dir.display().to_string()).expect("setting write failed");
+        }
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(db));
+        (app, db_dir)
+    }
+
+    fn install_sample_pack(dir: &Path, pack_id: &str) -> PathBuf {
+        let manifest_path = dir.join(format!("{pack_id}.aerini-pack.json"));
+        std::fs::write(&manifest_path, sample_manifest_json(pack_id, &["a.wasm"])).expect("manifest write failed");
+        std::fs::write(dir.join("a.wasm"), b"wasm-a").expect("member write failed");
+        manifest_path
+    }
+
+    #[tokio::test]
+    async fn remove_plugin_pack_works_in_the_configured_dir() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let manifest_path = install_sample_pack(dir.path(), "com.example.pack");
+        let (app, _db_dir) = mock_app_with_db(Some(dir.path()));
+
+        let result = remove_plugin_pack("com.example.pack".to_string(), dir.path().display().to_string(), app.state()).await;
+        assert!(result.is_ok(), "expected removal to succeed, got: {result:?}");
+        assert!(!manifest_path.exists());
+    }
+
+    #[tokio::test]
+    async fn pack_commands_refuse_a_dir_other_than_the_configured_one() {
+        let configured = tempfile::tempdir().expect("tempdir create failed");
+        let other = tempfile::tempdir().expect("tempdir create failed");
+        let manifest_path = install_sample_pack(other.path(), "com.example.pack");
+        let (app, _db_dir) = mock_app_with_db(Some(configured.path()));
+
+        let removed = remove_plugin_pack("com.example.pack".to_string(), other.path().display().to_string(), app.state()).await;
+        assert!(matches!(&removed, Err(e) if e.contains("does not match")), "got: {removed:?}");
+        assert!(manifest_path.exists(), "a refused removal must leave the pack in place");
+
+        let mut wrong_ext = tempfile::NamedTempFile::new().expect("tempfile create failed");
+        wrong_ext.write_all(b"not a real package").expect("tempfile write failed");
+        wrong_ext.flush().expect("tempfile flush failed");
+        let installed = install_plugin_pack_from_path(
+            wrong_ext.path().display().to_string(),
+            other.path().display().to_string(),
+            false,
+            app.state(),
+        )
+        .await;
+        assert!(matches!(&installed, Err(e) if e.contains("does not match")), "the folder check must run before the source file is inspected, got: {installed:?}");
+    }
+
+    #[tokio::test]
+    async fn pack_commands_refuse_when_no_plugin_dir_is_configured() {
+        let dir = tempfile::tempdir().expect("tempdir create failed");
+        let manifest_path = install_sample_pack(dir.path(), "com.example.pack");
+        let (app, _db_dir) = mock_app_with_db(None);
+
+        let result = remove_plugin_pack("com.example.pack".to_string(), dir.path().display().to_string(), app.state()).await;
+        assert!(matches!(&result, Err(e) if e.contains("No plugin folder is set")), "got: {result:?}");
+        assert!(manifest_path.exists());
     }
 }

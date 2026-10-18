@@ -14,9 +14,9 @@
 use chrono::Utc;
 use rand::TryRng;
 use base64::Engine;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Mutex};
+use std::{path::Path, sync::Mutex, time::Duration};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -51,6 +51,10 @@ pub struct TokenInfo {
     pub expires_at: Option<String>,
 }
 
+/// What `import_token` found for a raw token.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportOutcome { Added, AlreadyActive, Revoked }
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum GrantOutcome { Granted, UnknownToken, AdminToken }
 
@@ -67,8 +71,10 @@ pub struct TokenStore {
 
 impl TokenStore {
     pub fn open(path: &Path, key: [u8; 32]) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS tokens (
                 token_id   TEXT PRIMARY KEY,
                 token_hash TEXT NOT NULL UNIQUE,
@@ -90,15 +96,15 @@ impl TokenStore {
                 PRIMARY KEY (token_id, workflow_id)
             );",
         )?;
-        // Schema migration: add expires_at to databases created before that column existed.
-        let has_expires: bool = conn.query_row(
+        let has_expires: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('tokens') WHERE name='expires_at'",
             [],
             |row| row.get::<_, i64>(0),
-        ).map(|c| c > 0).unwrap_or(false);
+        )? > 0;
         if !has_expires {
-            conn.execute("ALTER TABLE tokens ADD COLUMN expires_at TEXT", [])?;
+            tx.execute("ALTER TABLE tokens ADD COLUMN expires_at TEXT", [])?;
         }
+        tx.commit()?;
         Ok(Self { conn: Mutex::new(conn), key })
     }
 
@@ -163,18 +169,21 @@ impl TokenStore {
         Ok((token_id, raw))
     }
 
-    /// Import an existing raw token (e.g. from `AERINI_TOKEN` migration).
-    /// If token is already present and active, no-op.
-    pub fn import_token(&self, raw: &str, label: &str, scopes: &[&str]) -> rusqlite::Result<()> {
+    /// Import an existing raw token (the `--token` / `AERINI_TOKEN` value).
+    /// A token already stored and active changes nothing; one already revoked
+    /// is reported, never re-enabled.
+    pub fn import_token(&self, raw: &str, label: &str, scopes: &[&str]) -> rusqlite::Result<ImportOutcome> {
         let hash = hash_token(&self.key, raw);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tokens WHERE token_hash = ?1",
+        let existing: Option<Option<String>> = conn.query_row(
+            "SELECT revoked_at FROM tokens WHERE token_hash = ?1",
             params![hash],
             |row| row.get(0),
-        )?;
-        if count > 0 {
-            return Ok(());
+        ).optional()?;
+        match existing {
+            Some(Some(_)) => return Ok(ImportOutcome::Revoked),
+            Some(None)    => return Ok(ImportOutcome::AlreadyActive),
+            None          => {}
         }
         let token_id = Uuid::new_v4().to_string();
         let scopes_j = serde_json::to_string(scopes).unwrap_or_else(|_| "[]".to_string());
@@ -184,7 +193,20 @@ impl TokenStore {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![token_id, hash, label, scopes_j, now],
         )?;
-        Ok(())
+        Ok(ImportOutcome::Added)
+    }
+
+    /// True when at least one token is unrevoked, unexpired and admin-scoped.
+    pub fn has_active_admin(&self) -> rusqlite::Result<bool> {
+        let now = Utc::now();
+        Ok(self.list_tokens()?.iter().any(|t| {
+            t.revoked_at.is_none()
+                && t.scopes.iter().any(|s| s == "admin")
+                && t.expires_at.as_deref().is_none_or(|exp| {
+                    chrono::DateTime::parse_from_rfc3339(exp)
+                        .is_ok_and(|e| now < e.with_timezone(&Utc))
+                })
+        }))
     }
 
     /// Verify a raw bearer token. Returns `None` if not found, revoked, or expired.
@@ -283,14 +305,10 @@ impl TokenStore {
     }
 
     /// Returns `true` if the store has no tokens at all (first-run detection).
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query_row(
-            "SELECT COUNT(*) FROM tokens",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).map(|c| c == 0)
-         .unwrap_or(true)
+        conn.query_row("SELECT COUNT(*) FROM tokens", [], |row| row.get::<_, i64>(0))
+            .map(|c| c == 0)
     }
 
     // ── Per-workflow ACL ──────────────────────────────────────────────────
@@ -467,6 +485,50 @@ mod tests {
             .expect("create token with workflows");
         let record = store.verify_token(&raw).expect("verify");
         assert!(store.acl_filter(&record).expect("filter").is_none());
+    }
+
+    #[test]
+    fn importing_a_revoked_token_reports_it_and_leaves_it_unusable() {
+        let store = open_temp_store();
+        let raw = "r".repeat(40);
+        assert_eq!(store.import_token(&raw, "default", &["admin"]).unwrap(), ImportOutcome::Added);
+        assert_eq!(store.import_token(&raw, "default", &["admin"]).unwrap(), ImportOutcome::AlreadyActive);
+        let id = store.verify_token(&raw).expect("active").token_id;
+        store.revoke_token(&id).unwrap();
+        assert_eq!(store.import_token(&raw, "default", &["admin"]).unwrap(), ImportOutcome::Revoked);
+        assert!(store.verify_token(&raw).is_none());
+    }
+
+    #[test]
+    fn active_admin_requires_an_unrevoked_unexpired_admin_scope() {
+        let store = open_temp_store();
+        assert!(!store.has_active_admin().unwrap());
+        store.create_token_with_id("r", &["read", "write"], None).unwrap();
+        assert!(!store.has_active_admin().unwrap());
+        let (admin, _) = store.create_token_with_id("a", &["admin"], None).unwrap();
+        assert!(store.has_active_admin().unwrap());
+        store.revoke_token(&admin).unwrap();
+        assert!(!store.has_active_admin().unwrap());
+        let (expiring, _) = store.create_token_with_id("e", &["admin"], Some(3600)).unwrap();
+        assert!(store.has_active_admin().unwrap());
+        store.conn.lock().unwrap()
+            .execute("UPDATE tokens SET expires_at = '2000-01-01T00:00:00+00:00' WHERE token_id = ?1", params![expiring])
+            .unwrap();
+        assert!(!store.has_active_admin().unwrap());
+    }
+
+    #[test]
+    fn opening_a_database_without_expires_at_adds_the_column_once() {
+        let dir = std::env::temp_dir().join(format!("aerini-token-store-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokens.db");
+        Connection::open(&path).unwrap().execute_batch(
+            "CREATE TABLE tokens (token_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+             label TEXT NOT NULL, scopes TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);",
+        ).unwrap();
+        TokenStore::open(&path, [7u8; 32]).expect("migrates");
+        let store = TokenStore::open(&path, [7u8; 32]).expect("reopens");
+        assert!(store.create_token("t", &["read"], Some(60)).is_ok());
     }
 
     #[test]

@@ -3,75 +3,77 @@ use tokio::time::Duration;
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::OnDrop;
 
 // ── MySQL ─────────────────────────────────────────────────────────────────────
 
-pub(super) async fn mysql_run_execute(
+pub(super) async fn mysql_run(
     pool: &sqlx::MySqlPool,
     query: &str,
     params: &[Value],
+    operation: super::Operation,
     kill_on_cancel: bool,
 ) -> NodeOutput {
+    if operation == super::Operation::Query {
+        if let Err(e) = super::enforce_read_only_query(query) {
+            return NodeOutput::failure(NodeError::unrecoverable("QUERY_NOT_READ_ONLY", e));
+        }
+    }
     let mut q = sqlx::query(query);
     for p in params {
         q = mysql_bind_one(q, p);
     }
+    let summarize: fn(&sqlx::mysql::MySqlQueryResult) -> (u64, u64) =
+        |r| (r.rows_affected(), r.last_insert_id());
 
-    let mut kill_mitigation_unavailable = false;
-    let exec_result = if kill_on_cancel {
-        let mut conn = match pool.acquire().await {
-            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
-                format!("Execute failed: {}", e))),
-            Ok(c) => c,
-        };
-        let connection_id = mysql_capture_connection_id(&mut conn).await;
-        kill_mitigation_unavailable = connection_id.is_none();
-        let kill_on_drop = connection_id.map(|id| {
-            let kill_pool = pool.clone();
-            OnDrop::new(move || {
-                super::spawn_detached(async move { mysql_kill_query(&kill_pool, id).await })
-            })
-        });
-        let result = q.execute(&mut *conn).await;
-        if let Some(guard) = kill_on_drop {
-            guard.disarm();
-        }
-        result
-    } else {
-        q.execute(pool).await
-    };
-
-    match exec_result {
-        Err(e) => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
-            format!("Execute failed: {}", e))),
-        Ok(result) => {
-            let rows_affected = result.rows_affected();
-            // last_insert_id() is available on MySqlQueryResult via sqlx::mysql::MySqlQueryResult
-            let last_id = result.last_insert_id();
-            let mut output = NodeOutput::success_with_logs(
-                json!({
-                    "rows": [],
-                    "rows_affected": rows_affected,
-                    "last_insert_id": last_id,
-                    "columns": []
-                }),
-                vec![format!("{} row(s) affected", rows_affected)],
-            );
-            if kill_mitigation_unavailable {
-                output.logs.push(
-                    "cancel-safety: could not capture this query's MySQL connection id; \
-                     a cancellation mid-query cannot be killed server-side this time".to_string(),
-                );
-            }
-            output
-        }
+    if !kill_on_cancel {
+        // `fetch_many` is the only call that also reports the row count and last
+        // insert id; the deprecation concerns multi-statement strings, which
+        // MySQL rejects for a prepared statement.
+        #[allow(deprecated)]
+        let steps = q.fetch_many(pool);
+        return super::collect_steps(steps, operation, summarize, decode_mysql_value).await.output;
     }
+    let mut guard = match mysql_acquire_cancellable(pool).await {
+        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
+            format!("{} failed: {}", operation.label(), e))),
+        Ok(g) => g,
+    };
+    #[allow(deprecated)]
+    let steps = q.fetch_many(&mut **guard.conn());
+    let mut collected = super::collect_steps(steps, operation, summarize, decode_mysql_value).await;
+    if !guard.can_kill() {
+        collected.output.logs.push(MYSQL_CANCEL_UNAVAILABLE_LOG.to_string());
+    }
+    // Still armed when reading stopped with the statement running (row limit):
+    // dropping the guard below kills it and closes the connection.
+    if collected.statement_finished {
+        guard.release();
+    }
+    collected.output
+}
+
+const MYSQL_CANCEL_UNAVAILABLE_LOG: &str = "cancel-safety: could not capture this query's MySQL \
+     connection id; a cancellation mid-query cannot be killed server-side this time";
+
+/// Takes a pooled connection for one statement that must stop if its future is
+/// dropped. When the session's connection id cannot be read the guard still
+/// closes the connection on drop, but has no kill to send ([`super::CancelOnDrop::can_kill`]).
+async fn mysql_acquire_cancellable(
+    pool: &sqlx::MySqlPool,
+) -> Result<super::CancelOnDrop<sqlx::MySql>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    let kill = mysql_capture_connection_id(&mut conn).await.map(|id| {
+        let kill_pool = pool.clone();
+        Box::new(move || {
+            super::spawn_detached(async move { mysql_kill_query(&kill_pool, id).await })
+        }) as Box<dyn FnOnce() + Send>
+    });
+    Ok(super::CancelOnDrop::new(conn, kill))
 }
 
 /// Reads the current session's connection id, for `mysql_kill_query` to target later.
-/// `None` on any read failure — the caller falls back to running without kill-safety
-/// rather than failing the query over a diagnostic read.
+/// `None` on any read failure: the caller runs without a kill rather than
+/// failing the query over a diagnostic read.
 async fn mysql_capture_connection_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>) -> Option<u64> {
     sqlx::query_scalar("SELECT CONNECTION_ID()")
         .fetch_one(&mut **conn)
@@ -82,75 +84,26 @@ async fn mysql_capture_connection_id(conn: &mut sqlx::pool::PoolConnection<sqlx:
 const KILL_QUERY_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Best-effort: acquires a second pooled connection and issues `KILL QUERY` for
-/// `connection_id`, then gives up silently on acquire timeout or error. Not a
-/// guaranteed kill — MySQL's own KILL QUERY has a known race (upstream bug
-/// #79838) where a kill landing just after the target query already finished
-/// can hit that connection's next statement instead of the intended one.
+/// `connection_id`. The cancelled connection is closed by
+/// [`super::CancelOnDrop`], so a kill that lands after the statement finished
+/// reaches a connection that is gone ("Unknown thread id") and cannot
+/// interrupt another statement. If no second connection can be had within the
+/// timeout (the pool is exhausted), the statement keeps running on the server
+/// until it finishes.
 async fn mysql_kill_query(pool: &sqlx::MySqlPool, connection_id: u64) {
     let mut conn = match tokio::time::timeout(KILL_QUERY_ACQUIRE_TIMEOUT, pool.acquire()).await {
         Ok(Ok(c)) => c,
-        _ => return,
+        _ => {
+            tracing::warn!(connection_id = connection_id, "could not get a connection to kill a MySQL statement; it keeps running on the server");
+            return;
+        }
     };
-    let _ = sqlx::query(&format!("KILL QUERY {}", connection_id))
+    if let Err(e) = sqlx::query(&format!("KILL QUERY {}", connection_id))
         .execute(&mut *conn)
-        .await;
-}
-
-pub(super) async fn mysql_run_query(pool: &sqlx::MySqlPool, query: &str, params: &[Value]) -> NodeOutput {
-    if let Err(e) = super::enforce_read_only_query(query) {
-        return NodeOutput::failure(NodeError::unrecoverable("QUERY_NOT_READ_ONLY", e));
+        .await
+    {
+        tracing::warn!(connection_id = connection_id, error = %e, "MySQL KILL QUERY failed; the statement keeps running on the server unless it had already ended");
     }
-    let mut q = sqlx::query(query);
-    for p in params {
-        q = mysql_bind_one(q, p);
-    }
-    use futures_util::StreamExt;
-    use sqlx::{Column, Row};
-    let mut stream = q.fetch(pool);
-    let mut column_names: Vec<String> = Vec::new();
-    let mut json_rows: Vec<Value> = Vec::new();
-    let mut unsupported: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    while let Some(item) = stream.next().await {
-        let row = match item {
-            Ok(r) => r,
-            Err(e) => return NodeOutput::failure(NodeError::unrecoverable("DB_ERROR",
-                format!("Query failed: {}", e))),
-        };
-        if json_rows.len() >= super::MAX_QUERY_ROWS {
-            return NodeOutput::failure(NodeError::unrecoverable("ROW_LIMIT_EXCEEDED",
-                super::row_limit_message()));
-        }
-        if column_names.is_empty() {
-            column_names = row.columns().iter().map(|c| c.name().to_string()).collect();
-        }
-        let mut obj = serde_json::Map::new();
-        for (i, col) in row.columns().iter().enumerate() {
-            let value = match decode_mysql_value(&row, i) {
-                Ok(v) => v,
-                Err(type_name) => {
-                    let placeholder = Value::String(super::undecodable_placeholder(&type_name));
-                    unsupported.entry(col.name().to_string()).or_insert(type_name);
-                    placeholder
-                }
-            };
-            obj.insert(col.name().to_string(), value);
-        }
-        json_rows.push(Value::Object(obj));
-    }
-    let count = json_rows.len();
-    let mut logs = vec![format!("Query returned {} row(s)", count)];
-    for (column, type_name) in &unsupported {
-        logs.push(super::unsupported_type_log(column, type_name));
-    }
-    NodeOutput::success_with_logs(
-        json!({
-            "rows": json_rows,
-            "rows_affected": 0,
-            "last_insert_id": 0,
-            "columns": column_names
-        }),
-        logs,
-    )
 }
 
 fn mysql_bind_one<'q>(
@@ -180,7 +133,7 @@ fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> Result<Value, St
         return Ok(v.map_or(Value::Null, |n| json!(n)));
     }
     if let Ok(v) = row.try_get::<Option<f64>, _>(i) {
-        return Ok(v.map_or(Value::Null, |n| json!(n)));
+        return Ok(v.map_or(Value::Null, super::f64_json));
     }
     if let Ok(v) = row.try_get::<Option<f32>, _>(i) {
         return Ok(v.map_or(Value::Null, super::f32_json));
@@ -194,12 +147,37 @@ fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> Result<Value, St
     if row.try_get_raw(i).map(|r| r.is_null()).unwrap_or(false) {
         return Ok(Value::Null);
     }
-    Err(row.columns()[i].type_info().name().to_string())
+    let type_name = row.columns()[i].type_info().name();
+    if let Some(value) = decode_mysql_raw(row, i, type_name) {
+        return Ok(value);
+    }
+    Err(type_name.to_string())
+}
+
+/// Types read from the raw value: DECIMAL (an exact string), DATE, DATETIME,
+/// TIMESTAMP and TIME (ISO 8601 strings), and JSON (the parsed value). The
+/// driver leaves the length byte on the date and time types.
+fn decode_mysql_raw(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> Option<Value> {
+    use super::types;
+    use sqlx::Row;
+    if !matches!(type_name, "DECIMAL" | "DATE" | "DATETIME" | "TIMESTAMP" | "TIME" | "JSON") {
+        return None;
+    }
+    let bytes = row.try_get_unchecked::<Vec<u8>, _>(i).ok()?;
+    let text = match type_name {
+        "DECIMAL" => String::from_utf8(bytes).ok()?,
+        "DATE" => types::mysql_datetime(&bytes, true)?,
+        "DATETIME" | "TIMESTAMP" => types::mysql_datetime(&bytes, false)?,
+        "TIME" => types::mysql_time(&bytes)?,
+        _ => return serde_json::from_slice(&bytes).ok(),
+    };
+    Some(Value::String(text))
 }
 
 #[cfg(test)]
 mod multi_statement_smuggling_tests {
-    use super::mysql_run_query;
+    use super::mysql_run;
+    use crate::nodes::database::Operation;
 
     #[tokio::test]
     #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
@@ -217,11 +195,9 @@ mod multi_statement_smuggling_tests {
 
         let attack = "SELECT 1; CREATE TABLE __aerini_smuggle_proof (id INT); \
                        INSERT INTO __aerini_smuggle_proof VALUES (1);";
-        let result = mysql_run_query(&pool, attack, &[]).await;
+        let result = mysql_run(&pool, attack, &[], Operation::Query, false).await;
 
-        // Expected: hard failure — MySQL's own COM_STMT_PREPARE rejects a
-        // multi-statement string outright (see comment above); it does not
-        // silently execute just the first statement and ignore the rest.
+        // MySQL's COM_STMT_PREPARE rejects a multi-statement string outright.
         assert!(
             !result.success,
             "expected the stacked statement to be rejected by MySQL's prepared-statement protocol, \
@@ -248,7 +224,8 @@ mod multi_statement_smuggling_tests {
 
 #[cfg(test)]
 mod cancellation_kill_tests {
-    use super::{mysql_kill_query, mysql_run_execute};
+    use super::{mysql_kill_query, mysql_run};
+    use crate::nodes::database::Operation;
 
     #[tokio::test]
     #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
@@ -259,7 +236,7 @@ mod cancellation_kill_tests {
             .await
             .expect("failed to connect to DATABASE_URL_MYSQL");
 
-        let result = mysql_run_execute(&pool, "SELECT 1", &[], true).await;
+        let result = mysql_run(&pool, "SELECT 1", &[], Operation::Execute, true).await;
 
         assert!(
             result.success,
@@ -302,5 +279,85 @@ mod cancellation_kill_tests {
             "expected the kill to interrupt SLEEP(5) well before its natural 5s completion, took {:?}",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn mysql_run_query_with_kill_on_cancel_completes_normally_when_not_cancelled() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_MYSQL");
+
+        let result = mysql_run(&pool, "SELECT 1 AS n", &[], Operation::Query, true).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(result.output.expect("rows")["rows"][0]["n"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn dropping_a_running_query_kills_it() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url)
+            .await
+            .expect("failed to connect to DATABASE_URL_MYSQL");
+        let marker = "aerini_cancel_probe_my";
+        let query = format!("SELECT SLEEP(30) AS {marker}");
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            mysql_run(&pool, &query, &[], Operation::Query, true),
+        )
+        .await;
+        assert!(outcome.is_err(), "the 30s statement should still be running when the timeout drops it");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let running: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.processlist \
+                 WHERE id <> CONNECTION_ID() AND info LIKE CONCAT('%', ?, '%')",
+            )
+            .bind(marker)
+            .fetch_one(&pool)
+            .await
+            .expect("processlist probe failed");
+            if running == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the dropped query is still running on the server after 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod type_decoding_tests {
+    use super::mysql_run;
+    use crate::nodes::database::Operation;
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "requires a live, disposable MySQL instance — set DATABASE_URL_MYSQL and run with `cargo test -- --ignored`"]
+    async fn decimal_dates_times_and_json_columns_decode() {
+        let url = std::env::var("DATABASE_URL_MYSQL")
+            .expect("set DATABASE_URL_MYSQL to a disposable MySQL instance to run this test");
+        let pool = sqlx::MySqlPool::connect(&url).await.expect("failed to connect to DATABASE_URL_MYSQL");
+        let sql = "SELECT CAST(12.50 AS DECIMAL(10,2)) AS n, DATE '2024-02-29' AS d, \
+                   CAST('2024-02-29 13:14:15.5' AS DATETIME(6)) AS dt, TIME '-01:02:03' AS t, \
+                   CAST('{\"a\": 1}' AS JSON) AS j";
+        let out = mysql_run(&pool, sql, &[], Operation::Query, false).await;
+        assert!(out.success, "got: {:?}", out.error);
+        let row = &out.output.expect("rows")["rows"][0];
+        assert_eq!(row["n"], json!("12.50"));
+        assert_eq!(row["d"], json!("2024-02-29"));
+        assert_eq!(row["dt"], json!("2024-02-29T13:14:15.5"));
+        assert_eq!(row["t"], json!("-01:02:03"));
+        assert_eq!(row["j"], json!({"a": 1}));
     }
 }

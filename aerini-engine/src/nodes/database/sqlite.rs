@@ -22,7 +22,10 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
     let is_execute = input.input["operation"].as_str()
         .map(|o| o == "execute")
         .unwrap_or(false);
-    let params = super::parse_params(&input.input["params"]);
+    let params = match super::parse_params(&input.input["params"]) {
+        Ok(p) => p,
+        Err(out) => return out,
+    };
     let caller_is_admin = input.context.metadata
         .get("__caller_is_admin")
         .and_then(|v| v.as_bool())
@@ -105,9 +108,40 @@ pub(super) async fn execute_sqlite(input: NodeInput) -> NodeOutput {
         Err(e)       => NodeOutput::failure(NodeError::unrecoverable("TASK_PANIC",
             format!("Database task panicked: {}", e))),
         Ok(Err(e))   => NodeOutput::failure(NodeError::unrecoverable("DB_ERROR", e)),
-        Ok(Ok(data)) => {
+        Ok(Ok(mut data)) => {
+            let dropped = data
+                .as_object_mut()
+                .and_then(|o| o.remove("dropped_rows"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let row_count = data["rows"].as_array().map(|a| a.len()).unwrap_or(0);
-            let mut logs = vec![format!("Query returned {} row(s)", row_count)];
+            let mut logs = if !is_execute {
+                vec![format!("Query returned {} row(s)", row_count)]
+            } else if row_count == 0 && dropped == 0 {
+                vec![format!("{} row(s) affected", data["rows_affected"])]
+            } else {
+                vec![format!(
+                    "{} row(s) affected, {} row(s) returned",
+                    data["rows_affected"],
+                    row_count as u64 + dropped
+                )]
+            };
+            if dropped > 0 {
+                logs.push(format!(
+                    "[RESULT_TRUNCATED] The statement completed, but its {} returned row(s) beyond \
+                     the result limit ({} rows or {} MiB) were not kept.",
+                    dropped,
+                    super::MAX_QUERY_ROWS,
+                    super::MAX_QUERY_BYTES / (1024 * 1024)
+                ));
+            }
+            let columns: Vec<String> = data["columns"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if let Some(rows) = data["rows"].as_array() {
+                logs.extend(super::result_warnings(&columns, rows));
+            }
             let mut out_data = data;
             if let Some(w) = inline_warning_sqlite {
                 logs.push(format!("[SQL_INJECTION_WARNING] {}", w));
@@ -122,15 +156,24 @@ pub(super) fn sqlite_run_execute(conn: &Connection, query: &str, params: &[Value
     super::reject_path_escaping_statement(query)?;
     let sql_params = sqlite_bind_params(params)?;
     let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|b| b.as_ref()).collect();
-    let rows_affected = conn.execute(query, refs.as_slice())
+    let mut stmt = conn.prepare(query)
         .map_err(|e| format!("Execute failed: {}", e))?;
-    let last_id = conn.last_insert_rowid();
-    Ok(json!({
-        "rows": [],
-        "rows_affected": rows_affected,
-        "last_insert_id": last_id,
-        "columns": []
-    }))
+    if stmt.column_count() == 0 {
+        let rows_affected = stmt.execute(refs.as_slice())
+            .map_err(|e| format!("Execute failed: {}", e))?;
+        return Ok(json!({
+            "rows": [],
+            "rows_affected": rows_affected,
+            "last_insert_id": conn.last_insert_rowid(),
+            "columns": []
+        }));
+    }
+    let changes_before = conn.total_changes();
+    let mut data = sqlite_read_rows(&mut stmt, refs.as_slice(), super::Operation::Execute)?;
+    let rows_affected = if conn.total_changes() > changes_before { conn.changes() } else { 0 };
+    data["rows_affected"] = json!(rows_affected);
+    data["last_insert_id"] = json!(conn.last_insert_rowid());
+    Ok(data)
 }
 
 pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value]) -> Result<Value, String> {
@@ -139,17 +182,28 @@ pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value])
     let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(query)
         .map_err(|e| format!("Query failed: {}. Check your SQL syntax.", e))?;
+    sqlite_read_rows(&mut stmt, refs.as_slice(), super::Operation::Query)
+}
+
+/// Runs a statement that produces rows. A Query over a limit fails; an Execute
+/// (a write with `RETURNING`) reads on and drops the rows past the limit,
+/// because stopping early would abandon the statement with its write pending.
+fn sqlite_read_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: &[&dyn rusqlite::ToSql],
+    operation: super::Operation,
+) -> Result<Value, String> {
     let column_names: Vec<String> = stmt.column_names()
         .iter().map(|s| s.to_string()).collect();
     let cols = column_names.clone();
     let mapped = stmt
-        .query_map(refs.as_slice(), move |row| {
+        .query_map(params, move |row| {
             let mut obj = serde_json::Map::new();
             for (i, col) in cols.iter().enumerate() {
                 let val: Value = match row.get_ref(i) {
                     Ok(rusqlite::types::ValueRef::Null)       => Value::Null,
                     Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                    Ok(rusqlite::types::ValueRef::Real(f))    => json!(f),
+                    Ok(rusqlite::types::ValueRef::Real(f))    => super::f64_json(f),
                     Ok(rusqlite::types::ValueRef::Text(s))    => {
                         json!(String::from_utf8_lossy(s).to_string())
                     }
@@ -162,20 +216,37 @@ pub(super) fn sqlite_run_query(conn: &Connection, query: &str, params: &[Value])
             }
             Ok(Value::Object(obj))
         })
-        .map_err(|e| format!("Query execution failed: {}", e))?;
+        .map_err(|e| format!("{} failed: {}", operation.label(), e))?;
     let mut rows: Vec<Value> = Vec::new();
+    let mut total_bytes: usize = 0;
+    let mut dropped: usize = 0;
     for row in mapped {
-        if rows.len() >= super::MAX_QUERY_ROWS {
-            return Err(super::row_limit_message());
+        let row = row.map_err(|e| format!("Row read error: {}", e))?;
+        let over_rows = rows.len() >= super::MAX_QUERY_ROWS;
+        if let Value::Object(obj) = &row {
+            total_bytes = total_bytes.saturating_add(super::row_bytes(obj));
         }
-        rows.push(row.map_err(|e| format!("Row read error: {}", e))?);
+        let over_bytes = total_bytes > super::MAX_QUERY_BYTES;
+        if dropped > 0 || over_rows || over_bytes {
+            if operation == super::Operation::Query {
+                return Err(if over_rows { super::row_limit_message() } else { super::byte_limit_message() });
+            }
+            dropped += 1;
+            continue;
+        }
+        rows.push(row);
     }
-    Ok(json!({
+    let mut data = json!({
         "rows": rows,
         "rows_affected": 0,
         "last_insert_id": 0,
         "columns": column_names
-    }))
+    });
+    if dropped > 0 {
+        data["truncated"] = Value::Bool(true);
+        data["dropped_rows"] = json!(dropped);
+    }
+    Ok(data)
 }
 
 fn sqlite_bind_params(params: &[Value]) -> Result<Vec<Box<dyn rusqlite::ToSql>>, String> {
@@ -215,6 +286,27 @@ mod sqlite_run_query_tests {
     }
 
     #[test]
+    fn query_over_byte_limit_is_rejected() {
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20) \
+                   SELECT hex(zeroblob(1000000)) AS h FROM c";
+        let err = sqlite_run_query(&conn, sql, &[]).unwrap_err();
+        assert!(err.contains("MiB"), "expected size-limit rejection, got: {}", err);
+        assert!(
+            err.contains("LIMIT") && err.contains("pages") && err.contains("aggregate"),
+            "the message must say how to get under the limit, got: {}", err
+        );
+    }
+
+    #[test]
+    fn infinite_real_is_returned_as_a_string() {
+        let conn = Connection::open_in_memory().unwrap();
+        let out = sqlite_run_query(&conn, "SELECT 1e999 AS x, 1.5 AS y", &[]).unwrap();
+        assert_eq!(out["rows"][0]["x"], serde_json::json!("Infinity"));
+        assert_eq!(out["rows"][0]["y"], serde_json::json!(1.5));
+    }
+
+    #[test]
     fn delete_rejected_by_query_operation() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (x INTEGER)", []).unwrap();
@@ -230,6 +322,49 @@ mod sqlite_run_query_tests {
         let err = sqlite_run_query(&conn, "WITH x AS (SELECT 1) DELETE FROM users", &[])
             .unwrap_err();
         assert!(err.contains("SELECT"), "expected read-only rejection, got: {}", err);
+    }
+}
+
+#[cfg(test)]
+mod sqlite_returning_tests {
+    use super::{sqlite_run_execute, sqlite_run_query};
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn table() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x INTEGER)", []).unwrap();
+        conn
+    }
+
+    #[test]
+    fn execute_returns_returning_rows_and_a_plain_write_still_counts_rows() {
+        let conn = table();
+        let out = sqlite_run_execute(&conn, "INSERT INTO t (x) VALUES (?) RETURNING id, x", &[json!(5)]).unwrap();
+        assert_eq!(out["rows"], json!([{ "id": 1, "x": 5 }]));
+        assert_eq!(out["rows_affected"], json!(1));
+        assert_eq!(out["columns"], json!(["id", "x"]));
+        assert_eq!(out["last_insert_id"], json!(1));
+
+        conn.execute("INSERT INTO t (x) VALUES (6)", []).unwrap();
+        let out = sqlite_run_execute(&conn, "UPDATE t SET x = x + 1", &[]).unwrap();
+        assert_eq!(out["rows"], json!([]));
+        assert_eq!(out["rows_affected"], json!(2));
+    }
+
+    #[test]
+    fn execute_over_the_row_limit_keeps_the_write_and_drops_the_extra_rows() {
+        let conn = table();
+        let sql = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 100001) \
+                   INSERT INTO t (x) SELECT n FROM c RETURNING x";
+        let out = sqlite_run_execute(&conn, sql, &[]).unwrap();
+        assert_eq!(out["rows"].as_array().unwrap().len(), super::super::MAX_QUERY_ROWS);
+        assert_eq!(out["truncated"], json!(true));
+        assert_eq!(out["dropped_rows"], json!(1));
+        assert_eq!(out["rows_affected"], json!(100_001));
+        let stored: i64 = conn.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored, 100_001);
+        assert!(sqlite_run_query(&conn, "SELECT x FROM t", &[]).is_err());
     }
 }
 

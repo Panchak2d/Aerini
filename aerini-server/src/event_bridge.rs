@@ -78,9 +78,6 @@ impl EventSink for EventBridge {
                 self.log.push(level, Some(node_id),
                     format!("Node '{}' → {}", node_id, status));
 
-                if status == "running" {
-                    *self.run_start.write().expect("event_bridge run_start RwLock poisoned") = Some(std::time::Instant::now());
-                }
             }
             "scheduler-status" => {
                 let status     = payload["status"].as_str().unwrap_or("?");
@@ -98,11 +95,22 @@ impl EventSink for EventBridge {
                         None
                     };
 
-                let duration_ms = if status == "waiting" || status == "error" {
-                    self.run_start.read().expect("event_bridge run_start RwLock poisoned")
-                        .map(|t| t.elapsed().as_millis() as u64)
-                } else {
-                    None
+                // The clock starts on the run's own `running` status, not on
+                // `node-status` (which fires once per node), and is consumed by
+                // the first `waiting`/`error` after it, so a status with no run
+                // behind it never reuses an earlier run's start time.
+                let duration_ms = match status {
+                    "running" => {
+                        *self.run_start.write().expect("event_bridge run_start RwLock poisoned") =
+                            Some(std::time::Instant::now());
+                        None
+                    }
+                    "waiting" | "error" => {
+                        self.run_start.write().expect("event_bridge run_start RwLock poisoned")
+                            .take()
+                            .map(|t| t.elapsed().as_millis() as u64)
+                    }
+                    _ => None,
                 };
 
                 let last_run_at = if status == "waiting" || status == "error" {
@@ -155,18 +163,12 @@ impl EventSink for EventBridge {
                                         format!("Failed to persist run to history: {}", e));
                                 }
 
-                                // `executor::run()`wraps every run in `perf_monitor::monitor_run`
-                                // (by direct read of `executor/mod.rs`), which
-                                // finalizes the report into `RECENT` before `run()`
-                                // resolves, and this event only fires after that
-                                // resolution — so the report is guaranteed to exist here.
-                                // `record.id` (== `wf_result.execution_id`) is reused as
-                                // the report's row id, same run_id-linkage convention the
-                                // desktop `save_performance_report` command uses. Does not
-                                // change execution ordering — purely additive, after the
-                                // existing `save_run` call, same best-effort WARN-on-error
-                                // handling (a missing/failed report must not fail the run
-                                // itself).
+                                // The executor finalizes the performance report before
+                                // the run resolves, and this event fires after that, so
+                                // the report exists here. It is stored under the run's id
+                                // (`record.id`), the same linkage the desktop app uses.
+                                // Best-effort: a missing or unsaved report must not fail
+                                // the run.
                                 match perf_monitor::get_recent_report(&wf_result.workflow_id) {
                                     Some(report) => {
                                         if let Err(e) = history_db.save_performance_report(&record.id, &report) {
@@ -213,5 +215,37 @@ impl aerini_engine::EventSink for BroadcastEventSink {
             msg.push('}');
             let _ = self.tx.send(msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bridge() -> EventBridge {
+        EventBridge::new(LogBuffer::new(50), Arc::new(RwLock::new(RunState::default())))
+    }
+
+    #[test]
+    fn run_duration_spans_the_whole_run_not_the_last_node() {
+        let b = bridge();
+        b.emit("scheduler-status", json!({"status": "running"}));
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        b.emit("node-status", json!({"node_id": "n2", "status": "running"}));
+        b.emit("scheduler-status", json!({"status": "waiting"}));
+        let d = b.state.read().unwrap().last_duration_ms.expect("duration recorded");
+        assert!(d >= 120, "duration {d}ms must include time before the last node started");
+    }
+
+    #[test]
+    fn a_status_with_no_run_behind_it_keeps_the_previous_duration() {
+        let b = bridge();
+        b.emit("scheduler-status", json!({"status": "running"}));
+        b.emit("scheduler-status", json!({"status": "waiting"}));
+        let first = b.state.read().unwrap().last_duration_ms;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        b.emit("scheduler-status", json!({"status": "waiting"}));
+        assert_eq!(b.state.read().unwrap().last_duration_ms, first);
     }
 }

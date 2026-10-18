@@ -6,9 +6,9 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-BLgZmCk1.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-DEW3gkfv.js">
-  <link rel="stylesheet" crossorigin href="./assets/style-Cdz4MPHN.css">
+  <script type="module" crossorigin src="./assets/index-yoRR_Ltf.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-DwrMa6HA.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-CCy7_ot7.css">
 </head>
 <body>
 
@@ -128,6 +128,7 @@
             <input id="wf-search" type="text" placeholder="Filter workflows…" aria-label="Filter workflows" autocomplete="off" spellcheck="false" />
           </div>
         </div>
+        <div class="wf-tag-filter hidden" id="wf-tag-filter"></div>
         <button class="workflow-bgruns-pill hidden" id="wf-bgruns-pill" type="button">
           <span class="workflow-bgruns-pill-dot"></span>
           <span class="workflow-bgruns-pill-label" id="wf-bgruns-pill-label"></span>
@@ -140,6 +141,7 @@
           </div>
           <div class="workflow-bulk-actions">
             <button id="wf-bulk-move" type="button">Move to ▾</button>
+            <button id="wf-bulk-tags" type="button">Tags…</button>
             <button id="wf-bulk-duplicate" type="button">Duplicate</button>
             <button class="danger" id="wf-bulk-delete" type="button">Delete</button>
           </div>
@@ -688,10 +690,7 @@
       <div class="settings-body">
         <div class="settings-group">
           <div class="settings-group-title">Tags</div>
-          <div class="wf-tags-editor">
-            <div class="wf-tags-chips" id="wf-setting-tags-chips"></div>
-            <input type="text" id="wf-setting-tags-input" class="settings-text-input" placeholder="Add a tag, press Enter" maxlength="32" autocomplete="off">
-          </div>
+          <div class="wf-tags-editor" id="wf-setting-tags-editor"></div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">Execution</div>

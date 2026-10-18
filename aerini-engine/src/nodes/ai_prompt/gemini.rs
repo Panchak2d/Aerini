@@ -13,7 +13,6 @@ use super::shared::{send_and_parse, extract_provider_error, error_output};
 // Body: { contents: [{ role, parts: [{text}] }], systemInstruction: { parts: [{text}] }, generationConfig }
 // Response: candidates[0].content.parts[].text
 // Inline data: { "inline_data": { "mime_type": <mime>, "data": <b64> } } — same shape for images and PDFs.
-// ai.google.dev/gemini-api/docs, June 2026.
 
 /// The model id as it goes in the URL: the `models/` prefix Google's own list
 /// shows is accepted in the field and not doubled.
@@ -62,17 +61,11 @@ pub(super) async fn call_gemini(
         }
     });
 
-    // `system_provided` (threaded from mod.rs, captured before its own
-    // `.unwrap_or(...)` default collapses "field absent" into the same string
-    // as "field explicitly set to that exact sentence") is the real signal
-    // for "did the user configure a system prompt" — a user who explicitly
-    // typed the literal default sentence now has it sent, unlike the old
-    // magic-string check, which dropped it for Gemini only (Anthropic/OpenAI
-    // already send `system` unconditionally). The `system != DEFAULT_SYSTEM`
-    // fallback is kept, not removed: mod.rs appends an attachment-processing
-    // warning onto `system` even when no system prompt was provided, and that
-    // warning must still reach Gemini the same way it already reaches
-    // Anthropic/OpenAI — dropping the fallback would silently regress that.
+    // `system_provided` is captured before mod.rs defaults an absent system
+    // prompt to DEFAULT_SYSTEM, so a user who typed that exact sentence still
+    // sends it. The `system != DEFAULT_SYSTEM` arm stays: mod.rs appends an
+    // attachment warning to `system` even when none was configured, and that
+    // warning must reach the model.
     const DEFAULT_SYSTEM: &str = "You are a helpful assistant.";
     if !system.is_empty() && (system_provided || system != DEFAULT_SYSTEM) {
         body["systemInstruction"] = json!({
@@ -143,11 +136,9 @@ pub(super) async fn call_gemini(
     )
 }
 
-/// `GET {base}/models?key=<api_key>` — VERIFIED (ai.google.dev/gemini-api/docs/api-errors,
-/// checked this session): ListModels takes the key as a query parameter, not
-/// only the `x-goog-api-key` header `call_gemini` above uses; `apply_auth`
-/// still runs too, for header/extra_headers consistency with the rest of
-/// this file. Response envelope is `{"models":[{"name":"models/xxx"}]}`,
+/// `GET {base}/models?key=<api_key>`: ListModels takes the key as a query
+/// parameter as well as the `x-goog-api-key` header `call_gemini` uses;
+/// `apply_auth` still runs, for header/extra_headers consistency. Response envelope is `{"models":[{"name":"models/xxx"}]}`,
 /// different from the other two providers' `{"data":[{"id":...}]}` — the
 /// `"models/"` prefix is stripped so all three return bare model ids.
 pub(super) async fn list_models(
@@ -251,8 +242,7 @@ mod tests {
 
     const DEFAULT_SYSTEM: &str = "You are a helpful assistant.";
 
-    /// a user who explicitly typed
-    /// the exact default sentence must have it sent, not silently dropped.
+    /// A user who explicitly typed the exact default sentence has it sent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn system_provided_with_literal_default_text_is_sent() {
         let (base_url, rx) = spawn_capturing_mock().await;
@@ -278,12 +268,8 @@ mod tests {
         assert!(!body.contains("systemInstruction"), "body: {body}");
     }
 
-    // mod.rs appends an
-    // attachment-processing warning onto a defaulted `system` even when the
-    // user configured nothing — that warning must still reach Gemini, same
-    // as it already reaches Anthropic/OpenAI (which send unconditionally).
-    // A naive "replace the check with system_provided alone" fix would have
-    // silently dropped this.
+    // mod.rs appends an attachment warning to a defaulted `system`; it must
+    // still reach Gemini.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn system_not_provided_but_warning_appended_is_still_sent() {
         let (base_url, rx) = spawn_capturing_mock().await;

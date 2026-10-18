@@ -92,4 +92,12 @@ describe("bindResizeHandle (sidebar)", () => {
     handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
   });
+
+  it("drag: a corrupt stored width falls back to the default instead of producing NaN", () => {
+    localStorage.setItem(LS_WIDTH, "{}");
+    handle.dispatchEvent(new MouseEvent("mousedown", { clientX: 500, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 560, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    expect(currentSidebarW()).toBe(320);
+  });
 });

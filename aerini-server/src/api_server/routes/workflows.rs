@@ -284,10 +284,26 @@ pub async fn run_workflow(
         }
     }
 
-    // Acquire the global run semaphore BEFORE the per-workflow exec lock.
-    // If the order were reversed, callers blocked on the exec lock would each
-    // hold a semaphore slot, starving unrelated workflows.
-    //
+    // Take the per-workflow exec lock first, then the global run slot. A caller
+    // waiting on a busy workflow's lock then holds no slot, so repeated requests
+    // for one long-running workflow cannot use up the slots other workflows need;
+    // the only callers that wait while holding the lock are those of the same
+    // workflow, which could not run concurrently anyway.
+    let lock = {
+        let entry = s.exec_locks.entry(id.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+        Arc::clone(&*entry)
+    };
+    let _guard = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lock.lock(),
+    ).await {
+        Ok(guard) => guard,
+        Err(_)    => return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "workflow already running"})),
+        ).into_response(),
+    };
+
     // acquire_owned() queues the request; the caller waits up to queue_timeout
     // for a free slot rather than being rejected immediately.
     let _run_permit = match tokio::time::timeout(
@@ -296,7 +312,6 @@ pub async fn run_workflow(
     ).await {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) => {
-            // Semaphore closed — should not happen in normal operation.
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "run semaphore closed"})),
@@ -315,22 +330,8 @@ pub async fn run_workflow(
         }
     };
 
-    let lock = {
-        let entry = s.exec_locks.entry(id.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
-        Arc::clone(&*entry)
-    };
-    let _guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        lock.lock(),
-    ).await {
-        Ok(guard) => guard,
-        Err(_)    => return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error": "workflow already running"})),
-        ).into_response(),
-    };
-
     let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let executor = s.base_executor.clone()
         .with_registry(s.registry.current())
         .with_caller_is_admin(caller.has_scope("admin"))
@@ -350,6 +351,17 @@ pub async fn run_workflow(
         Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
         Err(e)     => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e.to_string()}))).into_response(),
     }
+}
+
+/// Whether an event may go to a connection restricted to `filter`. Only an
+/// event that names a workflow in the set passes: an event with no
+/// `workflow_id`, or one that did not parse, is dropped.
+fn event_passes_workflow_filter(parsed: Option<&Value>, filter: &std::collections::HashSet<String>) -> bool {
+    parsed
+        .and_then(|v| v.get("payload"))
+        .and_then(|p| p.get("workflow_id"))
+        .and_then(|id| id.as_str())
+        .is_some_and(|id| filter.contains(id))
 }
 
 /// Whether a parsed SSE event should be forwarded to a connection scoped to
@@ -467,18 +479,8 @@ pub async fn sse_events(
             let parsed: Option<Value> = if needs_parse { serde_json::from_str(&raw).ok() } else { None };
 
             if let Some(ref filter) = effective_filter {
-                let wf_id = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("payload"))
-                    .and_then(|p| p.get("workflow_id"))
-                    .and_then(|id| id.as_str())
-                    .map(|s| s.to_string());
-                match wf_id {
-                    Some(id) if filter.contains(&id) => {}
-                    // Event has no workflow_id (e.g. heartbeat) — forward to all
-                    None => {}
-                    // workflow_id present but not in filter — drop
-                    _ => return None,
+                if !event_passes_workflow_filter(parsed.as_ref(), filter) {
+                    return None;
                 }
             }
 
@@ -702,5 +704,23 @@ mod health_tests {
         assert!(logged.load(Ordering::Relaxed));
         let second = node_check_failed(&logged, "other");
         assert_eq!(second["message"], NODE_CHECK_FAILED_MESSAGE);
+    }
+}
+
+#[cfg(test)]
+mod workflow_filter_tests {
+    use super::event_passes_workflow_filter;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    #[test]
+    fn only_events_naming_a_granted_workflow_pass_a_restricted_connection() {
+        let filter = HashSet::from(["wf_a".to_string()]);
+        let named = |id: &str| json!({"event": "node-status", "payload": {"workflow_id": id}});
+        assert!(event_passes_workflow_filter(Some(&named("wf_a")), &filter));
+        assert!(!event_passes_workflow_filter(Some(&named("wf_b")), &filter));
+        let ready = json!({"event": "scheduler-ready", "payload": {"job_count": 7}});
+        assert!(!event_passes_workflow_filter(Some(&ready), &filter));
+        assert!(!event_passes_workflow_filter(None, &filter));
     }
 }

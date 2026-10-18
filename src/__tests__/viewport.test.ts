@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, afterEach } from "vitest";
-import { visibleViewport } from "../canvas/viewport";
+import { visibleViewport, parseSavedViewport } from "../canvas/viewport";
 
 const rect = (r: Partial<DOMRect>): DOMRect =>
   ({ width: 800, height: 600, left: 0, top: 0, right: 800, bottom: 600, x: 0, y: 0, toJSON() { return {}; }, ...r }) as DOMRect;
@@ -50,5 +50,18 @@ describe("visibleViewport", () => {
     Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
     mountChat(900);
     expect(visibleViewport(rect({})).width).toBe(0);
+  });
+});
+
+describe("parseSavedViewport", () => {
+  it("accepts a valid entry and clamps zoom into range", () => {
+    expect(parseSavedViewport('{"panX":10,"panY":-5,"zoom":2}', 0.05, 4)).toEqual({ panX: 10, panY: -5, zoom: 2 });
+    expect(parseSavedViewport('{"panX":0,"panY":0,"zoom":99}', 0.05, 4)?.zoom).toBe(4);
+  });
+
+  it("rejects parseable-but-malformed entries that would blank the canvas", () => {
+    for (const raw of ["{}", "null", "[]", '"x"', "not json", '{"panX":null,"panY":0,"zoom":1}', '{"panX":0,"panY":0,"zoom":"1"}']) {
+      expect(parseSavedViewport(raw, 0.05, 4)).toBeNull();
+    }
   });
 });

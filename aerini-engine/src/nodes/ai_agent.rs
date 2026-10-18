@@ -1183,7 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_tools_fail_before_any_request() {
         let out = AiAgentNode.execute(make_input(json!({
-            "goal": "g", "provider": "openai", "tools": "not json"
+            "goal": "g", "provider": "openai", "base_url": "http://127.0.0.1:9", "tools": "not json"
         }))).await;
         assert_eq!(out.error.expect("error").code, "INVALID_TOOLS");
     }

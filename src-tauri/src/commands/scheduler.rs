@@ -6,7 +6,7 @@ use aerini_engine::scheduler::{ScheduledJobRow, SchedulerDaemon};
 /// The plugin directory saved in Settings, if one is set. Plugin triggers
 /// resolve their plugin from it; a blank value counts as unset.
 pub(crate) fn configured_plugin_dir(db: &WorkflowDb) -> Option<std::path::PathBuf> {
-    db.get_setting("plugin_dir")
+    db.get_setting(super::plugins::PLUGIN_DIR_SETTING)
         .ok()
         .flatten()
         .map(|dir| dir.trim().to_string())

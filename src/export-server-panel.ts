@@ -8,7 +8,7 @@
 ///   5. Linux: user runs ./install.sh   Docker: user runs docker compose up --build -d
 
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml } from "./utils";
+import { escapeHtml, copyWithButtonFeedback } from "./utils";
 
 interface CredentialExport {
   credential_id: string;
@@ -408,13 +408,7 @@ function showRunSecretBanner(container: Element | null, secret: string): void {
 
   const copyBtn = banner.querySelector<HTMLButtonElement>(".esp-run-secret-copy")!;
   copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(secret).then(() => {
-      copyBtn.textContent = "Copied!";
-      setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
-    }).catch(() => {
-      copyBtn.textContent = "Copy failed";
-      setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
-    });
+    void copyWithButtonFeedback(copyBtn, secret);
   });
 
   container.appendChild(banner);

@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use aerini_engine::executor::{CredentialResolveError, CredentialResolver, WorkflowExecutor};
+use aerini_engine::executor::{CredentialResolveError, CredentialResolver, SecretString, WorkflowExecutor};
 use aerini_engine::model::Workflow;
 use aerini_engine::node::NodeRegistry;
 use aerini_engine::nodes::register_builtins;
@@ -72,7 +72,7 @@ struct NoCredentials;
 
 #[async_trait::async_trait]
 impl CredentialResolver for NoCredentials {
-    async fn resolve(&self, _credential_id: &str) -> Result<String, CredentialResolveError> {
+    async fn resolve(&self, _credential_id: &str) -> Result<SecretString, CredentialResolveError> {
         Err(CredentialResolveError::NotFound)
     }
 }
@@ -124,7 +124,7 @@ The example above needs none of this. It applies once you want run history, save
 
 `WorkflowDb::open(path, pool_size)` and `CredentialStore::open(db_path, key_source)` are both synchronous, blocking calls. Call them before your runtime starts, or hand them to `tokio::task::spawn_blocking` if you're already inside one. `aerini-server` does exactly this for its own credential store, with a documented reason: `KeySource::OsKeychain` makes a blocking OS call, and running that directly on a thread that's also driving a Tokio runtime can deadlock the runtime.
 
-`KeySource` has two variants. `KeySource::File(path)` reads or generates a local AES key file and creates the file's parent directory itself if it doesn't exist; it never touches the OS keychain. `KeySource::OsKeychain { fallback }` tries the platform keychain first (Keychain, Credential Manager, Secret Service) and only falls back to a file if that's unavailable. For a bare embedding with no desktop integration, `KeySource::File` is the simpler choice and matches what `aerini-server` defaults to. With either variant, `open` generates a new key only when the credentials table is empty; if rows exist and no key can be found it returns `EngineError::KeyUnavailable` and creates nothing.
+`KeySource` has two variants. `KeySource::File(path)` reads or generates a local AES key file and creates the file's parent directory itself if it doesn't exist (owner-only on Unix); it never touches the OS keychain. `KeySource::OsKeychain { fallback }` tries the platform keychain first (Keychain, Credential Manager, Secret Service) and only falls back to a file if that's unavailable. The keychain entry is specific to the directory that holds `fallback`, so embedders with different data directories do not share a key. Key creation and migration take an exclusive lock on `<key file>.lock` beside the key file, so processes sharing a data directory agree on one key; leave that file in place. For a bare embedding with no desktop integration, `KeySource::File` is the simpler choice and matches what `aerini-server` defaults to. With either variant, `open` generates a new key only when the credentials table is empty; if rows exist and no key can be found it returns `EngineError::KeyUnavailable` and creates nothing.
 
 Neither `open` call creates its own top-level data directory; the desktop app and `aerini-server`'s `api` mode both call `create_dir_all` on that directory themselves first. Do the same for whatever path you choose.
 
@@ -138,6 +138,10 @@ let resolver = Arc::new(StoreCredentialResolver { store: Arc::new(store) });
 ```
 
 Its `resolve` implementation already offloads the blocking store lookup to `spawn_blocking` on every call, so it's safe to use from inside an already-running executor without any extra wrapping on your side.
+
+`SecretString` is `zeroize::Zeroizing<String>`: a resolver returns the secret in it, and `CredentialStore::retrieve` and `export_key_base64` return it too, so the copy they hand out is overwritten when you drop it. It dereferences to `String`; use `SecretString::new(value)` to build one. Strings you copy out of it, values already placed in a node's JSON input, HTTP buffers and the process environment are not wiped.
+
+Credentials are stored in a versioned format that binds each secret to its credential ID, type and metadata, and `open` checks the key against a stored check value before any credential is read. A key that does not decrypt the store makes `open` fail with `EngineError::KeyMismatch`. To recover from a lost or wrong key, call `CredentialStore::restore_key_base64(db_path, key_source, backup)` with a value from `export_key_base64`; it decrypts a stored credential with the backup first and replaces the stored key only if that works. It does not need an open store, so it works on a store that `open` refuses. `CreateCredentialRequest` no longer implements `Serialize`, its `Debug` output hides `value`, and `value` is overwritten when the request is dropped.
 
 For run history and saved workflow variables, pass `Some(Arc::new(workflow_db))` as `register_builtins`'s third argument instead of `None`. With `None`, the Set Variable and Get Variable nodes still run; persisting a variable becomes a no-op with a logged warning instead of a write.
 

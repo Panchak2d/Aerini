@@ -2,7 +2,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { NODE_IDS } from "./node-ids";
 import type { WorkflowResult } from "./ipc/workflow";
 import type { CanvasNode } from "./canvas/Node";
-import { escapeHtml } from "./utils";
+import { escapeHtml, copyWithButtonFeedback } from "./utils";
 
 type NodeMap = Map<string, CanvasNode>;
 
@@ -695,7 +695,7 @@ export function wireCopyButtons(container: Element): void {
   container.querySelectorAll<HTMLButtonElement>("[data-copy-text]").forEach(btn => {
     const text = btn.dataset.copyText ?? "";
     btn.addEventListener("click", () => {
-      navigator.clipboard.writeText(text).then(() => { btn.textContent = "Copied"; });
+      void copyWithButtonFeedback(btn, text);
     });
   });
 }

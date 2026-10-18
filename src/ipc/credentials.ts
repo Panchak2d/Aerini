@@ -37,21 +37,28 @@ export async function getCredentialMetadata(id: string): Promise<CredentialMetad
   return invoke("get_credential_metadata", { id });
 }
 
-export async function getCredentialSecret(id: string): Promise<string | null> {
-  return invoke("get_credential_secret", { id });
+/// Creates a credential. With `update` it replaces the existing one instead;
+/// an empty `value` then keeps the stored secret. Secrets are write-only from
+/// the webview: there is no command that returns a saved value.
+export async function saveCredential(req: CreateCredentialRequest, update = false): Promise<void> {
+  return invoke("save_credential", { req, update });
 }
 
-export async function saveCredential(req: CreateCredentialRequest): Promise<void> {
-  return invoke("save_credential", { req });
+/// Lists a provider's models using a saved credential's secret, read by the
+/// backend and never returned here. Rejects as `"{CODE}: {message}"`, same as
+/// `listProviderModels`.
+export async function listCredentialModels(id: string, provider: string, baseUrl: string): Promise<string[]> {
+  return invoke("list_credential_models", { id, provider, baseUrl });
 }
 
 export async function deleteCredential(id: string): Promise<void> {
   return invoke("delete_credential", { id });
 }
 
-/// Returns the raw AES-256 credential-encryption key, base64-encoded.
-/// See CredentialPanel's backup UI for how this is presented — this is the
-/// only recovery path if the OS keychain entry holding it is ever lost.
+/// Returns the raw AES-256 credential-encryption key, base64-encoded, after a
+/// native confirmation dialog. Rejects with `"CANCELLED"` when the user
+/// declines. This is the only recovery path if the OS keychain entry holding
+/// it is ever lost.
 export async function exportEncryptionKey(): Promise<string> {
   return invoke("export_encryption_key");
 }

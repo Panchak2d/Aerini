@@ -8,3 +8,25 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const COPY_FEEDBACK_MS = 2000;
+
+export async function copyWithButtonFeedback(btn: HTMLElement, text: string): Promise<void> {
+  const original = btn.dataset.copyLabel ?? btn.textContent ?? "";
+  btn.dataset.copyLabel = original;
+  const ok = await copyText(text);
+  btn.textContent = ok ? "Copied" : "Copy failed";
+  setTimeout(() => {
+    btn.textContent = original;
+    delete btn.dataset.copyLabel;
+  }, COPY_FEEDBACK_MS);
+}

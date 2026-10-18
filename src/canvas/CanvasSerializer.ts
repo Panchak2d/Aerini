@@ -3,6 +3,7 @@ import { Connector }  from "./Connector";
 import type { CanvasNodeData } from "./Node";
 import { NODE_IDS } from "../node-ids";
 import { getNodeDescriptor } from "./node-registry";
+import { normalizeTags } from "../workflow-tags";
 
 // Populated by app.ts after ALL_NODES is defined
 export { registerNodeDescriptors } from "./node-registry";
@@ -246,7 +247,7 @@ export function deserialize(json: string): {
     maxConcurrentNodes: doc.max_concurrent_nodes ?? 8,
     unlimitedDuration: doc.unlimited_duration ?? false,
     chatSettings: { ...DEFAULT_CHAT_SETTINGS, ...(doc.settings?.chat ?? {}) },
-    tags: Array.isArray(doc.metadata?.tags) ? doc.metadata.tags : [],
+    tags: normalizeTags(doc.metadata?.tags),
     collectionId: typeof doc.metadata?.collection_id === "string" ? doc.metadata.collection_id : null,
     maxDurationSecs: typeof doc.max_duration_secs === "number" ? doc.max_duration_secs : undefined,
     importWarnings,

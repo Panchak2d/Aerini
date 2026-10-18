@@ -4,6 +4,8 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput};
 use crate::nodes::util::{cfg_u64_opt, Replay};
 
+const MAX_VALUE_BYTES: u64 = super::MAX_QUERY_BYTES as u64;
+
 // ── Redis execution ───────────────────────────────────────────────────────────
 
 pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
@@ -12,14 +14,18 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_URL",
             "connection_url is required for redis. Example: redis://host:6379")),
     };
+    let url = match super::url_with_password(&url, &input.input["password"]) {
+        Ok(u) => u,
+        Err(out) => return out,
+    };
     let operation = match input.input["operation"].as_str() {
         Some(op) if !op.is_empty() => op.to_string(),
         _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_OPERATION",
             "operation is required for redis. One of: get, set, del, lpush, rpush, lpop, rpop, hget, hset")),
     };
-    let key = match input.input["key"].as_str() {
-        Some(k) if !k.is_empty() => k.to_string(),
-        _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_KEY",
+    let key = match scalar_arg(&input.input["key"]) {
+        Some(k) if !k.is_empty() => k,
+        _ => return NodeOutput::failure(arg_error("key", &input.input["key"],
             "key is required for all Redis operations")),
     };
 
@@ -35,6 +41,17 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
     }
     match operation.as_str() {
         "get" => {
+            match super::pool::redis_cmd_with_retry::<u64, _>(&url, ssrf_policy, Replay::Safe, || {
+                let mut cmd = redis::cmd("STRLEN");
+                cmd.arg(&key);
+                cmd
+            }).await {
+                Err(e)  => return NodeOutput::failure(NodeError::unrecoverable("REDIS_ERROR",
+                    format!("GET failed: {}", e))),
+                Ok(len) => if let Err(e) = check_value_size(len, "GET") {
+                    return NodeOutput::failure(e);
+                },
+            }
             match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("GET");
                 cmd.arg(&key);
@@ -49,7 +66,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         "set" => {
             let value = match scalar_arg(&input.input["value"]) {
                 Some(v) => v,
-                None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
+                None => return NodeOutput::failure(arg_error("value", &input.input["value"],
                     "value is required for set. Use an empty string to store an empty value.")),
             };
             let ttl = match cfg_u64_opt(&input.input["expire"], "expire") {
@@ -85,7 +102,7 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         "lpush" | "rpush" => {
             let value = match scalar_arg(&input.input["value"]) {
                 Some(v) => v,
-                None    => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
+                None    => return NodeOutput::failure(arg_error("value", &input.input["value"],
                     "value is required for lpush and rpush")),
             };
             let cmd_name = if operation == "lpush" { "LPUSH" } else { "RPUSH" };
@@ -114,11 +131,22 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         }
 
         "hget" => {
-            let field = match input.input["field"].as_str() {
-                Some(f) if !f.is_empty() => f.to_string(),
-                _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_FIELD",
+            let field = match scalar_arg(&input.input["field"]) {
+                Some(f) if !f.is_empty() => f,
+                _ => return NodeOutput::failure(arg_error("field", &input.input["field"],
                     "field is required for hget")),
             };
+            match super::pool::redis_cmd_with_retry::<u64, _>(&url, ssrf_policy, Replay::Safe, || {
+                let mut cmd = redis::cmd("HSTRLEN");
+                cmd.arg(&key).arg(&field);
+                cmd
+            }).await {
+                Err(e)  => return NodeOutput::failure(NodeError::unrecoverable("REDIS_ERROR",
+                    format!("HGET failed: {}", e))),
+                Ok(len) => if let Err(e) = check_value_size(len, "HGET") {
+                    return NodeOutput::failure(e);
+                },
+            }
             match super::pool::redis_cmd_with_retry::<Option<String>, _>(&url, ssrf_policy, Replay::Safe, || {
                 let mut cmd = redis::cmd("HGET");
                 cmd.arg(&key).arg(&field);
@@ -131,14 +159,14 @@ pub(super) async fn execute_redis(input: NodeInput) -> NodeOutput {
         }
 
         "hset" => {
-            let field = match input.input["field"].as_str() {
-                Some(f) if !f.is_empty() => f.to_string(),
-                _ => return NodeOutput::failure(NodeError::unrecoverable("MISSING_FIELD",
+            let field = match scalar_arg(&input.input["field"]) {
+                Some(f) if !f.is_empty() => f,
+                _ => return NodeOutput::failure(arg_error("field", &input.input["field"],
                     "field is required for hset")),
             };
             let value = match scalar_arg(&input.input["value"]) {
                 Some(v) => v,
-                None => return NodeOutput::failure(NodeError::unrecoverable("MISSING_VALUE",
+                None => return NodeOutput::failure(arg_error("value", &input.input["value"],
                     "value is required for hset. Use an empty string to store an empty value.")),
             };
             match super::pool::redis_cmd_with_retry::<(), _>(&url, ssrf_policy, Replay::Safe, || {
@@ -168,10 +196,56 @@ fn scalar_arg(v: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn arg_error(name: &str, v: &serde_json::Value, missing: &str) -> NodeError {
+    let upper = name.to_ascii_uppercase();
+    match v {
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => NodeError::unrecoverable(
+            format!("INVALID_{upper}"),
+            format!(
+                "{name} must be a string, number or true/false, not {}. Convert it to a JSON string first.",
+                if v.is_array() { "an array" } else { "an object" }
+            ),
+        ),
+        _ => NodeError::unrecoverable(format!("MISSING_{upper}"), missing),
+    }
+}
+
+fn check_value_size(len: u64, command: &str) -> Result<(), NodeError> {
+    if len > MAX_VALUE_BYTES {
+        return Err(NodeError::unrecoverable(
+            "VALUE_TOO_LARGE",
+            format!(
+                "{command} would return {} MiB; the limit is {} MiB. Store the value in smaller pieces under separate keys.",
+                len.div_ceil(1024 * 1024),
+                MAX_VALUE_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scalar_arg;
+    use super::{arg_error, check_value_size, scalar_arg, MAX_VALUE_BYTES};
     use serde_json::json;
+
+    #[test]
+    fn structured_argument_is_invalid_and_absent_argument_is_missing() {
+        let invalid = arg_error("value", &json!({"a": 1}), "value is required");
+        assert_eq!(invalid.code, "INVALID_VALUE");
+        assert!(invalid.message.contains("an object"), "got: {}", invalid.message);
+        let missing = arg_error("value", &json!(null), "value is required");
+        assert_eq!(missing.code, "MISSING_VALUE");
+        assert_eq!(missing.message, "value is required");
+    }
+
+    #[test]
+    fn value_over_the_size_limit_is_rejected() {
+        assert!(check_value_size(MAX_VALUE_BYTES, "GET").is_ok());
+        let err = check_value_size(MAX_VALUE_BYTES + 1, "GET").expect_err("over the limit");
+        assert_eq!(err.code, "VALUE_TOO_LARGE");
+        assert!(err.message.contains("32 MiB"), "got: {}", err.message);
+    }
 
     #[test]
     fn scalar_arg_accepts_strings_numbers_and_bools_only() {

@@ -63,7 +63,7 @@ pub async fn list_scheduler(
 }
 
 #[derive(Deserialize)]
-pub struct StartBody { #[serde(default)] pub always_on: bool, pub port_override: Option<u16> }
+pub struct StartBody { pub always_on: Option<bool>, pub port_override: Option<u16> }
 
 pub async fn start_job(
     State(s):          State<ApiState>,
@@ -74,7 +74,7 @@ pub async fn start_job(
     if let Err(e) = require_write(&caller) { return e.into_response(); }
     if let Err(e) = require_workflow_acl(&s, &caller, &id).await { return e.into_response(); }
     let workflow_id = id.clone();
-    match tokio::task::spawn_blocking(move || s.scheduler.start_job(&id, b.port_override, Some(b.always_on))).await {
+    match tokio::task::spawn_blocking(move || s.scheduler.start_job(&id, b.port_override, b.always_on)).await {
         Ok(Ok(()))  => (StatusCode::OK, Json(json!({"ok":true}))).into_response(),
         Ok(Err(e))  => start_rejection(&workflow_id, e).into_response(),
         Err(e)      => internal_error("start_job: task failed", e).into_response(),
@@ -110,6 +110,16 @@ pub async fn stop_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_body_without_always_on_keeps_the_stored_setting() {
+        let omitted: StartBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted.always_on, None);
+        let on: StartBody = serde_json::from_str(r#"{"always_on":true}"#).unwrap();
+        assert_eq!(on.always_on, Some(true));
+        let off: StartBody = serde_json::from_str(r#"{"always_on":false}"#).unwrap();
+        assert_eq!(off.always_on, Some(false));
+    }
 
     #[test]
     fn known_start_rejection_returns_readable_text() {

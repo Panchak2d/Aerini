@@ -30,17 +30,17 @@
 // memory attribution. Must be declared before first use, at crate root.
 // Safe to declare here rather than in either binary crate: a
 // `#[global_allocator]` applies to the whole final binary regardless of
-// which crate in its dependency graph declares it, and — confirmed via a
-// repo-wide grep this fix — no other crate in this workspace declares one,
-// so `aerini` (desktop), `aerini-server`, and this crate's own `cargo test`
-// harness each get exactly one, automatically, with no per-binary wiring
-// needed beyond calling `mem_tracking::install()` once at startup (see
+// which crate in its dependency graph declares it, and no other crate in
+// this workspace declares one, so `aerini` (desktop), `aerini-server`, and
+// this crate's own `cargo test` harness each get exactly one, automatically,
+// with no per-binary wiring needed beyond calling `mem_tracking::install()` once at startup (see
 // `src-tauri/src/lib.rs`'s `.setup()` and `aerini-server/src/main.rs`).
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tracking_allocator::Allocator<std::alloc::System> =
     tracking_allocator::Allocator::system();
 
 pub mod context;
+pub mod credential_env;
 pub mod cron;
 pub mod db;
 pub mod error;
@@ -58,6 +58,8 @@ pub mod plugin_loader;
 pub mod provider;
 pub mod scheduler;
 pub mod store;
+#[cfg(target_os = "linux")]
+pub mod session_bus;
 
 // Top-level re-exports used by both tauri app and server binary.
 pub use model::Workflow;

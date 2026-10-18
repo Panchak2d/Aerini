@@ -1,3 +1,4 @@
+# Keep the ignore list identical to [advisories].ignore in deny.toml (checked by scripts/tests/test_deny_config.py).
 [advisories]
 ignore = [
     # RUSTSEC-2023-0071: rsa 0.9.10 Marvin Attack timing side-channel.
@@ -48,4 +49,15 @@ ignore = [
     "RUSTSEC-2025-0081", # unic-char-property
     "RUSTSEC-2025-0098", # unic-ucd-version
     "RUSTSEC-2025-0100", # unic-ucd-ident
+
+    # zip 8.6.0 (RUSTSEC-2026-0367, -0368, -0369): symlink escape, symlink-followed permission
+    # changes and preserved SUID/SGID bits, all in `ZipArchive::extract` / `ZipStreamReader::extract`.
+    # Patched only in zip >=9.0.0. The one remaining copy of zip 8 is transitive via docx-rs
+    # (latest 0.4.22 requires `zip ^8.6.0`), used by the Text to File node to write `.docx`.
+    # Not reachable: docx-rs 0.4.22 never calls either `extract` (VERIFIED by reading its source),
+    # and Aerini's own zip use is on zip 9. The updater's older zip 4 copy is gone: src-tauri turns
+    # off the updater's `zip` feature. Remove these three entries once docx-rs moves to zip >=9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]

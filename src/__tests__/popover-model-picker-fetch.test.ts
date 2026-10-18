@@ -5,7 +5,7 @@ import type { Canvas } from "../canvas/Canvas";
 import { showPopover, closePopover } from "../popover/lifecycle";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level);
-// lifecycle.ts's listCredentials()/getCredentialMetadata()/getCredentialSecret()/
+// lifecycle.ts's listCredentials()/getCredentialMetadata()/listCredentialModels()/
 // listProviderModels() all go through this same mocked `invoke`. Empty/reset
 // by default (matching the original hardcoded behavior below); the provider-
 // filtering tests populate these before opening a popover.
@@ -15,7 +15,7 @@ let mockMetadata: Record<string, { provider?: string } | null> = {};
 const invokeMock = vi.fn((cmd: string, args?: Record<string, unknown>) => {
   if (cmd === "list_credentials") return Promise.resolve(mockCredentials);
   if (cmd === "get_credential_metadata") return Promise.resolve(mockMetadata[(args as { id: string }).id] ?? null);
-  if (cmd === "get_credential_secret") return Promise.resolve("secret-from-credential");
+  if (cmd === "list_credential_models") return Promise.resolve(["model-a", "model-b"]);
   if (cmd === "list_provider_models") return Promise.resolve(["model-a", "model-b"]);
   return Promise.resolve(args);
 });
@@ -88,10 +88,10 @@ describe("popover model-picker — api_key resolution precedence", () => {
     fetchBtn.click();
     await vi.advanceTimersByTimeAsync(50);
 
-    expect(invokeMock).toHaveBeenCalledWith("get_credential_secret", { id: "cred1" });
-    expect(invokeMock).toHaveBeenCalledWith("list_provider_models", {
-      provider: "openai", baseUrl: "https://api.example.com", apiKey: "secret-from-credential",
+    expect(invokeMock).toHaveBeenCalledWith("list_credential_models", {
+      id: "cred1", provider: "openai", baseUrl: "https://api.example.com",
     });
+    expect(invokeMock).not.toHaveBeenCalledWith("list_provider_models", expect.anything());
   });
 
   it("edge case: no saved credential selected — falls back to the one-off inline key in config", async () => {
@@ -107,7 +107,7 @@ describe("popover model-picker — api_key resolution precedence", () => {
     fetchBtn.click();
     await vi.advanceTimersByTimeAsync(50);
 
-    expect(invokeMock).not.toHaveBeenCalledWith("get_credential_secret", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("list_credential_models", expect.anything());
     expect(invokeMock).toHaveBeenCalledWith("list_provider_models", {
       provider: "openai", baseUrl: "https://api.example.com", apiKey: "one-off-key",
     });

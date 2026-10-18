@@ -38,6 +38,8 @@ The `metadata` object as a whole is optional: leave it out entirely and every fi
 
 `collection_id` references a named collection in the Workflows sidebar by ID. The collection's own name and color live outside the workflow file; a missing or `null` `collection_id` leaves the workflow Uncategorized.
 
+The desktop app cleans `tags` when it opens a workflow: entries that are not strings or are empty after trimming are dropped, tags that differ only by letter case count as one (the first spelling is kept), a tag is cut to 32 characters, and only the first 20 are kept. The file on disk is not rewritten until the workflow is saved.
+
 ### Chat settings
 
 `settings.chat` mirrors the Chat Panel toggles set from the Workflow Settings modal. Each field defaults independently, so a file that sets only some of them still loads correctly. See [Chat Panel](../guide/chat-panel.md) for what each toggle actually does in the app.
