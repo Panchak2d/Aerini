@@ -11,4 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 # wit-bindgen provides the generate! macro and runtime support for the WIT interface.
 # Pin to this exact version so the generated bindings match the WIT file.
-wit-bindgen = "0.57.1"
+wit-bindgen = "0.62.0"
