@@ -41,15 +41,18 @@ COPY Cargo.toml Cargo.lock ./
 COPY aerini-engine ./aerini-engine
 COPY aerini-server ./aerini-server
 
-# Drop src-tauri from the workspace members — it has Tauri/desktop dependencies
-# that cannot build in a headless container, and aerini-server does not depend
-# on it. Editing the real root manifest (instead of writing a replacement)
+# Reduce the workspace to exactly the crates COPYd above. The root manifest
+# lists every crate in the repo (desktop app, MCP server, ...), and Cargo
+# refuses to load the workspace if any listed member's directory is missing, so
+# an allow-list here keeps the build working when new members are added.
+# src-tauri also has Tauri/desktop dependencies that cannot build in a headless
+# container. Editing the real root manifest (instead of writing a replacement)
 # keeps [workspace.package] fields such as version and license inherited by
-# the member crates. Dropping the member prunes Cargo.lock, so the build below
-# must not pass --locked.
-RUN sed -i '/^[[:space:]]*"src-tauri",[[:space:]]*$/d' Cargo.toml && \
-    if grep -q 'src-tauri' Cargo.toml; then \
-      echo "ERROR: src-tauri is still referenced in Cargo.toml after the sed edit; update the pattern in the Dockerfile" >&2; \
+# the member crates. Dropping members prunes Cargo.lock, so the build below
+# must not pass --locked. Keep this list in step with the COPY lines above.
+RUN sed -i '/^members = \[$/,/^\]$/c\members = ["aerini-engine", "aerini-server"]' Cargo.toml && \
+    if ! grep -qxF 'members = ["aerini-engine", "aerini-server"]' Cargo.toml; then \
+      echo "ERROR: could not rewrite [workspace] members in Cargo.toml; update the pattern in the Dockerfile" >&2; \
       exit 1; \
     fi
 
