@@ -63,6 +63,41 @@ Run with `npm test` (`vitest run` under the hood, per `package.json`'s `scripts`
 
 Same pattern as the Rust side: no shared fixtures or mock module. Every file that needs `@tauri-apps/api/core` mocked calls `vi.mock` at its own top, and object factories like `workflow-manager.test.ts`'s `makeNode` are written locally in the file that needs them, not imported from anywhere shared.
 
+## Manual test with MCP Inspector
+
+The automated `aerini-mcp` tests use a mock server. This check runs the real program against a real `aerini-server api`, using [MCP Inspector](https://github.com/modelcontextprotocol/inspector) as the client. It was done by hand with Inspector 2.11.0; in that UI, switch the **Edit as JSON** toggle on to type a tool's arguments as JSON, and connect with the toggle at the top.
+
+1. Build both programs: `cargo build --release -p aerini-server -p aerini-mcp`.
+2. Start the server with an admin token you already have: `./target/release/aerini-server api --token <admin-token>` (it listens on `http://localhost:7700`).
+3. Create a throwaway token with read and write scope: `./target/release/aerini-server tokens create --label mcp-test --scopes read,write --token <admin-token>`. Copy the token it prints; it is not shown again.
+4. Start Inspector with that token: `npx @modelcontextprotocol/inspector -e AERINI_URL=http://localhost:7700 -e AERINI_TOKEN=<agent-token> ./target/release/aerini-mcp --allow-write`. Open the URL it prints.
+5. Connect and open **Tools**. Eleven tools should be listed in this order: `delete_workflow`, `get_node_schema`, `get_scheduler_status`, `get_workflow`, `list_nodes`, `list_workflows`, `run_workflow`, `save_workflow`, `start_schedule`, `stop_schedule`, `validate_workflow`.
+6. Run, in order, with the `hello` workflow from [Building Workflows with an AI Agent](../guide/agents.md#what-a-workflow-looks-like) as the `workflow` argument:
+   - `list_nodes`: 40 built-in nodes; the Code node shows `enabled: false`.
+   - `get_node_schema` with `type_id` `set_variable`.
+   - `validate_workflow` with `hello`: valid. Change a `node_type_id` to a name that does not exist: an error naming the unknown type.
+   - `save_workflow` with `hello`, then `run_workflow` with `id` `hello`, then `get_workflow` (a JSON object, not a string, plus `row_version`), `list_workflows` (with `limit` 1), and `delete_workflow` with `id` `hello`.
+7. Revoke the token: `./target/release/aerini-server tokens list --token <admin-token>` to find its `token_id`, then `tokens revoke <token_id> --token <admin-token>`. A token cannot revoke itself, so use the admin token.
+
+Checked this way: the tool list and annotations, `list_nodes`, `get_node_schema`, both `validate_workflow` outcomes, `save_workflow`, `run_workflow`, `get_workflow`, `list_workflows` and `delete_workflow`.
+
+Inspector's **Execute** button stays disabled while a required field is missing, so the failure cases were sent by hand as JSON-RPC to `aerini-mcp` over stdio. The same shape serves every case, with `CALL` set to the `tools/call` line (`sleep` keeps stdin open until the reply arrives; in fish, write `begin ... end |` instead of the parentheses):
+
+```sh
+( printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' "$CALL"
+  sleep 3 ) | env AERINI_URL=http://localhost:7700 AERINI_TOKEN=<agent-token> ./target/release/aerini-mcp
+```
+
+Each of these returned a result with `isError: true`, as the expected text shows:
+
+- **Missing required argument:** `CALL` is `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_workflow","arguments":{}}}`. The text is ``failed to deserialize parameters: missing field `id` ``.
+- **Write tool without `--allow-write`:** `delete_workflow` with `{"id":"hello"}`, `aerini-mcp` started without `--allow-write` and pointed at a small program that logs every request. The text names `--allow-write`, and the program logs no request.
+- **Read-only token:** a token made with `--scopes read`, then `run_workflow`. The text is `403 Forbidden by the Aerini server: write scope required ...`.
+- **Run timeout and dropped connection:** a workflow whose `delay` node waits 60 seconds. `run_workflow` with `wait_secs` 3 returns `Timed out after 3s ...`. To see whether the server cancelled the run, start a second run of the same workflow right afterwards with `curl -m 8 -X POST` on `/api/workflows/<id>/run`. A run still in progress holds the workflow's lock, so the second request waits 5 seconds and gets `429 workflow already running`. A cancelled run leaves the lock free, so the second request is admitted and curl gives up at 8 seconds with no response (`HTTP 000`). That was the result both after the timeout and after killing `aerini-mcp` mid-run (`timeout 3 ./target/release/aerini-mcp`). As a control, one run held open with curl makes the same probe return `429` after 5 seconds.
+- **Empty-body 404:** against a small program that answers every request with `404` and no body, `list_nodes` returns `404: this Aerini server has no such route. It is probably older than aerini-mcp ...`. A `404` with a body from the real server (`get_workflow` with an unknown id) returns `404 Not found: ...` without that hint.
+
 ## Continuous integration
 
 `ci.yml` runs on every push and pull request against `main`, as ten separate jobs:

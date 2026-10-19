@@ -111,7 +111,7 @@ dependencies = [
  "wasmtime-wasi-http",
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
- "zbus 4.4.0",
+ "zbus 5.19.0",
  "zeroize",
  "zip 9.0.5",
 ]
@@ -9521,6 +9521,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

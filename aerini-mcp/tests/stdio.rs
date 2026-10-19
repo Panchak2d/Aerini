@@ -93,6 +93,34 @@ async fn tools_list_is_sorted_stable_and_carries_honest_annotations() {
     client.cancel().await.unwrap();
 }
 
+fn has_array_valued_type(schema: &Value) -> bool {
+    match schema {
+        Value::Object(map) => map.iter().any(|(k, v)| (k == "type" && v.is_array()) || has_array_valued_type(v)),
+        Value::Array(items) => items.iter().any(has_array_valued_type),
+        _ => false,
+    }
+}
+
+#[tokio::test]
+async fn optional_arguments_are_advertised_as_any_of_never_as_a_type_array() {
+    let mock = serve(vec![]).await;
+    let client = connect(&mock.base, false).await;
+
+    let tools = client.list_all_tools().await.unwrap();
+    assert_eq!(tools.len(), 11);
+    for tool in &tools {
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert!(!has_array_valued_type(&schema), "{} has an array-valued type: {schema}", tool.name);
+    }
+
+    let list = tools.iter().find(|t| t.name == "list_workflows").expect("listed");
+    let limit = &list.input_schema["properties"]["limit"];
+    assert_eq!(limit["anyOf"], json!([{"type": "integer"}, {"type": "null"}]));
+    assert!(limit["description"].as_str().unwrap().contains("Most rows"));
+
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test]
 async fn tools_call_returns_the_server_data_over_stdio() {
     let mock = serve(vec![reply("GET", "/api/workflows", 200, r#"{"items":[{"id":"a"}],"total":1,"limit":5,"offset":0}"#)]).await;
