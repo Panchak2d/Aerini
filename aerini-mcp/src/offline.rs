@@ -88,7 +88,16 @@ mod imp {
             .collect();
         let stem = cleaned.trim_start_matches('.');
         let stem = if stem.is_empty() { "workflow" } else { stem };
-        format!("{stem}.aerini")
+        let base = stem.split('.').next().unwrap_or_default();
+        let reserved = ["con", "prn", "aux", "nul"].iter().any(|r| base.eq_ignore_ascii_case(r))
+            || (base.len() == 4
+                && (base[..3].eq_ignore_ascii_case("com") || base[..3].eq_ignore_ascii_case("lpt"))
+                && base.as_bytes()[3].is_ascii_digit());
+        if reserved {
+            format!("_{stem}.aerini")
+        } else {
+            format!("{stem}.aerini")
+        }
     }
 
     fn write_file(dir: &Path, path: &Path, content: &str, overwrite: bool) -> Result<(), String> {
@@ -121,6 +130,9 @@ mod imp {
             assert_eq!(file_name("..."), "workflow.aerini");
             assert_eq!(file_name("").as_str(), "workflow.aerini");
             assert_eq!(file_name(&"a".repeat(200)).len(), 80 + ".aerini".len());
+            assert_eq!(file_name("NUL"), "_NUL.aerini");
+            assert_eq!(file_name("com1.v2"), "_com1.v2.aerini");
+            assert_eq!(file_name("com10"), "com10.aerini");
         }
     }
 }

@@ -365,8 +365,8 @@ fn page_query(p: &PageParams) -> Vec<(&'static str, String)> {
 }
 
 fn check_id(id: &str) -> Result<(), String> {
-    if id.trim().is_empty() || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
-        return Err("`id` must be a non-empty workflow id of at most 256 characters".to_string());
+    if id.trim().is_empty() || matches!(id, "." | "..") || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
+        return Err("`id` must be a workflow id of at most 256 characters, not empty, `.` or `..`".to_string());
     }
     Ok(())
 }
