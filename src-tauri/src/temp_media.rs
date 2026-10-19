@@ -59,7 +59,10 @@ fn truncate_to_bytes(s: &str, max: usize) -> &str {
 /// shared, so another user could have created the path first; `chmod` fails
 /// unless this process owns the directory, which rejects that case.
 fn prepare_dir_at(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
     let mut builder = std::fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

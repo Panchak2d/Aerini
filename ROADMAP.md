@@ -39,7 +39,14 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.4.3 — Canvas polish
+## v0.4.3 — Agent access
+
+- [x] MCP server (`aerini-mcp`): an AI agent can read the node catalog, check and write workflows, and run them
+- [x] `aerini-server api`: `GET /api/nodes` and `POST /api/validate-workflow`
+
+---
+
+## v0.4.4 — Canvas polish
 
 - [ ] Improved minimap
 

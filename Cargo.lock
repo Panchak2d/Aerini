@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "aerini"
-version = "0.4.2"
+version = "0.4.3-rc.1"
 dependencies = [
  "aerini-engine",
  "argon2",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "aerini-engine"
-version = "0.4.2"
+version = "0.4.3-rc.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "aerini-mcp"
-version = "0.4.2"
+version = "0.4.3-rc.1"
 dependencies = [
  "aerini-engine",
  "axum",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "aerini-server"
-version = "0.4.2"
+version = "0.4.3-rc.1"
 dependencies = [
  "aerini-engine",
  "argon2",
