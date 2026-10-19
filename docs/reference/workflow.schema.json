@@ -353,5 +353,5 @@
   ],
   "title": "Workflow",
   "type": "object",
-  "x-aerini-engine-version": "0.4.2"
+  "x-aerini-engine-version": "0.4.3-rc.1"
 }

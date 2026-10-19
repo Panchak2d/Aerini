@@ -1,6 +1,6 @@
 # Node Catalog
 
-Every built-in node, generated from the engine (40 nodes, engine 0.4.2, workflow schema version 1.0). The same data is in `docs/reference/node-schemas.json` as machine-readable JSON Schema. For what each node does in practice, gotchas and examples, see the [Nodes Reference](../guide/nodes.md).
+Every built-in node, generated from the engine (40 nodes, engine 0.4.3-rc.1, workflow schema version 1.0). The same data is in `docs/reference/node-schemas.json` as machine-readable JSON Schema. For what each node does in practice, gotchas and examples, see the [Nodes Reference](../guide/nodes.md).
 
 This page is generated. Do not edit it by hand; see [Regenerating the reference files](../development/testing.md#regenerating-the-reference-files).
 
