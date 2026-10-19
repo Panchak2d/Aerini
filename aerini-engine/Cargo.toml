@@ -221,7 +221,7 @@ libc = "0.2"
 # async-secret-service, so this adds no new crate; the tokio feature is the
 # one it enables.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
