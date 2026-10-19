@@ -6,6 +6,8 @@ This page assumes you already know what a node and a connection are. If "workflo
 
 Nodes are grouped here the same way they're grouped in the app's node picker: Triggers, Core Actions, Files & Storage, Integrations, AI, Logic, and Utility.
 
+The [Node Catalog](../reference/node-catalog.md) lists the same nodes with their config fields, types, ports, and output fields, generated from the code each time the tests run. If it and this page ever disagree on a field name or type, the catalog is the one that matches the build. A running `aerini-server api` lists its own node types, plugins included, at [`GET /api/nodes`](../operations/server-api-reference.md#node-catalog-and-validation).
+
 A few things that apply across every node on this page, so they're not repeated 40 times:
 
 - **Fields marked "resolved from Connections"** don't show a plain text box. They open the saved-credential picker instead, so the actual secret lives in Aerini's encrypted credential store, not typed into the node. See [Credentials](credentials.md).

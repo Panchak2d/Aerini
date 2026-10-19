@@ -1,0 +1,357 @@
+{
+  "$defs": {
+    "CanvasPosition": {
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "ChatSettings": {
+      "description": "Chat panel feature toggles. Omitted fields use their defaults.",
+      "properties": {
+        "allow_attachments": {
+          "default": false,
+          "description": "Show the paperclip attach button in the Chat panel. Default OFF.",
+          "type": "boolean"
+        },
+        "allow_image_responses": {
+          "default": true,
+          "description": "Render image bubbles for media_batch AI replies. Default ON.",
+          "type": "boolean"
+        },
+        "max_message_length": {
+          "default": 2000,
+          "description": "Max characters accepted per chat message. Default 2000.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_persistence": {
+          "default": true,
+          "description": "Persist chat sessions to local storage across app restarts. Default ON.",
+          "type": "boolean"
+        },
+        "show_branding": {
+          "default": true,
+          "description": "Show the \"Built with Aerini\" footer in the Chat panel. Default ON.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "NodeType": {
+      "description": "Palette category for a node type.\n\nControls which section of the node picker the node appears in.\nHas no effect on execution behavior — the executor treats all categories identically.",
+      "enum": [
+        "action",
+        "ai",
+        "logic",
+        "utility"
+      ],
+      "type": "string"
+    },
+    "RetryPolicy": {
+      "description": "Per-node retry configuration.\n\nThe executor re-attempts a node that returns a *recoverable* failure up to\n`max_attempts` times. Nodes returning an unrecoverable error are never retried\nregardless of this setting.",
+      "properties": {
+        "backoff_ms": {
+          "description": "Fixed wait between attempts in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_attempts": {
+          "description": "Total attempts allowed, including the first. `1` means no automatic retry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_attempts",
+        "backoff_ms"
+      ],
+      "type": "object"
+    },
+    "WorkflowEdge": {
+      "description": "A directed connection between two nodes on the workflow canvas.\n\nThe executor uses `from_port` to determine which edge to follow after a node\nproduces output. Multi-output nodes (e.g. `if_condition`, `switch`) write a\n`branch` key to their output; the executor matches that value against `from_port`.",
+      "properties": {
+        "condition": {
+          "default": null,
+          "description": "Optional expression evaluated by the frontend canvas to control edge visibility.\nNot evaluated by the executor — routing is determined by `from_port` alone.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_node": {
+          "type": "string"
+        },
+        "from_port": {
+          "description": "Output port name on the source node (e.g. \"output\", \"on_true\").",
+          "type": "string"
+        },
+        "id": {
+          "description": "Unique ID for this edge (used by canvas to track connectors).",
+          "type": "string"
+        },
+        "on_failure": {
+          "default": null,
+          "description": "Target node activated when the source node fails after all retry attempts.\nWhen set, the executor routes the failure here instead of aborting the run.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_success": {
+          "default": null,
+          "description": "Alternate target node activated when the source node succeeds.\nUsed by the graph builder to register additional reachability edges.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to_node": {
+          "type": "string"
+        },
+        "to_port": {
+          "description": "Input port name on the target node (e.g. \"input\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "from_node",
+        "from_port",
+        "to_node",
+        "to_port"
+      ],
+      "type": "object"
+    },
+    "WorkflowMetadata": {
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "collection_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "author",
+        "created_at",
+        "updated_at",
+        "version"
+      ],
+      "type": "object"
+    },
+    "WorkflowNode": {
+      "description": "One node instance in a workflow. node_type_id picks the node implementation and config holds its settings.",
+      "properties": {
+        "config": {
+          "default": null,
+          "description": "Static config for this node instance (filled in via the config panel)."
+        },
+        "credentials": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Named credential references (e.g. { \"api_key\": \"openai_prod\" }).\nValues are credential IDs — the actual secrets are looked up at runtime.",
+          "type": "object"
+        },
+        "disabled": {
+          "default": false,
+          "description": "When true, the executor skips this node and activates its successors\nas if it ran successfully with empty output. Existing workflows without\nthis field deserialize with disabled = false (fully backwards compatible).",
+          "type": "boolean"
+        },
+        "fallback_node": {
+          "default": null,
+          "description": "Reserved for future use — not read by the executor in the current version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique ID within this workflow (e.g. \"node_abc123\").",
+          "type": "string"
+        },
+        "input_schema": {
+          "description": "JSON Schema the node's input must match."
+        },
+        "name": {
+          "description": "Human label shown on the canvas block.",
+          "type": "string"
+        },
+        "node_type": {
+          "$ref": "#/$defs/NodeType",
+          "description": "UI category for display."
+        },
+        "node_type_id": {
+          "description": "Which registered node IMPLEMENTATION to use (e.g. \"http_request\").\nMultiple `WorkflowNode`s may share the same `node_type_id`.",
+          "type": "string"
+        },
+        "output_schema": {
+          "description": "JSON Schema the node's output must match."
+        },
+        "position": {
+          "$ref": "#/$defs/CanvasPosition",
+          "default": {
+            "x": 0.0,
+            "y": 0.0
+          },
+          "description": "Visual position on the canvas — not used by the executor."
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_ms": 500,
+            "max_attempts": 1
+          }
+        }
+      },
+      "required": [
+        "id",
+        "node_type_id",
+        "node_type",
+        "name",
+        "input_schema",
+        "output_schema"
+      ],
+      "type": "object"
+    },
+    "WorkflowSettings": {
+      "description": "Workflow-scoped feature settings. Currently holds only chat.",
+      "properties": {
+        "chat": {
+          "$ref": "#/$defs/ChatSettings",
+          "default": {
+            "allow_attachments": false,
+            "allow_image_responses": true,
+            "max_message_length": 2000,
+            "session_persistence": true,
+            "show_branding": true
+          }
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A workflow document: nodes, the connections (edges) between them, and workflow-level settings. A file with an older schema_version is migrated when it is loaded.",
+  "properties": {
+    "description": {
+      "default": "",
+      "type": "string"
+    },
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/WorkflowEdge"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "max_concurrent_nodes": {
+      "default": null,
+      "description": "Maximum concurrent node tasks when `parallel_execution` is true.\n`None` = use executor default (8). Reduce if hitting external rate limits.",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_duration_secs": {
+      "default": null,
+      "description": "Maximum wall-clock time for the entire workflow execution.\n`None` = no limit (backward-compatible default).\nThe executor clamps values to [10, 86400] seconds.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "metadata": {
+      "$ref": "#/$defs/WorkflowMetadata"
+    },
+    "name": {
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/WorkflowNode"
+      },
+      "type": "array"
+    },
+    "parallel_execution": {
+      "default": false,
+      "description": "When true, independent branches run concurrently via the parallel executor.\nDefault: false — existing workflows are unaffected (sequential-safe default).\nEnabling this for workflows with ordered side-effects (Stripe → Slack → Email)\nmay cause non-deterministic execution order; opt in only where branches are\ntruly independent.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "type": "string"
+    },
+    "settings": {
+      "$ref": "#/$defs/WorkflowSettings",
+      "default": {
+        "chat": {
+          "allow_attachments": false,
+          "allow_image_responses": true,
+          "max_message_length": 2000,
+          "session_persistence": true,
+          "show_branding": true
+        }
+      },
+      "description": "Workflow-scoped feature settings. Currently only the Chat panel toggles. Omitted fields use their defaults."
+    },
+    "unlimited_duration": {
+      "default": false,
+      "description": "Only takes effect on a manual run started from the desktop app; scheduled and background runs ignore it. When true, the run ignores both the server duration ceiling and max_duration_secs.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "nodes",
+    "edges"
+  ],
+  "title": "Workflow",
+  "type": "object",
+  "x-aerini-engine-version": "0.4.2"
+}

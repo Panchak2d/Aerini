@@ -46,7 +46,7 @@ If a check or an install fails (no connection, a stalled download, a failed sign
 
 ## Server (`aerini-server`)
 
-A prebuilt `aerini-server` container image is published to GHCR with every release (see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), so the official Docker image now updates by pulling a new tag rather than rebuilding. There's still no standalone, downloadable binary for the other two deployment shapes below — the [Releases page](https://github.com/Panchak2d/aerini/releases) only carries desktop installers — so bare metal and the desktop's Docker export still update by rebuilding from source.
+A prebuilt `aerini-server` container image is published to GHCR with every release (see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), so the official Docker image now updates by pulling a new tag rather than rebuilding. There's still no standalone, downloadable binary for the other two deployment shapes below — the [Releases page](https://github.com/Panchak2d/aerini/releases) carries desktop installers and the `aerini-mcp` programs, not `aerini-server` — so bare metal and the desktop's Docker export still update by rebuilding from source.
 
 ### Official Docker image
 

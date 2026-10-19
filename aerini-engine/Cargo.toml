@@ -8,6 +8,11 @@ rust-version.workspace = true
 [lib]
 name = "aerini_engine"
 
+[features]
+# Derives JSON Schema for the workflow file types in `model.rs`. Used only to
+# generate docs/reference/workflow.schema.json; no production build enables it.
+schema = ["dep:schemars"]
+
 [dependencies]
 # Async
 tokio       = { version = "1.0", features = ["full"] }
@@ -108,6 +113,9 @@ scopeguard = "1"
 
 
 tracking-allocator = "0.4"
+
+# JSON Schema generation for the workflow file types (optional `schema` feature)
+schemars = { version = "1.2", optional = true }
 
 # JSON Schema validation
 # default-features = false: omits HTTP/TLS resolver — not needed since Aerini schemas are inline.
@@ -217,6 +225,8 @@ zbus = { version = "4.4", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
+# Reads the shipped example package in tests/workflow_schema.rs. Same features as src-tauri.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 serial_test = "4"
 # hooks: Connection::authorizer, used only by
 # nodes::ai_memory::tests::append_fails_cleanly_when_seq_lookup_errors to

@@ -22,6 +22,9 @@
 //!   GET    /api/workflows/:id       (returns `ETag: "<row_version>"`)
 //!   DELETE /api/workflows/:id
 //!   POST   /api/workflows/:id/run
+//!   POST   /api/validate-workflow   (body `{"workflow_json": "<string>"}`; read scope; checks
+//!                                    only — nothing is saved or run)
+//!   GET    /api/nodes               (read scope; live node catalog incl. plugins)
 //!   GET    /api/scheduler
 //!   POST   /api/scheduler/:id/start
 //!   POST   /api/scheduler/:id/stop
@@ -594,6 +597,8 @@ pub async fn run(cfg: ServerConfig) {
         .route("/api/workflows",           get(routes::workflows::list_workflows).post(routes::workflows::save_workflow))
         .route("/api/workflows/{id}",       get(routes::workflows::get_workflow).delete(routes::workflows::delete_workflow))
         .route("/api/workflows/{id}/run",   post(routes::workflows::run_workflow))
+        .route("/api/validate-workflow",    post(routes::validate::validate_workflow))
+        .route("/api/nodes",               get(routes::nodes::list_nodes))
         .route("/api/scheduler",           get(routes::scheduler::list_scheduler))
         .route("/api/scheduler/{id}/start", post(routes::scheduler::start_job))
         .route("/api/scheduler/{id}/stop",  post(routes::scheduler::stop_job))

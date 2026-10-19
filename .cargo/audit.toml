@@ -38,18 +38,6 @@ ignore = [
     # Transitive build dep. No prod impact. Track replacement upstream.
     "RUSTSEC-2024-0370",
 
-    # unic-* crate family (all "unmaintained", no vulnerability, no fix available):
-    # Transitive via Tauri: tauri-utils -> urlpattern 0.3.0 -> unic-ucd-ident ->
-    # unic-char-range / unic-char-property, and unic-ucd-ident -> unic-ucd-version
-    # -> unic-common. All of open-i18n/rust-unic is archived; there is no drop-in
-    # replacement upstream can swap to without urlpattern itself moving off it.
-    # Cannot fix without Tauri bumping tauri-utils past this urlpattern pin.
-    "RUSTSEC-2025-0075", # unic-char-range
-    "RUSTSEC-2025-0080", # unic-common
-    "RUSTSEC-2025-0081", # unic-char-property
-    "RUSTSEC-2025-0098", # unic-ucd-version
-    "RUSTSEC-2025-0100", # unic-ucd-ident
-
     # zip 8.6.0 (RUSTSEC-2026-0367, -0368, -0369): symlink escape, symlink-followed permission
     # changes and preserved SUID/SGID bits, all in `ZipArchive::extract` / `ZipStreamReader::extract`.
     # Patched only in zip >=9.0.0. The one remaining copy of zip 8 is transitive via docx-rs
@@ -60,4 +48,14 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+
+    # zbus family (RUSTSEC-2026-0370 zvariant, -0371 zbus_names, -0372 zvariant_derive): "unmaintained", no vulnerability. The crates were merged into zbus 6.0.0 and
+    # every standalone release is flagged, so no bump of these crates clears the advisory.
+    # Two trees remain: zbus 4 via keyring 3.6.3 -> secret-service 4.0.0 (and the engine's own
+    # zbus 4, which must stay on keyring's major so no extra crate is built), and zbus 5 via
+    # tauri-plugin-opener (desktop only). Remove these entries once keyring and tauri-plugin-opener
+    # move to zbus 6. Track: https://github.com/z-galaxy/zbus/issues/2043
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]

@@ -96,7 +96,7 @@ impl TriggerGuest for HeartbeatTrigger {
         // dropped receiver stalls this task forever or is unblocked by the
         // component-model-async runtime on its own. Flagged, not resolved —
         // do not treat this loop's shutdown behavior as verified.
-        wasip3::spawn(async move {
+        wasip3::spawn_local(async move {
             let mut tick: u64 = 0;
             report_next_beat(interval_secs);
             loop {

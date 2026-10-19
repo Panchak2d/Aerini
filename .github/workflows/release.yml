@@ -103,7 +103,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
@@ -161,6 +161,103 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: bash scripts/publish-updater-manifest.sh "$GITHUB_REPOSITORY" "$TAG"
+
+  mcp:
+    name: Build aerini-mcp (${{ matrix.target }})
+    # Needs the draft release that the desktop build creates. Holds no signing key, so it
+    # runs after the approval the release job waited for and needs no environment of its own.
+    needs: [verify, release]
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            python: python3
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            python: python3
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            python: python
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            python: python3
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        if: matrix.platform == 'ubuntu-22.04-arm'
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          preinstalled-runtimes: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - name: Add swap space
+        if: matrix.platform == 'ubuntu-22.04-arm'
+        run: bash scripts/ci-add-swap.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev
+
+      - name: Check the runner builds for the expected target
+        shell: bash
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "ERROR: runner builds for '${host}', expected '${{ matrix.target }}'" >&2
+            exit 1
+          fi
+
+      # Both programs are built by the same command apart from the feature, and both leave
+      # target/release/aerini-mcp, so the first is packaged before the second overwrites it.
+      - name: Build and package the online program
+        shell: bash
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: |
+          cargo build --release --locked -p aerini-mcp
+          "$PYTHON" -I scripts/package-mcp.py \
+            --binary "target/release/aerini-mcp${{ startsWith(matrix.platform, 'windows') && '.exe' || '' }}" \
+            --name aerini-mcp --target "${{ matrix.target }}" \
+            --version "${GITHUB_REF_NAME#v}" --license LICENSE --out-dir mcp-dist
+
+      - name: Build and package the offline program
+        shell: bash
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: |
+          cargo build --release --locked -p aerini-mcp --features offline
+          "$PYTHON" -I scripts/package-mcp.py \
+            --binary "target/release/aerini-mcp${{ startsWith(matrix.platform, 'windows') && '.exe' || '' }}" \
+            --name aerini-mcp-offline --target "${{ matrix.target }}" \
+            --version "${GITHUB_REF_NAME#v}" --license LICENSE --out-dir mcp-dist
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/upload-release-assets.sh "$GITHUB_REPOSITORY" "$TAG" mcp-dist/*
 
   smoke:
     name: Docker image smoke test

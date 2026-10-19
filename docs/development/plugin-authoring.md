@@ -38,7 +38,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.57.1"
+wit-bindgen = "0.62.0"
 ```
 
 ```rust

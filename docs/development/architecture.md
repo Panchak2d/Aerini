@@ -4,13 +4,14 @@ This page explains how Aerini's codebase fits together: three Rust crates, one p
 
 ## Three crates, one workspace
 
-The repository's root `Cargo.toml` declares a workspace with three members: `aerini-engine`, `aerini-server`, and `src-tauri`. Each has a different job.
+The repository's root `Cargo.toml` declares a workspace with four members: `aerini-engine`, `aerini-server`, `aerini-mcp`, and `src-tauri`. Each has a different job.
 
 | Crate | What it produces | What it depends on |
 |---|---|---|
 | `aerini-engine` | A library only, no binary | Nothing in this workspace |
 | `aerini-server` | A binary named `aerini-server` | `aerini-engine`, as a path dependency |
 | `src-tauri` | Both a library (`aerini_lib`) and a binary named `aerini` | `aerini-engine`, plus the Tauri framework |
+| `aerini-mcp` | A binary named `aerini-mcp` (and a small library for its tests) | `aerini-engine`, only when built with the `offline` feature |
 
 `aerini-engine` has no `[[bin]]` target at all: it's pure library code, meant to be linked into something else. `src-tauri` is the one crate that builds both ways at once, a `staticlib`/`cdylib`/`rlib` library that Tauri's own build tooling links against, and a thin binary (`src/main.rs`) that just calls into it. `aerini-server` is a conventional single-binary crate.
 
@@ -20,12 +21,13 @@ This split isn't just organizational. Aerini's CI pipeline builds and tests `aer
 
 ## Inside aerini-engine
 
-`aerini-engine` is where a workflow actually runs. Its crate-root file declares seventeen public modules; a few carry most of the weight:
+`aerini-engine` is where a workflow actually runs. Its crate-root file declares twenty public modules (`session_bus` is Linux-only); a few carry most of the weight:
 
 - **`node`** defines the `Node` trait every node type implements, and `NodeRegistry`, the map from a node's `type_id` string to the object that runs it.
 - **`nodes`** holds the built-in node implementations themselves (40 of them, registered by `register_builtins`) and is the source [Nodes Reference](../guide/nodes.md) is written from.
 - **`model`** is the serde layer: `Workflow`, `WorkflowNode`, `WorkflowEdge`, and the rest of the types that cross the Rust/TypeScript wire contract.
 - **`graph`** wraps petgraph to turn a `Workflow` into a topologically sorted execution order and to catch cycles before a run starts.
+- **`validation`** checks a `Workflow` against a `NodeRegistry` without running it (unknown node types, dangling or cyclic edges, port-arity violations, edges naming ports a node does not have, empty required fields) and returns a report of errors and warnings. `aerini-server` serves it as [`POST /api/validate-workflow`](../operations/server-api-reference.md#node-catalog-and-validation).
 - **`executor`** walks that order, resolving `{{...}}` expressions before each node runs, handling retries and disabled nodes, and routing along `on_success`/`on_failure` edges.
 - **`expression`** is the resolver behind that syntax, covered on its own terms in [Expressions](../guide/expressions.md).
 - **`context`** holds `ExecutionState`, the mutable per-run state (node outputs, statuses, log entries) that the executor and event-emitting tasks share.

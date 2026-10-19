@@ -182,14 +182,13 @@ pub(super) async fn run_inner_parallel(
     }
 
     {
-        const TRIGGER_TYPES: &[&str] = &["manual_trigger", "schedule", "webhook"];
         let mut s = state.write().await;
         for entry_id in &graph.entry_nodes {
             if let Some(node_def) = node_map.get(entry_id.as_str()).copied() {
                 let is_trigger_plugin = executor.registry.get(&node_def.node_type_id)
                     .map(|n| n.is_trigger_capable())
                     .unwrap_or(false);
-                if !TRIGGER_TYPES.contains(&node_def.node_type_id.as_str()) && !is_trigger_plugin {
+                if !crate::validation::TRIGGER_NODE_TYPE_IDS.contains(&node_def.node_type_id.as_str()) && !is_trigger_plugin {
                     s.log(
                         Some(entry_id),
                         LogLevel::Warn,
