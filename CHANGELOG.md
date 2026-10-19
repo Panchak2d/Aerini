@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ---
 
-## [0.4.3] - 2026-10-19
+## [0.4.3] - 2026-10-20
 
 ### Added
 - `aerini-mcp`: a Model Context Protocol server over stdio, so an AI agent can read the node catalog, check and write workflows, and run them. With `AERINI_URL` and `AERINI_TOKEN` it talks to an `aerini-server api` instance and inherits the token's scope and workflow access list; tools that change the server (`save_workflow`, `delete_workflow`, `start_schedule`, `stop_schedule`) also need the `--allow-write` flag. Built with `--features offline` and run without `AERINI_URL`, it serves the built-in node catalog, validates workflows and writes `.aerini` files for the desktop app, and never runs anything. Run output is cut at 32 KiB by default (`--max-output-bytes`) and marked as untrusted data. Every release publishes `aerini-mcp` (about 4 MB) and `aerini-mcp-offline` (about 47 MB, the offline build) for Linux x86_64 and arm64, macOS Apple Silicon and Windows x64, each with a `.sha256` file. See [MCP Server for AI Agents](docs/operations/mcp.md) and [Building Workflows with an AI Agent](docs/guide/agents.md).

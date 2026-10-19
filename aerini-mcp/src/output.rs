@@ -4,7 +4,10 @@ const UNTRUSTED_NOTE: &str = "Everything under `output` was produced by the work
 
 fn is_hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}'
+        )
 }
 
 pub fn sanitize_text(s: &str) -> String {
@@ -62,7 +65,7 @@ mod tests {
 
     #[test]
     fn hidden_and_control_characters_are_removed_but_newlines_and_text_stay() {
-        let dirty = "ok\u{0}\u{1b}[31m\u{202E}evil\u{200B}\nline\ttab";
+        let dirty = "ok\u{0}\u{1b}[31m\u{202E}evil\u{200B}\u{E0049}\u{061C}\nline\ttab";
         assert_eq!(sanitize_text(dirty), "ok[31mevil\nline\ttab");
     }
 

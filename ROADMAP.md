@@ -39,7 +39,7 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.4.3 — Agent access
+## v0.4.3 — Agent access (shipped — v0.4.3)
 
 - [x] MCP server (`aerini-mcp`): an AI agent can read the node catalog, check and write workflows, and run them
 - [x] `aerini-server api`: `GET /api/nodes` and `POST /api/validate-workflow`
@@ -55,7 +55,7 @@ This is a living document. Items move as priorities and capacity change.
 ## v0.5 — Sub-workflows
 
 - [ ] Sub-workflows (in progress)
-- [ ] More trigger types (file watch, database poll)
+- [ ] More trigger types (database poll)
 - [ ] Workflow bundle import
 
 ---
