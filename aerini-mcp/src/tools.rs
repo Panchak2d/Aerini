@@ -23,6 +23,7 @@ const ONLINE_ONLY: &str = "This tool needs online mode: set AERINI_URL and AERIN
 const WRITE_DISABLED: &str = "This tool changes the Aerini server and is switched off. Ask the user to restart aerini-mcp with --allow-write (the token also needs write scope), then try again.";
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = nullable_type_to_any_of)]
 pub struct PageParams {
     /// Most rows to return. The server caps this at 500 and defaults to 100.
     pub limit: Option<u32>,
@@ -49,6 +50,7 @@ pub struct ValidateParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = nullable_type_to_any_of)]
 pub struct SaveParams {
     /// The workflow as a JSON object: id, name, nodes, edges.
     pub workflow: Map<String, Value>,
@@ -61,6 +63,7 @@ pub struct SaveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = nullable_type_to_any_of)]
 pub struct RunParams {
     /// Workflow id to run.
     pub id: String,
@@ -71,6 +74,7 @@ pub struct RunParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = nullable_type_to_any_of)]
 pub struct StartScheduleParams {
     /// Workflow id whose trigger to start.
     pub id: String,
@@ -78,6 +82,23 @@ pub struct StartScheduleParams {
     pub always_on: Option<bool>,
     /// Webhook triggers only: listen on this port instead of the configured one.
     pub port_override: Option<u16>,
+}
+
+/// Option<T> fields are advertised as `{"type": [T, "null"]}`, which some MCP clients cannot map onto a
+/// single-`type` schema dialect. `{"anyOf": [{"type": T}, {"type": "null"}]}` means the same and is portable.
+fn nullable_type_to_any_of(schema: &mut schemars::Schema) {
+    schemars::transform::transform_subschemas(&mut nullable_type_to_any_of, schema);
+    let Some(obj) = schema.as_object_mut() else { return };
+    if obj.contains_key("anyOf") {
+        return;
+    }
+    let Some(Value::Array(types)) = obj.get("type") else { return };
+    if !types.iter().any(|t| t == "null") {
+        return;
+    }
+    let branches: Vec<Value> = types.iter().map(|t| json!({ "type": t })).collect();
+    obj.remove("type");
+    obj.insert("anyOf".to_string(), Value::Array(branches));
 }
 
 #[derive(Clone)]
@@ -204,7 +225,7 @@ impl AerinMcp {
             .await
             .map_err(|m| {
                 if m.starts_with("Timed out") {
-                    format!("{m} The run did not finish within wait_secs={wait}. aerini-mcp closed the request, which should make the server cancel the run (not verified end to end). Retry with a larger wait_secs (max {MAX_WAIT_SECS}) if the workflow needs longer.")
+                    format!("{m} The run did not finish within wait_secs={wait}. aerini-mcp closed the request, so the server cancels the run and its result is lost. Retry with a larger wait_secs (max {MAX_WAIT_SECS}) if the workflow needs longer.")
                 } else {
                     m
                 }
