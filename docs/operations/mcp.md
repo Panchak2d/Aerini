@@ -123,7 +123,7 @@ aerini-mcp-offline_0.4.3_x86_64-pc-windows-msvc.zip
 
 On a Mac, `uname -m` printing `x86_64` means an Intel Mac, which has no prebuilt program. On Windows, `ARM64` means Windows on Arm, which also has none; whether the x64 program runs there under Windows's own emulation has not been tested.
 
-Offline or online? Use the [table above](#choosing-a-mode). The offline program contains the whole workflow engine, so its download is several times larger than the online one (on the `0.4.3` release page, roughly 10 to 15 MB against 3 to 4 MB per archive). That is why it is separate: an agent that only talks to a server does not need it. Both can sit in one folder, because the offline archive holds a program named `aerini-mcp-offline`.
+Offline or online? Use the [table above](#choosing-a-mode). The offline program contains the whole workflow engine, so its download is several times larger than the online one (on the `0.4.3` release page, roughly 10 to 16 MB against 3 to 4 MB per archive). That is why it is separate: an agent that only talks to a server does not need it. Both can sit in one folder, because the offline archive holds a program named `aerini-mcp-offline`.
 
 ### Step 3: Download the archive and its checksum
 
