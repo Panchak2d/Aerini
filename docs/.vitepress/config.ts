@@ -6,6 +6,10 @@ export default defineConfig({
   lang: 'en-US',
   cleanUrls: true,
 
+  sitemap: {
+    hostname: 'https://docs.aerini.org'
+  },
+
   markdown: {
     // Aerini's own {{...}} expression syntax appears throughout docs/ as
     // inline code. Vue's compiler treats {{ }} as interpolation even inside

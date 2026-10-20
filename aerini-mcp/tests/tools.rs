@@ -214,9 +214,11 @@ async fn node_tools_return_compact_rows_then_one_full_schema() {
 }
 
 #[tokio::test]
-async fn blank_ids_are_rejected_before_any_request() {
+async fn blank_and_dot_ids_are_rejected_before_any_request() {
     let mock = serve(vec![]).await;
-    let got = outcome(server(&mock, true).delete_workflow(id("  ")).await);
-    assert!(got.is_error);
+    for bad in ["  ", ".", ".."] {
+        let got = outcome(server(&mock, true).delete_workflow(id(bad)).await);
+        assert!(got.is_error);
+    }
     assert!(mock.seen().is_empty());
 }

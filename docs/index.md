@@ -36,7 +36,7 @@ The edges matter as much as the feature list.
 - **No hosted service.** There's no Aerini cloud to sign up for. Something, your desktop or a server you run, has to be on for a scheduled or webhook-triggered workflow to fire.
 - **Single machine by design.** A workflow runs wherever you started it. There's no built-in way to sync the same workflow across two machines or hand a run off between them.
 - **Doesn't expose your machine to the internet on its own.** A Webhook node listens on a local port. If you want the outside world to reach it, you're responsible for exposing that port yourself, with a reverse proxy or a tunneling tool like `cloudflared` or `ngrok`.
-- **Pre-1.0.** Aerini is currently version 0.4.2. The workflow file format and internal APIs are expected to keep changing until 1.0, when they'll be locked down under semantic versioning.
+- **Pre-1.0.** Aerini is currently version 0.4.3. The workflow file format and internal APIs are expected to keep changing until 1.0, when they'll be locked down under semantic versioning.
 - **Not a general data platform.** No data warehouse, no built-in analytics, no massive-scale batch processing. It's an automation tool for individuals and small setups, not enterprise ETL infrastructure.
 
 > [!NOTE]
@@ -79,4 +79,4 @@ Not sure where to start? [Installation](getting-started/installation.md) is the 
 
 ## Project status
 
-Aerini is open source (AGPL-3.0), currently at version 0.4.2, pre-1.0, and actively developed. See the repository's `README.md` for license and contribution details.
+Aerini is open source (AGPL-3.0), currently at version 0.4.3, pre-1.0, and actively developed. See the repository's `README.md` for license and contribution details.

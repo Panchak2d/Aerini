@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "aerini"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aerini-engine",
  "argon2",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "aerini-engine"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -111,14 +111,14 @@ dependencies = [
  "wasmtime-wasi-http",
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
- "zbus 4.4.0",
+ "zbus 5.19.0",
  "zeroize",
  "zip 9.0.5",
 ]
 
 [[package]]
 name = "aerini-mcp"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aerini-engine",
  "axum",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "aerini-server"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aerini-engine",
  "argon2",
@@ -9521,6 +9521,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
