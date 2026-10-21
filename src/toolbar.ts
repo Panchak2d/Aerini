@@ -14,6 +14,7 @@ import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
 import { isMonitorModeActive } from "./monitor-mode";
 import { bindDrawerResize } from "./resize";
+import { bindMinimapResize } from "./minimap-resize";
 import { bindDrawerInset } from "./drawer-inset";
 import { loadBgPanel } from "./bg-panel-loader";
 import { NODE_IDS } from "./node-ids";
@@ -414,6 +415,7 @@ export function bindToolbar(
 
   bindDrawerResize();
   bindDrawerInset();
+  bindMinimapResize();
 
   // Defer BgJobsPanel init — runs after first paint, invisible to the user
   const _deferBgPanel = (fn: () => void) =>

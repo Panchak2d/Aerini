@@ -10,6 +10,7 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Pan canvas | Middle-drag |
 | Zoom | Scroll |
 | Fit to screen | `Ctrl+Shift+F` |
+| Toggle minimap (not while editing a field) | `M` |
 | Focus mode — hides the sidebar for a distraction-free canvas | `F` (not while editing a field) |
 | Close panel, from an empty area of the canvas | Double-click |
 

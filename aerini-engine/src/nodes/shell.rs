@@ -766,14 +766,27 @@ mod tests {
             r#"powershell -NoProfile -Command "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -WindowStyle Hidden; Set-Content -Path '{}' -Value $p.Id; Start-Sleep -Seconds 60""#,
             pid_file.display()
         );
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            ShellExecNode.execute(shell_input(&command, 60)),
-        )
+        let pid_written = async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if !text.trim().is_empty() {
+                        return text.trim().to_string();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            tokio::select! {
+                _ = ShellExecNode.execute(shell_input(&command, 120)) => None,
+                pid = pid_written => Some(pid),
+            }
+        })
         .await;
-        assert!(outcome.is_err(), "command should still be running when the future is dropped");
+        let pid = outcome
+            .expect("pid file not written within 90s")
+            .expect("command exited before writing the pid file");
 
-        let pid = std::fs::read_to_string(&pid_file).expect("pid file written").trim().to_string();
         let mut gone = false;
         for _ in 0..40 {
             let listing = std::process::Command::new("tasklist")
