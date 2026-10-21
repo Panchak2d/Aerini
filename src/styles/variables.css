@@ -63,8 +63,8 @@
   --color-wire-hover: #858d97;
 
   /* Layout */
-  --sidebar-w: 260px; --chat-w: 360px;
-  --toolbar-h: 44px;  --status-h: 26px;       --canvas-stat-h: 26px; --drawer-h: 260px;
+  --sidebar-w: clamp(260px, 28vw, 400px); --chat-w: 360px;
+  --toolbar-h: 36px;  --status-h: 26px;       --canvas-stat-h: 26px; --drawer-h: 260px;
   --radius-sm: 2px;
   --radius:    3px;
   --radius-lg: 4px;
