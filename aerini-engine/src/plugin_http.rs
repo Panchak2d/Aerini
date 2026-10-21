@@ -8,7 +8,7 @@
 //! host name for the TLS server name, so certificate verification and SNI are
 //! unchanged.
 //!
-//! The sender mirrors `wasmtime_wasi_http` 49.0.3 (`default_send_request`),
+//! The sender mirrors `wasmtime_wasi_http` 49.0.4 (`default_send_request`),
 //! which `aerini-engine/Cargo.toml` pins exactly. Re-check this file against
 //! upstream whenever that pin moves.
 

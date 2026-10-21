@@ -19,6 +19,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 ### Fixed
 - Canvas (desktop): clicking or dragging the minimap landed up to about a tenth off target and the minimap looked blurry on high-DPI screens; panning with the minimap is now remembered per workflow. Note nodes now use their real height in the minimap, **Fit to screen** and jump-to-node
 
+### Security
+- Dependencies: `wasmtime`/`wasmtime-wasi`/`wasmtime-wasi-http` 49.0.3 → 49.0.4 (RUSTSEC-2026-0375 to RUSTSEC-2026-0379 — the Cranelift backend on aarch64 could jump to the wrong target on a large Wasm `br_table` (critical), a host panic when a host-created component stream is lowered into a guest expecting a different payload type, and `wasi:http` guests adding conflicting content lengths, setting a wrong content length on spliced response bodies, or forwarding trailers that skip the forbidden-header check)
+- Dependencies: `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.9 → 1.0.10 (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383 — certificate verification could accept distrusted intermediates, and the bundled roots trusted distrusted emSign intermediates)
+
 ---
 
 ## [0.4.3] - 2026-10-20
