@@ -2,8 +2,8 @@
    WORKSPACE
    ══════════════════════════════════════════ */
 
-#toolbar { background: var(--bg2); border-bottom: 1px solid var(--bd); display: flex; align-items: center; padding: 0 12px 0 16px; gap: 4px; flex-shrink: 0; }
-.workflow-title { font-size: 14px; font-weight: 600; cursor: pointer; color: var(--color-text-primary); letter-spacing: -.25px; transition: color var(--trans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+#toolbar { background: var(--bg2); border-bottom: 1px solid var(--bd); display: flex; align-items: center; padding: 0 12px 0 16px; gap: 4px; flex-shrink: 0; height: var(--toolbar-h); min-width: 0; }
+.workflow-title { flex: 0 1 auto; min-width: 56px; font-size: 14px; font-weight: 600; cursor: pointer; color: var(--color-text-primary); letter-spacing: -.25px; transition: color var(--trans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 .workflow-title:hover { color: var(--blue); }
 .unsaved-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); margin-left: 5px; vertical-align: middle; opacity: 0; transition: opacity var(--trans); }
 .unsaved-dot.visible { opacity: 1; }
@@ -36,6 +36,7 @@
   position: relative;
   min-width: 0;
   min-height: 0;
+  container: workspace / inline-size;
 }
 
 /* Engineering-dot / blueprint-grid background — tokenized (color-mix against
@@ -471,4 +472,28 @@ body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }
 .sync-chip {
   font-size: 10px; letter-spacing: .05em; text-transform: uppercase; color: var(--amber);
   border: 1px solid var(--amber); border-radius: 4px; padding: 1px 6px; flex-shrink: 0;
+}
+
+/* ── toolbar narrowing ────────────────────────────────────────────────────
+   Keyed to the canvas area's width (the toolbar's width — not the window's) so a wide sidebar or
+   an open panel narrows it the same way a small window does.
+   Labels shrink to icons via font-size:0 — the text stays in the DOM, so
+   accessible names and always-on.ts's label swap keep working. */
+@container workspace (max-width: 1040px) {
+  #btn-new-workflow-toolbar,
+  #btn-chat,
+  #btn-always-on,
+  #btn-export { font-size: 0; gap: 0; padding: 4px 7px; }
+  #btn-export .dropdown-chevron { margin-left: 4px; }
+}
+@container workspace (max-width: 720px) {
+  #toolbar { padding: 0 8px 0 10px; gap: 2px; }
+  .toolbar-actions { gap: 2px; }
+  .toolbar-divider { display: none; }
+  .toolbar-zoom-readout { min-width: 0; font-size: 10px; }
+  .btn-toolbar { padding-left: 6px; padding-right: 6px; }
+}
+@container workspace (max-width: 560px) {
+  .workflow-rename-hint, .toolbar-zoom-readout { display: none; }
+  .workflow-title { min-width: 40px; }
 }

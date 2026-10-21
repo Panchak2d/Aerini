@@ -1012,6 +1012,14 @@ export class Canvas {
 
   selectNode(n: CanvasNode) { n.selected = true; this.selectedNodes.add(n.data.id); this.selectedNode = n; }
   openNodeConfig(n: CanvasNode) { this.onNodeSelected?.(n); }
+  /** Selects only `n`, centres it in the visible canvas and gives the canvas keyboard focus. Does not open its config. */
+  revealNode(n: CanvasNode) {
+    this.clearSelection();
+    this.selectNode(n);
+    this.centerOn(n.data.position.x + NODE_WIDTH / 2, n.data.position.y + n.height / 2);
+    this.el.focus({ preventScroll: true });
+    this.onViewportChange?.();
+  }
   selectConn(c: Connector)  { this.clearSelection(); c.selected = true; this.selectedConn = c; }
 
   clearSelection() {
