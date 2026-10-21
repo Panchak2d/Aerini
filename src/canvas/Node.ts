@@ -39,6 +39,7 @@ export const PORT_RADIUS = 6;
 export const PORT_GAP    = 28;
 const PADDING            = 14;
 const CORNER_R           = 10;
+const NOTE_MIN_HEIGHT    = 60;
 
 type CatKey = "action" | "ai" | "logic" | "utility" | "trigger";
 
@@ -58,14 +59,14 @@ const CAT_KEY_TO_COLORS_FIELD = {
 } as const satisfies Record<CatKey, keyof ReturnType<typeof getCanvasColors>>;
 
 /** Per-kind chrome (icon/label) plus its live, theme-reactive accent color. */
-function typeMeta(nodeType: string): { accent: string; icon: string; label: string } {
+export function typeMeta(nodeType: string): { accent: string; icon: string; label: string } {
   const key = (nodeType in TYPE_META_BASE ? nodeType : "utility") as Exclude<CatKey, "trigger">;
   const accent = getCanvasColors()[CAT_KEY_TO_COLORS_FIELD[key]];
   return { accent, ...TYPE_META_BASE[key] };
 }
 
 
-function statusAccent(status: CanvasNode["status"], colors: ReturnType<typeof getCanvasColors>): string | null {
+export function statusAccent(status: CanvasNode["status"], colors: ReturnType<typeof getCanvasColors>): string | null {
   switch (status) {
     case "running": return colors.warning;
     case "success": return colors.actionRun;
@@ -92,6 +93,9 @@ export class CanvasNode {
   // Running animation phase (0–1, loops)
   private _runPhase = 0;
 
+  // Height of a note as last drawn; notes size to their wrapped text.
+  private _noteHeight = NOTE_MIN_HEIGHT;
+
   // Backing field for `disabled`. The accessor below keeps `data.disabled`
   // in sync on every write, so ContextMenu's Disable/Enable toggle (which
   // only ever does `node.disabled = ...`) is automatically reflected in
@@ -105,6 +109,7 @@ export class CanvasNode {
   }
 
   get height(): number {
+    if (this.data.node_type_id === NODE_IDS.NOTE) return this._noteHeight;
     const maxPorts = Math.max(
       this.data.ports.inputs.length,
       this.data.ports.outputs.length
@@ -492,7 +497,8 @@ export class CanvasNode {
     const maxW = w - 24;
     const lines = wrapText(ctx, text, maxW);
     const lineH = 18;
-    const h = Math.max(60, 28 + lines.length * lineH);
+    const h = Math.max(NOTE_MIN_HEIGHT, 28 + lines.length * lineH);
+    this._noteHeight = h;
 
     ctx.save();
 

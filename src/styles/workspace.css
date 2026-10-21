@@ -118,8 +118,16 @@ body.resizing-v #output-drawer { transition: none; }
 .output-content-area { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 12px; line-height: 1.6; color: var(--t2); }
 .json-key { color: var(--blue); } .json-str { color: var(--green); } .json-num { color: var(--amber); } .json-bool { color: var(--purple); } .json-null { color: var(--t2); font-style: italic; }
 
-#minimap-canvas { position: absolute; bottom: 28px; right: 8px; width: 150px; height: 90px; background: color-mix(in srgb, var(--bg2) 92%, transparent); border: 1px solid var(--bd); border-radius: 6px; z-index: 10; cursor: crosshair; transition: border-color 120ms; }
+#minimap-canvas { order: -1; width: var(--minimap-w, 150px); height: var(--minimap-h, 90px); background: color-mix(in srgb, var(--bg2) 92%, transparent); border: 1px solid var(--bd); border-radius: 6px; cursor: crosshair; touch-action: none; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.22); transition: border-color 120ms; }
 #minimap-canvas:hover { border-color: color-mix(in srgb, var(--blue) 30%, transparent); }
+
+#minimap-resize-handle { position: absolute; top: 0; left: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; user-select: none; opacity: 0.35; transition: opacity 120ms; }
+#minimap-wrap:hover #minimap-resize-handle { opacity: 0.7; }
+#minimap-resize-handle::after { content: ''; position: absolute; top: 3px; left: 3px; width: 8px; height: 8px; border-top: 2px solid var(--t2); border-left: 2px solid var(--t2); border-top-left-radius: 5px; }
+#minimap-resize-handle:hover, #minimap-resize-handle.dragging, #minimap-resize-handle:focus-visible { opacity: 1; }
+#minimap-resize-handle:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+#minimap-wrap.minimap-hidden #minimap-resize-handle { display: none; }
+body.resizing-minimap, body.resizing-minimap * { cursor: nwse-resize !important; user-select: none !important; }
 
 #canvas-empty-state { position: absolute; inset: 0 0 calc(var(--status-h) + var(--canvas-stat-h) + var(--drawer-inset, 0px)) 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 5; }
 body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }

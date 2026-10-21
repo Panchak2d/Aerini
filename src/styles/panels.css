@@ -1926,8 +1926,10 @@
   padding: 4px 7px;
   display: flex;
   align-items: center;
-  transition: color 80ms, background 80ms;
+  opacity: 0.8;
+  transition: color 80ms, background 80ms, opacity 120ms;
 }
+#minimap-wrap:hover #btn-minimap-toggle, #btn-minimap-toggle:focus-visible { opacity: 1; }
 #btn-minimap-toggle:hover { color: var(--t1); background: var(--bg3); }
 
 #minimap-wrap.minimap-hidden #minimap-canvas { display: none; }

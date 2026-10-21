@@ -337,7 +337,8 @@
       <button id="btn-minimap-toggle" title="Toggle minimap (M)" aria-label="Toggle minimap" data-tooltip="Toggle minimap">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/></svg>
       </button>
-      <canvas id="minimap-canvas" width="160" height="100" role="img" aria-label="Workflow minimap" title="Click to jump to that area" data-tooltip="Click to jump to that area">
+      <canvas id="minimap-canvas" width="150" height="90" role="img" aria-label="Workflow minimap" data-tooltip="Click or drag to move the view · scroll to zoom · double-click to fit"></canvas>
+      <div id="minimap-resize-handle" data-tooltip="Drag to resize · double-click to reset" data-tooltip-side="left"></div>
     </div>
 
 
@@ -503,6 +504,7 @@
           <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd></div></div>
           <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd></div></div>
           <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
+          <div class="shortcut-row"><span>Toggle minimap <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>M</kbd></div></div>
           <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
           <div class="shortcut-row">
             <div class="shortcut-row-text"><span>Close panel</span><span class="shortcut-desc">On an empty area of the canvas</span></div>
