@@ -259,6 +259,27 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: bash scripts/upload-release-assets.sh "$GITHUB_REPOSITORY" "$TAG" mcp-dist/*
 
+  notes:
+    name: List downloads in the release notes
+    # Runs once every installer, latest.json and both MCP programs are on the release, so
+    # the list covers all of them. Holds no signing key.
+    needs: [release, manifest, mcp]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Group the downloads by system in the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/publish-release-notes.sh "$GITHUB_REPOSITORY" "$TAG"
+
   smoke:
     name: Docker image smoke test
     needs: verify

@@ -541,6 +541,21 @@ describe("renameWorkflowById", () => {
     expect(fakeThis.refreshWorkflowList).not.toHaveBeenCalled();
   });
 
+  it("warns, but still renames, when another workflow already uses the name", async () => {
+    const json = serialize("wf_other", "Old Name", new Map(), new Map());
+    lsSaveRaw("wf_other", "Old Name", json);
+
+    const fakeThis = {
+      currentId: "wf_open", onToast: vi.fn(), refreshWorkflowList: vi.fn(async () => {}),
+      summaries: [{ id: "wf_other", name: "Old Name" }, { id: "wf_taken", name: "Taken" }],
+    };
+    await WorkflowManager.prototype.renameWorkflowById.call(fakeThis as never, "wf_other", "taken");
+
+    expect(fakeThis.onToast).toHaveBeenCalledWith('Another workflow is already named "taken".', "info");
+    const stored = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}");
+    expect(JSON.parse(stored["wf_other"].json).name).toBe("taken");
+  });
+
   it("is a no-op when the name is unchanged", async () => {
     const json = serialize("wf_same", "Same Name", new Map(), new Map());
     lsSaveRaw("wf_same", "Same Name", json);

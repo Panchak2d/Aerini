@@ -12,7 +12,7 @@ The desktop app's frontend never touches the filesystem, a database, or the Rust
 
 **Error shape.** The overwhelming majority of commands return `Result<T, String>`, and on failure the frontend's `invoke()` promise rejects with that plain string as the reason (`catch (err) { /* err is a string */ }`). Three deliberate exceptions:
 
-- `scheduler::start_scheduled_workflow` serializes its underlying `SchedulerError` enum to a JSON string (`serde_json::to_string`, falling back to `format!("{:?}", e)` if that itself fails) instead of a human message. `src/ipc/workflow.ts`'s `parseSchedulerError()` parses it back into a typed union (`port_conflict`, `workflow_not_found`, `not_schedulable`, `already_running`, or `other`), falling back to `{ error_kind: "other", message: raw }` if parsing fails. Every other scheduler command (`stop_scheduled_workflow`, `set_always_on`, `stop_all_jobs`, `request_scheduler_state`) returns a plain string like everything else; only this one command is JSON-structured.
+- `scheduler::start_scheduled_workflow` serializes its underlying `SchedulerError` enum to a JSON string (`serde_json::to_string`, falling back to `format!("{:?}", e)` if that itself fails) instead of a human message. `src/ipc/workflow.ts`'s `parseSchedulerError()` parses it back into a typed union (`port_conflict`, `workflow_not_found`, `not_schedulable`, `already_running`, or `other`), falling back to `{ error_kind: "other", message: raw }` if parsing fails. Every other scheduler command (`stop_scheduled_workflow`, `cancel_scheduled_run`, `set_always_on`, `stop_all_jobs`, `request_scheduler_state`) returns a plain string like everything else; only this one command is JSON-structured.
 - `plugins::install_plugin_from_path` and `install_plugin_pack_from_path` embed a machine-readable, colon-terminated prefix in an otherwise plain error string, for example `plugin_already_installed: 'x' is already installed as 'x.wasm'`. Seven distinct prefixes exist (`plugin_already_installed`, `plugin_integrity_failed`, `plugin_signature_invalid`, `plugin_key_mismatch`, `plugin_signature_downgrade`, `pack_already_installed`, `pack_member_conflict`), but `src/plugin-settings.ts` only pattern-matches two of them, `plugin_already_installed:` and `pack_already_installed:`, to offer an update-and-retry-with-`overwrite`-confirmation. The other five prefixes still get returned this way but are shown to the user as plain error text with no special handling.
 - A handful of read-only commands with nothing that can fail return their value directly with no `Result` at all: `memory::get_memory_breakdown` (`Vec<RunBreakdown>`), `memory::get_process_memory` and `performance::get_live_performance`/`get_recent_performance` and `update::take_update_notice` (`Option<T>`, `None` meaning "nothing to report" rather than an error).
 
@@ -119,19 +119,20 @@ Reports the port an OAuth callback listener would actually bind if a flow starte
 
 ## Scheduler
 
-`scheduler.rs` (70 lines), seven commands. All seven are wrapped in `src/ipc/workflow.ts`, not a `scheduler.ts` file of their own, despite being a distinct module in Rust.
+`scheduler.rs` (101 lines), eight commands. Seven are wrapped in `src/ipc/workflow.ts`, not a `scheduler.ts` file of their own, despite being a distinct module in Rust; `stop_all_jobs` has no frontend caller.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|
 | `start_scheduled_workflow` | `workflow_id: String`, `port_override: Option<u16>`, `always_on: Option<bool>` | `Result<(), String>` (JSON-structured, see [Conventions](#conventions)) | `startScheduledWorkflow` |
 | `stop_scheduled_workflow` | `workflow_id: String` | `Result<(), String>` | `stopScheduledWorkflow` |
+| `cancel_scheduled_run` | `workflow_id: String` | `Result<(), String>` | `cancelScheduledRun` |
 | `get_scheduled_jobs` | none | `Result<Vec<ScheduledJobRow>, String>` | `getScheduledJobs` (5-second client-side timeout) |
 | `get_scheduled_job` | `workflow_id: String` | `Result<Option<ScheduledJobRow>, String>` | `getScheduledJob` (same timeout) |
 | `set_always_on` | `workflow_id: String`, `always_on: bool` | `Result<(), String>` | `setAlwaysOn` |
 | `stop_all_jobs` | none | `Result<(), String>` | none: registered, no frontend caller |
 | `request_scheduler_state` | none | `Result<(), String>` | `requestSchedulerState` (`ipc/events.ts`) |
 
-`get_scheduled_jobs` and `get_scheduled_job` both redact a job's webhook secret before returning its row; the scheduler's own in-process listener keeps the real value for its HMAC comparison, but it never crosses IPC. `stop_all_jobs` stops every active scheduled job; it's registered and callable but has no current frontend caller, since `force_quit` (below) and workflow deletion both call the underlying `SchedulerDaemon::stop_all()` method directly in-process rather than through this command. `request_scheduler_state` is called once, after the frontend's `scheduler-status` event listener is registered, to have the backend replay current state for every active job and emit `scheduler-ready`; it replaced an earlier fixed startup delay.
+`cancel_scheduled_run` cancels only the run in flight for that workflow: the job, its listener and its port stay up. It returns `Ok(())` when nothing is running, and the cancelled run ends with a `waiting` `scheduler-status` event rather than `error`. `get_scheduled_jobs` and `get_scheduled_job` both redact a job's webhook secret before returning its row; the scheduler's own in-process listener keeps the real value for its HMAC comparison, but it never crosses IPC. `stop_all_jobs` stops every active scheduled job; it's registered and callable but has no current frontend caller, since `force_quit` (below) and workflow deletion both call the underlying `SchedulerDaemon::stop_all()` method directly in-process rather than through this command. `request_scheduler_state` is called once, after the frontend's `scheduler-status` event listener is registered, to have the backend replay current state for every active job and emit `scheduler-ready`; it replaced an earlier fixed startup delay.
 
 ## Export
 

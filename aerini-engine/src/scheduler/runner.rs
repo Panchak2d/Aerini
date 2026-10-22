@@ -1,11 +1,14 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde_json::Value;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
+use crate::error::EngineError;
 use crate::executor::{CredentialResolver, WorkflowExecutor};
 use crate::model::Workflow;
 use crate::node::{NodeRegistry, Reloadable};
@@ -20,6 +23,60 @@ struct ActiveRunGuard(Arc<AtomicUsize>);
 impl Drop for ActiveRunGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Cancellation handle of the run currently in flight for each workflow.
+/// Cancelling it stops that run only; the job loop and its listener keep going.
+#[derive(Default)]
+pub(super) struct RunCancels {
+    next_id: AtomicU64,
+    active:  Mutex<HashMap<String, (u64, CancellationToken)>>,
+}
+
+impl RunCancels {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, (u64, CancellationToken)>> {
+        self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn begin(self: &Arc<Self>, workflow_id: &str) -> (CancellationToken, RunCancelGuard) {
+        let token = CancellationToken::new();
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        self.lock().insert(workflow_id.to_string(), (id, token.clone()));
+        let guard = RunCancelGuard {
+            owner:       Arc::clone(self),
+            workflow_id: workflow_id.to_string(),
+            id,
+        };
+        (token, guard)
+    }
+
+    /// Cancels the run in flight for `workflow_id`. Returns `false` when none is running.
+    pub(super) fn cancel(&self, workflow_id: &str) -> bool {
+        match self.lock().get(workflow_id) {
+            Some((_, token)) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Removes a run's entry on drop. Matches on the run's own id so a guard that
+/// drops late (an aborted run) cannot remove the entry of a newer run.
+struct RunCancelGuard {
+    owner:       Arc<RunCancels>,
+    workflow_id: String,
+    id:          u64,
+}
+
+impl Drop for RunCancelGuard {
+    fn drop(&mut self) {
+        let mut active = self.owner.lock();
+        if matches!(active.get(&self.workflow_id), Some((current, _)) if *current == self.id) {
+            active.remove(&self.workflow_id);
+        }
     }
 }
 
@@ -128,6 +185,7 @@ pub(super) async fn run_job_loop(
     run_semaphore:    Arc<Semaphore>,
     shutting_down:    Arc<AtomicBool>,
     active_runs:      Arc<AtomicUsize>,
+    run_cancels:      Arc<RunCancels>,
 ) {
     match trigger {
         TriggerKind::Interval { secs } => {
@@ -135,7 +193,7 @@ pub(super) async fn run_job_loop(
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
                     let snapshot = registry.current();
-                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -154,7 +212,7 @@ pub(super) async fn run_job_loop(
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
                     let snapshot = registry.current();
-                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -166,7 +224,7 @@ pub(super) async fn run_job_loop(
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
                     let snapshot = registry.current();
-                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -194,7 +252,7 @@ pub(super) async fn run_job_loop(
                 if let Ok(_guard) = exec_lock.try_lock() {
                     let _permit = run_semaphore.acquire().await;
                     let snapshot = registry.current();
-                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                    fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels).await;
                 } else {
                     log_skip(&event_sink, &workflow_id, "previous run still in progress");
                 }
@@ -222,7 +280,7 @@ pub(super) async fn run_job_loop(
             {
                 let _permit = run_semaphore.acquire().await;
                 let snapshot = registry.current();
-                fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs).await;
+                fire_once(&workflow_id, &db, &snapshot, &cred_store, &event_sink, &env_allowlist, shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes, server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels).await;
             }
             scheduler_set_status_async(&db, &workflow_id, "done").await;
             emit_done_async(&event_sink, &db, &workflow_id).await;
@@ -315,6 +373,7 @@ pub(super) async fn run_job_loop(
                 let file_sandbox_dir = file_sandbox_dir.clone();
                 let run_semaphore    = Arc::clone(&run_semaphore);
                 let active_runs      = Arc::clone(&active_runs);
+                let run_cancels      = Arc::clone(&run_cancels);
                 let dedup_seen       = Arc::clone(&dedup_seen);
 
                 let handle = tokio::spawn(async move {
@@ -404,7 +463,7 @@ pub(super) async fn run_job_loop(
                     fire_once_with_vars(
                         &workflow_id, &db, &registry, &cred_store, &event_sink, payload, &env_allowlist,
                         shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-                        server_max_duration_secs, &file_sandbox_dir, &active_runs,
+                        server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels,
                     ).await;
 
                     emit_waiting_async(&event_sink, &db, &workflow_id, None).await;
@@ -505,7 +564,7 @@ pub(super) async fn run_job_loop(
                                 fire_once_with_vars(
                                     &workflow_id, &db, &registry_snapshot, &cred_store, &event_sink, payload, &env_allowlist,
                                     shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-                                    server_max_duration_secs, &file_sandbox_dir, &active_runs,
+                                    server_max_duration_secs, &file_sandbox_dir, &active_runs, &run_cancels,
                                 ).await;
                                 // The run's own completion event carries no
                                 // next-fire time; put the plugin's latest
@@ -575,11 +634,12 @@ async fn fire_once(
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
     active_runs:          &Arc<AtomicUsize>,
+    run_cancels:          &Arc<RunCancels>,
 ) {
     fire_once_with_vars(workflow_id, db, registry, cred_store, event_sink,
         std::collections::HashMap::new(), env_allowlist,
         shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-        server_max_duration_secs, file_sandbox_dir, active_runs,
+        server_max_duration_secs, file_sandbox_dir, active_runs, run_cancels,
     ).await;
 }
 
@@ -634,6 +694,7 @@ async fn fire_once_with_vars(
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
     active_runs:          &Arc<AtomicUsize>,
+    run_cancels:          &Arc<RunCancels>,
 ) {
     // Owned clones for the spawned task ('static bound) — every value here
     // is a cheap Arc/Option<Arc>/Copy clone, matching the pattern the
@@ -646,6 +707,7 @@ async fn fire_once_with_vars(
     let env_allowlist_owned    = env_allowlist.clone();
     let file_sandbox_dir_owned = file_sandbox_dir.clone();
     let active_runs_owned      = Arc::clone(active_runs);
+    let run_cancels_owned      = Arc::clone(run_cancels);
     // Separate clones for the panic-reporting path below — the ones above
     // are moved into the spawned task and unavailable after that point.
     let db_for_report          = Arc::clone(db);
@@ -658,7 +720,7 @@ async fn fire_once_with_vars(
             vars, &env_allowlist_owned,
             shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin,
             code_sandbox_enabled, code_max_memory_mb, parallel_execution, max_concurrent_nodes,
-            server_max_duration_secs, &file_sandbox_dir_owned, &active_runs_owned,
+            server_max_duration_secs, &file_sandbox_dir_owned, &active_runs_owned, &run_cancels_owned,
         ).await;
     }));
 
@@ -710,7 +772,9 @@ async fn fire_once_with_vars_inner(
     server_max_duration_secs: Option<u64>,
     file_sandbox_dir:     &Option<Arc<std::path::PathBuf>>,
     active_runs:          &Arc<AtomicUsize>,
+    run_cancels:          &Arc<RunCancels>,
 ) {
+    let (cancel_token, _cancel_guard) = run_cancels.begin(workflow_id);
     {
         let row   = scheduler_get_async(db, workflow_id).await;
         let count = row.as_ref().map(|r| r.run_count).unwrap_or(0);
@@ -794,7 +858,8 @@ async fn fire_once_with_vars_inner(
     }
 
     let mut executor = WorkflowExecutor::new(Arc::clone(registry), Arc::clone(cred_store))
-        .with_event_sink(Arc::clone(event_sink));
+        .with_event_sink(Arc::clone(event_sink))
+        .with_cancel_token(cancel_token);
     if let Some(allowlist) = env_allowlist {
         executor = executor.with_env_allowlist(allowlist.iter().cloned().collect());
     }
@@ -856,6 +921,10 @@ async fn fire_once_with_vars_inner(
                 trigger_type,
                 last_result:   result_value,
             }).unwrap_or_default());
+        }
+        Err(EngineError::ExecutionCancelled) => {
+            scheduler_update_run_async(db, workflow_id, false, Some("Run cancelled by user".to_string())).await;
+            emit_waiting_async(event_sink, db, workflow_id, None).await;
         }
         Err(e) => {
             scheduler_update_run_async(db, workflow_id, false, Some(e.to_string())).await;
@@ -2216,6 +2285,150 @@ mod integration_tests {
              and fires again on schedule) within 30s; got {}",
             running_count
         );
+    }
+
+    fn webhook_delay_workflow(port: u16) -> Workflow {
+        let mut wf = webhook_dedup_workflow(port, 0);
+        wf.id = "wf-cancel-repro".to_string();
+        wf.name = "Cancel Repro".to_string();
+        wf.nodes.push(WorkflowNode {
+            id: "slow".to_string(),
+            node_type_id: "delay".to_string(),
+            node_type: NodeType::Utility,
+            name: "Slow".to_string(),
+            config: json!({ "duration": 60, "unit": "s" }),
+            credentials: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            retry: Default::default(),
+            fallback_node: None,
+            disabled: false,
+            position: Default::default(),
+        });
+        wf.edges.push(WorkflowEdge {
+            id: "e1".to_string(),
+            from_node: "trigger".to_string(),
+            from_port: "output".to_string(),
+            to_node: "slow".to_string(),
+            to_port: "input".to_string(),
+            condition: None,
+            on_success: None,
+            on_failure: None,
+        });
+        wf
+    }
+
+    fn status_count(sink: &CapturingSink, status: &str) -> usize {
+        sink.0.lock().expect("CapturingSink mutex poisoned").iter()
+            .filter(|(name, p)| name.as_str() == "scheduler-status" && p["status"] == json!(status))
+            .count()
+    }
+
+    async fn wait_for_status_count(sink: &CapturingSink, status: &str, at_least: usize) -> bool {
+        for _ in 0..100 {
+            if status_count(sink, status) >= at_least { return true; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Cancelling the in-flight run of a webhook job stops only that run: it
+    /// ends promptly without an `error` status, and the same listener accepts
+    /// and starts the next run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_run_stops_only_the_inflight_run_and_the_listener_keeps_serving() {
+        const PORT: u16 = 38496;
+        let data_dir = temp_data_dir("cancel-repro");
+        let db_path = data_dir.join("scheduler.db");
+        cleanup_db(&db_path);
+
+        let wf_db = WorkflowDb::open(&db_path, 4).expect("WorkflowDb::open failed");
+        let workflow = webhook_delay_workflow(PORT);
+        wf_db.save(&workflow).expect("save workflow failed");
+        let db: Arc<dyn SchedulerDb> = Arc::new(wf_db);
+
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry, &data_dir, None);
+
+        let sink = CapturingSink::default();
+        let daemon = SchedulerDaemon::new(
+            db,
+            Arc::new(Reloadable::new(registry)),
+            Arc::new(NoopCredentials),
+            Arc::new(sink.clone()),
+        );
+
+        assert!(!daemon.cancel_run(&workflow.id), "nothing is running yet");
+
+        daemon.start_job(&workflow.id, Some(PORT), Some(false))
+            .expect("start_job failed to arm the webhook listener");
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/hook", PORT);
+        let post = || async {
+            for _ in 0..40 {
+                if let Ok(r) = client.post(&url).json(&json!({ "n": 1 })).send().await {
+                    return r.status().is_success();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        };
+
+        assert!(post().await, "first delivery was not acknowledged");
+        assert!(wait_for_status_count(&sink, "running", 1).await, "run never started");
+
+        assert!(daemon.cancel_run(&workflow.id), "a run is in flight, cancel must find it");
+        assert!(
+            wait_for_status_count(&sink, "waiting", 1).await,
+            "cancelled run must end promptly with a 'waiting' status (the node sleeps 60s)"
+        );
+        assert_eq!(status_count(&sink, "error"), 0, "a user cancel must not surface as an error");
+        let mut forgotten = false;
+        for _ in 0..100 {
+            if !daemon.cancel_run(&workflow.id) { forgotten = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(forgotten, "a finished run must stop being cancellable");
+
+        assert!(post().await, "listener must still accept after a cancel");
+        assert!(wait_for_status_count(&sink, "running", 2).await, "next message must start a new run");
+
+        daemon.stop_job(&workflow.id).ok();
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod run_cancels_tests {
+    use super::*;
+
+    #[test]
+    fn cancel_reaches_only_the_named_workflow_and_a_finished_run_is_forgotten() {
+        let cancels = Arc::new(RunCancels::default());
+        let (token_a, guard_a) = cancels.begin("wf_a");
+        let (token_b, _guard_b) = cancels.begin("wf_b");
+
+        assert!(cancels.cancel("wf_a"));
+        assert!(token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+
+        drop(guard_a);
+        assert!(!cancels.cancel("wf_a"), "a finished run has no entry left to cancel");
+        assert!(!cancels.cancel("never_started"));
+    }
+
+    #[test]
+    fn a_late_dropping_guard_does_not_remove_a_newer_runs_entry() {
+        let cancels = Arc::new(RunCancels::default());
+        let (_old_token, old_guard) = cancels.begin("wf");
+        let (new_token, _new_guard) = cancels.begin("wf");
+
+        drop(old_guard);
+
+        assert!(cancels.cancel("wf"));
+        assert!(new_token.is_cancelled());
     }
 }
 

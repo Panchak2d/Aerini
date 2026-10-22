@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_provider_error, error_output, rejected_param, RejectedParam, is_official_openai};
+use super::shared::{LIST_MODELS_TIMEOUT, send_and_parse, extract_provider_error, error_output, rejected_param, RejectedParam, is_official_openai};
 
 // OpenAI Chat Completions — multimodal content blocks
 // Docs: developers.openai.com/api/docs/guides/images-vision and .../file-inputs
@@ -26,6 +28,7 @@ pub(super) async fn call_openai_compatible(
     image_attachments: &[ImageAttachment],
     doc_attachments: &[DocAttachment],
     provider_id: &str,
+    timeout: Duration,
 ) -> NodeOutput {
     let user_content: Value = if image_attachments.is_empty() && doc_attachments.is_empty() {
         json!(prompt)
@@ -75,7 +78,7 @@ pub(super) async fn call_openai_compatible(
             api_key,
         ).json(&body);
 
-        let (status, resp_json) = match send_and_parse(req).await {
+        let (status, resp_json) = match send_and_parse(req, timeout).await {
             Ok(v)  => v,
             Err(e) => return e,
         };
@@ -152,7 +155,7 @@ pub(super) async fn list_models(
         api_key,
     );
 
-    let (status, resp_json) = send_and_parse(req).await.map_err(|out| {
+    let (status, resp_json) = send_and_parse(req, LIST_MODELS_TIMEOUT).await.map_err(|out| {
         out.error.unwrap_or_else(|| NodeError::unrecoverable("NETWORK_ERROR", "request failed"))
     })?;
 
@@ -234,7 +237,7 @@ mod backward_compat_tests {
         let out = call_openai_compatible(
             client, &base_url, "", "test-model",
             "You are a helpful assistant.", "hello world",
-            0.7, 2048, &[], &[], "openai",
+            0.7, 2048, &[], &[], "openai", std::time::Duration::from_secs(30),
         ).await;
         assert!(out.success, "call_openai_compatible failed: {:?}", out.error);
 
@@ -268,7 +271,7 @@ mod backward_compat_tests {
         let (base_url, bodies) = super::super::shared::spawn_sequence_mock(replies).await;
         let out = call_openai_compatible(
             reqwest::Client::new(), &base_url, "", "m", system, "hi",
-            0.7, 2048, &[], &[], "openai",
+            0.7, 2048, &[], &[], "openai", std::time::Duration::from_secs(30),
         ).await;
         let seen = bodies.lock().expect("mock lock")
             .iter().map(|b| serde_json::from_str(b).expect("request body is JSON")).collect();
@@ -319,13 +322,31 @@ mod backward_compat_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_slower_than_the_timeout_fails_with_a_non_retryable_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("mock bind failed");
+        let base_url = format!("http://127.0.0.1:{}", listener.local_addr().expect("local_addr failed").port());
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let out = call_openai_compatible(
+            reqwest::Client::new(), &base_url, "", "m", "s", "hi",
+            0.7, 2048, &[], &[], "openai", std::time::Duration::from_millis(300),
+        ).await;
+        let err = out.error.expect("a timed-out request must fail");
+        assert_eq!(err.code, "TIMEOUT");
+        assert!(!err.recoverable, "a timeout must not be retried");
+        assert!(err.message.contains("timeout_secs"), "message must name the setting: {}", err.message);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn call_openai_compatible_resolves_local_provider_record() {
         let canned = r#"{"choices":[{"message":{"content":"ok"}}],"model":"llama3","usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
         let (base_url, _rx) = spawn_capturing_mock_server(canned).await;
         let out = call_openai_compatible(
             reqwest::Client::new(), &base_url, "", "llama3",
             "You are a helpful assistant.", "hello world",
-            0.7, 2048, &[], &[], "local",
+            0.7, 2048, &[], &[], "local", std::time::Duration::from_secs(30),
         ).await;
         assert!(out.success, "provider_id=\"local\" must resolve its own record, not panic or fail: {:?}", out.error);
     }

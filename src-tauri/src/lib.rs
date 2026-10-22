@@ -1147,6 +1147,7 @@ pub fn run() {
             // Keep original command names for IPC compatibility with frontend
             commands::scheduler::start_scheduled_workflow,
             commands::scheduler::stop_scheduled_workflow,
+            commands::scheduler::cancel_scheduled_run,
             commands::scheduler::get_scheduled_jobs,
             commands::scheduler::get_scheduled_job,
             commands::scheduler::set_always_on,
