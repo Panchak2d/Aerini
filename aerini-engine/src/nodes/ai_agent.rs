@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -10,6 +12,7 @@ use super::ai_prompt::{
     extract_provider_error, ATTACHMENT_ONLY_PROMPT,
     rejected_param, RejectedParam, is_official_openai, model_or_default,
     anthropic_text, clamp_claude_temperature, gemini_model_id,
+    request_timeout, is_request_timeout, timeout_error,
 };
 
 /// AI Agent node: gives a model a goal and a set of tools and returns its answer.
@@ -85,6 +88,10 @@ impl Node for AiAgentNode {
                 "temperature": {
                     "type": "number",
                     "description": "Creativity (0.0-1.0). Agents work best at 0.2-0.5."
+                },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models."
                 }
             }
         })
@@ -195,6 +202,10 @@ impl Node for AiAgentNode {
             Ok(v) => v.unwrap_or(0.3),
             Err(e) => return NodeOutput::failure(e),
         };
+        let timeout = match request_timeout(&input.input["timeout_secs"]) {
+            Ok(t)  => t,
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let mut system = input.input["system"].as_str()
             .filter(|s| !s.trim().is_empty())
@@ -228,7 +239,7 @@ impl Node for AiAgentNode {
             return run_gemini_agent(
                 client, base_url, api_key, model, system,
                 user_content, tools, max_tokens, temperature,
-                image_attachments, doc_attachments, attachment_warnings,
+                image_attachments, doc_attachments, attachment_warnings, timeout,
             ).await;
         }
 
@@ -278,12 +289,12 @@ impl Node for AiAgentNode {
         let response = if is_anthropic {
             call_anthropic_agent(
                 &client, &base_url, &api_key, &model, &system,
-                &messages, temperature, max_tokens,
+                &messages, temperature, max_tokens, timeout,
             ).await
         } else {
             call_openai_agent(
                 &client, &base_url, &api_key, &model, &system,
-                &messages, &tools, temperature, max_tokens, provider_id,
+                &messages, &tools, temperature, max_tokens, provider_id, timeout,
             ).await
         };
         let resp = match response {
@@ -382,7 +393,7 @@ fn agent_output(
 // `call_gemini_agent`/`call_openai_agent`/`call_anthropic_agent` duplicate
 // ai_prompt/shared.rs's send_and_parse request/response shape (send, cap-read,
 // parse) and carry the same recoverable/unrecoverable distinction ai_prompt
-// has: a timed-out/connection-failed send, an HTTP 429 or 529 (rate limited,
+// has: a connection-failed send, an HTTP 429 or 529 (rate limited,
 // overloaded) and a 502/503/504 gateway failure are Recoverable, including
 // when the body is not JSON (a proxy's HTML error page); every other failure
 // (auth, bad request, oversized body, a non-JSON body on any other status)
@@ -391,11 +402,13 @@ fn agent_output(
 // through `agent_status_error` rather than wrapping every error in
 // `NodeError::unrecoverable` regardless of cause: a rate-limited Agent node
 // must stay retry-eligible like the otherwise-identical Prompt node hitting
-// the same API.
+// the same API. A request that outlives the node's `timeout_secs` is the
+// exception among send failures: it is `TimedOut`, never retried.
 enum AgentApiError {
     Recoverable(String),
     Unavailable(String),
     Unrecoverable(String),
+    TimedOut(Duration),
 }
 
 impl AgentApiError {
@@ -410,6 +423,7 @@ impl AgentApiError {
             AgentApiError::Unrecoverable(msg) => {
                 NodeOutput::failure(NodeError::unrecoverable("API_ERROR", msg))
             }
+            AgentApiError::TimedOut(timeout) => NodeOutput::failure(timeout_error(timeout)),
         }
     }
 }
@@ -454,6 +468,7 @@ async fn run_gemini_agent(
     image_attachments: Vec<ImageAttachment>,
     doc_attachments: Vec<DocAttachment>,
     attachment_warnings: Vec<String>,
+    timeout: Duration,
 ) -> NodeOutput {
     if api_key.is_empty() {
         return NodeOutput::failure(NodeError::unrecoverable(
@@ -477,7 +492,7 @@ async fn run_gemini_agent(
 
     let resp = match call_gemini_agent(
         &client, &base_url, &api_key, &model, &system,
-        &contents, &tools, temperature, max_tokens,
+        &contents, &tools, temperature, max_tokens, timeout,
     ).await {
         Ok(r)  => r,
         Err(e) => return e.into_node_output(),
@@ -538,6 +553,7 @@ async fn call_gemini_agent(
     tools: &[Value],
     temperature: f64,
     max_tokens: u64,
+    timeout: Duration,
 ) -> Result<Value, AgentApiError> {
     let endpoint = format!("{}/models/{}:generateContent", base_url, gemini_model_id(model));
 
@@ -569,16 +585,10 @@ async fn call_gemini_agent(
         api_key,
     )
         .json(&body)
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|e| {
-            let recoverable = super::util::is_retryable_network_error(super::util::Replay::Safe, &e);
-            if recoverable {
-                AgentApiError::Recoverable(super::util::reqwest_err_msg(&e))
-            } else {
-                AgentApiError::Unrecoverable(super::util::reqwest_err_msg(&e))
-            }
-        })?;
+        .map_err(|e| send_error(e, timeout))?;
 
     let status = response.status().as_u16();
     let json: Value = crate::nodes::util::read_json_response_capped(response)
@@ -606,6 +616,7 @@ async fn call_openai_agent(
     temperature: f64,
     max_tokens: u64,
     provider_id: &str,
+    timeout: Duration,
 ) -> Result<Value, AgentApiError> {
     let mut all_messages: Vec<Value> = Vec::new();
     if !system.trim().is_empty() {
@@ -646,7 +657,7 @@ async fn call_openai_agent(
             api_key,
         ).json(&body);
 
-        let response = req.send().await.map_err(send_error)?;
+        let response = req.timeout(timeout).send().await.map_err(|e| send_error(e, timeout))?;
         let status = response.status().as_u16();
         let json: Value = crate::nodes::util::read_json_response_capped(response)
             .await
@@ -672,7 +683,10 @@ async fn call_openai_agent(
     }
 }
 
-fn send_error(e: reqwest::Error) -> AgentApiError {
+fn send_error(e: reqwest::Error, timeout: Duration) -> AgentApiError {
+    if is_request_timeout(&e) {
+        return AgentApiError::TimedOut(timeout);
+    }
     let msg = super::util::reqwest_err_msg(&e);
     if super::util::is_retryable_network_error(super::util::Replay::Safe, &e) {
         AgentApiError::Recoverable(msg)
@@ -732,6 +746,7 @@ async fn call_anthropic_agent(
     messages: &[Value],
     temperature: f64,
     max_tokens: u64,
+    timeout: Duration,
 ) -> Result<Value, AgentApiError> {
     let record = crate::provider::ProviderRegistry::global()
         .get("anthropic")
@@ -759,7 +774,7 @@ async fn call_anthropic_agent(
             api_key,
         ).json(&body);
 
-        let response = req.send().await.map_err(send_error)?;
+        let response = req.timeout(timeout).send().await.map_err(|e| send_error(e, timeout))?;
         let status = response.status().as_u16();
         let json: Value = crate::nodes::util::read_json_response_capped(response)
             .await
@@ -1040,6 +1055,25 @@ mod tests {
         let blocks = &v["messages"][1]["content"];
         assert!(!blocks[0]["text"].as_str().unwrap_or("").is_empty(), "user text block must not be empty");
         assert_eq!(blocks[1]["type"].as_str(), Some("image_url"));
+    }
+
+    /// A reply slower than the node's timeout fails with a non-retryable TIMEOUT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_slower_than_the_timeout_fails_with_a_non_retryable_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("mock bind failed");
+        let base_url = format!("http://127.0.0.1:{}", listener.local_addr().expect("local_addr failed").port());
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let err = call_openai_agent(
+            &reqwest::Client::new(), &base_url, "", "m", "s",
+            &[json!({ "role": "user", "content": "hi" })], &[], 0.3, 2048, "openai",
+            std::time::Duration::from_millis(300),
+        ).await.expect_err("a timed-out request must fail");
+        let out = err.into_node_output().error.expect("expected a NodeError");
+        assert_eq!(out.code, "TIMEOUT");
+        assert!(!out.recoverable, "a timeout must not be retried");
     }
 
     /// A 429 from an OpenAI-compatible provider is retry-eligible, not a permanent failure.

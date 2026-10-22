@@ -4,7 +4,7 @@ Aerini installs like any other desktop app: download a file, open it, and you're
 
 ## Download the installer
 
-Every release is published on the [Releases page](https://github.com/Panchak2d/aerini/releases). Pick the file that matches your operating system.
+Every release is published on the [Releases page](https://github.com/Panchak2d/aerini/releases). Pick the file that matches your operating system. The release notes list the files grouped by system (Windows, macOS, Linux), so you don't have to scroll through every attached file.
 
 ### macOS
 

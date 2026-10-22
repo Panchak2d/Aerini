@@ -4,7 +4,7 @@ import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
 import type { RunManager } from "../run-manager";
 import { NODE_IDS } from "../node-ids";
-import { startScheduledWorkflow, stopScheduledWorkflow, getScheduledJobs, getScheduledJob, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
+import { startScheduledWorkflow, stopScheduledWorkflow, cancelScheduledRun, getScheduledJobs, getScheduledJob, parseSchedulerError, clearChatSession, getSetting, setSetting } from "../ipc/workflow";
 import type { WorkflowResult, ScheduledJobRow } from "../ipc/workflow";
 import { listChatSessionMeta, loadChatMessages, appendChatMessage, saveChatSessionMeta, saveChatSession, deleteChatSession } from "../ipc/chat";
 import type { ChatSessionWire, ChatSessionMetaWire, ChatMessageWire } from "../ipc/chat";
@@ -19,7 +19,9 @@ import { checkChatReadiness, type ChatGraphEdge, type ChatGraphNode, type Readin
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
-const RESPONSE_TIMEOUT_MS = 30_000;
+/** How long a reply may take before the typing bubble gains a "still working" note. Not a failure threshold. */
+const SLOW_REPLY_NOTICE_MS = 30_000;
+const STOP_ICON_HTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>`;
 const MAX_READINESS_ROWS = 3;
 
 interface ChatImageFile { filename: string; data: string; mime_type: string; }
@@ -52,8 +54,8 @@ const CHAT_ATTACHMENT_X_ICON    = `<svg width="9" height="9" viewBox="0 0 24 24"
  * aerini-engine/src/nodes/webhook.rs `MAX_BODY_BYTES` — the local webhook
  * server rejects any request body over this many bytes. handleSend() never
  * inspects the HTTP response (see the class doc above — resolution is
- * entirely event-driven), so a request rejected for size still waits out
- * the full 30s timeout instead of failing immediately. Enforced here as a
+ * entirely event-driven), so a request rejected for size would wait for a
+ * reply that never comes instead of failing immediately. Enforced here as a
  * hard client-side block rather than a dismissible warning, since an
  * oversized request never succeeds at all — unlike a saved workflow file,
  * which just grows.
@@ -136,13 +138,19 @@ export class ChatPanel {
   /** Set on every panel open via applyToggles(wfManager.chatSettings). */
   private chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
 
-  // `awaitingReply` only gates the input lock / "one send at a time" rule —
-  // it's cleared on timeout so the user regains control. `replyPending`
-  // tracks whether we still owe a render for an outstanding request; it stays
-  // true across a timeout so a reply that arrives late still gets shown instead
-  // of being silently dropped.
+  // `awaitingReply` gates the input lock / "one send at a time" rule and turns
+  // the send button into Stop. It clears only when the reply lands, the run
+  // fails, or the user stops it — never on elapsed time, because the backend
+  // drops a message sent while the previous run is still going. `replyPending`
+  // tracks whether we still owe a render for an outstanding request.
   private awaitingReply  = false;
   private replyPending   = false;
+  /** Set once the user presses Stop, so the run's closing status event is discarded instead of rendered as a reply. Reset on the next send. */
+  private stopRequested  = false;
+  /** Workflow the outstanding request was sent to; Stop targets it even if the user has since switched workflows. */
+  private pendingRunWorkflowId = "";
+  private sendIconHtml   = "";
+  private fileInputEl:    HTMLInputElement;
   private pendingTimer:  ReturnType<typeof setTimeout> | null = null;
   private lastSentText   = "";
   /** Files attached to the next outgoing message, not yet sent. */
@@ -189,6 +197,7 @@ export class ChatPanel {
     this.messagesEl   = document.getElementById("chat-messages")!;
     this.inputEl      = document.getElementById("chat-input") as HTMLTextAreaElement;
     this.sendBtn      = document.getElementById("chat-send-btn") as HTMLButtonElement;
+    this.sendIconHtml = this.sendBtn.innerHTML;
     this.statusEl     = document.getElementById("chat-status")!;
     this.statusTextEl = document.getElementById("chat-status-text")!;
     this.startBtn     = document.getElementById("btn-chat-start") as HTMLButtonElement;
@@ -204,6 +213,14 @@ export class ChatPanel {
     this.pendingAttachmentsEl = document.createElement("div");
     this.pendingAttachmentsEl.className = "chat-pending-attachments";
     this.pendingAttachmentsEl.style.display = "none";
+
+    // Persistent and attached to the DOM: a detached input can be garbage-collected before its change event fires.
+    this.fileInputEl        = document.createElement("input");
+    this.fileInputEl.type   = "file";
+    this.fileInputEl.accept = CHAT_ATTACHMENT_ACCEPT;
+    this.fileInputEl.hidden = true;
+    this.fileInputEl.addEventListener("change", () => this.handleFilePicked());
+    this.el.appendChild(this.fileInputEl);
     const inputRow = this.el.querySelector(".chat-input-row");
     if (inputRow && inputRow.parentElement) {
       inputRow.parentElement.insertBefore(this.pendingAttachmentsEl, inputRow);
@@ -346,65 +363,72 @@ export class ChatPanel {
   private handleAttachClick(): void {
     if (!this.chatSettings.allow_attachments) return; // gated off — aria-disabled, not native disabled
     if (this.attachBtn.disabled) return;               // transient: still reading a previous file
+    this.fileInputEl.click();
+  }
 
-    const fileInput = document.createElement("input");
-    fileInput.type   = "file";
-    fileInput.accept = CHAT_ATTACHMENT_ACCEPT;
-    fileInput.addEventListener("change", () => {
-      const file = fileInput.files?.[0];
-      if (!file) return;
+  private handleFilePicked(): void {
+    const file = this.fileInputEl.files?.[0];
+    // Cleared so picking the same file again still fires change.
+    const resetInput = () => { this.fileInputEl.value = ""; };
+    if (!file) { resetInput(); return; }
 
-      const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-      const fallbackMime = CHAT_ATTACHMENT_MIME_MAP[ext];
-      if (!fallbackMime) {
-        this.toast(`"${file.name}" is not a supported attachment type.`, "error");
-        return;
-      }
+    const dot = file.name.lastIndexOf(".");
+    const ext = dot < 0 ? "" : file.name.slice(dot).toLowerCase();
+    const fallbackMime = CHAT_ATTACHMENT_MIME_MAP[ext];
+    if (!fallbackMime) {
+      resetInput();
+      this.toast(`"${file.name}" is not a supported attachment type.`, "error");
+      return;
+    }
 
-      // Estimate post-base64 size from raw bytes (base64 ≈ raw × 4/3) before reading
-      // the file at all — avoids a wasted read for a file that can't be sent anyway.
-      const estBytes = Math.ceil(file.size / 3) * 4;
-      const budget    = this.attachmentBudgetBytes();
-      const remaining = budget - this.pendingAttachmentBytes();
-      if (estBytes > remaining) {
-        this.toast(
-          `"${file.name}" is too large to attach (about ${Math.max(0, Math.floor(remaining / 1024))} KB left).`,
-          "error",
-        );
-        return;
-      }
+    // Estimate post-base64 size from raw bytes (base64 ≈ raw × 4/3) before reading
+    // the file at all — avoids a wasted read for a file that can't be sent anyway.
+    const estBytes = Math.ceil(file.size / 3) * 4;
+    const budget    = this.attachmentBudgetBytes();
+    const remaining = budget - this.pendingAttachmentBytes();
+    if (estBytes > remaining) {
+      resetInput();
+      this.toast(
+        `"${file.name}" is too large to attach (about ${Math.max(0, Math.floor(remaining / 1024))} KB left).`,
+        "error",
+      );
+      return;
+    }
 
-      this.attachBtn.disabled = true;
-      const reader = new FileReader();
+    this.attachBtn.disabled = true;
+    const reader = new FileReader();
 
-      reader.onerror = () => {
-        this.attachBtn.disabled = false;
+    reader.onerror = () => {
+      this.attachBtn.disabled = false;
+      resetInput();
+      this.toast(`Could not read "${file.name}".`, "error");
+    };
+
+    reader.onload = () => {
+      this.attachBtn.disabled = false;
+      resetInput();
+
+      // FileReader.result is typed string | ArrayBuffer | null; readAsDataURL always yields a string.
+      const raw = reader.result;
+      if (typeof raw !== "string") {
         this.toast(`Could not read "${file.name}".`, "error");
-      };
+        return;
+      }
 
-      reader.onload = () => {
-        this.attachBtn.disabled = false;
+      // Slice after the first comma — correct way to strip "data:<mime>;base64,".
+      const b64      = raw.slice(raw.indexOf(",") + 1);
+      const mimeType = file.type || fallbackMime;
 
-        // Guard: FileReader.result is typed string | ArrayBuffer | null; must be string here.
-        const raw = reader.result;
-        if (typeof raw !== "string") return;
+      this.pendingAttachments.push({ filename: file.name, data: b64, mime_type: mimeType });
+      this.renderPendingAttachments();
+    };
 
-        // Slice after the first comma — correct way to strip "data:<mime>;base64,".
-        const b64      = raw.slice(raw.indexOf(",") + 1);
-        const mimeType = file.type || fallbackMime;
-
-        this.pendingAttachments.push({ filename: file.name, data: b64, mime_type: mimeType });
-        this.renderPendingAttachments();
-      };
-
-      reader.readAsDataURL(file);
-    });
-    fileInput.click();
+    reader.readAsDataURL(file);
   }
 
   private renderPendingAttachments(): void {
     this.pendingAttachmentsEl.innerHTML = "";
-    this.sendBtn.disabled = !this.canSend();
+    this.syncSendButton();
 
     if (this.pendingAttachments.length === 0) {
       this.pendingAttachmentsEl.style.display = "none";
@@ -642,6 +666,22 @@ export class ChatPanel {
     if (listWasHidden && !centered) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
+  /** Send while idle, Stop while a reply is outstanding. */
+  private syncSendButton(): void {
+    const stopMode = this.awaitingReply;
+    const label    = stopMode ? "Stop" : "Send";
+    this.sendBtn.classList.toggle("chat-send-btn--stop", stopMode);
+    this.sendBtn.title = label;
+    this.sendBtn.setAttribute("aria-label", label);
+    this.sendBtn.setAttribute("data-tooltip", label);
+    const mode = stopMode ? "stop" : "send";
+    if (this.sendBtn.dataset.mode !== mode) {
+      this.sendBtn.dataset.mode = mode;
+      this.sendBtn.innerHTML = stopMode ? STOP_ICON_HTML : this.sendIconHtml;
+    }
+    this.sendBtn.disabled = stopMode ? this.stopRequested : !this.canSend();
+  }
+
   private canSend(): boolean {
     return !this.inputEl.disabled
       && (this.inputEl.value.trim().length > 0 || this.pendingAttachments.length > 0);
@@ -655,19 +695,21 @@ export class ChatPanel {
 
   private syncInputLock(): void {
     this.inputEl.disabled = !this.schedulerRunning || this.awaitingReply || this.pendingSwitchId !== null;
-    this.sendBtn.disabled = !this.canSend();
+    this.syncSendButton();
   }
 
   private onSchedulerStatus(evt: SchedulerStatusEvent): void {
     if (evt.workflow_id !== this.wfManager.currentId) return;
     this.schedulerRunning = evt.status === "running" || evt.status === "waiting";
     if (this.el.classList.contains("chat-open")) this.refreshRunningState();
-    // Unlike a timeout (workflow may still reply late — replyPending stays true
-    // on purpose, see its declaration above), a user-initiated stop guarantees
-    // no reply is coming: the workflow process is gone. Clear immediately
-    // instead of leaving the typing bubble to expire via the 30s timer.
+    // A stopped job guarantees no reply is coming: the workflow process is
+    // gone, so clear the pending state immediately.
     if (this.replyPending && evt.status === "stopped") {
       this.cancelPending();
+    }
+    if (this.replyPending && this.stopRequested && (evt.status === "waiting" || evt.status === "error")) {
+      this.cancelPending();
+      this.refreshRunningState();
     }
     if (this.replyPending && (evt.status === "waiting" || evt.status === "error")) {
       this.resolvePending(evt);
@@ -856,8 +898,10 @@ export class ChatPanel {
 
     this.awaitingReply      = true;
     this.replyPending       = true;
+    this.stopRequested      = false;
+    this.pendingRunWorkflowId = this.wfManager.currentId;
     this.inputEl.disabled   = true;
-    this.sendBtn.disabled   = true;
+    this.syncSendButton();
     this.appendTypingBubble();
 
     const session = this.activeSession();
@@ -883,9 +927,37 @@ export class ChatPanel {
 
     if (attachments.length > 0) this.syncReadiness(true);
 
-    this.pendingTimer = setTimeout(() => {
-      this.failPending("No response after 30s. The workflow may be busy or the message was dropped.");
-    }, RESPONSE_TIMEOUT_MS);
+    this.pendingTimer = setTimeout(() => this.showSlowReplyNotice(), SLOW_REPLY_NOTICE_MS);
+  }
+
+  /** Neutral progress note on the typing bubble — a slow model is not a failure. */
+  private showSlowReplyNotice(): void {
+    this.pendingTimer = null;
+    const bubble = this.messagesEl.querySelector("#chat-typing-row .chat-bubble");
+    if (!bubble || bubble.querySelector(".chat-working-note")) return;
+    const note = document.createElement("div");
+    note.className   = "chat-working-note";
+    note.textContent = "The model is working on your task…";
+    bubble.appendChild(note);
+    this.scrollIfAtBottom();
+  }
+
+  private async handleStop(): Promise<void> {
+    if (!this.awaitingReply || this.stopRequested) return;
+    this.stopRequested = true;
+    this.syncSendButton();
+    try {
+      await cancelScheduledRun(this.pendingRunWorkflowId);
+    } catch (e) {
+      this.stopRequested = false;
+      this.syncSendButton();
+      this.toast(`Could not stop the reply: ${e}`, "error");
+      return;
+    }
+    if (this.replyPending) {
+      this.cancelPending();
+      this.refreshRunningState();
+    }
   }
 
   private resolvePending(evt: SchedulerStatusEvent): void {
@@ -1611,7 +1683,7 @@ export class ChatPanel {
     document.getElementById("btn-chat-close")?.addEventListener("click", () => this.hide());
     this.startBtn.addEventListener("click", () => this.handleStart());
     document.getElementById("btn-chat-clear")?.addEventListener("click", () => this.handleClear());
-    this.sendBtn.addEventListener("click", () => this.handleSend());
+    this.sendBtn.addEventListener("click", () => { void (this.awaitingReply ? this.handleStop() : this.handleSend()); });
     this.attachBtn.addEventListener("click", () => this.handleAttachClick());
 
     this.sessionBtn?.addEventListener("click", (e) => {
@@ -1622,10 +1694,10 @@ export class ChatPanel {
 
     this.inputEl.addEventListener("input", () => {
       this.autosizeInput();
-      this.sendBtn.disabled = !this.canSend();
+      this.syncSendButton();
     });
     this.inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.handleSend(); }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!this.awaitingReply) this.handleSend(); }
     });
   }
 

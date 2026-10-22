@@ -115,6 +115,7 @@ pub struct SchedulerDaemon {
     shutting_down: Arc<AtomicBool>,
     /// In-flight `executor.run()` count. Decremented on drop via `ActiveRunGuard`.
     active_runs: Arc<AtomicUsize>,
+    run_cancels: Arc<runner::RunCancels>,
 }
 
 impl SchedulerDaemon {
@@ -149,6 +150,7 @@ impl SchedulerDaemon {
             plugin_dir: std::sync::RwLock::new(None),
             shutting_down: Arc::new(AtomicBool::new(false)),
             active_runs:   Arc::new(AtomicUsize::new(0)),
+            run_cancels:   Arc::new(runner::RunCancels::default()),
         }
     }
 
@@ -389,6 +391,13 @@ impl SchedulerDaemon {
         Ok(())
     }
 
+    /// Cancels only the run in flight for `workflow_id`. The job, its listener and
+    /// its port stay up. Returns `false` when no run is in flight, so calling it
+    /// after a run has just finished is harmless.
+    pub fn cancel_run(&self, workflow_id: &str) -> bool {
+        self.run_cancels.cancel(workflow_id)
+    }
+
     pub fn list_jobs(&self) -> Result<Vec<ScheduledJobRow>, String> {
         self.db.scheduler_list_all()
     }
@@ -494,6 +503,7 @@ impl SchedulerDaemon {
         let run_semaphore = Arc::clone(&self.run_semaphore);
         let shutting_down = Arc::clone(&self.shutting_down);
         let active_runs   = Arc::clone(&self.active_runs);
+        let run_cancels   = Arc::clone(&self.run_cancels);
 
         let trigger = if let Some(t) = trigger_override {
             t
@@ -586,7 +596,7 @@ impl SchedulerDaemon {
                 shell_exec_disabled, code_exec_disabled, database_exec_disabled, caller_is_admin, code_sandbox_enabled,
                 code_max_memory_mb, parallel_execution, max_concurrent_nodes,
                 server_max_duration_secs, file_sandbox_dir, plugin_dir, run_semaphore,
-                shutting_down, active_runs,
+                shutting_down, active_runs, run_cancels,
             ).await;
             jobs_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&wf_id);
         }));

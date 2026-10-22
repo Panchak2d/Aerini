@@ -5,6 +5,10 @@ import { bindResizeHandle } from "../sidebar-sections";
 
 const LS_WIDTH = "aerini_sidebar_w_v2";
 
+function setWindowWidth(w: number): void {
+  Object.defineProperty(window, "innerWidth", { value: w, configurable: true, writable: true });
+}
+
 function currentSidebarW(): number {
   return parseInt(
     document.documentElement.style.getPropertyValue("--sidebar-w"),
@@ -16,6 +20,7 @@ describe("bindResizeHandle (sidebar)", () => {
   let handle: HTMLElement;
 
   beforeEach(() => {
+    setWindowWidth(929); // default sidebar width = 28% of the window, floored at 260px
     localStorage.removeItem(LS_WIDTH);
     document.body.innerHTML = `<div id="sidebar-resize-handle"></div>`;
     handle = document.getElementById("sidebar-resize-handle")!;
@@ -69,6 +74,17 @@ describe("bindResizeHandle (sidebar)", () => {
     handle.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     expect(currentSidebarW()).toBe(260);
     expect(JSON.parse(localStorage.getItem(LS_WIDTH)!)).toBe(260);
+  });
+
+  it("default width is 28% of the window, kept within 260px and 400px", () => {
+    const reset = (w: number) => {
+      setWindowWidth(w);
+      handle.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      return currentSidebarW();
+    };
+    expect(reset(1400)).toBe(392);
+    expect(reset(1920)).toBe(400);
+    expect(reset(700)).toBe(260);
   });
 
   it("ArrowRight grows the sidebar by one step, ArrowLeft shrinks it — both persisted", () => {

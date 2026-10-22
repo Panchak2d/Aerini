@@ -14,6 +14,7 @@ import {
   initCommandPalette, openPalette,
 } from "./palette-manager";
 import { initModals } from "./modal-manager";
+import { uniqueWorkflowName } from "./workflow-names";
 import { bindDropImport, bindFileInput } from "./drag-drop";
 import { bindPluginSettings } from "./plugin-settings";
 import { showPopover, closePopover } from "./popover";
@@ -295,9 +296,13 @@ async function init() {
     chip.addEventListener("click", () => filterByCategory(chip.dataset.cat ?? "all"));
   });
   initCommandPalette(canvas, setStatus);
-  initModals((obj) => {
+  initModals(async (obj) => {
     try {
-      const { id, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs, importWarnings } = deserialize(JSON.stringify(obj));
+      const doc = deserialize(JSON.stringify(obj));
+      const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs, importWarnings } = doc;
+      // An import is always a new workflow: keeping the file's own id would overwrite any stored workflow exported from the same source.
+      const id   = `wf_${crypto.randomUUID()}`;
+      const name = uniqueWorkflowName(await wfManager.listWorkflowNames(), doc.name);
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection(); canvas.fitToScreen();
       canvas.warnArityViolations();
@@ -309,16 +314,20 @@ async function init() {
       wfManager.currentTags        = tags;
       wfManager.currentCollectionId = collectionId;
       wfManager.currentId = id; wfManager.currentName = name;
-      wfManager.markUnsaved(false); setTitle(name);
+      // Unsaved on purpose: the new id has no stored row yet, so it must be written or the import vanishes on the next switch.
+      wfManager.markUnsaved(true); setTitle(name);
+      wfManager.scheduleAutoSave();
+      await wfManager.flushAutoSave();
       document.getElementById("output-drawer")!.classList.add("hidden");
       setStatus(`Imported "${name}"`);
       wfManager.onNavigate?.();
       wfManager.refreshWorkflowList();
+      const renamed = name !== doc.name ? ` (name "${doc.name}" was already taken)` : "";
       // One toast either way — this app has no toast queue/stacking, so a
       // second call right after would just render on top of the first at
       // the same fixed position (see .toast in base.css).
-      if (importWarnings.length) toast(`Imported "${name}" — ${importWarnings.join(" ")}`, "warning");
-      else toast(`Imported "${name}"`, "success");
+      if (importWarnings.length) toast(`Imported "${name}"${renamed} — ${importWarnings.join(" ")}`, "warning");
+      else toast(`Imported "${name}"${renamed}`, "success");
     } catch (e) { toast(`Import failed: ${e}`, "error"); }
   });
   bindDropImport(toast);

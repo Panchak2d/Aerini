@@ -204,3 +204,30 @@ describe("Canvas fit/center/zoom — chat panel overlap", () => {
   });
 });
 
+
+describe("Canvas.revealNode", () => {
+  it("selects only that node, centres it, focuses the canvas and reports the viewport change", () => {
+    const other = { data: { id: "a" }, selected: true } as never;
+    const node = { data: { id: "b", position: { x: 1000, y: 500 } }, height: 100, selected: false } as never;
+    const focus = vi.fn();
+    const rect = { width: 800, height: 600, left: 0, top: 0, right: 800, bottom: 600, x: 0, y: 0, toJSON() { return {}; } };
+    const fake = makeFakeCanvas({
+      el: { getBoundingClientRect: () => rect, focus },
+      selectedNodes: new Set(["a"]),
+      selectedNode: other,
+      nodes: new Map([["a", other], ["b", node]]),
+      clearSelection: Canvas.prototype.clearSelection,
+      selectNode: Canvas.prototype.selectNode,
+      onNodeSelected: null,
+      selectedConn: null,
+    });
+    Canvas.prototype.revealNode.call(fake, node);
+    expect((other as { selected: boolean }).selected).toBe(false);
+    expect((node as { selected: boolean }).selected).toBe(true);
+    expect([...(fake as unknown as { selectedNodes: Set<string> }).selectedNodes]).toEqual(["b"]);
+    expect(fake.panX).toBe(400 - 1110);
+    expect(fake.panY).toBe(300 - 550);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(fake.onViewportChange).toHaveBeenCalledTimes(1);
+  });
+});

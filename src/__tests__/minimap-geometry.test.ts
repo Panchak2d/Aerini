@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  activeBounds, backingSize, computeBounds, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
+  activeBounds, backingSize, computeBounds, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
   hitTopmost, hoverText, minimapLabel, minimapToWorld, nextErrorIndex, normalizeDpr, placeLabel, pulseAlpha, snapStroke,
-  viewportOnContent, wireControlOffset, wireKind, worldToMinimap, type Rect,
+  viewBounds, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, type Rect,
 } from "../canvas/Minimap";
 
 const NODE: Rect = { x: 100, y: 200, w: 220, h: 100 };
@@ -194,5 +194,70 @@ describe("sizing helpers", () => {
     expect(minimapLabel(1, 0)).toBe("Workflow minimap: 1 node");
     expect(minimapLabel(12, 1)).toBe("Workflow minimap: 12 nodes, 1 with an error");
     expect(minimapLabel(12, 3)).toBe("Workflow minimap: 12 nodes, 3 with errors");
+  });
+});
+
+describe("computeBounds with a canvas viewport", () => {
+  const size = { w: 140, h: 80 };
+
+  it("a viewport inside the nodes changes nothing", () => {
+    const inside: Rect = { x: 150, y: 220, w: 40, h: 30 };
+    expect(computeBounds([NODE], size, inside)).toEqual(computeBounds([NODE], size));
+  });
+
+  it("a huge viewport grows the box by at most 2x, so the nodes keep a readable share", () => {
+    const huge: Rect = { x: -50000, y: -50000, w: 100000, h: 100000 };
+    const plain = computeBounds([NODE], size)!, grown = computeBounds([NODE], size, huge)!;
+    expect(grown.scale).toBeLessThan(plain.scale);
+    expect(grown.scale).toBeGreaterThanOrEqual(plain.scale / 2 - 1e-9);
+  });
+
+  it("a viewport far from the nodes is ignored", () => {
+    const away: Rect = { x: 90000, y: 90000, w: 800, h: 600 };
+    expect(computeBounds([NODE], size, away)).toEqual(computeBounds([NODE], size));
+  });
+});
+
+describe("minimap own zoom (viewBounds / zoomView)", () => {
+  const base = computeBounds([NODE], { w: 140, h: 80 })!;
+
+  it("zoom 1 is the fitted base, untouched", () => {
+    expect(viewBounds(base, DEFAULT_VIEW)).toBe(base);
+    expect(viewBounds(null, DEFAULT_VIEW)).toBeNull();
+  });
+
+  it("wheel-in keeps the world point under the pointer fixed", () => {
+    const p = { x: 100, y: 30 };
+    const before = minimapToWorld(base, p.x, p.y);
+    const view = zoomView(base, DEFAULT_VIEW, -100, p);
+    const zoomed = viewBounds(base, view)!;
+    expect(view.zoom).toBeGreaterThan(1);
+    expect(zoomed.scale).toBeGreaterThan(base.scale);
+    const after = minimapToWorld(zoomed, p.x, p.y);
+    expect(after.x).toBeCloseTo(before.x, 6);
+    expect(after.y).toBeCloseTo(before.y, 6);
+  });
+
+  it("zoom is capped, and zooming back out to 1 resets the pan", () => {
+    let v = DEFAULT_VIEW;
+    for (let i = 0; i < 60; i++) v = zoomView(base, v, -100, { x: 70, y: 40 });
+    expect(v.zoom).toBe(MAX_VIEW_ZOOM);
+    for (let i = 0; i < 60; i++) v = zoomView(base, v, 100, { x: 70, y: 40 });
+    expect(v).toEqual(DEFAULT_VIEW);
+  });
+
+  it("zoom scales with the wheel delta: a pinch's small delta zooms less than a notch, and a huge delta is capped", () => {
+    const p = { x: 70, y: 40 };
+    const notch = zoomView(base, DEFAULT_VIEW, -100, p).zoom;
+    expect(notch).toBeCloseTo(1.25, 6);
+    expect(zoomView(base, DEFAULT_VIEW, -10, p).zoom).toBeLessThan(notch);
+    expect(zoomView(base, DEFAULT_VIEW, -100000, p).zoom).toBeCloseTo(zoomView(base, DEFAULT_VIEW, -300, p).zoom, 9);
+  });
+
+  it("the magnified content always still covers the panel", () => {
+    const v = zoomView(base, DEFAULT_VIEW, -100, { x: 0, y: 0 });
+    const b = viewBounds(base, { ...v, panX: 99999, panY: -99999 })!;
+    expect(b.offX).toBeLessThanOrEqual(0);
+    expect(b.offY).toBeLessThanOrEqual(0);
   });
 });

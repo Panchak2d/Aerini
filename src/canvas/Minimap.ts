@@ -60,6 +60,14 @@ export interface MinimapNodeStyle {
 }
 
 const BOUNDS_MARGIN = 30;
+// The view rectangle may stretch the minimap's world box to at most this multiple of the node box on each axis, so nodes always keep a readable share of the panel when the canvas is zoomed far out.
+const MAX_VIEWPORT_GROWTH = 2;
+export const MIN_VIEW_ZOOM = 1;
+export const MAX_VIEW_ZOOM = 8;
+const WHEEL_ZOOM_STEP = 1.25;
+const WHEEL_NOTCH_DELTA = 100;
+const MAX_WHEEL_DELTA = 300;
+const WHEEL_LINE_PX = 33;
 export const EDGE_INSET = 3;
 const DISABLED_ALPHA = 0.35;
 // Highest outside-the-viewport dim that keeps every node mark at 3:1 against the panel in Midnight and Paper (Paper is the limit, about 0.28).
@@ -100,7 +108,7 @@ export function backingSize(css: Size, dpr: number): Size {
   return { w: Math.max(1, Math.round(css.w * d)), h: Math.max(1, Math.round(css.h * d)) };
 }
 
-export function computeBounds(nodes: readonly Rect[], size: Size): MinimapBounds | null {
+export function computeBounds(nodes: readonly Rect[], size: Size, viewport?: Rect): MinimapBounds | null {
   if (nodes.length === 0 || !(size.w > 2 * EDGE_INSET && size.h > 2 * EDGE_INSET)) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const n of nodes) {
@@ -108,6 +116,16 @@ export function computeBounds(nodes: readonly Rect[], size: Size): MinimapBounds
     y0 = Math.min(y0, n.y - BOUNDS_MARGIN);
     x1 = Math.max(x1, n.x + n.w + BOUNDS_MARGIN);
     y1 = Math.max(y1, n.y + n.h + BOUNDS_MARGIN);
+  }
+  if (viewport) {
+    const padX = ((x1 - x0) * (MAX_VIEWPORT_GROWTH - 1)) / 2;
+    const padY = ((y1 - y0) * (MAX_VIEWPORT_GROWTH - 1)) / 2;
+    const vx0 = Math.max(viewport.x, x0 - padX), vx1 = Math.min(viewport.x + viewport.w, x1 + padX);
+    const vy0 = Math.max(viewport.y, y0 - padY), vy1 = Math.min(viewport.y + viewport.h, y1 + padY);
+    if (vx1 > vx0 && vy1 > vy0) {
+      x0 = Math.min(x0, vx0); x1 = Math.max(x1, vx1);
+      y0 = Math.min(y0, vy0); y1 = Math.max(y1, vy1);
+    }
   }
   const ww = Math.max(x1 - x0, 1);
   const wh = Math.max(y1 - y0, 1);
@@ -120,6 +138,42 @@ export function computeBounds(nodes: readonly Rect[], size: Size): MinimapBounds
     offY: (size.h - wh * scale) / 2,
     w: size.w,
     h: size.h,
+  };
+}
+
+export interface MinimapView { zoom: number; panX: number; panY: number }
+
+export const DEFAULT_VIEW: MinimapView = { zoom: 1, panX: 0, panY: 0 };
+
+function clampAxis(off: number, content: number, size: number): number {
+  return content <= size ? (size - content) / 2 : Math.min(0, Math.max(size - content, off));
+}
+
+// The minimap's own magnification: scales the fitted bounds about the panel centre and shifts them by the pan, keeping the content on screen. Independent of the main canvas zoom.
+export function viewBounds(base: MinimapBounds | null, view: MinimapView): MinimapBounds | null {
+  if (!base) return null;
+  const z = Math.min(MAX_VIEW_ZOOM, Math.max(MIN_VIEW_ZOOM, view.zoom));
+  if (z === 1) return base;
+  const cx = base.w / 2, cy = base.h / 2;
+  const contentW = (base.w - 2 * base.offX) * z, contentH = (base.h - 2 * base.offY) * z;
+  const offX = clampAxis((base.offX - cx) * z + cx + view.panX, contentW, base.w);
+  const offY = clampAxis((base.offY - cy) * z + cy + view.panY, contentH, base.h);
+  return { ...base, scale: base.scale * z, offX, offY };
+}
+
+// Next view after a wheel event at `pointer` (deltaY < 0 zooms in): the world point under the pointer stays under it. Exponential in deltaY, so a mouse notch (about 100) is one WHEEL_ZOOM_STEP and a trackpad pinch's many small deltas stay smooth.
+export function zoomView(base: MinimapBounds | null, view: MinimapView, deltaY: number, pointer: Point): MinimapView {
+  if (!base) return DEFAULT_VIEW;
+  const d = Math.min(MAX_WHEEL_DELTA, Math.max(-MAX_WHEEL_DELTA, deltaY));
+  const z = Math.min(MAX_VIEW_ZOOM, Math.max(MIN_VIEW_ZOOM, view.zoom * Math.exp((-d * Math.log(WHEEL_ZOOM_STEP)) / WHEEL_NOTCH_DELTA)));
+  if (z === 1) return DEFAULT_VIEW;
+  const cur = viewBounds(base, view)!;
+  const wx = (pointer.x - cur.offX) / cur.scale, wy = (pointer.y - cur.offY) / cur.scale;
+  const cx = base.w / 2, cy = base.h / 2;
+  return {
+    zoom: z,
+    panX: pointer.x - wx * base.scale * z - (base.offX - cx) * z - cx,
+    panY: pointer.y - wy * base.scale * z - (base.offY - cy) * z - cy,
   };
 }
 
@@ -148,7 +202,7 @@ function overlapsEnough(a0: number, a1: number, b0: number, b1: number): boolean
 
 export function viewportOnContent(b: MinimapBounds, viewport: Rect): boolean {
   const v = viewportToMinimap(b, viewport);
-  return overlapsEnough(v.x, v.x + v.w, b.offX, b.w - b.offX) && overlapsEnough(v.y, v.y + v.h, b.offY, b.h - b.offY);
+  return overlapsEnough(v.x, v.x + v.w, Math.max(b.offX, 0), Math.min(b.w - b.offX, b.w)) && overlapsEnough(v.y, v.y + v.h, Math.max(b.offY, 0), Math.min(b.h - b.offY, b.h));
 }
 
 export function edgeArrow(b: MinimapBounds, viewport: Rect): [Point, Point, Point] | null {
@@ -303,6 +357,9 @@ export class Minimap {
   private ctx: CanvasRenderingContext2D | null;
   private _size: Size = { w: 0, h: 0 };
   private _bounds: MinimapBounds | null = null;
+  private _hits: { rect: Rect; node: CanvasNode }[] = [];
+  private _base: MinimapBounds | null = null;
+  private _view: MinimapView = DEFAULT_VIEW;
   private _viewport: Rect | null = null;
   private _drag: DragState | null = null;
   private _pointerId: number | null = null;
@@ -335,7 +392,7 @@ export class Minimap {
     mmEl.addEventListener("lostpointercapture", (e) => this._onEnd(e));
     mmEl.addEventListener("wheel", (e) => this._onWheel(e), { passive: false });
     mmEl.addEventListener("pointerleave", () => { this._hover = null; });
-    mmEl.addEventListener("dblclick", (e) => { if (!this._overBadge(e)) this.canvas.fitToScreen(); });
+    mmEl.addEventListener("dblclick", (e) => this._onDoubleClick(e));
 
     if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
       const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -368,6 +425,9 @@ export class Minimap {
     const c = this.canvas;
     if (c.nodes.size === 0) {
       this._bounds = null;
+      this._base = null;
+      this._hits = [];
+      this._view = DEFAULT_VIEW;
       this._viewport = null;
       this._setLabel(minimapLabel(0, 0));
       return;
@@ -385,7 +445,13 @@ export class Minimap {
     for (const n of c.nodes.values()) {
       worldRects.push({ x: n.data.position.x, y: n.data.position.y, w: NODE_WIDTH, h: n.height });
     }
-    const bounds = activeBounds(this._drag, computeBounds(worldRects, this._size));
+    // While magnified the fitted base is held still, so the view the user zoomed into doesn't shift as the canvas pans underneath it.
+    const stale = !this._base || this._base.w !== this._size.w || this._base.h !== this._size.h;
+    if (!this._drag && (this._view.zoom === 1 || stale)) {
+      if (stale) this._view = DEFAULT_VIEW;
+      this._base = computeBounds(worldRects, this._size, viewport);
+    }
+    const bounds = activeBounds(this._drag, viewBounds(this._base, this._view));
     this._bounds = bounds;
     this._viewport = viewport;
     if (!bounds) return;
@@ -452,6 +518,7 @@ export class Minimap {
     }
     placed.sort((a, b) => a.style.rank - b.style.rank);
     errorTargets.sort((a, b) => a.x - b.x || a.y - b.y);
+    this._hits = placed.map(({ rect, node }) => ({ rect, node }));
     this._errorTargets = errorTargets;
     if (errors === 0) this._errorIndex = -1;
     const pulse = pulseAlpha(performance.now(), this._reducedMotion);
@@ -478,8 +545,10 @@ export class Minimap {
 
     if (viewportOnContent(bounds, viewport)) {
       const v = viewportToMinimap(bounds, viewport);
-      const x0 = snapStroke(v.x, OUTLINE_WIDTH, dpr), y0 = snapStroke(v.y, OUTLINE_WIDTH, dpr);
-      const x1 = snapStroke(v.x + v.w, OUTLINE_WIDTH, dpr), y1 = snapStroke(v.y + v.h, OUTLINE_WIDTH, dpr);
+      // Clamped to the panel so a view larger than the map still shows its outline along the edge instead of vanishing.
+      const edge = OUTLINE_WIDTH / 2;
+      const x0 = Math.max(snapStroke(v.x, OUTLINE_WIDTH, dpr), edge), y0 = Math.max(snapStroke(v.y, OUTLINE_WIDTH, dpr), edge);
+      const x1 = Math.min(snapStroke(v.x + v.w, OUTLINE_WIDTH, dpr), w - edge), y1 = Math.min(snapStroke(v.y + v.h, OUTLINE_WIDTH, dpr), h - edge);
       mc.globalAlpha = DIM_ALPHA;
       mc.fillStyle = mm.panel;
       mc.beginPath();
@@ -612,11 +681,31 @@ export class Minimap {
     if (world) this._panTo(world, drag);
   }
 
+  // Double-click a node: select it on the canvas and bring it to the centre. Anywhere else: reset the minimap zoom and fit the workflow.
+  private _onDoubleClick(e: MouseEvent): void {
+    if (this._overBadge(e)) return;
+    const p = this._pointerContent(e);
+    const hit = p ? hitTopmost(this._hits.map(h => h.rect), p) : -1;
+    if (hit >= 0) {
+      this.canvas.revealNode(this._hits[hit].node);
+      return;
+    }
+    this._view = DEFAULT_VIEW;
+    this.canvas.fitToScreen();
+  }
+
   private _onWheel(e: WheelEvent): void {
     e.preventDefault();
     if (this._drag || e.deltaY === 0) return;
-    if (e.deltaY < 0) this.canvas.zoomIn();
-    else this.canvas.zoomOut();
+    if (!(e.ctrlKey || e.metaKey)) {
+      if (e.deltaY < 0) this.canvas.zoomIn();
+      else this.canvas.zoomOut();
+      return;
+    }
+    // Ctrl/Cmd (also what a trackpad pinch reports) magnifies the minimap itself.
+    const base = this._base, p = this._pointerContent(e);
+    if (!base || !p) return;
+    this._view = zoomView(base, this._view, e.deltaY * (e.deltaMode === 1 ? WHEEL_LINE_PX : 1), p);
   }
 
   private _onEnd(e: PointerEvent): void {

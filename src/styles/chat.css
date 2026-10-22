@@ -140,6 +140,8 @@ html[data-theme="paper"] #chat-panel { --chat-user-bg: var(--blue); }
 .chat-send-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .chat-send-btn:active:not(:disabled) { filter: brightness(.9); }
 .chat-send-btn:disabled { opacity: .4; cursor: not-allowed; }
+.chat-send-btn--stop { background: var(--bg3); border: 1px solid var(--bd); color: var(--t1); }
+.chat-working-note { margin-top: 6px; font-size: 12px; color: var(--t2); }
 
 @media (prefers-reduced-motion: reduce) {
   #chat-panel.chat-open { animation: none; }

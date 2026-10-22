@@ -10,6 +10,7 @@ import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import type { Connector } from "./canvas/Connector";
 import { isTauri } from "./utils";
+import { isWorkflowNameTaken } from "./workflow-names";
 import { parseSavedViewport } from "./canvas/viewport";
 import { activateZone } from "./sidebar-sections";
 import { openMenu, type MenuEntry } from "./menu";
@@ -1261,6 +1262,7 @@ export class WorkflowManager {
    *  save idiom duplicateWorkflow/moveWorkflowsToCollection already use, then
    *  refreshes -- needed so a name-based sort order picks up the new name. */
   async renameWorkflowById(id: string, trimmedName: string): Promise<void> {
+    if (isWorkflowNameTaken(this.summaries, trimmedName, id)) this.onToast(`Another workflow is already named "${trimmedName}".`, "info");
     if (id === this.currentId) {
       this.currentName = trimmedName;
       this.markUnsaved(true);
@@ -1284,6 +1286,12 @@ export class WorkflowManager {
       this.onToast(`Rename failed: ${e}`, "error");
       await this.refreshWorkflowList(); // re-sync the row back to its real, on-disk name
     }
+  }
+
+  /** Names of every stored workflow, read fresh from storage rather than the cached sidebar list. */
+  async listWorkflowNames(): Promise<string[]> {
+    const list = isTauri() ? await listWorkflows() : lsList();
+    return list.map(w => w.name);
   }
 
   private collectionOf(id: string): string | null {
@@ -1950,7 +1958,10 @@ export class WorkflowManager {
         document.removeEventListener("mousedown", dismiss, true);
         const v = cancelled ? null : (inp.value.trim() || null);
         this.currentName = v ?? this.currentName;
-        if (v) this.markUnsaved(true);
+        if (v) {
+          this.markUnsaved(true);
+          if (isWorkflowNameTaken(this.summaries, v, this.currentId)) this.onToast(`Another workflow is already named "${v}".`, "info");
+        }
         const lbl = document.createElement("span");
         lbl.id = "workflow-name-label"; lbl.className = "workflow-title";
         lbl.title = "Double-click to rename"; lbl.setAttribute("data-tooltip", "Double-click to rename"); lbl.textContent = this.currentName;

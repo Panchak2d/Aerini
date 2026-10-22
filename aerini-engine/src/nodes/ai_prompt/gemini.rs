@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
-use super::shared::{send_and_parse, extract_provider_error, error_output};
+use super::shared::{LIST_MODELS_TIMEOUT, send_and_parse, extract_provider_error, error_output};
 
 // Gemini
 // Docs: https://ai.google.dev/api/generate-content
@@ -33,6 +35,7 @@ pub(super) async fn call_gemini(
     max_tokens: u64,
     image_attachments: &[ImageAttachment],
     doc_attachments: &[DocAttachment],
+    timeout: Duration,
 ) -> NodeOutput {
     if api_key.is_empty() {
         return NodeOutput::failure(NodeError::unrecoverable(
@@ -82,7 +85,7 @@ pub(super) async fn call_gemini(
         api_key,
     ).json(&body);
 
-    let (status, resp_json) = match send_and_parse(req).await {
+    let (status, resp_json) = match send_and_parse(req, timeout).await {
         Ok(v)  => v,
         Err(e) => return e,
     };
@@ -162,7 +165,7 @@ pub(super) async fn list_models(
         api_key,
     );
 
-    let (status, resp_json) = send_and_parse(req).await.map_err(|out| {
+    let (status, resp_json) = send_and_parse(req, LIST_MODELS_TIMEOUT).await.map_err(|out| {
         out.error.unwrap_or_else(|| NodeError::unrecoverable("NETWORK_ERROR", "request failed"))
     })?;
 
@@ -249,7 +252,7 @@ mod tests {
         let _ = call_gemini(
             reqwest::Client::new(), &base_url, "test-key", "gemini-3.6-flash",
             DEFAULT_SYSTEM, /* system_provided */ true,
-            "hello", 0.7, 100, &[], &[],
+            "hello", 0.7, 100, &[], &[], std::time::Duration::from_secs(30),
         ).await;
         let body = rx.await.expect("mock never received a request");
         assert!(body.contains("systemInstruction"), "body: {body}");
@@ -262,7 +265,7 @@ mod tests {
         let _ = call_gemini(
             reqwest::Client::new(), &base_url, "test-key", "gemini-3.6-flash",
             DEFAULT_SYSTEM, /* system_provided */ false,
-            "hello", 0.7, 100, &[], &[],
+            "hello", 0.7, 100, &[], &[], std::time::Duration::from_secs(30),
         ).await;
         let body = rx.await.expect("mock never received a request");
         assert!(!body.contains("systemInstruction"), "body: {body}");
@@ -277,7 +280,7 @@ mod tests {
         let _ = call_gemini(
             reqwest::Client::new(), &base_url, "test-key", "gemini-3.6-flash",
             &system_with_warning, /* system_provided */ false,
-            "hello", 0.7, 100, &[], &[],
+            "hello", 0.7, 100, &[], &[], std::time::Duration::from_secs(30),
         ).await;
         let body = rx.await.expect("mock never received a request");
         assert!(body.contains("systemInstruction"), "body: {body}");

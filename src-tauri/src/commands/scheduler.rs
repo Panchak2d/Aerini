@@ -41,6 +41,17 @@ pub async fn stop_scheduled_workflow(
     daemon.stop_job(&workflow_id)
 }
 
+/// Cancels only the run currently in flight for this workflow; the job and its
+/// listener keep running. Succeeds when nothing is running.
+#[tauri::command]
+pub async fn cancel_scheduled_run(
+    workflow_id: String,
+    daemon: tauri::State<'_, Arc<SchedulerDaemon>>,
+) -> Result<(), String> {
+    daemon.cancel_run(&workflow_id);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_scheduled_jobs(
     daemon: tauri::State<'_, Arc<SchedulerDaemon>>,

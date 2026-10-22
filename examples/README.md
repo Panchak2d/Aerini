@@ -10,6 +10,8 @@ Aerini imports a `.aerini` or `.json` workflow file two ways:
 
 There is no separate **Import** toolbar button — the two paths above are the only import mechanism.
 
+An imported file is always added as a new workflow, so importing never overwrites one you already have. If its name is already taken, Aerini adds a suffix: `My Workflow (2)`, then `(3)`, and so on.
+
 ## Getting_Started___Fetch___Show.zip
 
 A self-hosted Docker deployment package for the beginner workflow below — not an in-app-importable

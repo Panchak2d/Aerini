@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::error::NodeError;
@@ -5,7 +7,7 @@ use crate::model::NodeOutput;
 
 use super::attachments::{ImageAttachment, DocAttachment};
 use super::shared::{
-    send_and_parse, extract_provider_error, error_output,
+    LIST_MODELS_TIMEOUT, send_and_parse, extract_provider_error, error_output,
     rejected_param, RejectedParam, anthropic_text, clamp_claude_temperature,
 };
 
@@ -29,6 +31,7 @@ pub(super) async fn call_anthropic(
     max_tokens: u64,
     image_attachments: &[ImageAttachment],
     doc_attachments: &[DocAttachment],
+    timeout: Duration,
 ) -> NodeOutput {
     if api_key.is_empty() {
         return NodeOutput::failure(NodeError::unrecoverable(
@@ -85,7 +88,7 @@ pub(super) async fn call_anthropic(
             api_key,
         ).json(&body);
 
-        let (status, resp_json) = match send_and_parse(req).await {
+        let (status, resp_json) = match send_and_parse(req, timeout).await {
             Ok(v)  => v,
             Err(e) => return e,
         };
@@ -150,7 +153,7 @@ pub(super) async fn list_models(
         .expect("anthropic always registered");
     let req = crate::provider::ProviderRegistry::apply_auth(record, client.get(&endpoint), api_key);
 
-    let (status, resp_json) = send_and_parse(req).await.map_err(|out| {
+    let (status, resp_json) = send_and_parse(req, LIST_MODELS_TIMEOUT).await.map_err(|out| {
         out.error.unwrap_or_else(|| NodeError::unrecoverable("NETWORK_ERROR", "request failed"))
     })?;
 
@@ -222,7 +225,7 @@ mod call_tests {
         let (base_url, bodies) = spawn_sequence_mock(replies).await;
         let out = call_anthropic(
             reqwest::Client::new(), &base_url, "key", "m", system, "hi",
-            temperature, 100, &[], &[],
+            temperature, 100, &[], &[], std::time::Duration::from_secs(30),
         ).await;
         let seen = bodies.lock().expect("mock lock")
             .iter().map(|b| serde_json::from_str(b).expect("request body is JSON")).collect();

@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::error::NodeError;
 use crate::model::NodeOutput;
-use crate::nodes::util::{Replay, provider_error_for};
+use crate::nodes::util::{Replay, provider_error_for, cfg_u64_opt};
 
 pub(super) fn extract_err_msg(obj: &serde_json::Map<String, Value>, default: &str) -> String {
     obj.get("message").and_then(|m| m.as_str()).unwrap_or(default).to_string()
@@ -99,9 +101,41 @@ pub(crate) fn clamp_claude_temperature(t: f64) -> f64 {
     t.clamp(0.0, 1.0)
 }
 
-pub(super) async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<(u16, Value), NodeOutput> {
-    let response = match req.send().await {
+/// Seconds an AI request may take, from the node's `timeout_secs`.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 3600;
+const MIN_REQUEST_TIMEOUT_SECS: u64 = 10;
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 86_400;
+
+/// Model listing is short-lived and keeps the shared client's own limit.
+pub(super) const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The request timeout configured on an AI node, clamped to its supported range.
+pub(crate) fn request_timeout(field: &Value) -> Result<Duration, NodeError> {
+    let secs = cfg_u64_opt(field, "timeout_secs")?.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    Ok(Duration::from_secs(secs.clamp(MIN_REQUEST_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS)))
+}
+
+/// True when the request ran past its deadline. A connect timeout is excluded:
+/// nothing was sent, so it stays retry-eligible.
+pub(crate) fn is_request_timeout(e: &reqwest::Error) -> bool {
+    e.is_timeout() && !e.is_connect()
+}
+
+/// A timed-out request is not retried: repeating it would wait out the same limit again.
+pub(crate) fn timeout_error(timeout: Duration) -> NodeError {
+    NodeError::unrecoverable(
+        "TIMEOUT",
+        format!(
+            "The AI request did not finish within {} s. Raise timeout_secs on this node if the model needs longer.",
+            timeout.as_secs()
+        ),
+    )
+}
+
+pub(super) async fn send_and_parse(req: reqwest::RequestBuilder, timeout: Duration) -> Result<(u16, Value), NodeOutput> {
+    let response = match req.timeout(timeout).send().await {
         Ok(r)  => r,
+        Err(e) if is_request_timeout(&e) => return Err(NodeOutput::failure(timeout_error(timeout))),
         Err(e) => {
             let recoverable = crate::nodes::util::is_retryable_network_error(Replay::Safe, &e);
             return Err(if recoverable {
@@ -233,6 +267,16 @@ mod tests {
         assert_eq!(clamp_claude_temperature(1.7), 1.0);
         assert_eq!(clamp_claude_temperature(-0.5), 0.0);
         assert_eq!(clamp_claude_temperature(0.4), 0.4);
+    }
+
+    #[test]
+    fn request_timeout_defaults_clamps_and_rejects_non_numbers() {
+        let secs = |v: Value| request_timeout(&v).map(|d| d.as_secs());
+        assert_eq!(secs(Value::Null).unwrap(), 3600);
+        assert_eq!(secs(json!(2400)).unwrap(), 2400);
+        assert_eq!(secs(json!(1)).unwrap(), 10);
+        assert_eq!(secs(json!(9_999_999)).unwrap(), 86_400);
+        assert_eq!(secs(json!("abc")).unwrap_err().code, "INVALID_CONFIG");
     }
 
     #[test]

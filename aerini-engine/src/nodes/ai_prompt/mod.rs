@@ -18,6 +18,9 @@ pub(crate) use attachments::{
 pub(crate) use shared::spawn_sequence_mock;
 pub(crate) use gemini::gemini_model_id;
 pub(crate) use shared::{
+    request_timeout,
+    is_request_timeout,
+    timeout_error,
     extract_provider_error,
     rejected_param,
     RejectedParam,
@@ -59,7 +62,8 @@ impl Node for AiPromptNode {
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },
                 "temperature":    { "type": "number",  "description": "Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7" },
                 "max_tokens":     { "type": "number",  "description": "Maximum response tokens. Default 2048. Higher values allow longer output but increase cost and latency. The ceiling that actually applies is set by the provider/model you select above, not by this node." },
-                "rate_limit_rpm": { "type": "number",  "description": "Max requests per minute. 0 = unlimited" }
+                "rate_limit_rpm": { "type": "number",  "description": "Max requests per minute. 0 = unlimited" },
+                "timeout_secs":   { "type": "number",  "description": "How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models." }
             }
         })
     }
@@ -138,6 +142,10 @@ impl Node for AiPromptNode {
             Ok(v) => v.unwrap_or(0),
             Err(e) => return NodeOutput::failure(e),
         };
+        let timeout = match shared::request_timeout(&input.input["timeout_secs"]) {
+            Ok(t)  => t,
+            Err(e) => return NodeOutput::failure(e),
+        };
 
         let user_url_raw = input.input["base_url"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("");
         let raw_provider = input.input["provider"].as_str().unwrap_or("auto");
@@ -191,9 +199,9 @@ impl Node for AiPromptNode {
         let client = crate::provider::shared_ai_client();
 
         let mut output = match provider_id {
-            "anthropic" => anthropic::call_anthropic(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
-            "gemini"    => gemini::call_gemini(client, &base_url, &api_key, &model, &system, system_provided, &prompt, temperature, max_tokens, &pa.images, &pa.docs).await,
-            _           => openai::call_openai_compatible(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs, provider_id).await,
+            "anthropic" => anthropic::call_anthropic(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs, timeout).await,
+            "gemini"    => gemini::call_gemini(client, &base_url, &api_key, &model, &system, system_provided, &prompt, temperature, max_tokens, &pa.images, &pa.docs, timeout).await,
+            _           => openai::call_openai_compatible(client, &base_url, &api_key, &model, &system, &prompt, temperature, max_tokens, &pa.images, &pa.docs, provider_id, timeout).await,
         };
         if !pa.logs.is_empty() {
             output.logs.extend(pa.logs);

@@ -6,7 +6,14 @@ const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
 const MIN_W = 180;   // matches the mockup's own clamp
 const MAX_W = 420;
-const DEF_W = 260;
+const DEF_W_MIN = 260;
+const DEF_W_MAX = 400;
+const DEF_W_FRACTION = 0.28; // default tracks window width so a narrow window isn't left with a sliver of canvas
+
+/** First-launch / reset width: about 28% of the window, within 260–400px. Keep in step with --sidebar-w's CSS fallback in variables.css. */
+function defaultWidth(): number {
+  return Math.min(DEF_W_MAX, Math.max(DEF_W_MIN, Math.round(window.innerWidth * DEF_W_FRACTION)));
+}
 const SIDEBAR_STEP = 24; // px per arrow-key press — same value as resize.ts's DRAWER_STEP
 
 function lsGet<T>(key: string, def: T): T {
@@ -119,8 +126,8 @@ function resetTransientState(): void {
 }
 
 function savedWidth(): number {
-  const w = lsGet<unknown>(LS_WIDTH, DEF_W);
-  return typeof w === "number" && Number.isFinite(w) ? w : DEF_W;
+  const w = lsGet<unknown>(LS_WIDTH, null);
+  return typeof w === "number" && Number.isFinite(w) ? w : defaultWidth();
 }
 
 function applySavedWidth(): void {
@@ -174,7 +181,7 @@ export function bindResizeHandle(): void {
   // Double-click: reset to the default width — persisted immediately (unlike
   // resize.ts's drawer reset, sidebar width IS persisted across reloads via
   // LS_WIDTH, so a non-persisted reset would silently revert on next launch).
-  handle.addEventListener("dblclick", () => setWidth(DEF_W, true));
+  handle.addEventListener("dblclick", () => setWidth(defaultWidth(), true));
 
   // Arrow keys resize while the handle has focus — Right = wider, Left =
   // narrower, matching the drag direction (moving the pointer right is what
@@ -184,7 +191,7 @@ export function bindResizeHandle(): void {
   // subsequent drag silently ignoring it and snapping back to the last
   // persisted width.
   handle.addEventListener("keydown", (e) => {
-    const cur = parseInt(document.documentElement.style.getPropertyValue("--sidebar-w"), 10) || DEF_W;
+    const cur = parseInt(document.documentElement.style.getPropertyValue("--sidebar-w"), 10) || defaultWidth();
     if (e.key === "ArrowRight")     { e.preventDefault(); setWidth(cur + SIDEBAR_STEP, true); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); setWidth(cur - SIDEBAR_STEP, true); }
   });

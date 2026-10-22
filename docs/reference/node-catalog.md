@@ -425,6 +425,7 @@ Ports. In: `input` (In), `attachments` (Files); Out: `output` (Done), `on_error`
 | `model` | string | No | Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash. |
 | `system` | string | No | System instructions for the agent's persona and behavior. |
 | `temperature` | number | No | Creativity (0.0-1.0). Agents work best at 0.2-0.5. |
+| `timeout_secs` | number | No | How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models. |
 | `tools` | string | No | JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers; the node returns the model's tool requests and does not run them. Anthropic ignores tools. |
 
 Output fields: `awaiting_tools`, `finished`, `iterations`, `reasoning`, `result`, `tool_calls`, `truncated`.
@@ -471,6 +472,7 @@ Ports. In: `input` (In), `attachments` (Files); Out: `output` (Success), `on_err
 | `rate_limit_rpm` | number | No | Max requests per minute. 0 = unlimited |
 | `system` | string | No | System / persona instructions |
 | `temperature` | number | No | Creativity: 0.0 (precise) to 2.0 (creative). Default 0.7 |
+| `timeout_secs` | number | No | How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models. |
 
 Output fields: `content`, `input_tokens`, `model`, `output_tokens`, `provider`.
 

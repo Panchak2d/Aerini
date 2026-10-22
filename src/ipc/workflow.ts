@@ -141,6 +141,10 @@ export const startScheduledWorkflow = (workflowId: string, portOverride?: number
 export const stopScheduledWorkflow = (workflowId: string) =>
   invoke<void>("stop_scheduled_workflow", { workflowId });
 
+/** Cancels only the run in flight for a started workflow; the job keeps listening. Resolves normally when nothing is running. */
+export const cancelScheduledRun = (workflowId: string) =>
+  invoke<void>("cancel_scheduled_run", { workflowId });
+
 export const getScheduledJobs = () =>
   withTimeout(invoke<ScheduledJobRow[]>("get_scheduled_jobs"), SCHEDULER_QUERY_TIMEOUT_MS, "get_scheduled_jobs");
 

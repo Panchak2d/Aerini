@@ -89,7 +89,7 @@ Those four platforms are all that is published. There is no prebuilt program for
 
 ### Step 1: Find the right files in the release list
 
-A release lists dozens of files, because the desktop app's installers are attached to the same page. Only some are for `aerini-mcp`. Scroll the **Assets** list and use the name to tell them apart:
+A release lists dozens of files, because the desktop app's installers are attached to the same page. Only some are for `aerini-mcp`. The release notes have an **MCP server** table with a link for each platform and mode, plus the matching `.sha256`, which saves the search. In the **Assets** list, use the name to tell them apart:
 
 | File name starts with | What it is | Do you need it? |
 |---|---|---|
