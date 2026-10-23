@@ -439,6 +439,12 @@ async fn run_accept_loop(
     deadline:     std::time::Instant,
     cancel_token: Option<CancellationToken>,
 ) {
+    // One request per connection. With keep-alive (hyper's default) the
+    // connection stays open after the response, so the per-connection wait
+    // below runs to its 30s cap and the workflow does not start until then.
+    let mut http = http1::Builder::new();
+    http.keep_alive(false);
+
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -494,7 +500,7 @@ async fn run_accept_loop(
         // serve_connection drives the full HTTP/1.1 request/response exchange.
         // Chunked encoding, pipelining, large headers, and malformed requests are
         // all handled by hyper's parser — no manual byte slicing.
-        let conn = http1::Builder::new().serve_connection(
+        let conn = http.serve_connection(
             io,
             service_fn(move |req: Request<Incoming>| {
                 let state_i = Arc::clone(&state_c);

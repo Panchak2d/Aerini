@@ -77,7 +77,7 @@ async fn parallel_route_failure(
         execution_id:      s.execution_id.clone(),
         workflow_id:       workflow.id.clone(),
         success:           false,
-        node_outputs:      HashMap::new(),
+        node_outputs:      (*s.snapshot().node_outputs).clone(),
         logs:              s.logs.clone(),
         error:             Some(err_msg),
         validation_errors: vec![],
@@ -547,7 +547,12 @@ pub(super) async fn run_inner_parallel(
                 }
 
                 let (should_abort, result) = parallel_route_failure(
-                    &node_id, format!("Node '{}' failed: {}", node_id, err_msg),
+                    &node_id,
+                    format!(
+                        "Node '{}' failed: {}",
+                        node_map.get(node_id.as_str()).map_or(node_id.as_str(), |n| n.name.as_str()),
+                        err_msg,
+                    ),
                     &executor, &workflow, &graph, &mut active_nodes, &state,
                 ).await;
                 if should_abort { abort = true; failure_result = result; }
@@ -617,7 +622,12 @@ pub(super) async fn run_inner_parallel(
                 }
 
                 let (should_abort, result) = parallel_route_failure(
-                    &node_id, format!("Node '{}' failed: {}", node_id, err_msg),
+                    &node_id,
+                    format!(
+                        "Node '{}' failed: {}",
+                        node_map.get(node_id.as_str()).map_or(node_id.as_str(), |n| n.name.as_str()),
+                        err_msg,
+                    ),
                     &executor, &workflow, &graph, &mut active_nodes, &state,
                 ).await;
                 if should_abort { abort = true; failure_result = result; }
@@ -880,6 +890,40 @@ mod tests {
             !r.node_outputs.contains_key("n_after"),
             "downstream node must not appear in node_outputs when upstream failed without routing"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_run_keeps_earlier_outputs_and_names_the_failed_node_in_both_modes() {
+        for parallel in [false, true] {
+            let mut registry = NodeRegistry::new();
+            registry.register(Arc::new(FailingNode));
+            registry.register(Arc::new(InstantNode));
+            let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCreds))
+                .with_parallel_execution(parallel);
+
+            let mut failing = make_node("n_fail", "parallel_failing_test");
+            failing.name = "Fail Step".to_string();
+            let workflow = Workflow {
+                schema_version: CURRENT_VERSION.to_string(),
+                id: "wf_keep_outputs".to_string(),
+                name: "Keep Outputs".to_string(),
+                description: String::new(),
+                nodes: vec![make_node("n_ok", "parallel_instant_test"), failing],
+                edges: vec![make_edge("n_ok", "n_fail")],
+                metadata: Default::default(),
+                max_duration_secs: None,
+                unlimited_duration: false,
+                parallel_execution: parallel,
+                max_concurrent_nodes: None,
+                settings: Default::default(),
+            };
+
+            let r = executor.run(Arc::new(workflow), HashMap::new()).await.unwrap();
+            assert!(!r.success, "parallel={parallel}");
+            assert!(r.node_outputs.contains_key("n_ok"), "parallel={parallel}");
+            let error = r.error.unwrap();
+            assert!(error.contains("'Fail Step'") && !error.contains("n_fail"), "parallel={parallel}: {error}");
+        }
     }
 
     // Cancel fired mid-execute in parallel mode, on a node with an on_error

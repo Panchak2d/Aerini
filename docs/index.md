@@ -68,6 +68,7 @@ If you're deciding whether it's safe to expose a Webhook node to the internet, y
 | Install or manage a `.wasm` plugin node | [Plugins](guide/plugins.md) |
 | Check on every workflow's status and memory use at once | [Monitor](guide/monitor.md) |
 | Chat with a workflow inside the desktop app | [Chat Panel](guide/chat-panel.md) |
+| Build a chat bot, from a template or by hand | [Build a Chat Bot](guide/chat-bot.md) |
 | Drop a chat widget onto a web page | [Widget Embedding](guide/widget-embedding.md) |
 | See a worked example end to end | [Examples](guide/examples.md) |
 | Fix a stuck or failed run | [Troubleshooting](troubleshooting.md) |

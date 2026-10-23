@@ -55,6 +55,7 @@ export default defineConfig({
           { text: 'Monitor', link: '/guide/monitor' },
           { text: 'Local Models', link: '/guide/local-models' },
           { text: 'Chat Panel', link: '/guide/chat-panel' },
+          { text: 'Build a Chat Bot', link: '/guide/chat-bot' },
           { text: 'Widget Embedding', link: '/guide/widget-embedding' },
           { text: 'Building with an AI Agent', link: '/guide/agents' },
           { text: 'Security', link: '/guide/security' },

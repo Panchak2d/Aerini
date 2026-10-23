@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { NODE_IDS } from "../node-ids";
 import type { CanvasNode } from "../canvas/Node";
 import { showExpressionPicker } from "../expression-picker";
-import { describeModelFetchError } from "../ipc/providers";
+import { describeModelFetchError, type OllamaTarget } from "../ipc/providers";
+import { mountOllamaModelControl } from "../ollama-model-control";
 import {
   mk, mkSection, mkField, mkCustomSelect, CRON_PRESETS,
   type ExtensionContext, type NodeConfigExtension,
@@ -47,6 +48,21 @@ export interface PropSchema {
 
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
 export const AI_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT, NODE_IDS.IMAGE_GEN]);
+const OLLAMA_NODE_IDS: Set<string> = new Set([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT]);
+
+/** The server the Pull and Delete buttons would act on, or `null` when the
+ *  node isn't pointed at a local server yet. Whether it is really Ollama is
+ *  decided by the backend probe, never here. */
+function ollamaTargetFor(node: CanvasNode): OllamaTarget | null {
+  const config = node.data.config as Record<string, unknown>;
+  const provider = String(config["provider"] ?? "auto");
+  const base_url = String(config["base_url"] ?? "").trim();
+  if ((provider !== "local" && provider !== "auto") || !base_url) return null;
+  const credential_id = node.data.credentials["api_key"];
+  if (credential_id) return { provider, base_url, credential_id };
+  const api_key = String(config["api_key"] ?? "");
+  return api_key ? { provider, base_url, api_key } : { provider, base_url };
+}
 
 interface CredentialFieldInfo { key: string; credType?: string; inline?: boolean; }
 
@@ -153,12 +169,15 @@ function renderTextField(
  *  button's own label giving transient feedback. Requires `ctx.fetchModels`
  *  (see `ExtensionContext`) — if a node schema sets `x-aerini-model-picker`
  *  without wiring that hook, this silently degrades to a plain text field,
- *  same fallback logic as a fetch failure. */
+ *  same fallback logic as a fetch failure. On AI Prompt and AI Agent it
+ *  also mounts the Ollama pull/delete control under the button, which
+ *  re-runs the fetch after it changes what the server has installed. */
 function renderModelPickerField(
   key: string, prop: PropSchema, cur: string,
   node: CanvasNode, canvasEl: HTMLCanvasElement,
   onChange: () => void, syncRequired: () => void,
   fetchModels: (() => Promise<string[]>) | undefined,
+  ctx?: ExtensionContext,
 ): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "field-multiline-wrap"; // vertical stack, same gap as other composite fields
@@ -174,14 +193,29 @@ function renderModelPickerField(
   fetchBtn.textContent = FETCH_LABEL;
   wrap.appendChild(fetchBtn);
 
+  const ollamaSlot = document.createElement("div");
+  wrap.appendChild(ollamaSlot);
+
   const listSlot = document.createElement("div");
   wrap.appendChild(listSlot);
 
-  fetchBtn.addEventListener("click", async () => {
+  let fetchSeq = 0;
+  async function runFetch(afterChange = false): Promise<void> {
+    const seq = ++fetchSeq;
     fetchBtn.disabled = true;
     fetchBtn.textContent = "Fetching…";
     try {
-      const models = await fetchModels();
+      const models = await fetchModels!();
+      if (seq !== fetchSeq) return;
+      if (!models.length && afterChange) {
+        listSlot.innerHTML = "";
+        const none = document.createElement("div");
+        none.className = "config-hint";
+        none.textContent = "No models are installed on this server.";
+        listSlot.appendChild(none);
+        fetchBtn.textContent = FETCH_LABEL;
+        return;
+      }
       if (!models.length) throw new Error("no models returned");
 
       listSlot.innerHTML = "";
@@ -202,6 +236,7 @@ function renderModelPickerField(
 
       fetchBtn.textContent = FETCH_LABEL;
     } catch (err) {
+      if (seq !== fetchSeq) return;
       // The free-text field above is untouched and fully usable either way.
       // The button's own label still gives brief feedback, but the reason
       // (missing/bad key, SSRF block, network error, ...) is now shown
@@ -215,9 +250,28 @@ function renderModelPickerField(
       listSlot.appendChild(errHint);
       setTimeout(() => { fetchBtn.textContent = FETCH_LABEL; }, 2500);
     } finally {
-      fetchBtn.disabled = false;
+      if (seq === fetchSeq) fetchBtn.disabled = false;
     }
-  });
+  }
+  fetchBtn.addEventListener("click", () => { void runFetch(); });
+
+  if (ctx?.onClose && ctx.onFieldChange && OLLAMA_NODE_IDS.has(node.data.node_type_id)) {
+    const config = node.data.config as Record<string, unknown>;
+    const control = mountOllamaModelControl({
+      getTarget: () => ollamaTargetFor(node),
+      getModel: () => String(config[key] ?? ""),
+      onModelsChanged: () => { void runFetch(true); },
+    });
+    ollamaSlot.appendChild(control.el);
+    let lastTarget = JSON.stringify(ollamaTargetFor(node));
+    ctx.onFieldChange(() => {
+      const now = JSON.stringify(ollamaTargetFor(node));
+      if (now === lastTarget) return;
+      lastTarget = now;
+      control.refresh();
+    });
+    ctx.onClose(() => control.dispose());
+  }
 
   return wrap;
 }
@@ -712,9 +766,10 @@ function renderField(
   node: CanvasNode, canvasEl: HTMLCanvasElement,
   onChange: () => void, syncRequired: () => void,
   fetchModels: (() => Promise<string[]>) | undefined,
+  ctx?: ExtensionContext,
 ): HTMLElement {
   if (key === "cron_expr") return renderCronField(key, cur, node, onChange, syncRequired);
-  if (prop["x-aerini-model-picker"]) return renderModelPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired, fetchModels);
+  if (prop["x-aerini-model-picker"]) return renderModelPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired, fetchModels, ctx);
   if (key === "base_url" && AI_NODE_IDS.has(node.data.node_type_id)) return renderBaseUrlField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   if (prop["x-aerini-path-picker"]) return renderPathPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   if (prop.enum)            return renderEnumField(key, prop, cur, node, onChange, syncRequired);
@@ -764,7 +819,7 @@ export function renderConfigFieldsLoop(
 
     fieldEl = mkField(
       formatLabel(key),
-      () => renderField(key, prop, cur, node, canvasEl, fieldOnChange, syncRequired, fetchModels),
+      () => renderField(key, prop, cur, node, canvasEl, fieldOnChange, syncRequired, fetchModels, ctx),
       hint,
       isRequired,
     );

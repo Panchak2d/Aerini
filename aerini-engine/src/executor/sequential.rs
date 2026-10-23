@@ -191,7 +191,7 @@ impl WorkflowExecutor {
                                     success:      false,
                                     node_outputs: (*s.snapshot().node_outputs).clone(),
                                     logs:         s.logs.clone(),
-                                    error: Some(format!("Node '{}' failed: {}", node_id, err_msg)),
+                                    error: Some(format!("Node '{}' failed: {}", node_def.name, err_msg)),
                                     validation_errors: validation_warnings.clone(),
                                 });
                             }
@@ -355,7 +355,7 @@ impl WorkflowExecutor {
                             success:      false,
                             node_outputs: (*s.snapshot().node_outputs).clone(),
                             logs:         s.logs.clone(),
-                            error: Some(format!("Node '{}' failed: {}", node_id, err_msg)),
+                            error: Some(format!("Node '{}' failed: {}", node_def.name, err_msg)),
                             validation_errors: validation_warnings.clone(),
                         });
                     }

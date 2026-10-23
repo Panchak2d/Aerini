@@ -12,7 +12,7 @@ const ai   = (config: Record<string, unknown> = {}) => node("ai", "AI Prompt", "
   prompt: "History: {{AI Memory (read).output.messages}} User: {{Webhook.output.body.message}}",
   ...config,
 });
-const out  = node("out", "Output", "output");
+const out  = node("out", "Output", "output", { field: "content" });
 
 describe("checkChatReadiness", () => {
   it("reports nothing for a fully wired chat workflow", () => {
@@ -82,5 +82,41 @@ describe("checkChatReadiness", () => {
 
   it("returns nothing when the workflow has no Webhook", () => {
     expect(checkChatReadiness([ai(), out], [edge("ai", "out")], { checkFiles: true })).toEqual([]);
+  });
+
+  const reply = (config: Record<string, unknown> = { prompt: "{{Webhook.output.body.message}}" }) =>
+    node("ai", "AI Prompt", "ai_prompt", config);
+  const chain = [edge("hook", "ai"), edge("ai", "out")];
+
+  it("flags an AI node after the Webhook with a blank prompt, using the Agent's own field for an Agent", () => {
+    const agent = node("agent", "AI Agent", "ai_agent", { goal: "  " });
+    expect(checkChatReadiness([hook, reply({ prompt: "" }), out], chain, { checkFiles: false })).toEqual([
+      { kind: "prompt_unset", webhook: { id: "hook", name: "Webhook" }, node: { id: "ai", name: "AI Prompt" }, field: "prompt" },
+    ]);
+    expect(checkChatReadiness([hook, agent, out], [edge("hook", "agent"), edge("agent", "out")], { checkFiles: false })).toEqual([
+      { kind: "prompt_unset", webhook: { id: "hook", name: "Webhook" }, node: { id: "agent", name: "AI Agent" }, field: "goal" },
+    ]);
+  });
+
+  it("does not flag a blank prompt on an AI node the Webhook never reaches", () => {
+    expect(checkChatReadiness([hook, reply({}), out], [edge("ai", "out")], { checkFiles: false })).toEqual([]);
+  });
+
+  it("flags the Output when it shows an AI node's whole result, and not once a Field or Source Node is chosen", () => {
+    const raw = node("out", "Output", "output");
+    expect(checkChatReadiness([hook, reply(), raw], chain, { checkFiles: false })).toEqual([
+      { kind: "reply_raw", output: { id: "out", name: "Output" }, source: { id: "ai", name: "AI Prompt" }, field: "content" },
+    ]);
+    for (const config of [{ field: "content" }, { source_node: "ai" }]) {
+      expect(checkChatReadiness([hook, reply(), node("out", "Output", "output", config)], chain, { checkFiles: false })).toEqual([]);
+    }
+  });
+
+  it("does not flag an Output fed by a non-AI node or by an AI node's error port", () => {
+    const raw  = node("out", "Output", "output");
+    const code = node("code", "Code", "code");
+    expect(checkChatReadiness([hook, code, raw], [edge("hook", "code"), edge("code", "out")], { checkFiles: false })).toEqual([]);
+    const viaError = [edge("hook", "ai"), { ...edge("ai", "out"), from_port: "on_error" }];
+    expect(checkChatReadiness([hook, reply(), raw], viaError, { checkFiles: false })).toEqual([]);
   });
 });

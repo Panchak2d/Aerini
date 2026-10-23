@@ -8,7 +8,7 @@ Aerini is pre-1.0 and under active development. The workflow file format and int
 
 ![Aerini running a workflow with the chat panel open](.github/readme/hero.png)
 
-Get it at **[aerini.org](https://aerini.org/)**, or from the [Releases page](https://github.com/Panchak2d/aerini/releases) if you'd rather skip the website. Docs live in [`docs/`](docs/index.md). Pricing for the commercial license is at [aerini.org/pricing](https://aerini.org/pricing).
+Get it at **[aerini.org](https://aerini.org/)**, or from the [Releases page](https://github.com/Panchak2d/aerini/releases) if you'd rather skip the website. Docs are at **[docs.aerini.org](https://docs.aerini.org/)**, and the source is in [`docs/`](docs/index.md). Pricing for the commercial license is at [aerini.org/pricing](https://aerini.org/pricing).
 
 ## What you can build
 
@@ -137,6 +137,8 @@ The first build takes a few minutes while Rust compiles. After that, changes reb
 
 ## Documentation
 
+Browse and search everything at **[docs.aerini.org](https://docs.aerini.org/)**. The same pages live in [`docs/`](docs/index.md) in this repository.
+
 | Guide | What it covers |
 | - | - |
 | [Introduction](docs/index.md) | What Aerini is, who it's for, what it can't do |
@@ -158,10 +160,13 @@ The first build takes a few minutes while Rust compiles. After that, changes reb
 | [Security](docs/guide/security.md) | Encryption, dangerous nodes, SSRF protection, hardening a server |
 | [Chat Panel](docs/guide/chat-panel.md) | Chatting with a workflow inside the desktop app |
 | [Widget Embedding](docs/guide/widget-embedding.md) | Dropping the chat widget into a web page |
+| [Local Models Quickstart](docs/guide/local-models-quickstart.md) | A first reply from a model running on your own machine, step by step |
 | [Local Models](docs/guide/local-models.md) | Using Ollama and other OpenAI-compatible local servers |
+| [Chat with a Local Model](docs/guide/chat-with-a-local-model.md) | Building a workflow and chatting with it in the Chat Panel |
 | [Server Deployment](docs/operations/server-deploy.md) | Running workflows 24/7 on Docker or a Linux box |
 | [Server CLI Reference](docs/operations/server-cli-reference.md) | Every `aerini-server serve`/`api` flag |
 | [Server API Reference](docs/operations/server-api-reference.md) | REST endpoints, SSE events, scoped tokens |
+| [MCP Quickstart](docs/operations/mcp-quickstart.md) | Letting an AI assistant draft workflows for you, with no server |
 | [MCP Server for AI Agents](docs/operations/mcp.md) | Installing `aerini-mcp`, configuring Claude Code and Claude Desktop, limits, what to lock down |
 | [Building with an AI Agent](docs/guide/agents.md) | The order an agent should work in, and what to keep a person in charge of |
 | [Updating](docs/operations/updating.md) | Desktop updates, server binary updates, workflow schema migration |

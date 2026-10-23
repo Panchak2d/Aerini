@@ -506,7 +506,7 @@ impl WorkflowExecutor {
             }
         };
 
-        // one run-level memory-tracking group,
+        // One run-level memory-tracking group,
         // covering the entire run (both branches below). Keyed by
         // `workflow.id` — safe because desktop's `ActiveRunToken` exec-lock,
         // `aerini-server`'s `ApiState::exec_locks`, and `SchedulerDaemon`'s
@@ -520,7 +520,7 @@ impl WorkflowExecutor {
         // nothing extra needed here.
         let mem_meta = crate::mem_tracking::GroupMeta::run(workflow.id.clone());
 
-        // wraps the existing mem_tracking-tracked run in perf_monitor's aggregation layer,
+        // Wraps the existing mem_tracking-tracked run in perf_monitor's aggregation layer,
         // one level further out. Same `workflow.id` key as
         // `mem_meta` above, same safety argument (see perf_monitor's own
         // module doc, "Key — workflow_id, not a fresh run id"), so no
@@ -826,7 +826,7 @@ impl WorkflowExecutor {
                 }
                 ctx.metadata.insert("__caller_is_admin".to_string(), Value::Bool(self.config.caller_is_admin));
 
-                // current loop-body iteration, 0-based. Absent (not just null)
+                // Current loop-body iteration, 0-based. Absent (not just null)
                 // for top-level nodes and the Loop node itself,
                 // so `.get("__loop_iteration_index")` is a reliable "am I inside
                 // a loop body right now" check for any node that wants it.
@@ -916,7 +916,7 @@ impl WorkflowExecutor {
             }
         }
 
-        // one node-level memory-tracking group
+        // One node-level memory-tracking group
         // per attempt, nested inside whichever Run group `run()` registered
         // (nesting handled by tracking-allocator itself — see
         // mem_tracking.rs's module doc). Built from `input`'s own

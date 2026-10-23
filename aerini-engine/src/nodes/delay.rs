@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
+use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts};
 use super::util::cfg_f64_opt;
@@ -39,15 +40,22 @@ impl Node for DelayNode {
             Ok(v) => v.unwrap_or(1.0),
             Err(e) => return NodeOutput::failure(e),
         };
-        let unit     = input.input["unit"].as_str().unwrap_or("s");
+        let duration = duration.max(0.0);
+        let unit = match input.input["unit"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+            None => "s",
+            Some(u @ ("ms" | "s" | "m" | "h")) => u,
+            Some(other) => return NodeOutput::failure(NodeError::unrecoverable(
+                "INVALID_CONFIG",
+                format!("unit must be one of ms, s, m, h (got '{other}')"),
+            )),
+        };
 
         let ms: u64 = match unit {
-            "ms" => duration as u64,
-            "s"  => (duration * 1_000.0)     as u64,
-            "m"  => (duration * 60_000.0)    as u64,
-            "h"  => (duration * 3_600_000.0) as u64,
-            _    => (duration * 1_000.0)     as u64,
-        }.min(3_600_000); // hard cap: 1 hour
+            "ms" => duration,
+            "m"  => duration * 60_000.0,
+            "h"  => duration * 3_600_000.0,
+            _    => duration * 1_000.0,
+        }.min(3_600_000.0) as u64; // hard cap: 1 hour
 
         sleep(Duration::from_millis(ms)).await;
 
@@ -98,5 +106,37 @@ mod tests {
         let err = out.error.expect("expected error");
         assert_eq!(err.code, "INVALID_CONFIG");
         assert!(!err.recoverable);
+    }
+
+    #[tokio::test]
+    async fn unknown_unit_fails_with_invalid_config() {
+        let out = DelayNode.execute(NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        json!({ "duration": 5, "unit": "min" }),
+            context:      ExecutionContext::default(),
+        }).await;
+
+        assert!(!out.success);
+        assert_eq!(out.error.expect("expected error").code, "INVALID_CONFIG");
+    }
+
+    #[tokio::test]
+    async fn negative_duration_clamps_to_zero() {
+        let out = DelayNode.execute(NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "n1".into(),
+            workflow_id:  "w1".into(),
+            execution_id: "e1".into(),
+            input:        json!({ "duration": -3, "unit": "s" }),
+            context:      ExecutionContext::default(),
+        }).await;
+
+        assert!(out.success);
+        assert_eq!(out.output.expect("expected output data")["waited_ms"], json!(0));
     }
 }

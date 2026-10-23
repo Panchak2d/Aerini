@@ -952,6 +952,7 @@ pub fn run() {
             ));
             app.manage(Arc::new(Reloadable::new(plugin_load_report)));
             app.manage(Arc::new(tokio::sync::Mutex::new(())));
+            app.manage(commands::providers::PullState::default());
 
             // Async startup cleanup of temp media files older than 24h —
             // spawn_blocking so the std::fs directory scan doesn't occupy a tokio thread.
@@ -1180,6 +1181,10 @@ pub fn run() {
             commands::update::get_update_check_on_startup,
             commands::update::set_update_check_on_startup,
             commands::providers::list_provider_models,
+            commands::providers::ollama_probe,
+            commands::providers::ollama_pull_model,
+            commands::providers::ollama_cancel_pull,
+            commands::providers::ollama_delete_model,
             pick_folder_dialog,
             pick_plugin_file_dialog,
             pick_file_dialog,

@@ -448,7 +448,7 @@ Send a prompt to an AI model, Claude, GPT, Gemini, or a local Ollama model, and 
 |---|---|---|
 | `prompt` | Prompt | Required, unless the node has at least one readable attachment (for example a file-only Chat message), in which case a default instruction stands in for the missing text. |
 | `system` | System | System/persona instructions. |
-| `model` | Model | Model name, e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash`, `llama3`. Blank uses the provider's default (`local` has none and needs a name). A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. |
+| `model` | Model | Model name, e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash`, `llama3`. Blank uses the provider's default (`local` has none and needs a name). A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. On the desktop app, with Provider `local` pointed at an Ollama server, **Pull model** and **Delete model** buttons appear under it too ([Local Models](local-models.md#pulling-and-deleting-models)). |
 | `provider` | Provider | `auto`, `openai`, `anthropic`, `gemini`, or `local`. `auto` detects from Base URL, including local servers such as Ollama. |
 | `base_url` | Base URL | API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here specifically, for local models like Ollama. See [Local Models](local-models.md) for how to point this at one. |
 | `api_key` | API Key | Resolved from Connections. |
@@ -472,7 +472,7 @@ Give an AI model a goal and a set of tool definitions. The node makes one model 
 | `tools` | Tools | JSON array of tool definitions, each `{name, description, parameters}` (the OpenAI `{type, function}` form is accepted too). Used with OpenAI-compatible and Gemini providers; Anthropic ignores them and says so in `reasoning`. Text that is not a JSON array of named tools fails the node with `INVALID_TOOLS`. |
 | `context` | Context | Extra context to hand the agent, e.g. from earlier nodes or variables. |
 | `provider` | Provider | Required. `openai`, `anthropic`, `gemini`, `local`, or `auto`. OpenAI, Gemini, and `local` receive the tool definitions; Anthropic receives none and answers in a single pass. |
-| `model` | Model | E.g. `gpt-5.6` (OpenAI), `claude-sonnet-5` (Anthropic), `gemini-3.6-flash` (Gemini). A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. |
+| `model` | Model | E.g. `gpt-5.6` (OpenAI), `claude-sonnet-5` (Anthropic), `gemini-3.6-flash` (Gemini). A **Fetch Models** button queries the provider's `/models` endpoint and offers a dropdown; typing a name directly always still works if the fetch fails or the provider doesn't support it. On the desktop app, with Provider `local` pointed at an Ollama server, **Pull model** and **Delete model** buttons appear under it too ([Local Models](local-models.md#pulling-and-deleting-models)). |
 | `base_url` | Base URL | API base URL, leave blank for the provider's default. Loopback and private-network addresses are allowed here too, for local models like Ollama; see [Local Models](local-models.md). |
 | `api_key` | API Key | Resolved from Connections. |
 | `max_iterations` | Max Iterations | Not used: the agent makes one call. Kept so saved workflows still load. |
@@ -729,8 +729,8 @@ Pause the workflow for a fixed duration before continuing to the next node.
 
 | Field | Label | Notes |
 |---|---|---|
-| `duration` | Duration | How long to wait. Default 1. |
-| `unit` | Unit | `ms`, `s`, `m`, or `h`. Default `s`. |
+| `duration` | Duration | How long to wait. Default 1. The wait is capped at one hour. |
+| `unit` | Unit | `ms`, `s`, `m`, or `h`. Default `s`. Any other value fails with `INVALID_CONFIG`. |
 
 **Ports:** default (In → Out).
 

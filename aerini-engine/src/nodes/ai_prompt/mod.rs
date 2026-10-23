@@ -3,6 +3,7 @@ mod shared;
 mod openai;
 mod anthropic;
 mod gemini;
+pub mod ollama;
 
 // Re-export the types and helpers that ai_agent.rs imports via `super::ai_prompt::`.
 // Keeps ai_agent.rs import path unchanged after the module split.
