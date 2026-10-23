@@ -96,18 +96,27 @@ export function getIconBitmap(typeId: string, color: string): ImageBitmap | null
   return _bitmapCache.get(`${typeId}:${color}`) ?? null;
 }
 
+// Chromium rejects createImageBitmap(svgBlob) with InvalidStateError, so the SVG goes through an <img> first.
+// A data: URL, not a blob: URL: the production CSP's img-src allows data: but not blob:, so a blob URL
+// loads in `tauri dev` and is blocked in a built app.
+async function decodeSvg(svg: string): Promise<ImageBitmap> {
+  const img = new Image();
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  await img.decode();
+  return await createImageBitmap(img);
+}
+
 async function loadBitmap(typeId: string, inner: string, color: string, size: number): Promise<void> {
   const key = `${typeId}:${color}`;
   if (_bitmapCache.has(key)) return;
   try {
-    const blob = new Blob([buildSvg(typeId, inner, color, size)], { type: "image/svg+xml" });
-    _bitmapCache.set(key, await createImageBitmap(blob));
+    _bitmapCache.set(key, await decodeSvg(buildSvg(typeId, inner, color, size)));
   } catch {
     // Silently skip — canvas falls back to accent letter
   }
 }
 
-import { getCanvasColors } from "./canvas/theme-colors";
+import { getCanvasColors, resolveNoteColors } from "./canvas/theme-colors";
 
 // The exact, complete set of colors Node.ts's draw() can ever pass as
 // `accent` to getIconBitmap (its one call site) — verified against
@@ -129,6 +138,12 @@ export function accentColors(): string[] {
   return [c.catAction, c.catAI, c.catLogic, c.catUtility, c.error];
 }
 
+// Minimap note chips draw the note icon in the note's own ink color, which is
+// not always a category/status accent (default = textSecondary, blue = actionNav).
+export function noteInkColors(): string[] {
+  return [...new Set(Object.values(resolveNoteColors(getCanvasColors())).map((n) => n.text))];
+}
+
 // Preload at physical pixel size (dpr * 16) so bitmaps are sharp on retina displays.
 // The canvas transform (dpr * zoom) maps 16 world-coord units to exactly these pixels at zoom=1.
 export async function preloadAllIcons(): Promise<void> {
@@ -138,6 +153,9 @@ export async function preloadAllIcons(): Promise<void> {
     for (const color of accentColors()) {
       tasks.push(loadBitmap(typeId, inner, color, size));
     }
+  }
+  for (const color of noteInkColors()) {
+    tasks.push(loadBitmap("note", NODE_SVG_INNER.note, color, size));
   }
   await Promise.allSettled(tasks);
 }

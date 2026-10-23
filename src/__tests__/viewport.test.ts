@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, afterEach } from "vitest";
-import { visibleViewport, parseSavedViewport } from "../canvas/viewport";
+import { visibleViewport, fitViewports, parseSavedViewport } from "../canvas/viewport";
 
 const rect = (r: Partial<DOMRect>): DOMRect =>
   ({ width: 800, height: 600, left: 0, top: 0, right: 800, bottom: 600, x: 0, y: 0, toJSON() { return {}; }, ...r }) as DOMRect;
@@ -22,7 +22,15 @@ function mountDrawer(top: number): void {
 afterEach(() => {
   document.getElementById("chat-panel")?.remove();
   document.getElementById("output-drawer")?.remove();
+  document.getElementById("minimap-wrap")?.remove();
 });
+
+function mountMinimap(r: Partial<DOMRect>): void {
+  const wrap = document.createElement("div");
+  wrap.id = "minimap-wrap";
+  wrap.getBoundingClientRect = () => rect(r);
+  document.body.appendChild(wrap);
+}
 
 describe("visibleViewport", () => {
   it("returns the full canvas rect when nothing overlays it", () => {
@@ -50,6 +58,26 @@ describe("visibleViewport", () => {
     Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
     mountChat(900);
     expect(visibleViewport(rect({})).width).toBe(0);
+  });
+});
+
+describe("fitViewports", () => {
+  it("without a minimap it is exactly the visible viewport", () => {
+    Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+    expect(fitViewports(rect({}))).toEqual([{ width: 800, height: 600 }]);
+  });
+
+  it("an overlapping minimap yields the region above it and the region left of it", () => {
+    Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+    mountMinimap({ left: 640, right: 788, top: 500, bottom: 588, width: 148, height: 88 });
+    expect(fitViewports(rect({}))).toEqual([{ width: 800, height: 500 }, { width: 640, height: 600 }]);
+  });
+
+  it("a minimap lying entirely below the drawer-trimmed viewport does not trim anything", () => {
+    Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+    mountDrawer(300);
+    mountMinimap({ left: 640, right: 788, top: 500, bottom: 588, width: 148, height: 88 });
+    expect(fitViewports(rect({}))).toEqual([{ width: 800, height: 300 }]);
   });
 });
 

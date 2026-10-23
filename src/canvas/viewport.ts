@@ -16,6 +16,26 @@ export function visibleViewport(r: DOMRect): VisibleViewport {
   return { width: unobstructedWidth(r), height: unobstructedHeight(r) };
 }
 
+/** Regions of `r` (each measured from its top-left corner) that fit-to-screen may use.
+ * The minimap is an absolutely positioned overlay in the bottom-right corner, so
+ * the free area is not one rectangle: either everything above it or everything
+ * left of it. Both are returned and the caller keeps whichever fits the content
+ * larger. Without an overlapping minimap this is just `visibleViewport(r)`. */
+export function fitViewports(r: DOMRect): VisibleViewport[] {
+  const vp = visibleViewport(r);
+  const wrap = document.getElementById("minimap-wrap");
+  if (!wrap) return [vp];
+  const m = wrap.getBoundingClientRect();
+  if (!(m.width > 0 && m.height > 0)) return [vp];
+  const left = m.left - r.left;
+  const top = m.top - r.top;
+  if (left >= vp.width || top >= vp.height || m.right <= r.left || m.bottom <= r.top) return [vp];
+  return [
+    { width: vp.width, height: Math.max(0, top) },
+    { width: Math.max(0, left), height: vp.height },
+  ];
+}
+
 function unobstructedWidth(r: DOMRect): number {
   const chat = document.getElementById("chat-panel");
   const chatWidth = chat ? chat.offsetWidth : 0;

@@ -1,28 +1,17 @@
-// Paper-theme canvas color fix.
-//
 // The Canvas 2D renderer (Node.ts, Canvas.ts, Connector.ts, Minimap.ts) can't
-// consume CSS var() — fillStyle/strokeStyle need literal computed color
-// strings. This module is the one place that resolves variables.css's custom
-// properties into those literals, so every canvas file reads real theme
-// colors instead of hardcoding Midnight's hex directly.
+// consume CSS var(): fillStyle/strokeStyle need literal computed color strings.
+// This module is the one place that resolves variables.css's custom properties
+// into those literals, behind a live cache that a <html data-theme> change
+// invalidates.
 //
-// Pattern generalized from Minimap.ts's original resolveMinimapColors() (pure
-// function, unit-testable without a real canvas 2D context — jsdom has none,
-// see canvas-safety.test.ts's own note) and Node.ts's original catAccents()
-// (live cache + <html data-theme> MutationObserver, so a switch mid-session
-// invalidates it). Both existed independently before this batch; this merges
-// them into one cache/observer so Canvas.ts and Connector.ts — which had
-// neither — get the same live theme-reactivity for free, and Minimap.ts
-// stops needing its own one-time, non-reactive snapshot.
+// resolveCanvasColors is a pure function, unit-testable without a real canvas 2D
+// context (jsdom has none; see canvas-safety.test.ts).
 //
-// Fallbacks below are byte-identical to the hardcoded literals this fix
-// replaces across those files — a lookup miss (no stylesheet linked, e.g.
-// most unit tests) reproduces exactly today's Midnight appearance.
+// The fallbacks below are Midnight's values: a lookup miss (no stylesheet linked,
+// e.g. most unit tests) renders Midnight.
 //
-// Adding theme #3+ — including a future user-defined custom theme — touches
-// only variables.css (one new `html[data-theme="x"]` block). This module and
-// everything that reads it needs zero changes: it reads tokens by name, not
-// by theme, exactly like theme.ts's own THEMES registry.
+// A new theme touches only variables.css (one `html[data-theme="x"]` block). This
+// module reads tokens by name, not by theme, like theme.ts's THEMES registry.
 
 export interface CanvasThemeColors {
   surface1: string; surface2: string; surface3: string;
@@ -157,15 +146,11 @@ export function tintOver(fg: string, bg: string, t: number): string {
   return rgbToHex(fr * t + br * (1 - t), fgc * t + bgc * (1 - t), fb * t + bb * (1 - t));
 }
 
-/** Per-kind node-header tint: the kind's own accent at low alpha, composited
- * over the node body (drawn first, same draw() call, always opaque) —
- * automatically theme-correct for Midnight, Paper, and any future theme.
- * Deliberately renders as a translucent tint of the kind's own accent rather
- * than a fixed near-black on every theme, including Midnight — an
- * intentional design choice, not a bug, so it should not be "corrected"
- * back to a flat near-black. The four kinds stay visually distinct by hue. */
-export function headerTint(accentHex: string): string {
-  return accentHex + "26"; // ~15% alpha, composited over the opaque body fill
+/** Node icon-tile tint: the accent at low alpha, composited over the opaque node
+ * body — theme-correct for Midnight, Paper, and any future theme. A translucent
+ * tint of the accent, not a fixed near-black, on purpose. */
+export function tileTint(accentHex: string): string {
+  return accentHex + "33"; // ~20% alpha
 }
 
 export interface NoteColorSet { bg: string; border: string; text: string; }

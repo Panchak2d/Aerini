@@ -1,8 +1,8 @@
 # Aerini Commercial License Agreement
 
-**Version 1.0**
+**Version 1.1**
 
-This Aerini Commercial License Agreement ("Agreement") is between Panchaketu Debbarma, maintainer of the Aerini project ("Licensor"), and the individual or organization identified on the applicable License Certificate ("Licensee"). This Agreement takes effect on the date Licensee completes payment through Licensor's designated checkout process ("Effective Date") and applies only to the Licensed Version identified on the Certificate.
+This Aerini Commercial License Agreement ("Agreement") is between Panchaketu Debbarma, maintainer of the Aerini project ("Licensor"), and the individual or organization identified on the applicable License Certificate ("Licensee"). This Agreement takes effect on the date Licensee completes payment through Licensor's designated checkout process ("Effective Date") and applies only to the Covered Versions defined in Section 1.
 
 Licensor's designated checkout process is currently operated through Polar (polar.sh), acting solely as payment processor and merchant of record. Polar is not a party to this Agreement.
 
@@ -14,15 +14,23 @@ By completing checkout and checking the acceptance box presented at that time, L
 
 **"Software"** means Aerini, the visual workflow automation application (including `aerini-engine`, `aerini-server`, and its associated desktop and CLI components), as made available by Licensor. It does not include third-party dependencies bundled with or used by Aerini, which remain governed by their own licenses.
 
-**"Licensed Version"** means the version of the Software identified on the Certificate, together with any patch-level release Licensor issues within the same minor-version line (for example, a Certificate naming 0.4 covers every subsequent 0.4.z patch). A new minor or major release (for example, 0.5.0 or 1.0.0) is not covered and requires a new Certificate.
+**"Subscription"** means Licensee's recurring paid subscription to this Agreement, created through Licensor's checkout process on a monthly or annual billing plan, at the fee shown at checkout.
+
+**"Paid Term"** means each billing period of the Subscription for which the fee has been received in full and not reversed, from the first day of that period to its last day. A period whose payment is refunded by Licensor, reversed, or charged back is not a Paid Term. Licensor may, but need not, treat a period as paid while a failed renewal payment is being retried.
+
+**"Lapse"** means the end of the last Paid Term without a following Paid Term, whether because Licensee cancelled, a renewal payment failed, or the Subscription otherwise ended. A Lapse is not a termination under Section 11. The "Lapse Date" is the last day of that final Paid Term.
+
+**"Paid Months"** means the cumulative number of months of Paid Term Licensee has completed, counted across all Paid Terms, with or without gaps. A monthly billing period is one Paid Month; an annual billing period is twelve. Licensee is **"Vested"** once Licensee has twelve Paid Months, and stays Vested permanently.
+
+**"Covered Version"** means each of the following: (i) the version of the Software that is current on the first day of Licensee's first Paid Term; (ii) every version, including every minor and major release (for example 0.5.0 or 1.0.0), that Licensor first publicly releases during a Paid Term; and (iii) every later patch-level release within the same minor-version line as a version in (i) or (ii), including a patch-level release issued after a Lapse (for example, if 0.5.0 is a Covered Version, a later 0.5.3 is too). A version first released outside every Paid Term, other than under (iii), is not a Covered Version.
 
 **"Modifications"** means any change, addition, or derivative work Licensee makes to the Software.
 
 **"Licensee"** means the individual or organization named on the Certificate. Where an organization is named, "Licensee" includes that organization's employees and contractors acting on its behalf for its own business, and excludes any parent, subsidiary, or affiliate not itself named, unless the Certificate states otherwise.
 
-**"Embedded Product"** means the single product or service of Licensee's, identified by name on the Certificate, into which Licensee embeds the Licensed Version, or which Licensee operates using the Licensed Version, under Sections 3(b) and 3(c).
+**"Embedded Product"** means the single product or service of Licensee's, identified by name on the Certificate, into which Licensee embeds a Covered Version, or which Licensee operates using a Covered Version, under Sections 3(b) and 3(c).
 
-**"Certificate"** means the record of Licensee's purchase that Licensor's checkout process generates and delivers automatically when payment completes. It consists of: (i) the License ID, which is the license key the checkout process issues to Licensee; (ii) the Licensed Version, as named in the product description shown at checkout; (iii) the Embedded Product, as entered by Licensee in the checkout form; (iv) Licensee's identity, as entered by Licensee at checkout; and (v) the purchase date and fee, as shown on the order confirmation or receipt. The Certificate is delivered through the checkout process's order confirmation, receipt, and customer portal, and is not a separate signed document. The Certificate is evidence of the license; Licensee's rights under this Agreement arise on the Effective Date, not on issuance of the Certificate.
+**"Certificate"** means the record of Licensee's purchase that Licensor's checkout process generates and delivers automatically when payment completes. It consists of: (i) the License ID, which is the license key the checkout process issues to Licensee; (ii) the billing plan (monthly or annual), as named in the product description shown at checkout; (iii) the Embedded Product, as entered by Licensee in the checkout form; (iv) Licensee's identity, as entered by Licensee at checkout; and (v) the date and amount of each payment, as shown on the order confirmations and receipts for the first payment and every renewal. The Certificate is delivered through the checkout process's order confirmations, receipts, and customer portal, and is not a separate signed document. The order history is the evidence of each Paid Term and of Paid Months. The Certificate is evidence of the license; Licensee's rights under this Agreement arise on the Effective Date, not on issuance of the Certificate.
 
 **"AI/ML System"** and **"Training Data"** have the meanings given to them in Section 1 of the Aerini Contributor License Agreement, version 1.4. If a later version of the Contributor License Agreement changes those definitions, the definitions in version 1.4 continue to apply to this Agreement unless Licensor and Licensee agree otherwise.
 
@@ -30,23 +38,23 @@ By completing checkout and checking the acceptance box presented at that time, L
 
 ## 2. Relationship to AGPL-3.0
 
-The Software is also available under AGPL-3.0. This Agreement is an alternative to AGPL-3.0, not an addition to it: for as long as this Agreement remains in force, it governs Licensee's use of the Licensed Version, to the extent of the rights granted in Section 3, in place of AGPL-3.0's source-availability obligations generally — including the network-copyleft requirement in Section 13 and the source-disclosure obligations that apply to distribution. Any other AGPL-3.0 permission Licensee already had continues to apply to the extent it does not conflict with this Agreement. Use outside the rights granted in Section 3 remains governed by AGPL-3.0.
+The Software is also available under AGPL-3.0. This Agreement is an alternative to AGPL-3.0, not an addition to it: for as long as this Agreement remains in force, it governs Licensee's use of each Covered Version, to the extent of the rights granted in Section 3, in place of AGPL-3.0's source-availability obligations generally — including the network-copyleft requirement in Section 13 and the source-disclosure obligations that apply to distribution. Any other AGPL-3.0 permission Licensee already had continues to apply to the extent it does not conflict with this Agreement. Use outside the rights granted in Section 3, including use of any version that is not a Covered Version, remains governed by AGPL-3.0.
 
 ---
 
 ## 3. Grant of License
 
-Subject to Licensee's compliance with this Agreement and payment of the fee stated on the Certificate, Licensor grants Licensee a perpetual (as to the Licensed Version only — see Section 1), non-exclusive, non-transferable (see Section 9) license to:
+Subject to Licensee's compliance with this Agreement and payment of the Subscription fee, Licensor grants Licensee a non-exclusive, non-transferable (see Section 9) license, for each Covered Version and for the term described in Section 10, to:
 
-**(a)** use, reproduce, and modify the Licensed Version for Licensee's own internal purposes and as part of Licensee's own products or services;
+**(a)** use, reproduce, and modify the Covered Version for Licensee's own internal purposes and as part of Licensee's own products or services;
 
-**(b)** distribute the Licensed Version, including Modifications, in object-code or source-code form, to Licensee's own end customers as part of the Embedded Product, without AGPL-3.0's obligation to publish source code or Modifications, and sublicense to those end customers the limited right to use the object-code form as part of the Embedded Product, subject to the flow-down requirement in Section 5; and
+**(b)** distribute the Covered Version, including Modifications, in object-code or source-code form, to Licensee's own end customers as part of the Embedded Product, without AGPL-3.0's obligation to publish source code or Modifications, and sublicense to those end customers the limited right to use the object-code form as part of the Embedded Product, subject to the flow-down requirement in Section 5; and
 
 **(c)** operate a modified `aerini-server` as a network-accessible service for others, as part of the Embedded Product, without triggering AGPL-3.0 Section 13.
 
 Sections 3(b) and 3(c) apply to the Embedded Product only, however many end customers or users it has. Each additional product or service Licensee wishes to distribute or operate under Section 3(b) or 3(c) requires a separate Certificate and fee. Section 3(a) is not limited to the Embedded Product, but does not extend to distribution, or to network-accessible service for others, which Sections 3(b) and 3(c) alone govern.
 
-This license covers the Licensed Version only and does not extend to any later version of the Software.
+This license covers Covered Versions only and does not extend to any other version of the Software. Section 10 states which of these rights continue after a Lapse.
 
 ---
 
@@ -58,7 +66,7 @@ Licensee may not:
 
 **(b)** state or imply that Licensee's product or service is produced or endorsed by Licensor, or that it is "Aerini" rather than a product built on Aerini (see Section 8);
 
-**(c)** license or sublicense the Software itself, or a rebrand of it, as a standalone competing product. Distributing the Licensed Version as a component of the Embedded Product, which Section 3(b) permits, is not a standalone competing product if both of the following are true: (i) the Embedded Product has materially different functionality, branding, or customer relationship from the unmodified Software; and (ii) the Embedded Product is not marketed primarily as a way to obtain the Software itself;
+**(c)** license or sublicense the Software itself, or a rebrand of it, as a standalone competing product. Distributing a Covered Version as a component of the Embedded Product, which Section 3(b) permits, is not a standalone competing product if both of the following are true: (i) the Embedded Product has materially different functionality, branding, or customer relationship from the unmodified Software; and (ii) the Embedded Product is not marketed primarily as a way to obtain the Software itself;
 
 **(d)** use any part of the Software as Training Data for an AI/ML System (see Section 5); or
 
@@ -72,7 +80,7 @@ Aerini's contributors license their contributions to Licensor on the condition t
 
 Licensee — and anyone Licensee further distributes the Software to — may not use the Software, in whole or in part, as Training Data for any AI/ML System: to train, fine-tune, pre-train, distil, or otherwise update the learned parameters or weights of such a system, or to build a dataset for that purpose. This does not prohibit ordinary developer tooling that does not update model weights (code completion, static analysis, search indexing). See Licensor's published AI and Machine Learning Policy for the full scope.
 
-**Flow-Down.** Licensee must include a contractually binding restatement of this Section 5, or a restriction at least as protective, in every end-user agreement under which Licensee distributes the Licensed Version under Section 3(b). Licensee has no right, under this Agreement or any end-user agreement Licensee enters into, to authorise the excluded use described in this Section 5. Licensee's failure to include the required restatement in an end-user agreement under Section 3(b) is itself a breach of this Section 5.
+**Flow-Down.** Licensee must include a contractually binding restatement of this Section 5, or a restriction at least as protective, in every end-user agreement under which Licensee distributes a Covered Version under Section 3(b). Licensee has no right, under this Agreement or any end-user agreement Licensee enters into, to authorise the excluded use described in this Section 5. Licensee's failure to include the required restatement in an end-user agreement under Section 3(b) is itself a breach of this Section 5.
 
 This Section survives termination of this Agreement and cannot be waived by any other provision of this Agreement or any later agreement between the parties, unless that later agreement amends this Section by explicit reference to it.
 
@@ -86,7 +94,7 @@ The Software, including all contributions incorporated into it, remains the prop
 
 ## 7. No Runtime Enforcement
 
-The Software does not phone home, validate a license key, or technically enforce this Agreement. Licensee's right to use the Software under this Agreement rather than AGPL-3.0 depends on Licensee holding a current license for the Licensed Version — meaning this Agreement has taken effect on payment and has not been terminated under Section 11 — not on any technical control, and not on Licensee possessing a copy of the Certificate. A lost or delayed Certificate makes Licensee's rights harder to prove; it does not reduce them. The License ID is an identifier only; the Software does not read or check it.
+The Software does not phone home, validate a license key, or technically enforce this Agreement. Licensee's right to use the Software under this Agreement rather than AGPL-3.0 depends on Licensee holding a license for the version in question — meaning that version is a Covered Version, this Agreement has taken effect on payment, and it has not been terminated under Section 11 — not on any technical control, and not on Licensee possessing a copy of the Certificate. A lost or delayed Certificate makes Licensee's rights harder to prove; it does not reduce them. The License ID is an identifier only; the Software does not read or check it. If the checkout process revokes or expires the License ID when the Subscription ends, that does not end any right that continues after a Lapse under Section 10.
 
 ---
 
@@ -114,9 +122,20 @@ The limited end-customer sublicense granted in Section 3(b) is not a sublicense 
 
 ---
 
-## 10. Fees
+## 10. Fees, Subscription, and Lapse
 
-The fee is the one-time amount shown at checkout on the Certificate. It is not a subscription: no renewal or recurring payment is required to keep using the Licensed Version under this Agreement. Fees are non-refundable except as required by applicable law or as Licensor agrees in writing. Refund requests are handled by Polar as merchant of record under Polar's own refund policy; a chargeback is handled under the applicable card network's rules. See Section 11 for what happens to this Agreement if a payment is reversed.
+**Fee and renewal.** The fee is the recurring amount, and the monthly or annual billing plan, shown at checkout. The Subscription renews automatically at the end of each billing period until Licensee cancels it. Licensee may cancel at any time; cancellation takes effect at the end of the billing period already paid for, and Licensee keeps its rights for that Paid Term. Licensor may change the fee for future billing periods by giving at least 30 days' notice to the email address used at checkout; a change does not apply to a billing period already paid for, and Licensee may cancel before it takes effect.
+
+**Refunds.** Fees are non-refundable except as required by applicable law or as Licensor agrees in writing. Refund requests are handled by Polar as merchant of record under Polar's own refund policy; a chargeback is handled under the applicable card network's rules. See Section 11 for what happens to this Agreement if a payment is reversed.
+
+**During a Paid Term.** Licensee holds the rights in Section 3 for every Covered Version, including each new version Licensor releases during the Paid Term, with no new Certificate and no further fee.
+
+**After a Lapse.** The Agreement stays in force. Licensee keeps the right to use every Covered Version, and has no rights under this Agreement in any other version, which is governed by AGPL-3.0. What else continues depends on whether Licensee is Vested on the Lapse Date:
+
+- **Vested.** Sections 3(a), 3(b), and 3(c) continue for every Covered Version, indefinitely, subject to Licensee's continued compliance with Sections 4, 5, 8, and 9.
+- **Not Vested.** Only Section 3(a) continues. Sections 3(b) and 3(c) end on the Lapse Date. The fourth paragraph of Section 11 then applies as if this Agreement had been terminated on the Lapse Date other than for breach of Section 5. Copies already delivered to Licensee's own end customers before the Lapse Date are unaffected.
+
+**Reactivation.** If Licensee resumes paying, a new Paid Term begins on the day payment is received, Paid Months continue to accumulate, and versions Licensor first released during the gap do not become Covered Versions. If Licensee resumes paying while the 90-day period in Section 11 is still running after a Not Vested Lapse, Sections 3(b) and 3(c) resume as if there had been no Lapse.
 
 ---
 
@@ -128,9 +147,11 @@ On termination, Licensee must stop distributing new copies of the Software under
 
 If the fee is reversed, charged back, or otherwise recovered by Licensee or its payment method after payment — for any reason other than Licensor's own refund under Section 10 — this Agreement terminates immediately and automatically, without notice or cure period, as of the date of the reversal.
 
-If this Agreement is terminated other than for breach of Section 5, Licensee has 90 days from the date of termination to either (a) stop operating the Licensed Version, as modified by Licensee's Modifications, as a network-accessible service, or (b) release Modifications made after the termination date under AGPL-3.0. During those 90 days, Section 3(c) continues to apply to what Licensee had already deployed at the termination date, so no AGPL-3.0 disclosure duty attaches to it. After the 90 days: if Licensee has done (a), no AGPL-3.0 disclosure duty arises from the termination; if Licensee has done (b), Section 3(c) continues to apply to what was already deployed at the termination date, and AGPL-3.0 applies to Modifications made after that date; and if Licensee has done neither, AGPL-3.0 applies in full, including to what was already deployed. On termination for breach of Section 5, this paragraph does not apply and the preceding paragraph applies immediately.
+If this Agreement is terminated other than for breach of Section 5, Licensee has 90 days from the date of termination to either (a) stop operating the Covered Version, as modified by Licensee's Modifications, as a network-accessible service, or (b) release Modifications made after the termination date under AGPL-3.0. During those 90 days, Section 3(c) continues to apply to what Licensee had already deployed at the termination date, so no AGPL-3.0 disclosure duty attaches to it. After the 90 days: if Licensee has done (a), no AGPL-3.0 disclosure duty arises from the termination; if Licensee has done (b), Section 3(c) continues to apply to what was already deployed at the termination date, and AGPL-3.0 applies to Modifications made after that date; and if Licensee has done neither, AGPL-3.0 applies in full, including to what was already deployed. On termination for breach of Section 5, this paragraph does not apply and the preceding paragraph applies immediately.
 
-Sections 5, 6, 12, 13, 14, and 17 survive termination.
+A Lapse under Section 10 is not a termination. Termination under this Section ends every right that would otherwise continue after a Lapse, including those of a Vested Licensee.
+
+Sections 5, 6, 10 (as to rights that continue after a Lapse), 12, 13, 14, and 17 survive termination, subject to the preceding paragraph.
 
 ---
 
@@ -142,7 +163,7 @@ THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## 13. Limitation of Liability
 
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR'S TOTAL LIABILITY ARISING OUT OF OR RELATED TO THIS AGREEMENT OR THE SOFTWARE WILL NOT EXCEED THE FEE LICENSEE ACTUALLY PAID UNDER THE CERTIFICATE. LICENSOR WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. THIS LIMITATION DOES NOT APPLY TO LIABILITY ARISING FROM LICENSOR'S FRAUD OR WILFUL MISCONDUCT, OR TO THE EXTENT IT CANNOT BE EXCLUDED BY APPLICABLE LAW.
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR'S TOTAL LIABILITY ARISING OUT OF OR RELATED TO THIS AGREEMENT OR THE SOFTWARE WILL NOT EXCEED THE FEES LICENSEE ACTUALLY PAID UNDER THE SUBSCRIPTION IN THE TWELVE MONTHS BEFORE THE EVENT GIVING RISE TO THE CLAIM. LICENSOR WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. THIS LIMITATION DOES NOT APPLY TO LIABILITY ARISING FROM LICENSOR'S FRAUD OR WILFUL MISCONDUCT, OR TO THE EXTENT IT CANNOT BE EXCLUDED BY APPLICABLE LAW.
 
 ---
 
@@ -154,7 +175,7 @@ Licensee will indemnify, defend, and hold harmless Licensor against any third-pa
 
 ## 15. Certificate
 
-Licensor's checkout process issues the Certificate automatically when payment completes, as described in Section 1. The Certificate is evidence of this Agreement and of the license it grants; it is not itself the operative legal document — this Agreement is. Licensee should keep the order confirmation and license key it receives, and is responsible for entering its identity and the Embedded Product name accurately at checkout; Licensee may ask Licensor at support@aerini.org to correct an entry. Licensor may, at its discretion, provide a separate written certificate on request. Licensee's rights arise on the Effective Date; a delayed, lost, or unissued Certificate does not reduce them. If the Certificate and this Agreement conflict on anything other than Licensee's identity, the Licensed Version, the Embedded Product, or the License ID, this Agreement controls.
+Licensor's checkout process issues the Certificate automatically when the first payment completes, as described in Section 1, and adds each renewal receipt to it. The Certificate is evidence of this Agreement and of the license it grants; it is not itself the operative legal document — this Agreement is. Licensee should keep the order confirmation and license key it receives, and is responsible for entering its identity and the Embedded Product name accurately at checkout; Licensee may ask Licensor at support@aerini.org to correct an entry. Licensor may, at its discretion, provide a separate written certificate on request. Licensee's rights arise on the Effective Date; a delayed, lost, or unissued Certificate does not reduce them. If the Certificate and this Agreement conflict on anything other than Licensee's identity, the billing plan, the Embedded Product, or the License ID, this Agreement controls.
 
 ---
 
@@ -172,9 +193,9 @@ This Agreement is governed by the laws of India, without regard to conflict-of-l
 
 ## 18. General
 
-**Entire Agreement.** This Agreement, together with the Certificate, is the entire agreement between the parties regarding the Licensed Version, and supersedes any prior discussion or understanding on the subject.
+**Entire Agreement.** This Agreement, together with the Certificate, is the entire agreement between the parties regarding the Covered Versions, and supersedes any prior discussion or understanding on the subject.
 
-**Amendments.** Licensor may publish a new version of this Agreement for future sales. Doing so does not change the terms Licensee already accepted — Licensee remains governed by the version in force on Licensee's Effective Date unless Licensee separately agrees to a new version.
+**Amendments.** Licensor may publish a new version of this Agreement for future sales. Doing so does not change the terms Licensee already accepted. Licensee remains governed by the version in force on Licensee's Effective Date, for the life of the Subscription and any rights that continue after a Lapse, unless Licensee separately agrees to a new version in writing or at a renewal checkout that presents it. Fee changes follow Section 10.
 
 **Severability.** If a provision of this Agreement is held unenforceable, the rest of the Agreement remains in effect, and the unenforceable provision is modified to the minimum extent necessary to make it enforceable.
 
@@ -184,5 +205,5 @@ This Agreement is governed by the laws of India, without regard to conflict-of-l
 
 ---
 
-*Aerini Commercial License Agreement — Version 1.0*
+*Aerini Commercial License Agreement — Version 1.1*
 *Panchaketu Debbarma — Aerini maintainer — https://github.com/Panchak2d/aerini*

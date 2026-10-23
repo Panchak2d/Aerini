@@ -2,8 +2,8 @@
  @vitest-environment jsdom
  */
 import { describe, it, expect } from "vitest";
-import { accentColors } from "../icon-cache";
-import { _resetCanvasColorCache } from "../canvas/theme-colors";
+import { accentColors, noteInkColors } from "../icon-cache";
+import { _resetCanvasColorCache, getCanvasColors, resolveNoteColors } from "../canvas/theme-colors";
 
 describe("accentColors", () => {
   it("returns the 5 Midnight fallback tokens when no theme CSS is linked", () => {
@@ -24,5 +24,14 @@ describe("accentColors", () => {
     expect(accentColors()).toContain("rgb(2, 2, 2)");
     expect(accentColors()).not.toContain("#4d9eff");
     expect(accentColors()).not.toContain("#f87171");
+  });
+
+  it("noteInkColors covers every note color, including ones outside accentColors", () => {
+    document.documentElement.removeAttribute("style");
+    _resetCanvasColorCache();
+    const ink = noteInkColors();
+    for (const n of Object.values(resolveNoteColors(getCanvasColors()))) expect(ink).toContain(n.text);
+    expect(ink).toContain("#8b949e");
+    expect(accentColors()).not.toContain("#8b949e");
   });
 });

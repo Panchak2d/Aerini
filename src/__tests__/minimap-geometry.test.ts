@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   activeBounds, backingSize, computeBounds, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
   hitTopmost, hoverText, minimapLabel, minimapToWorld, nextErrorIndex, normalizeDpr, placeLabel, pulseAlpha, snapStroke,
-  viewBounds, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, type Rect,
+  viewBounds, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
 } from "../canvas/Minimap";
 
 const NODE: Rect = { x: 100, y: 200, w: 220, h: 100 };
@@ -141,6 +141,54 @@ describe("wires and running pulse", () => {
       expect(pulseAlpha(t, false)).toBeGreaterThanOrEqual(0.65 - 1e-9);
       expect(pulseAlpha(t, false)).toBeLessThanOrEqual(1 + 1e-9);
     }
+  });
+});
+
+describe("flow arrows and node decor", () => {
+  const pt = (x: number, y: number): Point => ({ x, y });
+
+  it("points a wire's arrow along its flow at the midpoint, whichever way the wire runs", () => {
+    const right = wireArrow(pt(0, 0), pt(30, 0), pt(70, 0), pt(100, 0))!;
+    expect(right[0].x).toBeGreaterThan(50);
+    expect(right[1].x).toBeLessThan(right[0].x);
+    expect(right[2].x).toBeLessThan(right[0].x);
+    const back = wireArrow(pt(100, 0), pt(130, 0), pt(-30, 0), pt(0, 0))!;
+    expect(back[0].x).toBeLessThan(back[1].x);
+  });
+
+  it("draws no arrow on a wire too short or too degenerate to carry one", () => {
+    expect(wireArrow(pt(0, 0), pt(5, 0), pt(15, 0), pt(20, 0))).toBeNull();
+    expect(wireArrow(pt(0, 0), pt(50, 0), pt(-50, 0), pt(0, 0))).toBeNull();
+  });
+
+  it("gives a node mark an icon chip once it fits one, and its name once it is wider still", () => {
+    const at = (w: number, h: number): Rect => ({ x: 10, y: 20, w, h });
+    expect(nodeDecor(at(17, 20))).toEqual({ chip: null, name: null });
+    expect(nodeDecor(at(30, 13))).toEqual({ chip: null, name: null });
+    const chipOnly = nodeDecor(at(30, 20));
+    expect(chipOnly.chip).toMatchObject({ w: 12, h: 12 });
+    expect(chipOnly.name).toBeNull();
+    const named = nodeDecor(at(80, 20));
+    expect(named.name!.x).toBeGreaterThan(named.chip!.x + named.chip!.w);
+    expect(named.name!.x + named.name!.maxW).toBeLessThanOrEqual(10 + 80);
+  });
+
+  it("clips a node mark to the panel so a magnified mark keeps its chip on screen, and drops one entirely outside", () => {
+    const size = { w: 100, h: 60 };
+    expect(visiblePart({ x: -50, y: -20, w: 120, h: 50 }, size)).toEqual({ x: 0, y: 0, w: 70, h: 30 });
+    expect(visiblePart({ x: 10, y: 10, w: 20, h: 20 }, size)).toEqual({ x: 10, y: 10, w: 20, h: 20 });
+    expect(visiblePart({ x: 100, y: 10, w: 20, h: 20 }, size)).toBeNull();
+  });
+
+  it("rounds only the left corners of a trigger mark, never past half its size", () => {
+    expect(triggerRadii({ x: 0, y: 0, w: 40, h: 30 })).toEqual({ tl: 6, tr: 0, br: 0, bl: 6 });
+    expect(triggerRadii({ x: 0, y: 0, w: 40, h: 5 })).toEqual({ tl: 2.5, tr: 0, br: 0, bl: 2.5 });
+  });
+
+  it("fades plain wires while a run is active or a node is selected", () => {
+    expect(wireBaseAlpha(false, false)).toBe(1);
+    expect(wireBaseAlpha(true, false)).toBeLessThan(1);
+    expect(wireBaseAlpha(false, true)).toBeLessThan(1);
   });
 });
 

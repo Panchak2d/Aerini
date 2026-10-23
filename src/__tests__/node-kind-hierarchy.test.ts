@@ -13,17 +13,17 @@ interface Call { args: unknown[]; colorAtCall: unknown; }
 
 function makeMockCtx() {
   const gradient = { addColorStop: vi.fn() };
-  const fillRectCalls: Call[] = [];
+  const fillCalls: Call[] = [];
   const fillTextCalls: Call[] = [];
 
   const ctx = {
     save: vi.fn(), restore: vi.fn(),
     beginPath: vi.fn(), closePath: vi.fn(), clip: vi.fn(),
     moveTo: vi.fn(), lineTo: vi.fn(), arcTo: vi.fn(), arc: vi.fn(), rect: vi.fn(),
-    fill: vi.fn(), stroke: vi.fn(),
-    fillRect: vi.fn((...args: unknown[]) => {
-      fillRectCalls.push({ args, colorAtCall: ctx.fillStyle });
+    fill: vi.fn((...args: unknown[]) => {
+      fillCalls.push({ args, colorAtCall: ctx.fillStyle });
     }),
+    stroke: vi.fn(), fillRect: vi.fn(),
     fillText: vi.fn((...args: unknown[]) => {
       fillTextCalls.push({ args, colorAtCall: ctx.fillStyle });
     }),
@@ -34,7 +34,7 @@ function makeMockCtx() {
     textAlign: "left", textBaseline: "alphabetic", globalAlpha: 1,
   } as unknown as CanvasRenderingContext2D;
 
-  return { ctx, fillRectCalls, fillTextCalls };
+  return { ctx, fillCalls, fillTextCalls };
 }
 
 function makeNodeData(node_type_id: string, node_type: CanvasNodeData["node_type"] = "action"): CanvasNodeData {
@@ -67,37 +67,32 @@ describe("CanvasNode.draw — category accent (CSS-var wiring, node-env fallback
     ["ai",      NODE_IDS.AI_PROMPT,     "AI",      CAT_AI],
     ["logic",   NODE_IDS.IF_CONDITION,  "LOGIC",   CAT_LOGIC],
     ["utility", NODE_IDS.COLLECT_FILES, "UTILITY", CAT_UTILITY],
-  ] as const)("%s category renders its label and stripe in the fallback hex (%s)", (nodeType, typeId, label, hex) => {
+  ] as const)("%s category renders its label and icon tile in the fallback hex (%s)", (nodeType, typeId, label, hex) => {
     const node = new CanvasNode(makeNodeData(typeId, nodeType as CanvasNodeData["node_type"]));
-    const { ctx, fillRectCalls, fillTextCalls } = makeMockCtx();
+    const { ctx, fillCalls, fillTextCalls } = makeMockCtx();
     node.draw(ctx, 0);
 
-    // .filter, not .find: TYPE_META_BASE.ai's icon glyph ("AI") is textually
-    // identical to its label ("AI") — both produce a fillText("AI", ...)
-    // call, distinguishable only by color (icon: bare accent, label: accent+"99").
     const matches = fillTextCalls.filter(c => c.args[0] === label);
     expect(matches.length, `expected at least one fillText("${label}", ...) call`).toBeGreaterThan(0);
-    expect(matches.some(c => c.colorAtCall === hex + "99")).toBe(true);
+    expect(matches.some(c => c.colorAtCall === hex)).toBe(true);
 
-    // The stripe is the only fillRect call reached for a non-note node.
-    expect(fillRectCalls).toHaveLength(1);
-    expect(fillRectCalls[0].colorAtCall).toBe(hex);
+    expect(fillCalls.some(c => c.colorAtCall === hex + "33")).toBe(true);
   });
 });
 
 describe("CanvasNode.draw — trigger identity overlay (independent of NodeType)", () => {
-  it("swaps the category label to TRIGGER and the stripe to --cat-trigger, for a trigger node_type_id", () => {
+  it("swaps the category label to TRIGGER in --cat-trigger and rounds the body's left edge, for a trigger node_type_id", () => {
     const node = new CanvasNode(makeNodeData(NODE_IDS.SCHEDULE, "action"));
-    const { ctx, fillRectCalls, fillTextCalls } = makeMockCtx();
+    const { ctx, fillTextCalls } = makeMockCtx();
     node.draw(ctx, 0);
 
     expect(fillTextCalls.find(c => c.args[0] === "ACTION")).toBeUndefined();
     const labelCall = fillTextCalls.find(c => c.args[0] === "TRIGGER");
     expect(labelCall, 'expected fillText("TRIGGER", ...)').toBeTruthy();
-    expect(labelCall!.colorAtCall).toBe(CAT_TRIGGER + "99");
+    expect(labelCall!.colorAtCall).toBe(CAT_TRIGGER);
 
-    expect(fillRectCalls).toHaveLength(1);
-    expect(fillRectCalls[0].colorAtCall).toBe(CAT_TRIGGER);
+    const bodyArc = (ctx.arcTo as ReturnType<typeof vi.fn>).mock.calls.find(c => c[4] === 22);
+    expect(bodyArc, "expected a 22px left-corner arc for the trigger body").toBeTruthy();
   });
 
   it("does NOT recolor the node icon — icon stays on the category (action) accent, not the trigger accent", () => {
@@ -134,23 +129,21 @@ describe("CanvasNode.draw — selection indicator (soft ring -> CAD corner brack
     const { ctx: ctxIdle, fillTextCalls: _t1 } = makeMockCtx();
     node.selected = false;
     node.draw(ctxIdle, 0);
-    // roundedRect (body/header/etc.) never calls lineTo — only moveTo+arcTo.
-    // The header separator is the only unconditional lineTo call.
-    expect(ctxIdle.lineTo).toHaveBeenCalledTimes(1);
+    // roundedRect never calls lineTo — only moveTo+arcTo — so an idle node draws none.
+    expect(ctxIdle.lineTo).toHaveBeenCalledTimes(0);
 
     const { ctx: ctxSelected } = makeMockCtx();
     node.selected = true;
     node.draw(ctxSelected, 0);
-    // header separator (1) + 4 corners x 2 lineTo each (8) = 9.
-    expect(ctxSelected.lineTo).toHaveBeenCalledTimes(9);
+    expect(ctxSelected.lineTo).toHaveBeenCalledTimes(8);
   });
 
-  it("hover ring is untouched — still uses the old rounded-rect stroke (no extra lineTo calls)", () => {
+  it("hover ring is a rounded-rect stroke (no lineTo calls)", () => {
     const node = new CanvasNode(makeNodeData(NODE_IDS.HTTP_REQUEST));
     node.selected = false;
     node.hovered  = true;
     const { ctx } = makeMockCtx();
     node.draw(ctx, 0);
-    expect(ctx.lineTo).toHaveBeenCalledTimes(1); // just the header separator
+    expect(ctx.lineTo).toHaveBeenCalledTimes(0);
   });
 });

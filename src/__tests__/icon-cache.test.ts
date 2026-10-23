@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
-import { describe, it, expect } from "vitest";
-import { getIconSvg } from "../icon-cache";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { accentColors, getIconBitmap, getIconSvg, preloadAllIcons } from "../icon-cache";
+import { _resetCanvasColorCache } from "../canvas/theme-colors";
 
 describe("getIconSvg — brand icons", () => {
   it("renders a saturated brand color as a literal fill, stroke none", () => {
@@ -31,5 +32,34 @@ describe("getIconSvg — brand icons", () => {
     expect(slack).not.toContain("var(--brand-");
     expect(sendgrid).toContain('stroke="currentColor"');
     expect(sendgrid).not.toContain("var(--brand-");
+  });
+});
+
+describe("preloadAllIcons", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("decodes each SVG through an <img> loaded from a data: URL, which the production CSP allows (blob: is blocked)", async () => {
+    const bitmap = { width: 16 } as ImageBitmap;
+    const srcs: string[] = [];
+    class FakeImage {
+      decode = vi.fn(async () => {});
+      set src(v: string) { srcs.push(v); }
+    }
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("createImageBitmap", vi.fn(async (src: unknown) => {
+      if (src instanceof Blob) throw new DOMException("The source image could not be decoded.", "InvalidStateError");
+      return bitmap;
+    }));
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.removeAttribute("style");
+    _resetCanvasColorCache();
+
+    await preloadAllIcons();
+
+    expect(getIconBitmap("webhook", accentColors()[0])).toBe(bitmap);
+    expect(srcs.length).toBeGreaterThan(0);
+    expect(srcs.every((u) => u.startsWith("data:image/svg+xml"))).toBe(true);
   });
 });

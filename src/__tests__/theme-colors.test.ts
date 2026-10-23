@@ -3,7 +3,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveCanvasColors, getCanvasColors, _resetCanvasColorCache,
-  headerTint, tintOver, resolveNoteColors,
+  tileTint, tintOver, resolveNoteColors,
 } from "../canvas/theme-colors";
 
 describe("resolveCanvasColors", () => {
@@ -49,10 +49,10 @@ describe("getCanvasColors — live cache", () => {
   });
 });
 
-describe("headerTint", () => {
+describe("tileTint", () => {
   it("appends a fixed low-alpha suffix to whatever accent it's given", () => {
-    expect(headerTint("#4d9eff")).toBe("#4d9eff26");
-    expect(headerTint("#536e60")).toBe("#536e6026");
+    expect(tileTint("#4d9eff")).toBe("#4d9eff33");
+    expect(tileTint("#536e60")).toBe("#536e6033");
   });
 });
 
