@@ -189,8 +189,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-wasip2
 
-      # No Cargo.lock ships with the echo template, so this build resolves the
-      # newest wit-bindgen 0.62.x and fails if the template stops compiling.
+      # Builds against the echo template's committed Cargo.lock (wit-bindgen 0.63.x)
+      # and fails if the template stops compiling.
       - name: Build echo template
         working-directory: examples/plugin-template
         run: cargo build --target wasm32-wasip2 --release

@@ -26,7 +26,7 @@ const PAPER: CanvasThemeColors = {
 
 const BASE: MinimapNodeInput = {
   isNote: false, noteColor: undefined, status: "idle",
-  selected: false, disabled: false, isTrigger: false, categoryAccent: "#aaaaaa",
+  selected: false, disabled: false, isTrigger: false, categoryAccent: "#aaaaaa", dimmed: false,
 };
 
 describe("resolveMinimapColors", () => {
@@ -63,6 +63,15 @@ describe("resolveNodeStyle", () => {
     expect(s.fillAlpha).toBe(0.35);
     expect(s.fill).toBe(MIDNIGHT.catTrigger);
     expect(s.stroke).toBe(MIDNIGHT.catTrigger);
+  });
+
+  it("carries the trigger flag and category glyph color, and fades only non-error nodes outside the selection", () => {
+    const style = (o: Partial<MinimapNodeInput>) => resolveNodeStyle({ ...BASE, ...o }, MIDNIGHT, resolveNoteColors(MIDNIGHT));
+    expect(style({ isTrigger: true })).toMatchObject({ trigger: true, glyphAccent: "#aaaaaa" });
+    expect(style({})).toMatchObject({ trigger: false, fillAlpha: 1 });
+    expect(style({ dimmed: true }).fillAlpha).toBe(0.5);
+    expect(style({ dimmed: true, disabled: true }).fillAlpha).toBe(0.35);
+    expect(style({ dimmed: true, isNote: true }).fillAlpha).toBe(1);
   });
 
   it("draws notes first as an outlined rectangle in their own palette, falling back to default", () => {

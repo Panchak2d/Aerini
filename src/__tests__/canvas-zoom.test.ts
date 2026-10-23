@@ -29,7 +29,18 @@ function mountDrawer(rect: Partial<DOMRect>): HTMLElement {
   return drawer;
 }
 
-afterEach(() => { document.getElementById("output-drawer")?.remove(); });
+function mountMinimap(rect: Partial<DOMRect>): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.id = "minimap-wrap";
+  wrap.getBoundingClientRect = () => ({ width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON() { return {}; }, ...rect });
+  document.body.appendChild(wrap);
+  return wrap;
+}
+
+afterEach(() => {
+  document.getElementById("output-drawer")?.remove();
+  document.getElementById("minimap-wrap")?.remove();
+});
 
 describe("Canvas.zoomIn / zoomOut", () => {
   it("zoomIn increases zoom by the same 1/0.9 step onWheel already uses, anchored at the viewport center", () => {
@@ -105,9 +116,8 @@ describe("Canvas.fitToScreen — output drawer overlap", () => {
     mountDrawer({ left: 0, right: 800, top: 400, bottom: 600 });
     const fake = makeFakeCanvas({ nodes });
     Canvas.prototype.fitToScreen.call(fake);
-    // Height term ((400-160)/300=0.8) now binds tighter than the width term
-    // ((800-160)/620≈1.032) that alone governs when the drawer is absent --
-    // the bug shipped fitToScreen with the width-term answer even here.
+    // Height term ((400-160)/300=0.8) binds tighter than the width term
+    // ((800-160)/620≈1.032) that alone governs when the drawer is absent.
     expect(fake.zoom).toBeCloseTo(0.8, 5);
     expect(fake.panX).toBeCloseTo(152, 5);
     expect(fake.panY).toBeCloseTo(80, 5); // centered in the 0..400 visible strip, not 0..600
@@ -127,6 +137,60 @@ describe("Canvas.fitToScreen — output drawer overlap", () => {
     Canvas.prototype.fitToScreen.call(fake);
     expect(fake.zoom).toBeGreaterThan(0);
     expect(Number.isFinite(fake.zoom)).toBe(true);
+  });
+});
+
+describe("Canvas.fitToScreen — minimap overlap", () => {
+  const wide = new Map([
+    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
+    ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+  ]);
+  const tall = new Map([
+    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
+    ["n2", { data: { position: { x: 0, y: 800 } }, height: 100 }],
+  ]);
+  const corner = { left: 600, right: 800, top: 400, bottom: 600, width: 200, height: 200 };
+
+  it("a wide workflow fits above the minimap so no node ends up underneath it", () => {
+    mountMinimap({ left: 640, right: 788, top: 500, bottom: 588, width: 148, height: 88 });
+    const fake = makeFakeCanvas({ nodes: wide });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(fake.zoom).toBeCloseTo(640 / 620, 5); // width term; height region is 500, not 600
+    expect(fake.panY + 300 * fake.zoom).toBeLessThan(500); // lowest node edge clears the minimap's top
+  });
+
+  it("a tall workflow fits left of the minimap instead, because that region gives the larger zoom", () => {
+    mountMinimap(corner);
+    const fake = makeFakeCanvas({ nodes: tall });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(fake.zoom).toBeCloseTo(440 / 900, 5);
+    expect(fake.panX).toBeCloseTo(300 - 110 * fake.zoom, 5); // centred in 0..600
+    expect(fake.panX + 220 * fake.zoom).toBeLessThan(600);
+  });
+
+  it("a zero-size minimap box (display:none) has no effect on the fit", () => {
+    mountMinimap({});
+    const fake = makeFakeCanvas({ nodes: wide });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(fake.zoom).toBeCloseTo(640 / 620, 5);
+    expect(fake.panY).toBeCloseTo(300 - 150 * fake.zoom, 5);
+  });
+
+  it("edge case: a minimap covering the whole canvas keeps zoom finite and positive", () => {
+    mountMinimap({ left: 0, right: 800, top: 0, bottom: 600, width: 800, height: 600 });
+    const fake = makeFakeCanvas({ nodes: wide });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(Number.isFinite(fake.zoom) && fake.zoom > 0).toBe(true);
+  });
+
+  it("zoom never drops below MIN_ZOOM, matching what wheel zoom allows", () => {
+    const huge = new Map([
+      ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
+      ["n2", { data: { position: { x: 100000, y: 0 } }, height: 100 }],
+    ]);
+    const fake = makeFakeCanvas({ nodes: huge });
+    Canvas.prototype.fitToScreen.call(fake);
+    expect(fake.zoom).toBe(0.05);
   });
 });
 

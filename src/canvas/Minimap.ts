@@ -1,5 +1,6 @@
 import type { Canvas } from "./Canvas";
-import { NODE_WIDTH, typeMeta, statusAccent, type CanvasNode } from "./Node";
+import { NODE_WIDTH, typeMeta, statusAccent, roundedRect, type CanvasNode, type CornerRadii } from "./Node";
+import { getIconBitmap } from "../icon-cache";
 import { NODE_IDS } from "../node-ids";
 import { isTriggerNodeType } from "./node-registry";
 import {
@@ -46,6 +47,7 @@ export interface MinimapNodeInput {
   disabled: boolean;
   isTrigger: boolean;
   categoryAccent: string;
+  dimmed: boolean;
 }
 
 export interface MinimapNodeStyle {
@@ -55,6 +57,8 @@ export interface MinimapNodeStyle {
   stroke: string | null;
   strokeWidth: number;
   selected: boolean;
+  trigger: boolean;
+  glyphAccent: string;
   minW: number;
   minH: number;
 }
@@ -84,6 +88,19 @@ const LABEL_PAD_X = 4;
 const LABEL_H = 14;
 const LABEL_GAP = 4;
 const BADGE_H = 12;
+const FOCUS_DIM_ALPHA = 0.5;
+const DIM_WIRE_ALPHA = 0.4;
+const WIRE_ARROW_LENGTH = 5;
+const WIRE_ARROW_HALF_WIDTH = 3;
+const WIRE_ARROW_MIN_CHORD = 28;
+const CHIP_SIZE = 12;
+const CHIP_MIN_W = 18;
+const CHIP_MIN_H = 14;
+const CHIP_INSET = 2;
+const NAME_MIN_W = 52;
+const NAME_GAP = 3;
+const NAME_FONT = "600 9px system-ui, sans-serif";
+const TRIGGER_MAX_RADIUS = 6;
 
 const STATUS_RANK: Record<NodeStatus, number> = { idle: 1, success: 2, running: 3, error: 4 };
 const NOTE_RANK = 0;
@@ -239,6 +256,53 @@ export function wireControlOffset(x1: number, x2: number): number {
   return Math.max(Math.abs(x2 - x1) * 0.55, 80);
 }
 
+export function wireBaseAlpha(anyActive: boolean, hasSelection: boolean): number {
+  return anyActive || hasSelection ? DIM_WIRE_ALPHA : 1;
+}
+
+// Arrowhead at the wire's midpoint pointing along its direction of flow, or null when the wire is too short to carry one.
+export function wireArrow(p0: Point, p1: Point, p2: Point, p3: Point): [Point, Point, Point] | null {
+  if (Math.hypot(p3.x - p0.x, p3.y - p0.y) < WIRE_ARROW_MIN_CHORD) return null;
+  const mid = { x: (p0.x + 3 * p1.x + 3 * p2.x + p3.x) / 8, y: (p0.y + 3 * p1.y + 3 * p2.y + p3.y) / 8 };
+  const tx = p3.x + p2.x - p1.x - p0.x, ty = p3.y + p2.y - p1.y - p0.y;
+  const len = Math.hypot(tx, ty);
+  if (!(len > 0)) return null;
+  const ux = tx / len, uy = ty / len;
+  const tip = { x: mid.x + (ux * WIRE_ARROW_LENGTH) / 2, y: mid.y + (uy * WIRE_ARROW_LENGTH) / 2 };
+  const bx = tip.x - ux * WIRE_ARROW_LENGTH, by = tip.y - uy * WIRE_ARROW_LENGTH;
+  return [
+    tip,
+    { x: bx - uy * WIRE_ARROW_HALF_WIDTH, y: by + ux * WIRE_ARROW_HALF_WIDTH },
+    { x: bx + uy * WIRE_ARROW_HALF_WIDTH, y: by - ux * WIRE_ARROW_HALF_WIDTH },
+  ];
+}
+
+export interface NodeDecor {
+  chip: Rect | null;
+  name: { x: number; y: number; maxW: number } | null;
+}
+
+// What a node block has room for: an icon chip once it is big enough, plus the node's name beside it once it is wider still.
+export function nodeDecor(rect: Rect): NodeDecor {
+  if (rect.w < CHIP_MIN_W || rect.h < CHIP_MIN_H) return { chip: null, name: null };
+  const chip: Rect = { x: rect.x + CHIP_INSET, y: rect.y + (rect.h - CHIP_SIZE) / 2, w: CHIP_SIZE, h: CHIP_SIZE };
+  if (rect.w < NAME_MIN_W) return { chip, name: null };
+  const x = chip.x + chip.w + NAME_GAP;
+  return { chip, name: { x, y: rect.y + rect.h / 2, maxW: rect.x + rect.w - CHIP_INSET - x } };
+}
+
+// The part of a node mark inside the panel, so its chip and name stay on screen while the mark is magnified past the edge.
+export function visiblePart(rect: Rect, size: Size): Rect | null {
+  const x0 = Math.max(rect.x, 0), y0 = Math.max(rect.y, 0);
+  const x1 = Math.min(rect.x + rect.w, size.w), y1 = Math.min(rect.y + rect.h, size.h);
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+}
+
+export function triggerRadii(rect: Rect): CornerRadii {
+  const r = Math.min(TRIGGER_MAX_RADIUS, rect.w / 2, rect.h / 2);
+  return { tl: r, tr: 0, br: 0, bl: r };
+}
+
 export function pulseAlpha(timeMs: number, reducedMotion: boolean): number {
   if (reducedMotion) return 1;
   const phase = (timeMs % PULSE_PERIOD_MS) / PULSE_PERIOD_MS;
@@ -276,6 +340,15 @@ export function nextErrorIndex(current: number, count: number, backwards: boolea
   if (count <= 0) return -1;
   if (current < 0 || current >= count) return backwards ? count - 1 : 0;
   return (current + (backwards ? -1 : 1) + count) % count;
+}
+
+function traceBlock(mc: CanvasRenderingContext2D, rect: Rect, trigger: boolean): void {
+  if (trigger) {
+    roundedRect(mc, rect.x, rect.y, rect.w, rect.h, triggerRadii(rect));
+  } else {
+    mc.beginPath();
+    mc.rect(rect.x, rect.y, rect.w, rect.h);
+  }
 }
 
 function fitText(mc: CanvasRenderingContext2D, text: string, maxWidth: number): string {
@@ -323,18 +396,21 @@ export function resolveNodeStyle(
     const c = noteColors[n.noteColor ?? "default"] ?? noteColors["default"];
     return {
       rank: NOTE_RANK, fill: c.bg, fillAlpha: 1, stroke: c.text, strokeWidth: 1,
-      selected: n.selected, minW: MIN_SIZE.idle.w, minH: MIN_SIZE.idle.h,
+      selected: n.selected, trigger: false, glyphAccent: c.text, minW: MIN_SIZE.idle.w, minH: MIN_SIZE.idle.h,
     };
   }
   const fill = statusAccent(n.status, colors) ?? (n.isTrigger ? colors.catTrigger : n.categoryAccent);
   const min = MIN_SIZE[n.status];
-  const base = { rank: STATUS_RANK[n.status], fill, selected: n.selected, minW: min.w, minH: min.h };
+  const base = {
+    rank: STATUS_RANK[n.status], fill, selected: n.selected,
+    trigger: n.isTrigger, glyphAccent: n.categoryAccent, minW: min.w, minH: min.h,
+  };
   if (n.disabled) {
     return { ...base, fillAlpha: DISABLED_ALPHA, stroke: fill, strokeWidth: 1 };
   }
   const ring = STATUS_RING_WIDTH[n.status];
   return {
-    ...base, fillAlpha: 1,
+    ...base, fillAlpha: n.dimmed ? FOCUS_DIM_ALPHA : 1,
     stroke: ring > 0 ? colors.textPrimary : null,
     strokeWidth: ring,
   };
@@ -456,6 +532,11 @@ export class Minimap {
     this._viewport = viewport;
     if (!bounds) return;
 
+    let hasSelection = false;
+    for (const n of c.nodes.values()) {
+      if (n.selected) { hasSelection = true; break; }
+    }
+
     const wires: Wire[] = [];
     for (const conn of c.connectors.values()) {
       const fn = c.nodes.get(conn.data.from_node), tn = c.nodes.get(conn.data.to_node);
@@ -473,8 +554,11 @@ export class Minimap {
       });
     }
     const wireStyles: [WireKind, string, number][] = [["base", mm.conn, 1], ["selected", mm.nav, 1.5], ["active", mm.run, 1.5]];
+    const baseWireAlpha = wireBaseAlpha(wires.some(wire => wire.kind === "active"), hasSelection);
     for (const [kind, color, width] of wireStyles) {
+      mc.globalAlpha = kind === "base" ? baseWireAlpha : 1;
       mc.strokeStyle = color;
+      mc.fillStyle = color;
       mc.lineWidth = width;
       mc.beginPath();
       for (const wire of wires) {
@@ -483,7 +567,19 @@ export class Minimap {
         mc.bezierCurveTo(wire.p1.x, wire.p1.y, wire.p2.x, wire.p2.y, wire.p3.x, wire.p3.y);
       }
       mc.stroke();
+      mc.beginPath();
+      for (const wire of wires) {
+        if (wire.kind !== kind) continue;
+        const arrow = wireArrow(wire.p0, wire.p1, wire.p2, wire.p3);
+        if (!arrow) continue;
+        mc.moveTo(arrow[0].x, arrow[0].y);
+        mc.lineTo(arrow[1].x, arrow[1].y);
+        mc.lineTo(arrow[2].x, arrow[2].y);
+        mc.closePath();
+      }
+      mc.fill();
     }
+    mc.globalAlpha = 1;
 
     const placed: Placed[] = [];
     const errorTargets: Point[] = [];
@@ -501,6 +597,7 @@ export class Minimap {
           disabled: n.disabled,
           isTrigger: isTriggerNodeType(n.data.node_type_id),
           categoryAccent: typeMeta(n.data.node_type).accent,
+          dimmed: hasSelection && !n.selected && n.status !== "error",
         },
         colors,
         this._noteColors,
@@ -523,18 +620,24 @@ export class Minimap {
     if (errors === 0) this._errorIndex = -1;
     const pulse = pulseAlpha(performance.now(), this._reducedMotion);
 
+    mc.textAlign = "left";
+    mc.textBaseline = "middle";
     for (const { rect, style, node } of placed) {
       mc.globalAlpha = style.fillAlpha;
       mc.fillStyle = style.fill;
-      mc.fillRect(rect.x, rect.y, rect.w, rect.h);
+      traceBlock(mc, rect, style.trigger);
+      mc.fill();
       mc.globalAlpha = 1;
       if (style.stroke) {
         mc.globalAlpha = node.status === "running" ? pulse : 1;
         mc.strokeStyle = style.stroke;
         mc.lineWidth = style.strokeWidth;
-        mc.strokeRect(rect.x, rect.y, rect.w, rect.h);
+        traceBlock(mc, rect, style.trigger);
+        mc.stroke();
         mc.globalAlpha = 1;
       }
+      const visible = node.data.node_type_id === NODE_IDS.NOTE ? null : visiblePart(rect, this._size);
+      if (visible) this._drawDecor(mc, visible, style, node, mm.panel, style.fillAlpha < 1 ? colors.textPrimary : mm.panel);
     }
 
     mc.strokeStyle = mm.nav;
@@ -612,6 +715,33 @@ export class Minimap {
     }
 
     this._setLabel(minimapLabel(c.nodes.size, errors));
+  }
+
+  private _drawDecor(mc: CanvasRenderingContext2D, rect: Rect, style: MinimapNodeStyle, node: CanvasNode, panel: string, ink: string): void {
+    const decor = nodeDecor(rect);
+    const chip = decor.chip;
+    if (!chip) return;
+    mc.globalAlpha = style.fillAlpha;
+    mc.fillStyle = panel;
+    roundedRect(mc, chip.x, chip.y, chip.w, chip.h, 3);
+    mc.fill();
+    const bmp = getIconBitmap(node.data.node_type_id, style.glyphAccent);
+    if (bmp) {
+      mc.drawImage(bmp, chip.x + 1, chip.y + 1, chip.w - 2, chip.h - 2);
+    } else {
+      mc.font = NAME_FONT;
+      mc.fillStyle = style.glyphAccent;
+      mc.textAlign = "center";
+      mc.fillText(typeMeta(node.data.node_type).icon, chip.x + chip.w / 2, chip.y + chip.h / 2 + 0.5);
+      mc.textAlign = "left";
+    }
+    if (decor.name) {
+      mc.globalAlpha = 1;
+      mc.font = NAME_FONT;
+      mc.fillStyle = ink;
+      mc.fillText(fitText(mc, node.data.name || "Untitled", decor.name.maxW), decor.name.x, decor.name.y + 0.5);
+    }
+    mc.globalAlpha = 1;
   }
 
   private _setLabel(text: string): void {

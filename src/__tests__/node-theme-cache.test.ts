@@ -21,21 +21,21 @@ function makeNodeData(node_type_id: string): CanvasNodeData {
 }
 
 function makeMockCtx() {
-  const fillRectCalls: Array<{ colorAtCall: unknown }> = [];
+  const glyphCalls: Array<{ colorAtCall: unknown }> = [];
   const ctx = {
     save: vi.fn(), restore: vi.fn(),
     beginPath: vi.fn(), closePath: vi.fn(), clip: vi.fn(),
     moveTo: vi.fn(), lineTo: vi.fn(), arcTo: vi.fn(), arc: vi.fn(), rect: vi.fn(),
     fill: vi.fn(), stroke: vi.fn(),
-    fillRect: vi.fn(() => { fillRectCalls.push({ colorAtCall: ctx.fillStyle }); }),
-    fillText: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn((text: string) => { if (text === "A") glyphCalls.push({ colorAtCall: ctx.fillStyle }); }),
     measureText: vi.fn(() => ({ width: 30 }) as TextMetrics),
     drawImage: vi.fn(),
     createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
     fillStyle: "", strokeStyle: "", font: "", lineWidth: 1,
     textAlign: "left", textBaseline: "alphabetic", globalAlpha: 1,
   } as unknown as CanvasRenderingContext2D;
-  return { ctx, fillRectCalls };
+  return { ctx, glyphCalls };
 }
 
 describe("Node.ts catAccents cache invalidation on theme switch", () => {
@@ -49,7 +49,7 @@ describe("Node.ts catAccents cache invalidation on theme switch", () => {
 
     const first = makeMockCtx();
     node.draw(first.ctx, 0);
-    expect(first.fillRectCalls[0]?.colorAtCall).toBe("rgb(1, 2, 3)");
+    expect(first.glyphCalls[0]?.colorAtCall).toBe("rgb(1, 2, 3)");
 
     // Change the underlying custom property WITHOUT touching data-theme —
     // by design this must NOT invalidate the cache (it's keyed off the
@@ -57,7 +57,7 @@ describe("Node.ts catAccents cache invalidation on theme switch", () => {
     document.documentElement.style.setProperty("--cat-action", "rgb(9, 9, 9)");
     const second = makeMockCtx();
     node.draw(second.ctx, 0);
-    expect(second.fillRectCalls[0]?.colorAtCall).toBe("rgb(1, 2, 3)");
+    expect(second.glyphCalls[0]?.colorAtCall).toBe("rgb(1, 2, 3)");
 
     // Flip the theme attribute — the actual invalidation trigger.
     // MutationObserver callbacks run at the next microtask checkpoint.
@@ -66,6 +66,6 @@ describe("Node.ts catAccents cache invalidation on theme switch", () => {
 
     const third = makeMockCtx();
     node.draw(third.ctx, 0);
-    expect(third.fillRectCalls[0]?.colorAtCall).toBe("rgb(9, 9, 9)");
+    expect(third.glyphCalls[0]?.colorAtCall).toBe("rgb(9, 9, 9)");
   });
 });

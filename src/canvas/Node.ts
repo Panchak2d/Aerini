@@ -1,7 +1,7 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
 import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
-import { getCanvasColors, headerTint, resolveNoteColors } from "./theme-colors";
+import { getCanvasColors, tileTint, resolveNoteColors } from "./theme-colors";
 import { isPluginNodeType, isUnregisteredNodeType, isTriggerNodeType } from "./node-registry";
 
 export interface CanvasNodeData {
@@ -40,6 +40,10 @@ export const PORT_GAP    = 28;
 const PADDING            = 14;
 const CORNER_R           = 10;
 const NOTE_MIN_HEIGHT    = 60;
+const TILE_SIZE          = 26;
+const TILE_INSET         = 10;
+const TILE_CORNER_R      = 7;
+const TRIGGER_CORNER_R   = 22;
 
 type CatKey = "action" | "ai" | "logic" | "utility" | "trigger";
 
@@ -222,88 +226,41 @@ export class CanvasNode {
     const meta = typeMeta(this.data.node_type);
     const accent = statusAccent(this.status, colors) ?? meta.accent;
 
-    // ── Trigger identity overlay (independent of NodeType/TYPE_META) ────────
-    // The trigger check (built-in ids plus trigger-capable plugins) is unrelated to the 4-value NodeType
-    // union — schedule/webhook/manual_trigger are node_type "action" same as
-    // everything else (verified against aerini-engine/src/nodes/{schedule,
-    // webhook,manual_trigger}.rs and onboarding.ts's own fixture). This only
-    // swaps the *identity* marks (left stripe + category label) to
-    // --cat-trigger; it deliberately does not touch `accent` above, so ports,
-    // selection, the running pulse, the status dot, and the node icon all stay
-    // on the category/status accent, untouched. Two reasons: (1) that's what
-    // "two independent systems, don't merge" means in practice, not just in
-    // type signatures; (2) icon-cache.ts's bitmap cache is keyed by exact
-    // color string and only preloads the 4 category colors + error red —
-    // feeding it a 5th, unpreloaded color would silently degrade trigger
-    // icons to the letter-fallback glyph.
+    // Trigger identity is independent of NodeType: schedule/webhook/manual_trigger are
+    // node_type "action" in the engine, so the check goes by node_type_id (built-in ids
+    // plus trigger-capable plugins). It swaps only the shape (rounded left edge, round
+    // icon tile) and the subtitle; `accent` stays on the category/status color because
+    // icon-cache.ts preloads bitmaps for exactly those colors and nothing else.
     const isTrigger      = isTriggerNodeType(this.data.node_type_id);
     const identityAccent = isTrigger ? colors.catTrigger : meta.accent;
     const identityLabel  = isTrigger ? "TRIGGER" : meta.label;
+    const radii: CornerRadii = isTrigger
+      ? { tl: TRIGGER_CORNER_R, tr: r, br: r, bl: TRIGGER_CORNER_R }
+      : { tl: r, tr: r, br: r, bl: r };
 
     ctx.save();
     if (this.disabled) ctx.globalAlpha = 0.35;
 
-    // ── Selection / hover outer indicator ────────────────────────────────────
-  
     if (this.selected) {
       drawCornerBrackets(ctx, x, y, w, h, accent + "88", 2);
     } else if (this.hovered) {
-
-      ctx.beginPath();
-      roundedRect(ctx, x - 2, y - 2, w + 4, h + 4, r + 2);
+      roundedRect(ctx, x - 2, y - 2, w + 4, h + 4, radii);
       ctx.strokeStyle = colors.border + "b0";
       ctx.lineWidth   = 1.5;
       ctx.stroke();
     }
 
-    // ── Node body ───────────────────────────────────────────────────────────
-    ctx.beginPath();
-    roundedRect(ctx, x, y, w, h, r);
+    roundedRect(ctx, x, y, w, h, radii);
     ctx.fillStyle = colors.surface1;
     ctx.fill();
-
-    // ── Left accent stripe ──────────────────────────────────────────────────
-    ctx.save();
-    ctx.beginPath();
-    roundedRect(ctx, x, y, w, h, r);
-    ctx.clip();
-    ctx.fillStyle = identityAccent;
-    ctx.fillRect(x, y, 3, h);
-    ctx.restore();
-
-    // ── Header background ───────────────────────────────────────────────────
-    // meta.accent (category-tied, not the trigger-swapped identityAccent —
-    // same "two independent systems" split the stripe/label already keep,
-    // see the trigger-overlay comment above) at low alpha over the opaque
-    // body just filled. Was 4 hardcoded near-black hexes, theme-blind.
-    ctx.save();
-    ctx.beginPath();
-    roundedRect(ctx, x, y, w, NODE_HEADER, r);
-    ctx.rect(x, y + r, w, NODE_HEADER - r); // make bottom flat
-    ctx.fillStyle = headerTint(meta.accent);
-    ctx.fill();
-    ctx.restore();
-
-    // ── Header separator ───────────────────────────────────────────────────
-    ctx.beginPath();
-    ctx.moveTo(x + 3, y + NODE_HEADER);
-    ctx.lineTo(x + w, y + NODE_HEADER);
-    ctx.strokeStyle = colors.border + "40";
-    ctx.lineWidth   = 1;
-    ctx.stroke();
-
-    // ── Border ─────────────────────────────────────────────────────────────
-    ctx.beginPath();
-    roundedRect(ctx, x, y, w, h, r);
     ctx.strokeStyle = this.selected
       ? accent
       : this.hovered
       ? colors.border + "99"
-      : colors.border + "40";
+      : colors.border + "80";
     ctx.lineWidth = this.selected ? 1.5 : 1;
     ctx.stroke();
 
-    // ── Running animation: pulsing top border ──────────────────────────────
     if (this.status === "running") {
       const grad = ctx.createLinearGradient(x, y, x + w, y);
       const p    = this._runPhase;
@@ -311,22 +268,41 @@ export class CanvasNode {
       grad.addColorStop(p, accent);
       grad.addColorStop(Math.min(1, p + 0.3), "transparent");
       ctx.beginPath();
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w - r, y);
+      ctx.moveTo(x + radii.tl, y);
+      ctx.lineTo(x + w - radii.tr, y);
       ctx.strokeStyle = grad;
       ctx.lineWidth   = 2;
       ctx.stroke();
     }
 
+    // ── Icon tile ──────────────────────────────────────────────────────────
+    const tileX = x + TILE_INSET;
+    const tileY = y + (NODE_HEADER - TILE_SIZE) / 2;
+    const tileCx = tileX + TILE_SIZE / 2;
+    const tileCy = tileY + TILE_SIZE / 2;
+    roundedRect(ctx, tileX, tileY, TILE_SIZE, TILE_SIZE, isTrigger ? TILE_SIZE / 2 : TILE_CORNER_R);
+    ctx.fillStyle = tileTint(accent);
+    ctx.fill();
+
+    const bmp = getIconBitmap(this.data.node_type_id, accent);
+    if (bmp) {
+      ctx.drawImage(bmp, tileCx - 8, tileCy - 8, 16, 16);
+    } else {
+      ctx.font         = "bold 12px monospace";
+      ctx.fillStyle    = accent;
+      ctx.textBaseline = "middle";
+      ctx.textAlign    = "center";
+      ctx.fillText(meta.icon, tileCx, tileCy);
+    }
+
     // ── Status dot (top-right) ─────────────────────────────────────────────
     if (this.status !== "idle") {
-      const dotX = x + w - 10;
-      const dotY = y + 10;
+      const dotX = x + w - 12;
+      const dotY = y + 14;
       ctx.beginPath();
       ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
       ctx.fillStyle = accent;
       ctx.fill();
-      // Pulse ring for running
       if (this.status === "running") {
         const alpha = Math.sin(this._runPhase * Math.PI * 2) * 0.5 + 0.5;
         ctx.beginPath();
@@ -337,10 +313,10 @@ export class CanvasNode {
       }
     }
 
-    // ── Incomplete-config badge (top-left, idle only) ───────────────────────
+    // ── Incomplete-config badge (tile top-right, idle only) ─────────────────
     if (this.missingRequired && this.status === "idle") {
-      const bx = x + 10;
-      const by = y + 10;
+      const bx = tileX + TILE_SIZE;
+      const by = tileY;
       ctx.beginPath();
       ctx.arc(bx, by, 6, 0, Math.PI * 2);
       ctx.fillStyle = colors.surface2;
@@ -355,62 +331,37 @@ export class CanvasNode {
       ctx.fillText("!", bx, by + 0.5);
     }
 
-    // ── Node icon ──────────────────────────────────────────────────────────
-    const bmp = getIconBitmap(this.data.node_type_id, accent);
-    if (bmp) {
-      ctx.drawImage(bmp, x + 12, y + NODE_HEADER / 2 - 8, 16, 16);
-    } else {
-      ctx.font         = "bold 13px monospace";
-      ctx.fillStyle    = accent;
-      ctx.textBaseline = "middle";
-      ctx.textAlign    = "left";
-      ctx.fillText(meta.icon, x + 14, y + NODE_HEADER / 2);
-    }
-
-    // ── Plugin badge (corner of the icon, any status) ───────────────────────
-    // Looked up by type_id against the same registry the palette/config panel
-    // use (node-registry's registerNodeDescriptors) -- CanvasNodeData never
-    // carries is_plugin itself, so this needs zero changes to node placement,
-    // serialization, or the .aerini file format.
+    // The registry lookup is by type_id, so CanvasNodeData and the .aerini format
+    // never carry a plugin flag.
     if (isPluginNodeType(this.data.node_type_id)) {
-      drawTypeBadge(ctx, x + 26, y + NODE_HEADER / 2 + 6, "P");
+      drawTypeBadge(ctx, tileX + TILE_SIZE - 2, tileY + TILE_SIZE - 2, "P");
     } else if (isUnregisteredNodeType(this.data.node_type_id)) {
-      drawTypeBadge(ctx, x + 26, y + NODE_HEADER / 2 + 6, "?");
+      drawTypeBadge(ctx, tileX + TILE_SIZE - 2, tileY + TILE_SIZE - 2, "?");
     }
 
-    // ── Node name ──────────────────────────────────────────────────────────
-    ctx.font         = "500 12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif";
+    // ── Name + subtitle ────────────────────────────────────────────────────
+    const textX = tileX + TILE_SIZE + 10;
+    ctx.font         = "500 13px -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif";
     ctx.fillStyle    = colors.textPrimary;
     ctx.textBaseline = "middle";
     ctx.textAlign    = "left";
-    ctx.fillText(trunc(this.data.name, 20), x + 34, y + NODE_HEADER / 2);
+    ctx.fillText(trunc(this.data.name, 20), textX, y + 14);
 
-    // ── Category label (top right) ─────────────────────────────────────────
-    ctx.font         = "500 8px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillStyle    = identityAccent + "99";
-    ctx.textBaseline = "middle";
-    ctx.textAlign    = "right";
-    const labelRightEdge = x + w - (this.status !== "idle" ? 20 : 8);
-    const labelY          = y + NODE_HEADER / 2;
-    ctx.fillText(identityLabel, labelRightEdge, labelY);
+    ctx.font      = "600 9px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.fillStyle = identityAccent;
+    ctx.fillText(identityLabel, textX, y + 28);
 
-    // ── Danger badge (top right, immediately left of the category label) ────
-    // Measures identityLabel (not meta.label) so the badge stays correctly
-    // positioned if a node is ever both trigger and dangerous — no overlap
-    // exists today (the built-in trigger ids and DANGEROUS_NODE_IDS are disjoint,
-    // verified against node-ids.ts), but the two sets are independently
-    // maintained elsewhere, so this shouldn't rely on them staying that way.
-    if (DANGEROUS_NODE_IDS.has(this.data.node_type_id)) {
-      const labelWidth = ctx.measureText(identityLabel).width;
-      drawDangerBadge(ctx, labelRightEdge - labelWidth - 9, labelY);
-    }
-
-    // ── Disabled overlay label ─────────────────────────────────────────────
+    // The right end of the subtitle row holds the DISABLED tag, with the danger badge beside it.
+    let rightEdge = x + w - 12;
     if (this.disabled) {
       ctx.font      = "700 9px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillStyle = colors.error + "cc";
-      ctx.textAlign = "center";
-      ctx.fillText("DISABLED", x + w / 2, y + NODE_HEADER / 2);
+      ctx.fillStyle = colors.error;
+      ctx.textAlign = "right";
+      ctx.fillText("DISABLED", rightEdge, y + 28);
+      rightEdge -= ctx.measureText("DISABLED").width + 10;
+    }
+    if (DANGEROUS_NODE_IDS.has(this.data.node_type_id)) {
+      drawDangerBadge(ctx, rightEdge - 2, y + 28);
     }
 
     // ── Ports ──────────────────────────────────────────────────────────────
@@ -635,19 +586,21 @@ function drawTypeBadge(ctx: CanvasRenderingContext2D, cx: number, cy: number, gl
   ctx.restore();
 }
 
+export interface CornerRadii { tl: number; tr: number; br: number; bl: number }
+
 export function roundedRect(
   ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number, r: number
+  x: number, y: number, w: number, h: number, r: number | CornerRadii
 ): void {
+  const { tl, tr, br, bl } = typeof r === "number" ? { tl: r, tr: r, br: r, bl: r } : r;
   ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y,     x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x,     y + h, r);
-  ctx.arcTo(x,     y + h, x,     y,     r);
-  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.moveTo(x + tl, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, tr);
+  ctx.arcTo(x + w, y + h, x,     y + h, br);
+  ctx.arcTo(x,     y + h, x,     y,     bl);
+  ctx.arcTo(x,     y,     x + w, y,     tl);
   ctx.closePath();
 }
-
 
  
 function drawCornerBrackets(

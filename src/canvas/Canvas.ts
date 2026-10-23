@@ -12,7 +12,7 @@ import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
 import { getCanvasColors, tintOver } from "./theme-colors";
 import { getNodeDescriptor } from "./node-registry";
-import { visibleViewport } from "./viewport";
+import { visibleViewport, fitViewports } from "./viewport";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -1204,14 +1204,19 @@ export class Canvas {
     if (!this.nodes.size) return;
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
     for (const n of this.nodes.values()) { mnX = Math.min(mnX, n.data.position.x); mnY = Math.min(mnY, n.data.position.y); mxX = Math.max(mxX, n.data.position.x + NODE_WIDTH); mxY = Math.max(mxY, n.data.position.y + n.height); }
-    const vp  = visibleViewport(this.el.getBoundingClientRect()), pad = 80;
+    const pad = 80;
     // Floor guards against the drawer or chat panel covering nearly the whole
     // canvas on a small viewport driving a term to zero/negative, which would
     // invert the zoom instead of just fitting tighter than usual.
     const minSpan = pad * 2 + 40;
-    const w   = Math.max(vp.width,  minSpan);
-    const h   = Math.max(vp.height, minSpan);
-    this.zoom = Math.min((w - pad * 2) / ((mxX - mnX) || 1), (h - pad * 2) / ((mxY - mnY) || 1), 1.2);
+    const spanX = (mxX - mnX) || 1, spanY = (mxY - mnY) || 1;
+    let w = 0, h = 0, zoom = -1;
+    for (const region of fitViewports(this.el.getBoundingClientRect())) {
+      const cw = Math.max(region.width, minSpan), ch = Math.max(region.height, minSpan);
+      const z = Math.max(this.MIN_ZOOM, Math.min((cw - pad * 2) / spanX, (ch - pad * 2) / spanY, 1.2));
+      if (z > zoom) { zoom = z; w = cw; h = ch; }
+    }
+    this.zoom = zoom;
     this.panX = w / 2 - ((mnX + mxX) / 2) * this.zoom;
     this.panY = h / 2 - ((mnY + mxY) / 2) * this.zoom;
     // Notify zoom-hint and viewport-persistence listeners, same as onWheel
