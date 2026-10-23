@@ -193,6 +193,7 @@ describe("occupied inputs", () => {
 
   it("appends to a multi-arity input", () => {
     const { canvas, hook, ai } = makeCanvas();
+    ai.data.config.prompt = "Answer: {{hook.output.body.message}}";
     ai.data.ports.inputs[0].arity = "multi";
     canvas.connectors.set("w1", wire("w1", "mem_read", "output", "ai", "input"));
 

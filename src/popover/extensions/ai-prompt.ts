@@ -1,11 +1,28 @@
 import { escapeHtml } from "../../utils";
 import { mkSection, type ExtensionContext } from "../../node-configs/popover-utils";
+import { AI_CHAT_FIELDS, chatMessageExpr, isBlank } from "../../chat/chat-defaults";
 
-export function renderAiCostWarning(ctx: ExtensionContext): void {
+function renderAiCostWarning(ctx: ExtensionContext): void {
   const warn = document.createElement("div");
   warn.className = "config-hint config-hint-warn";
   warn.textContent = "Note: Each execution of this node will consume API credits. Set a sensible schedule interval to avoid unexpected costs.";
   ctx.body.appendChild(warn);
+}
+
+function renderAiPromptHint(ctx: ExtensionContext): void {
+  const fields = AI_CHAT_FIELDS[ctx.node.data.node_type_id];
+  if (!fields || !isBlank((ctx.node.data.config as Record<string, unknown>)[fields.input])) return;
+  const tip = document.createElement("div");
+  tip.className = "popover-info-banner";
+  tip.innerHTML =
+    `<strong>Answering Chat messages?</strong> Fill this in with <strong>${chatMessageExpr("Webhook")}</strong> ` +
+    `(use your Webhook node's name). Type <strong>{{</strong> in any field to insert data from other nodes.`;
+  ctx.body.appendChild(tip);
+}
+
+export function renderAiNodeNotices(ctx: ExtensionContext): void {
+  renderAiPromptHint(ctx);
+  renderAiCostWarning(ctx);
 }
 
 export function renderAiAttachments(ctx: ExtensionContext): void {

@@ -10,9 +10,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: vi.fn((p: string) => p),
 }));
 
-function node(id: string, inputs: string[], outputs: string[]): CanvasNode {
+function node(id: string, inputs: string[], outputs: string[], typeId = id, config: Record<string, unknown> = {}, name = id): CanvasNode {
   return new CanvasNode({
-    id, node_type_id: id, node_type: "action", name: id, config: {}, credentials: {},
+    id, node_type_id: typeId, node_type: "action", name, config, credentials: {},
     position: { x: 0, y: 0 },
     ports: {
       inputs:  inputs.map(i => ({ id: i, label: i, position: "left" as const })),
@@ -82,5 +82,68 @@ describe("Canvas.connectPorts", () => {
 
     expect(canvas.connectors.size).toBe(1);
     expect(undoDepth(canvas)).toBe(0);
+  });
+});
+
+describe("Canvas.connectPorts chat defaults", () => {
+  const chatCanvas = (aiConfig: Record<string, unknown> = {}, outConfig: Record<string, unknown> = {}) => {
+    const canvas = makeCanvas();
+    canvas.nodes.set("wh", node("wh", [], ["output"], "webhook", {}, "Chat In"));
+    canvas.nodes.set("llm", node("llm", ["input"], ["output"], "ai_prompt", aiConfig, "AI Prompt"));
+    canvas.nodes.set("show", node("show", ["input"], ["output"], "output", outConfig, "Output"));
+    return canvas;
+  };
+  const cfg = (c: Canvas, id: string) => c.nodes.get(id)!.data.config as Record<string, unknown>;
+
+  it("fills a blank AI prompt with the chat message when a Webhook is wired in, as one undo step", () => {
+    const canvas = chatCanvas();
+
+    expect(canvas.connectPorts("wh", "output", "llm", "input")).toBe(true);
+
+    expect(cfg(canvas, "llm").prompt).toBe("{{Chat In.output.body.message}}");
+    expect(canvas.onWarn).toHaveBeenCalledTimes(1);
+    expect(undoDepth(canvas)).toBe(1);
+    canvas.undo();
+    expect(cfg(canvas, "llm").prompt).toBeUndefined();
+  });
+
+  it("leaves a prompt the user already wrote, and prompts fed by other nodes, alone", () => {
+    const written = chatCanvas({ prompt: "Summarize this" });
+    written.connectPorts("wh", "output", "llm", "input");
+    expect(cfg(written, "llm").prompt).toBe("Summarize this");
+
+    const other = chatCanvas();
+    other.connectPorts("other", "output", "llm", "input");
+    expect(cfg(other, "llm").prompt).toBeUndefined();
+  });
+
+  it("sets an Output's Field to the AI reply only when it was blank", () => {
+    const blank = chatCanvas();
+    blank.connectPorts("llm", "output", "show", "input");
+    expect(cfg(blank, "show").field).toBe("content");
+
+    const chosen = chatCanvas({}, { field: "body.text" });
+    chosen.connectPorts("llm", "output", "show", "input");
+    expect(cfg(chosen, "show").field).toBe("body.text");
+
+    const fromOther = chatCanvas();
+    fromOther.connectPorts("other", "output", "show", "input");
+    expect(cfg(fromOther, "show").field).toBeUndefined();
+  });
+});
+
+describe("Canvas.connectPorts error port", () => {
+  it("refuses to wire an Error port into a Files port and says why, but allows it into a normal input", () => {
+    const canvas = makeCanvas();
+    const hook = node("hook", [], ["output", "on_error"]);
+    canvas.nodes.set("hook", hook);
+    canvas.nodes.get("ai")!.data.ports.inputs.find(p => p.id === "attachments")!.port_type = "files";
+
+    expect(canvas.connectPorts("hook", "on_error", "ai", "attachments")).toBe(false);
+    expect(canvas.connectors.size).toBe(0);
+    expect(undoDepth(canvas)).toBe(0);
+    expect(canvas.onWarn).toHaveBeenCalledWith(expect.stringContaining("Error port"));
+
+    expect(canvas.connectPorts("hook", "on_error", "ai", "input")).toBe(true);
   });
 });

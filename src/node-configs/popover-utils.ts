@@ -26,6 +26,11 @@ export interface ExtensionContext {
    *  reason as `hasConfigSection` above — most node types have no
    *  model-picker field and existing `ExtensionContext` literals omit it. */
   fetchModels?: () => Promise<string[]>;
+  /** Registers work to run when this popover closes or is superseded (Esc,
+   *  outside click, the × button, a rebuild). Optional like the hooks above. */
+  onClose?: (fn: () => void) => void;
+  /** Registers a listener that runs after any field in this popover changes. */
+  onFieldChange?: (fn: () => void) => void;
 }
 
 export interface NodeConfigExtension {

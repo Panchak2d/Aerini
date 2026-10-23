@@ -19,7 +19,8 @@ import { renderScheduleFields }      from "../node-configs/schedule-config";
 import { renderSaveToFolderFields }  from "../node-configs/save-to-folder-config";
 import { renderTextToFileFields }    from "../node-configs/text-to-file-config";
 import { renderCollectFilesFields }  from "../node-configs/collect-files-config";
-import { renderAiCostWarning, renderAiAttachments }   from "./extensions/ai-prompt";
+import { renderAiNodeNotices, renderAiAttachments }   from "./extensions/ai-prompt";
+import { renderOutputHint }                           from "./extensions/output";
 import { renderHttpAuthMode, renderHttpSsrfWarning }  from "./extensions/http";
 import { renderWebhookBanners }                       from "./extensions/webhook";
 import { renderSocialUploadFields }                   from "./extensions/social-upload";
@@ -36,8 +37,9 @@ import {
 const MAX_RETRY_ATTEMPTS = 10;
 
 const NODE_CONFIG_EXTENSIONS: Partial<Record<string, NodeConfigExtension>> = {
-  [NODE_IDS.AI_PROMPT]:      { beforeFields: renderAiCostWarning, afterFields: renderAiAttachments },
-  [NODE_IDS.AI_AGENT]:       { beforeFields: renderAiCostWarning },
+  [NODE_IDS.AI_PROMPT]:      { beforeFields: renderAiNodeNotices, afterFields: renderAiAttachments },
+  [NODE_IDS.AI_AGENT]:       { beforeFields: renderAiNodeNotices },
+  [NODE_IDS.OUTPUT]:         { beforeFields: renderOutputHint },
   [NODE_IDS.SCHEDULE]:       { beforeFields: renderScheduleFields, replaceGenericFields: true },
   [NODE_IDS.SAVE_TO_FOLDER]: { afterFields: renderSaveToFolderFields },
   [NODE_IDS.TEXT_TO_FILE]:   { afterFields: renderTextToFileFields },
@@ -140,6 +142,8 @@ export async function showPopover(
   // A rebuild can shrink the port set (e.g. adding the first subfolder replaces
   // the flat-mode "input" port) — prune any connector left pointing at a port
   // that no longer exists.
+  const closeHooks: Array<() => void> = [];
+  const changeHooks: Array<() => void> = [];
   const onChange = () => {
     let pruned: ReturnType<Canvas["pruneOrphanedConnectors"]> = [];
     if (node.data.dynamic_ports) {
@@ -149,6 +153,7 @@ export async function showPopover(
     }
     canvas.commitNodeEdit(node, pruned);
     onChangeFn();
+    for (const hook of changeHooks) hook();
   };
 
   const creds = await listCredentials().catch(() => []);
@@ -356,6 +361,8 @@ export async function showPopover(
     rerender: () => showPopover(node, canvasEl, onChangeFn, canvas),
     hasConfigSection: cfgKeys.length > 0,
     fetchModels: fetchModelsForNode,
+    onClose: (fn) => { closeHooks.push(fn); },
+    onFieldChange: (fn) => { changeHooks.push(fn); },
   };
 
   // Config fields
@@ -451,6 +458,7 @@ export async function showPopover(
     document.removeEventListener("keydown", onFocusTrap, true);
     document.removeEventListener("keydown", onEsc, true);
     document.removeEventListener("mousedown", onOutside, true);
+    for (const hook of closeHooks) hook();
   };
 
   // Delay slightly so the triggering dblclick doesn't immediately close the popover.

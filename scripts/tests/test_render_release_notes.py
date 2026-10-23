@@ -55,13 +55,49 @@ class RenderTest(unittest.TestCase):
         groups = sections(render.render(TAG, REPO, ALL))
         expected = {
             "Windows": ("_x64-setup.exe", "_x64_en-US.msi"),
-            "macOS": ("_aarch64.dmg", "_aarch64.app.tar.gz"),
+            "macOS": ("_aarch64.dmg",),
             "Linux": (".AppImage", ".deb", ".rpm"),
         }
         for system, endings in expected.items():
             for name in INSTALLERS:
                 belongs = name.endswith(endings)
                 self.assertEqual(f"/{name})" in groups[system], belongs, f"{name} in {system}")
+
+    def test_one_format_per_system_is_recommended_for_every_architecture(self):
+        groups = sections(render.render(TAG, REPO, ALL))
+        recommended = {
+            system: {
+                line.split("`")[1]
+                for line in text.splitlines()
+                if "**Recommended.**" in line
+            }
+            for system, text in groups.items()
+            if system in ("Windows", "macOS", "Linux")
+        }
+        self.assertEqual(
+            recommended,
+            {
+                "Windows": {f"Aerini_{VERSION}_x64-setup.exe"},
+                "macOS": {f"Aerini_{VERSION}_aarch64.dmg"},
+                "Linux": {f"Aerini_{VERSION}_aarch64.AppImage", f"Aerini_{VERSION}_amd64.AppImage"},
+            },
+        )
+
+    def test_mac_app_bundle_moves_to_updater_files_only_when_a_disk_image_exists(self):
+        bundle = f"Aerini_{VERSION}_aarch64.app.tar.gz"
+        folded = render.render(TAG, REPO, [bundle, f"Aerini_{VERSION}_aarch64.dmg"])
+        self.assertNotIn("### macOS\n\n| Download | Architecture | Notes |\n|---|---|---|\n| [`" + bundle, folded)
+        self.assertEqual(folded.count(f"/{bundle})"), 1)
+        self.assertGreater(folded.index(f"/{bundle})"), folded.index("<summary>Auto-update files"))
+
+        alone = render.render(TAG, REPO, [bundle])
+        self.assertLess(alone.index("### macOS"), alone.index(f"/{bundle})"))
+        self.assertNotIn("Auto-update files", alone)
+
+    def test_mcp_table_is_collapsed_under_its_heading(self):
+        mcp_section = sections(render.render(TAG, REPO, ALL))["MCP server (`aerini-mcp`)"]
+        self.assertLess(mcp_section.index("<details>"), mcp_section.index("| Platform | Online | Offline |"))
+        self.assertLess(mcp_section.index("| Linux ARM64 |"), mcp_section.index("</details>"))
 
     def test_mcp_programs_land_in_the_row_and_column_for_their_platform(self):
         block = render.render(TAG, REPO, ALL)

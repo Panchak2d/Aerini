@@ -10,7 +10,8 @@ assets.txt holds one release asset name per line, exactly as GitHub stores it.
 download list from an earlier run is replaced, so running this again gives the same result.
 
 Every asset appears exactly once. A name that is not recognised is listed under "Other
-files" instead of being dropped.
+files" instead of being dropped. One format per system is marked Recommended, and a macOS
+app bundle that has a disk image for the same chip is listed with the updater files.
 """
 
 import argparse
@@ -48,6 +49,7 @@ INSTALLER_SUFFIXES = (
     (".msi", "Windows", "msi"),
 )
 FORMAT_ORDER = ("exe", "msi", "dmg", "app", "appimage", "deb", "rpm")
+RECOMMENDED_FORMAT = {"Windows": "exe", "macOS": "dmg", "Linux": "appimage"}
 FORMAT_NOTES = {
     "exe": "Installer (.exe)",
     "msi": "Installer (.msi)",
@@ -137,14 +139,28 @@ def render(tag, repo, names):
                 other.append(program.pop("checksum"))
     other.sort()
 
-    out = ["## Downloads", "", "Pick your system below. Files for the in-app updater are at the bottom."]
+    mac = installers.get("macOS", [])
+    disk_image_archs = {row[3] for row in mac if row[4] == "dmg"}
+    bundles = sorted(row[2] for row in mac if row[4] == "app" and row[3] in disk_image_archs)
+    if bundles:
+        installers["macOS"] = [row for row in mac if row[2] not in bundles]
+
+    out = [
+        "## Downloads",
+        "",
+        "Pick your system below and take the file marked **Recommended**. "
+        "Files for the in-app updater are at the bottom.",
+    ]
 
     for os_name in OS_ORDER:
         if os_name not in installers:
             continue
         out += ["", f"### {os_name}", "", "| Download | Architecture | Notes |", "|---|---|---|"]
         for _, _, name, arch, fmt in sorted(installers[os_name]):
-            out.append(f"| {link(name)} | {arch_label(os_name, arch)} | {FORMAT_NOTES[fmt]} |")
+            note = FORMAT_NOTES[fmt]
+            if fmt == RECOMMENDED_FORMAT[os_name]:
+                note = f"**Recommended.** {note}"
+            out.append(f"| {link(name)} | {arch_label(os_name, arch)} | {note} |")
 
     mcp = {platform: cells for platform, cells in mcp.items() if any(cells.values())}
     if mcp:
@@ -155,6 +171,9 @@ def render(tag, repo, names):
             "For connecting an AI agent to Aerini. **Offline** needs no server: the agent saves workflows "
             "as files you open in the desktop app. **Online** connects to an Aerini server. "
             f"See the [setup guide](https://github.com/{repo}/blob/main/docs/operations/mcp.md).",
+            "",
+            "<details>",
+            "<summary>MCP server downloads</summary>",
             "",
             "| Platform | Online | Offline |",
             "|---|---|---|",
@@ -172,15 +191,18 @@ def render(tag, repo, names):
                     text += f" · [.sha256]({url(cell['checksum'])})"
                 row.append(text)
             out.append("| " + " | ".join(row) + " |")
+        out += ["", "</details>"]
 
     if other:
         out += ["", "### Other files", ""] + [f"- {link(name)}" for name in other]
 
-    if manifests or signatures:
+    if manifests or bundles or signatures:
         out += ["", "<details>", "<summary>Auto-update files (not needed to install)</summary>", ""]
         out.append("The desktop app reads these to find and verify updates.")
+        if bundles:
+            out.append("The macOS `.app.tar.gz` is the same app as the disk image, as a compressed bundle.")
         out.append("")
-        out += [f"- {link(name)}" for name in manifests + sorted(signatures)]
+        out += [f"- {link(name)}" for name in manifests + bundles + sorted(signatures)]
         out += ["", "</details>"]
 
     return "\n".join([START, *out, END])

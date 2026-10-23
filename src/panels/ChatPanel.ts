@@ -16,6 +16,7 @@ import type { Connector } from "../canvas/Connector";
 import { RunningSync, triggerFingerprint } from "../running-sync";
 import { showConfirm } from "../confirm";
 import { checkChatReadiness, type ChatGraphEdge, type ChatGraphNode, type ReadinessIssue } from "../chat/readiness";
+import { chatMessageExpr } from "../chat/chat-defaults";
 
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
@@ -523,7 +524,7 @@ export class ChatPanel {
   private renderReadiness(issues: ReadinessIssue[]): void {
     const rows = issues.slice(0, MAX_READINESS_ROWS).map(i => this.readinessRow(i));
     if (issues.length > MAX_READINESS_ROWS) {
-      rows.push(this.buildReadinessRow(`${issues.length - MAX_READINESS_ROWS} more wiring problems on the canvas.`, []));
+      rows.push(this.buildReadinessRow(`${issues.length - MAX_READINESS_ROWS} more problems on the canvas.`, []));
     }
     if (this.wfManager.autoSaveFailed) {
       rows.push(this.buildReadinessRow("Your latest changes aren't saved, so the running workflow can't see them. Press Ctrl+S to retry.", []));
@@ -538,25 +539,57 @@ export class ChatPanel {
   }
 
   private readinessRow(issue: ReadinessIssue): HTMLElement {
-    if (issue.kind === "not_connected") {
-      const { from, to } = issue;
-      const text = `"${to.name}" uses the output of "${from.name}", but "${from.name}" doesn't run before it, so its values will be empty.`;
-      const actions = issue.fixable
-        ? [{ label: "Connect them", run: () => this.applyReadinessFix(() => this.canvas.connectPorts(from.id, "output", to.id, "input")) }]
-        : [];
-      return this.buildReadinessRow(text, actions);
+    switch (issue.kind) {
+      case "not_connected": {
+        const { from, to } = issue;
+        const text = `"${to.name}" uses the output of "${from.name}", but "${from.name}" doesn't run before it, so its values will be empty.`;
+        const actions = issue.fixable
+          ? [{ label: "Connect them", run: () => this.applyReadinessFix(() => this.canvas.connectPorts(from.id, "output", to.id, "input")) }]
+          : [];
+        return this.buildReadinessRow(text, actions);
+      }
+      case "prompt_unset": {
+        const { webhook, node, field } = issue;
+        return this.buildReadinessRow(
+          `"${node.name}" has no ${field}, so it never sees what you type here.`,
+          [{
+            label: "Use chat message",
+            run:   () => this.applyReadinessFix(
+              () => this.setNodeConfig(node.id, field, chatMessageExpr(this.canvas.nodes.get(webhook.id)?.data.name ?? webhook.name)),
+              "Fixed. Ctrl+Z on the canvas undoes it.",
+              `Couldn't set this automatically. Double-click "${node.name}" and fill in its ${field}.`,
+            ),
+          }],
+        );
+      }
+      case "reply_raw": {
+        const { output, source, field } = issue;
+        return this.buildReadinessRow(
+          `Replies will show as raw JSON, because "${output.name}" displays everything "${source.name}" returns.`,
+          [{
+            label: "Show reply text only",
+            run:   () => this.applyReadinessFix(
+              () => this.setNodeConfig(output.id, "field", field),
+              "Fixed. Ctrl+Z on the canvas undoes it.",
+              `Couldn't set this automatically. Double-click "${output.name}" and set Field to ${field}.`,
+            ),
+          }],
+        );
+      }
+      case "files_unread": {
+        if (issue.candidates.length === 0) {
+          return this.buildReadinessRow("Files you attach won't reach the AI: no AI node runs after the Webhook, so nothing can read them.", []);
+        }
+        const { webhook } = issue;
+        return this.buildReadinessRow(
+          "Files you attach won't reach the AI yet: nothing in this workflow reads them.",
+          issue.candidates.slice(0, MAX_READINESS_ROWS).map(c => ({
+            label: `Connect to "${c.name}"`,
+            run:   () => this.applyReadinessFix(() => this.canvas.connectPorts(webhook.id, "output", c.id, "attachments")),
+          })),
+        );
+      }
     }
-    if (issue.candidates.length === 0) {
-      return this.buildReadinessRow("Files you attach won't reach the AI: no AI node runs after the Webhook, so nothing can read them.", []);
-    }
-    const { webhook } = issue;
-    return this.buildReadinessRow(
-      "Files you attach won't reach the AI yet: nothing in this workflow reads them.",
-      issue.candidates.slice(0, MAX_READINESS_ROWS).map(c => ({
-        label: `Connect to "${c.name}"`,
-        run:   () => this.applyReadinessFix(() => this.canvas.connectPorts(webhook.id, "output", c.id, "attachments")),
-      })),
-    );
   }
 
   private buildReadinessRow(text: string, actions: { label: string; run: () => void }[]): HTMLElement {
@@ -577,14 +610,25 @@ export class ChatPanel {
     return row;
   }
 
-  private applyReadinessFix(connect: () => boolean): void {
-    if (!connect()) {
-      this.toast("Couldn't connect these automatically. Drag a wire between them on the canvas.", "error");
+  private setNodeConfig(nodeId: string, key: string, value: string): boolean {
+    const node = this.canvas.nodes.get(nodeId);
+    if (!node) return false;
+    this.canvas.editNode(node, () => { (node.data.config as Record<string, unknown>)[key] = value; });
+    return true;
+  }
+
+  private applyReadinessFix(
+    fix: () => boolean,
+    done   = "Connected. Ctrl+Z on the canvas undoes it.",
+    failed = "Couldn't connect these automatically. Drag a wire between them on the canvas.",
+  ): void {
+    if (!fix()) {
+      this.toast(failed, "error");
       return;
     }
-    this.toast("Connected. Ctrl+Z on the canvas undoes it.", "success");
+    this.toast(done, "success");
     this.syncReadiness();
-    // The scheduler re-reads the saved workflow on every run, so saving is all a wiring fix needs.
+    // The scheduler re-reads the saved workflow on every run, so saving is all a fix needs.
     if (this.schedulerRunning) void this.wfManager.flushAutoSave().then(() => this.syncReadiness());
   }
 

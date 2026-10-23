@@ -1,6 +1,7 @@
 import { Canvas } from "./canvas/Canvas";
 import { NODE_IDS } from "./node-ids";
-import { isTriggerNodeType } from "./canvas/node-registry";
+import { getNodeDescriptor, isTriggerNodeType } from "./canvas/node-registry";
+import { buildChatBotWorkflow, CHAT_BOT_NEXT_STEPS } from "./chat/chat-bot-template";
 import { deserialize, registerNodeDescriptors } from "./canvas/CanvasSerializer";
 import type { ChatSettings } from "./canvas/CanvasSerializer";
 import type { NodeDescriptor } from "./ipc/workflow";
@@ -296,7 +297,7 @@ async function init() {
     chip.addEventListener("click", () => filterByCategory(chip.dataset.cat ?? "all"));
   });
   initCommandPalette(canvas, setStatus);
-  initModals(async (obj) => {
+  const importWorkflowObject = async (obj: Record<string, unknown>): Promise<boolean> => {
     try {
       const doc = deserialize(JSON.stringify(obj));
       const { nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs, importWarnings } = doc;
@@ -328,7 +329,17 @@ async function init() {
       // the same fixed position (see .toast in base.css).
       if (importWarnings.length) toast(`Imported "${name}"${renamed} — ${importWarnings.join(" ")}`, "warning");
       else toast(`Imported "${name}"${renamed}`, "success");
-    } catch (e) { toast(`Import failed: ${e}`, "error"); }
+      return true;
+    } catch (e) {
+      toast(`Import failed: ${e}`, "error");
+      return false;
+    }
+  };
+  initModals(importWorkflowObject);
+  document.getElementById("empty-state-chat-bot-btn")?.addEventListener("click", async () => {
+    const workflow = buildChatBotWorkflow(getNodeDescriptor);
+    if (!workflow) { toast("The node list hasn't loaded yet. Try again in a moment.", "error"); return; }
+    if (await importWorkflowObject(workflow)) toast(CHAT_BOT_NEXT_STEPS, "info");
   });
   bindDropImport(toast);
   bindFileInput(toast);

@@ -1,4 +1,5 @@
 import { NODE_IDS } from "../node-ids";
+import { AI_CHAT_FIELDS, isBlank } from "./chat-defaults";
 
 export interface ChatGraphNode {
   id:     string;
@@ -8,9 +9,10 @@ export interface ChatGraphNode {
 }
 
 export interface ChatGraphEdge {
-  from_node: string;
-  to_node:   string;
-  to_port:   string;
+  from_node:  string;
+  from_port?: string;
+  to_node:    string;
+  to_port:    string;
 }
 
 export interface NodeRef { id: string; name: string; }
@@ -19,7 +21,11 @@ export type ReadinessIssue =
   /** Files can be sent, but nothing in the workflow reads the Webhook's files. */
   | { kind: "files_unread"; webhook: NodeRef; candidates: NodeRef[] }
   /** `to` reads `from`'s output but `from` does not run before it. */
-  | { kind: "not_connected"; from: NodeRef; to: NodeRef; fixable: boolean };
+  | { kind: "not_connected"; from: NodeRef; to: NodeRef; fixable: boolean }
+  /** An AI node after the Webhook has no prompt, so it never sees the typed message. */
+  | { kind: "prompt_unset"; webhook: NodeRef; node: NodeRef; field: string }
+  /** The Output Chat reads shows an AI node's whole result, which renders as raw JSON. */
+  | { kind: "reply_raw"; output: NodeRef; source: NodeRef; field: string };
 
 const FILE_READER_TYPES = new Set<string>([NODE_IDS.AI_PROMPT, NODE_IDS.AI_AGENT]);
 const MAX_SCANNED_STRING = 20_000;
@@ -58,8 +64,9 @@ function downstreamOf(startId: string, adjacency: Map<string, string[]>): Set<st
 /**
  * Static check of what the Chat panel depends on: the Webhook's files reaching
  * a node that reads them (when `checkFiles`), and every node that reads another
- * node's output actually running after it. Never throws; an unidentifiable
- * Webhook yields no file issue.
+ * node's output actually running after it, an AI node after the Webhook with no
+ * prompt, and an Output that would render an AI node's result as raw JSON.
+ * Never throws; an unidentifiable Webhook yields no file issue.
  */
 export function checkChatReadiness(
   nodes: ChatGraphNode[],
@@ -86,6 +93,7 @@ export function checkChatReadiness(
 
   const issues: ReadinessIssue[] = [];
   const named = nodes.filter(n => n.name.trim() !== "");
+  const downstream = downstreamOf(webhook.id, adjacency);
 
   for (const source of named) {
     const re = outputRef(source.name.trim(), "");
@@ -107,7 +115,6 @@ export function checkChatReadiness(
     const consumed = nodes.some(n => n.id !== webhook.id && reads(n, filesRef))
       || edges.some(e => e.from_node === webhook.id && e.to_port === "attachments");
     if (!consumed) {
-      const downstream = downstreamOf(webhook.id, adjacency);
       issues.push({
         kind:       "files_unread",
         webhook:    { id: webhook.id, name: webhook.name },
@@ -115,6 +122,37 @@ export function checkChatReadiness(
           .filter(n => FILE_READER_TYPES.has(n.type) && downstream.has(n.id))
           .map(n => ({ id: n.id, name: n.name })),
       });
+    }
+  }
+
+  if (webhook.name.trim() !== "") {
+    for (const n of nodes) {
+      const fields = AI_CHAT_FIELDS[n.type];
+      if (!fields || !downstream.has(n.id) || !isBlank(n.config[fields.input])) continue;
+      issues.push({
+        kind:    "prompt_unset",
+        webhook: { id: webhook.id, name: webhook.name },
+        node:    { id: n.id, name: n.name },
+        field:   fields.input,
+      });
+    }
+  }
+
+  // Chat reads the first Output node it finds, so only that one can show raw JSON.
+  const output = nodes.find(n => n.type === NODE_IDS.OUTPUT);
+  if (output && downstream.has(output.id) && isBlank(output.config["field"]) && isBlank(output.config["source_node"])) {
+    for (const e of edges) {
+      if (e.to_node !== output.id || e.to_port !== "input" || (e.from_port ?? "output") !== "output") continue;
+      const source = nodes.find(n => n.id === e.from_node);
+      const fields = source && AI_CHAT_FIELDS[source.type];
+      if (!source || !fields) continue;
+      issues.push({
+        kind:   "reply_raw",
+        output: { id: output.id, name: output.name },
+        source: { id: source.id, name: source.name },
+        field:  fields.reply,
+      });
+      break;
     }
   }
 

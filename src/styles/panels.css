@@ -350,6 +350,28 @@
 }
 .code-load-btn:hover { background: var(--bg4); color: var(--t1); }
 
+.ollama-ctl { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.ollama-ctl[hidden] { display: none; }
+.ollama-ctl .code-load-btn:disabled { opacity: .5; cursor: not-allowed; }
+.ollama-ctl .code-load-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.ollama-ctl .code-load-btn.is-danger:hover:not(:disabled) { color: var(--red); border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.1); }
+.ollama-ctl .config-hint { margin-bottom: 0; }
+.ollama-ctl-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.ollama-ctl-row[hidden] { display: none; }
+.ollama-ctl-progress { display: flex; flex-direction: column; gap: 6px; }
+.ollama-ctl-progress[hidden] { display: none; }
+.ollama-bar { position: relative; height: 6px; border-radius: 3px; background: var(--bg4); overflow: hidden; }
+.ollama-bar-fill { height: 100%; width: 0; border-radius: 3px; background: var(--blue); transition: width 120ms linear; }
+.ollama-bar.is-indeterminate .ollama-bar-fill { width: 35%; animation: ollama-bar-sweep 1.2s ease-in-out infinite; }
+@keyframes ollama-bar-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(300%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ollama-bar-fill { transition: none; }
+  .ollama-bar.is-indeterminate .ollama-bar-fill { width: 100%; opacity: .35; animation: none; }
+}
+
 .popover-body {
   flex: 1;
   overflow-y: auto;

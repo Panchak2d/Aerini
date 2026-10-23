@@ -261,7 +261,7 @@ describe("ChatPanel — unread attachments banner", () => {
   });
 
   it("edge case: hidden when a node's Files port is wired to the Webhook", async () => {
-    const { banner } = await send(new Map<string, unknown>([["n1", hook], ["n2", ai({ attachments_expr: "{{Webhook.output.files}}" })]]), "attachments");
+    const { banner } = await send(new Map<string, unknown>([["n1", hook], ["n2", ai({ prompt: "hi", attachments_expr: "{{Webhook.output.files}}" })]]), "attachments");
     expect(banner.classList.contains("hidden")).toBe(true);
   });
 });

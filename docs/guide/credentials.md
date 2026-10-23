@@ -34,7 +34,7 @@ Click **Add a credential** (or, if this is your first one, **Add your first cred
 
 ![The same form with Secret Value revealed by clicking the eye icon](../public/images/credentials-add-filled-revealed.png)
 
-An **Advanced** section lets you optionally record a provider, model, and base URL alongside the secret. These aren't secret themselves, they exist so that when you later pick this credential on an AI node, Aerini can fill in matching fields for you automatically. Next to Model, a **Fetch Models** button queries that provider's `/models` endpoint using whatever Provider, Base URL, and Secret Value are currently in this form, and offers a dropdown of what it finds — typing a name directly always still works if the fetch fails. More on that below.
+An **Advanced** section lets you optionally record a provider, model, and base URL alongside the secret. These aren't secret themselves, they exist so that when you later pick this credential on an AI node, Aerini can fill in matching fields for you automatically. Next to Model, a **Fetch Models** button queries that provider's `/models` endpoint using whatever Provider, Base URL, and Secret Value are currently in this form, and offers a dropdown of what it finds — typing a name directly always still works if the fetch fails. When Provider and Base URL point at a local Ollama server, **Pull model** and **Delete model** buttons appear under it too; closing the panel stops a download in progress ([Local Models](local-models.md#pulling-and-deleting-models)). More on that below.
 
 Click **Save Credential**. That's it: the credential now shows up in the panel and is available to every workflow.
 

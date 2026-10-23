@@ -180,7 +180,7 @@ impl WorkflowExecutor {
                 Ok(input) => input,
                 Err(failure) => {
                     let msg = failure.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "unknown error".to_string());
-                    return Err(format!("Loop node '{}' build_input failed: {}", loop_node_id, msg));
+                    return Err(format!("Loop node '{}' build_input failed: {}", loop_node_def.name, msg));
                 }
             };
             // This call bypasses `execute_with_retry` entirely
@@ -209,7 +209,7 @@ impl WorkflowExecutor {
                     .as_ref()
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "unknown error".to_string());
-                return Err(format!("Loop node '{}' failed on iteration {}: {}", loop_node_id, iteration, msg));
+                return Err(format!("Loop node '{}' failed on iteration {}: {}", loop_node_def.name, iteration, msg));
             }
 
             let done = loop_output
@@ -322,7 +322,7 @@ impl WorkflowExecutor {
                         if routed {
                             continue;
                         }
-                        return Err(format!("Loop body node '{}' build_input failed: {}", body_id, msg));
+                        return Err(format!("Loop body node '{}' build_input failed: {}", body_def.name, msg));
                     }
                 };
 
@@ -338,7 +338,7 @@ impl WorkflowExecutor {
                         let fail_output = crate::model::NodeOutput::failure(
                             crate::error::NodeError::unrecoverable(
                                 "SCHEMA_VIOLATION",
-                                format!("Input schema validation failed for loop body node '{}': {}", body_id, reason),
+                                format!("Input schema validation failed for loop body node '{}': {}", body_def.name, reason),
                             ),
                         );
                         state.write().await.mark_failed(body_id, fail_output, 1);
@@ -355,7 +355,7 @@ impl WorkflowExecutor {
                         }
                         return Err(format!(
                             "Loop body node '{}' failed schema validation on iteration {}: {}",
-                            body_id, iteration, reason
+                            body_def.name, iteration, reason
                         ));
                     } else {
                         let mut s = state.write().await;
@@ -414,7 +414,7 @@ impl WorkflowExecutor {
                         continue;
                     }
                     return Err(format!(
-                        "Loop body node '{}' failed on iteration {}: {}", body_id, iteration, msg
+                        "Loop body node '{}' failed on iteration {}: {}", body_def.name, iteration, msg
                     ));
                 }
 

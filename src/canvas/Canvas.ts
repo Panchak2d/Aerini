@@ -2,6 +2,7 @@ import { CanvasNode, createNodeFromDescriptor, NODE_WIDTH, PORT_RADIUS, roundedR
 import { Connector, newConnectorId, WIRE_DELETE_RADIUS, WIRE_DELETE_HIT_RADIUS, type PendingConnector } from "./Connector";
 import { serialize } from "./CanvasSerializer";
 import { NODE_IDS } from "../node-ids";
+import { AI_CHAT_FIELDS, chatMessageExpr, isBlank } from "../chat/chat-defaults";
 import type { NodeDescriptor } from "../ipc/workflow";
 import { UndoManager } from "./UndoManager";
 import { snapshotConfig, diffConfig } from "./UndoManager";
@@ -746,13 +747,17 @@ export class Canvas {
    * single-arity input any wire already there is replaced and a toast names the
    * source it displaced; a multi-arity input just gains the wire. Returns true,
    * changing nothing, when the identical wire exists. Returns false, changing
-   * nothing, when either port does not exist or the wire would loop a node back
-   * into itself.
+   * nothing, when either port does not exist, an Error port would feed a Files
+   * port, or the wire would loop a node back into itself.
    */
   connectOrReplace(srcNode: string, srcPort: string, toNode: string, toPort: string): boolean {
     if (srcNode === toNode) return false;
     if (!this.nodes.get(srcNode)?.ports.some(p => p.id === srcPort && !p.isInput)) return false;
     if (!this.nodes.get(toNode)?.ports.some(p => p.id === toPort && p.isInput)) return false;
+    if (srcPort === "on_error" && this.nodes.get(toNode)?.data.ports.inputs.find(p => p.id === toPort)?.port_type === "files") {
+      this.onWarn?.("An Error port carries error details, not files, so it can't feed a Files port.");
+      return false;
+    }
 
     const existing = this.wiresIntoPort(toNode, toPort);
     if (existing.some(c => c.data.from_node === srcNode && c.data.from_port === srcPort)) return true;
@@ -945,6 +950,25 @@ export class Canvas {
         if (!cfg.content) {
           cfg.content = `{{${fromNode.data.name}.output.content}}`;
         }
+      }
+    }
+
+    const aiFields = target ? AI_CHAT_FIELDS[target.data.node_type_id] : undefined;
+    if (target && aiFields && portId === "input") {
+      const fromNode = this.nodes.get(srcId);
+      const cfg = target.data.config as Record<string, unknown>;
+      if (fromNode?.data.node_type_id === NODE_IDS.WEBHOOK && fromNode.data.name.trim() && isBlank(cfg[aiFields.input])) {
+        cfg[aiFields.input] = chatMessageExpr(fromNode.data.name);
+        this.onWarn?.(`"${target.data.name}" will use the message sent to "${fromNode.data.name}" (the text typed in Chat). Edit it if your webhook sends something else.`);
+      }
+    }
+
+    if (target?.data.node_type_id === NODE_IDS.OUTPUT && portId === "input") {
+      const reply = AI_CHAT_FIELDS[this.nodes.get(srcId)?.data.node_type_id ?? ""]?.reply;
+      const cfg = target.data.config as Record<string, unknown>;
+      if (reply && isBlank(cfg.field) && isBlank(cfg.source_node)) {
+        cfg.field = reply;
+        this.onWarn?.(`"${target.data.name}" shows only the reply text (Field: ${reply}). Clear the Field to see the whole result.`);
       }
     }
 

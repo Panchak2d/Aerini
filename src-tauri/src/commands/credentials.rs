@@ -4,6 +4,7 @@ use std::sync::Arc;
 use aerini_engine::{
     db::WorkflowDb,
     error::EngineError,
+    executor::SecretString,
     store::{CredentialEntry, CredentialMetadata, CredentialStore, CreateCredentialRequest},
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -97,6 +98,19 @@ pub async fn save_credential(
     blocking(move || if update { store.update(&req) } else { store.create(&req) }).await
 }
 
+/// Reads a saved credential's secret. Rejects `CREDENTIAL_ERROR: ...` when
+/// the store fails and `MISSING_API_KEY: ...` when the id is unknown.
+pub(crate) async fn credential_secret(
+    store: &Arc<CredentialStore>,
+    id:    String,
+) -> Result<SecretString, String> {
+    let store = Arc::clone(store);
+    blocking(move || store.retrieve(&id))
+        .await
+        .map_err(|e| format!("CREDENTIAL_ERROR: {e}"))?
+        .ok_or_else(|| "MISSING_API_KEY: credential not found".to_string())
+}
+
 /// Lists a provider's models using a saved credential's secret, which is
 /// read here and never sent to the webview.
 #[tauri::command]
@@ -106,11 +120,7 @@ pub async fn list_credential_models(
     base_url: String,
     store:    tauri::State<'_, Arc<CredentialStore>>,
 ) -> Result<Vec<String>, String> {
-    let store = Arc::clone(&store);
-    let secret = blocking(move || store.retrieve(&id))
-        .await
-        .map_err(|e| format!("CREDENTIAL_ERROR: {e}"))?
-        .ok_or_else(|| "MISSING_API_KEY: credential not found".to_string())?;
+    let secret = credential_secret(&store, id).await?;
     crate::commands::providers::models_for(&provider, &base_url, &secret).await
 }
 

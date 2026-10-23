@@ -17,10 +17,21 @@ vi.mock("../ipc/credentials", () => credMock);
 const confirmMock = vi.hoisted(() => ({ showConfirm: vi.fn() }));
 vi.mock("../confirm", () => ({ showConfirm: confirmMock.showConfirm }));
 
-const providersMock = vi.hoisted(() => ({ listProviderModels: vi.fn() }));
+const providersMock = vi.hoisted(() => ({
+  listProviderModels: vi.fn(),
+  probeOllama:        vi.fn(),
+  pullOllamaModel:    vi.fn(),
+  cancelOllamaPull:   vi.fn(),
+}));
 vi.mock("../ipc/providers", async () => {
   const actual = await vi.importActual<typeof import("../ipc/providers")>("../ipc/providers");
-  return { ...actual, listProviderModels: providersMock.listProviderModels };
+  return {
+    ...actual,
+    listProviderModels: providersMock.listProviderModels,
+    probeOllama:        providersMock.probeOllama,
+    pullOllamaModel:    providersMock.pullOllamaModel,
+    cancelOllamaPull:   providersMock.cancelOllamaPull,
+  };
 });
 
 import { CredentialPanel } from "../panels/CredentialPanel";
@@ -46,6 +57,9 @@ beforeEach(() => {
   credMock.exportEncryptionKey.mockReset().mockResolvedValue("KEY-BASE64");
   confirmMock.showConfirm.mockReset().mockResolvedValue(true);
   providersMock.listProviderModels.mockReset().mockResolvedValue([]);
+  providersMock.probeOllama.mockReset().mockResolvedValue({ ollama: false, version: null, loopback: true, reason: "not_ollama" });
+  providersMock.pullOllamaModel.mockReset();
+  providersMock.cancelOllamaPull.mockReset().mockResolvedValue(undefined);
 });
 
 describe("CredentialPanel — scroll region structure", () => {
@@ -450,5 +464,93 @@ describe("CredentialPanel — Advanced 'Fetch Models'", () => {
     await flush();
 
     expect(providersMock.listProviderModels).toHaveBeenCalledWith("auto", "", "");
+  });
+});
+
+describe("CredentialPanel — Ollama pull/delete control", () => {
+  const OLLAMA = { ollama: true, version: "0.30.0", loopback: true, reason: null };
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  async function openPanel(): Promise<CredentialPanel> {
+    const panel = new CredentialPanel();
+    await panel.show();
+    await vi.advanceTimersByTimeAsync(0);
+    return panel;
+  }
+
+  async function typeInto(id: string, value: string): Promise<void> {
+    const inp = document.getElementById(id) as HTMLInputElement;
+    inp.value = value;
+    inp.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+  }
+
+  const ctl = () => document.querySelector<HTMLElement>("#cred-ollama-slot .ollama-ctl");
+  const pullBtn = () => document.querySelector<HTMLButtonElement>("#cred-ollama-slot .ollama-ctl-row button")!;
+
+  it("stays hidden for a cloud provider without probing, and appears for local once the probe says Ollama", async () => {
+    providersMock.probeOllama.mockResolvedValue(OLLAMA);
+    await openPanel();
+    await typeInto("cred-meta-provider", "openai");
+    await typeInto("cred-meta-base-url", "https://api.openai.com/v1");
+    expect(providersMock.probeOllama).not.toHaveBeenCalled();
+    expect(ctl()?.hidden).toBe(true);
+
+    await typeInto("cred-meta-provider", "local");
+    await typeInto("cred-meta-base-url", "http://localhost:11434/v1");
+    expect(providersMock.probeOllama).toHaveBeenLastCalledWith({ provider: "local", base_url: "http://localhost:11434/v1" });
+    expect(ctl()?.hidden).toBe(false);
+  });
+
+  it("stays hidden when the server does not answer as Ollama", async () => {
+    await openPanel();
+    await typeInto("cred-meta-provider", "local");
+    await typeInto("cred-meta-base-url", "http://localhost:1234/v1");
+    expect(providersMock.probeOllama).toHaveBeenCalled();
+    expect(ctl()?.hidden).toBe(true);
+  });
+
+  it("targets the saved credential while editing with a blank Secret Value, and the typed secret otherwise", async () => {
+    providersMock.probeOllama.mockResolvedValue(OLLAMA);
+    credMock.listCredentials.mockResolvedValue([entry("k1", "Local")]);
+    credMock.getCredentialMetadata.mockResolvedValue({ provider: "local", model: "llama3.2", base_url: "http://localhost:11434/v1" });
+    await openPanel();
+    document.querySelector<HTMLButtonElement>(".cred-item-edit")!.click();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(providersMock.probeOllama).toHaveBeenLastCalledWith({ provider: "local", base_url: "http://localhost:11434/v1", credential_id: "k1" });
+
+    await typeInto("cred-value", "typed-secret");
+    expect(providersMock.probeOllama).toHaveBeenLastCalledWith({ provider: "local", base_url: "http://localhost:11434/v1", api_key: "typed-secret" });
+  });
+
+  it("cancels a running pull when the panel is hidden", async () => {
+    providersMock.probeOllama.mockResolvedValue(OLLAMA);
+    providersMock.pullOllamaModel.mockReturnValue(new Promise(() => {}));
+    const panel = await openPanel();
+    await typeInto("cred-meta-provider", "local");
+    await typeInto("cred-meta-base-url", "http://localhost:11434/v1");
+    await typeInto("cred-meta-model", "llama3.2");
+    pullBtn().click();
+    await vi.advanceTimersByTimeAsync(0);
+    const pullId = providersMock.pullOllamaModel.mock.calls[0][0];
+
+    panel.hide();
+    expect(providersMock.cancelOllamaPull).toHaveBeenCalledWith(pullId);
+  });
+
+  it("lists models again after a pull completes", async () => {
+    providersMock.probeOllama.mockResolvedValue(OLLAMA);
+    providersMock.pullOllamaModel.mockResolvedValue("done");
+    providersMock.listProviderModels.mockResolvedValue(["llama3.2:latest"]);
+    await openPanel();
+    await typeInto("cred-meta-provider", "local");
+    await typeInto("cred-meta-base-url", "http://localhost:11434/v1");
+    await typeInto("cred-meta-model", "llama3.2");
+    pullBtn().click();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(providersMock.listProviderModels).toHaveBeenCalledWith("local", "http://localhost:11434/v1", "");
+    expect(document.querySelector("#cred-model-list-slot")?.textContent).toContain("1 model found");
   });
 });

@@ -7,7 +7,8 @@ import {
   exportEncryptionKey,
   listCredentialModels,
 } from "../ipc/credentials";
-import { listProviderModels, describeModelFetchError } from "../ipc/providers";
+import { listProviderModels, describeModelFetchError, type OllamaTarget } from "../ipc/providers";
+import { mountOllamaModelControl, type OllamaControl } from "../ollama-model-control";
 import { mkCustomSelect } from "../node-configs/popover-utils";
 import { showConfirm } from "../confirm";
 import { escapeHtml as escHtml, copyWithButtonFeedback } from "../utils";
@@ -50,6 +51,7 @@ export class CredentialPanel {
   private busy = false;
   private keyBannerTimer: ReturnType<typeof setTimeout> | null = null;
   private clipboardTimer: ReturnType<typeof setTimeout> | null = null;
+  private ollamaCtl: OllamaControl | null = null;
 
   constructor() {
     this.el = document.getElementById("cred-panel")!;
@@ -69,7 +71,13 @@ export class CredentialPanel {
 
   hide(): void {
     this.clearKeyBanner();
+    this.disposeOllama();
     this.el.classList.add("hidden");
+  }
+
+  private disposeOllama(): void {
+    this.ollamaCtl?.dispose();
+    this.ollamaCtl = null;
   }
 
   private async refresh(): Promise<void> {
@@ -148,6 +156,7 @@ export class CredentialPanel {
   }
 
   private render(): void {
+    this.disposeOllama();
     const isEmpty = this.creds.length === 0;
     this.el.innerHTML = `
       <div class="cred-panel-backdrop"></div>
@@ -286,6 +295,7 @@ export class CredentialPanel {
           <div class="field-multiline-wrap">
             <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
             <button type="button" class="code-load-btn" id="cred-fetch-models">Fetch Models</button>
+            <div id="cred-ollama-slot"></div>
             <div id="cred-model-list-slot"></div>
           </div>
         </div>
@@ -316,6 +326,14 @@ export class CredentialPanel {
     const baseUrlInp  = this.el.querySelector("#cred-meta-base-url") as HTMLInputElement;
     const fetchModelsBtn = this.el.querySelector("#cred-fetch-models")   as HTMLButtonElement;
     const modelListSlot  = this.el.querySelector("#cred-model-list-slot") as HTMLElement;
+    const ollamaSlot     = this.el.querySelector("#cred-ollama-slot") as HTMLElement;
+    let ollamaTargetKey = "";
+    const syncOllama = (): void => {
+      const key = JSON.stringify(ollamaTarget());
+      if (key === ollamaTargetKey) return;
+      ollamaTargetKey = key;
+      this.ollamaCtl?.refresh();
+    };
     const providerPickerSlot = this.el.querySelector("#cred-provider-picker-slot") as HTMLElement;
 
     // Build custom select — avoids WebKitGTK Linux native <select> rendering bug
@@ -339,6 +357,7 @@ export class CredentialPanel {
         providerInp.value = v;
         refreshProviderPicker();
         refreshBaseUrlHelp();
+        syncOllama();
       }));
     }
     refreshProviderPicker();
@@ -363,14 +382,16 @@ export class CredentialPanel {
       fillBtn.type = "button";
       fillBtn.className = "code-load-btn";
       fillBtn.textContent = "Use Ollama defaults";
-      fillBtn.addEventListener("click", () => { baseUrlInp.value = OLLAMA_DEFAULT_BASE_URL; });
+      fillBtn.addEventListener("click", () => { baseUrlInp.value = OLLAMA_DEFAULT_BASE_URL; syncOllama(); });
       baseUrlHelpSlot.appendChild(fillBtn);
     }
     refreshBaseUrlHelp();
     // Keeps both the picker's own label and the Base URL help in sync with
     // manual typing too, not just picker clicks — rebuilding a plain select
     // on every keystroke is cheap (DOM construction only, no network).
-    providerInp.addEventListener("input", () => { refreshProviderPicker(); refreshBaseUrlHelp(); });
+    providerInp.addEventListener("input", () => { refreshProviderPicker(); refreshBaseUrlHelp(); syncOllama(); });
+    baseUrlInp.addEventListener("input", syncOllama);
+    valInp.addEventListener("input", syncOllama);
 
     // Auto-slug ID from name — skipped entirely while editing, since the ID
     // field is read-only and re-deriving it would fight the locked value.
@@ -403,7 +424,9 @@ export class CredentialPanel {
     // this form; a blank Secret Value while editing uses the saved secret,
     // which the backend reads itself.
     const FETCH_MODELS_LABEL = "Fetch Models";
-    fetchModelsBtn.addEventListener("click", async () => {
+    let fetchSeq = 0;
+    const runFetch = async (afterChange = false): Promise<void> => {
+      const seq = ++fetchSeq;
       fetchModelsBtn.disabled = true;
       fetchModelsBtn.textContent = "Fetching…";
       try {
@@ -413,6 +436,16 @@ export class CredentialPanel {
         const models   = editingId && !valInp.value
           ? await listCredentialModels(editingId, provider, baseUrl)
           : await listProviderModels(provider, baseUrl, valInp.value);
+        if (seq !== fetchSeq) return;
+        if (!models.length && afterChange) {
+          modelListSlot.innerHTML = "";
+          const none = document.createElement("div");
+          none.className = "config-hint";
+          none.textContent = "No models are installed on this server.";
+          modelListSlot.appendChild(none);
+          fetchModelsBtn.textContent = FETCH_MODELS_LABEL;
+          return;
+        }
         if (!models.length) throw new Error("no models returned");
 
         modelListSlot.innerHTML = "";
@@ -429,6 +462,7 @@ export class CredentialPanel {
 
         fetchModelsBtn.textContent = FETCH_MODELS_LABEL;
       } catch (err) {
+        if (seq !== fetchSeq) return;
         fetchModelsBtn.textContent = "Couldn't fetch — try again";
         modelListSlot.innerHTML = "";
         const errHint = document.createElement("div");
@@ -437,9 +471,29 @@ export class CredentialPanel {
         modelListSlot.appendChild(errHint);
         setTimeout(() => { fetchModelsBtn.textContent = FETCH_MODELS_LABEL; }, 2500);
       } finally {
-        fetchModelsBtn.disabled = false;
+        if (seq === fetchSeq) fetchModelsBtn.disabled = false;
       }
+    };
+    fetchModelsBtn.addEventListener("click", () => { void runFetch(); });
+
+    // Pull and Delete for a local Ollama server. Only shown once the backend
+    // probe says the Provider and Base URL on this form point at Ollama; a
+    // blank Secret Value while editing makes the backend use the saved one.
+    const ollamaTarget = (): OllamaTarget | null => {
+      const provider = providerInp.value.trim() || "auto";
+      const base_url = baseUrlInp.value.trim();
+      if ((provider !== "local" && provider !== "auto") || !base_url) return null;
+      if (valInp.value) return { provider, base_url, api_key: valInp.value };
+      const credential_id = this.editing?.id;
+      return credential_id ? { provider, base_url, credential_id } : { provider, base_url };
+    };
+    ollamaTargetKey = JSON.stringify(ollamaTarget());
+    this.ollamaCtl = mountOllamaModelControl({
+      getTarget: ollamaTarget,
+      getModel: () => modelInp.value,
+      onModelsChanged: () => { void runFetch(true); },
     });
+    ollamaSlot.appendChild(this.ollamaCtl.el);
 
     cancelBtn?.addEventListener("click", () => this.cancelEdit());
 

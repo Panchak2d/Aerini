@@ -2,14 +2,14 @@
 
 `aerini-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets an AI agent (Claude Code, Claude Desktop, or any other MCP client that can start a local program) look up what Aerini's nodes can do, check a workflow, save it, and run it. It talks to the client over standard input and output, so there is nothing to host: the client starts it as a child process.
 
-It is a separate small program, not part of the desktop app or of `aerini-server`. For how an agent should use the tools, see [Building Workflows with an AI Agent](../guide/agents.md). This page covers installing it, configuring a client, what each switch controls, and what to lock down first.
+It is a separate small program, not part of the desktop app or of `aerini-server`. This is the reference page: modes, flags, tools, limits, security and error messages. If you want to get something working first, follow the [MCP Quickstart](mcp-quickstart.md). For how an agent should use the tools, see [Building Workflows with an AI Agent](../guide/agents.md).
 
 **Where to start**
 
 | You are... | Read |
 |---|---|
-| New to MCP or to this program | [What this is](#what-this-is), then the [Quick start](#quick-start) |
-| Not sure which file to download | [Getting the program](#getting-the-program), step 1 and step 2 |
+| New to MCP or to this program | [MCP Quickstart](mcp-quickstart.md), then [What this is](#what-this-is) |
+| Not sure which file to download | [Install the MCP Program](mcp-install.md), step 1 and step 2 |
 | Setting up a client | [Client configuration](#client-configuration) |
 | Something does not work | [Troubleshooting](#troubleshooting) |
 | Reviewing the security model | [Write access](#write-access-and-allow-write), [Limits](#limits), [Security](#security) |
@@ -34,18 +34,13 @@ The agent gets tools to list nodes, read their schemas, check a workflow, save i
 
 ## Quick start
 
-The fastest working setup is **offline mode**: no server, no token, nothing to host. It lets an agent design a workflow and hands you a file to open in the desktop app. It never runs anything.
+The fastest working setup is **offline mode**: no server, no token, nothing to host. The agent designs a workflow and hands you a `.aerini` file to open in the desktop app. It never runs anything. The step-by-step version, with a first prompt to try, is the [MCP Quickstart](mcp-quickstart.md).
 
-1. Open the [Releases page](https://github.com/Panchak2d/aerini/releases) and download the **offline** archive for your computer, plus the `.sha256` file beside it. [How to pick the right one.](#getting-the-program)
-2. Check the download against the checksum, then unpack it into a folder of its own.
-3. Run `aerini-mcp-offline --version` in that folder to confirm it starts.
-4. Register the program with your client (an example for each client is in [Client configuration](#client-configuration)). For Claude Code:
+The short form, for readers who have done this before: download the `aerini-mcp-offline` archive and its `.sha256` from the [Releases page](https://github.com/Panchak2d/aerini/releases) ([which file?](mcp-install.md)), verify and unpack it, then register it with your client by absolute path. For Claude Code:
 
-   ```bash
-   claude mcp add --transport stdio aerini -- /full/path/to/aerini-mcp-offline
-   ```
-
-5. Ask the agent to build a workflow. It saves a `.aerini` file in `~/aerini-workflows`. Drag that file onto the canvas of the desktop app. [A first prompt to try.](#try-it)
+```bash
+claude mcp add --transport stdio aerini -- /full/path/to/aerini-mcp-offline
+```
 
 If you want the agent to run workflows, you need a server and a token: see [Choosing a mode](#choosing-a-mode).
 
@@ -76,148 +71,9 @@ The mode is picked by the program's environment, not by a flag. `aerini-mcp` sta
 
 ## Getting the program
 
-Every release publishes both programs for each platform on the [Releases page](https://github.com/Panchak2d/aerini/releases), as an archive that holds the program and the license text, plus a `.sha256` file beside it.
+Every release publishes both programs for Linux x86_64 and arm64, macOS Apple Silicon and Windows x64, each with a `.sha256` checksum. Picking the right file, verifying it, unpacking it and clearing the macOS and Windows warnings take seven short steps, written up in [Install the MCP Program](mcp-install.md). A source build for other platforms is covered there too.
 
-| Platform | Online | Offline |
-|---|---|---|
-| Linux x86_64 | `aerini-mcp_<version>_x86_64-unknown-linux-gnu.tar.gz` | `aerini-mcp-offline_<version>_x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `aerini-mcp_<version>_aarch64-unknown-linux-gnu.tar.gz` | `aerini-mcp-offline_<version>_aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `aerini-mcp_<version>_aarch64-apple-darwin.tar.gz` | `aerini-mcp-offline_<version>_aarch64-apple-darwin.tar.gz` |
-| Windows x64 | `aerini-mcp_<version>_x86_64-pc-windows-msvc.zip` | `aerini-mcp-offline_<version>_x86_64-pc-windows-msvc.zip` |
-
-Those four platforms are all that is published. There is no prebuilt program for Intel Macs, Windows on Arm, or Linux systems that do not use glibc (such as Alpine); [build it from source](#build-it-from-source) there.
-
-### Step 1: Find the right files in the release list
-
-A release lists dozens of files, because the desktop app's installers are attached to the same page. Only some are for `aerini-mcp`. The release notes have an **MCP server** table with a link for each platform and mode, plus the matching `.sha256`, which saves the search. In the **Assets** list, use the name to tell them apart:
-
-| File name starts with | What it is | Do you need it? |
-|---|---|---|
-| `aerini-mcp_` | The MCP program that talks to a server (online mode) | If you run a server |
-| `aerini-mcp-offline_` | The MCP program with the engine built in (offline mode) | If you have no server |
-| `Aerini_` or `Aerini-` (capital A) | The desktop app: installers, packages, AppImage, app bundles | No, that is the app itself |
-| anything ending in `.sig` | A signature file used by the desktop app's updater | No |
-| anything ending in `.sha256` | A checksum for the archive with the same name | Yes, download the one that matches your archive |
-
-The name of an MCP archive has four parts. For example:
-
-```text
-aerini-mcp-offline_0.4.3_x86_64-pc-windows-msvc.zip
-|__________________| |____| |___________________| |__|
-   which program    version    platform (target)   format
-```
-
-- **Program:** `aerini-mcp` (online) or `aerini-mcp-offline` (offline).
-- **Version:** match it to the version of your Aerini server, if you use one.
-- **Platform:** the CPU and operating system, as described in the next step.
-- **Format:** `.tar.gz` for Linux and macOS, `.zip` for Windows.
-
-### Step 2: Match the platform to your computer
-
-| Name contains | Means | You have it if... |
-|---|---|---|
-| `x86_64-unknown-linux-gnu` | Linux, Intel/AMD 64-bit | `uname -m` prints `x86_64` |
-| `aarch64-unknown-linux-gnu` | Linux, Arm 64-bit | `uname -m` prints `aarch64` or `arm64` |
-| `aarch64-apple-darwin` | macOS, Apple Silicon (M1 and later) | `uname -m` prints `arm64` on a Mac |
-| `x86_64-pc-windows-msvc` | Windows, Intel/AMD 64-bit | PowerShell `$env:PROCESSOR_ARCHITECTURE` prints `AMD64` |
-
-On a Mac, `uname -m` printing `x86_64` means an Intel Mac, which has no prebuilt program. On Windows, `ARM64` means Windows on Arm, which also has none; whether the x64 program runs there under Windows's own emulation has not been tested.
-
-Offline or online? Use the [table above](#choosing-a-mode). The offline program contains the whole workflow engine, so its download is several times larger than the online one (on the `0.4.3` release page, roughly 10 to 16 MB against 3 to 4 MB per archive). That is why it is separate: an agent that only talks to a server does not need it. Both can sit in one folder, because the offline archive holds a program named `aerini-mcp-offline`.
-
-### Step 3: Download the archive and its checksum
-
-Download the archive and the `.sha256` file with the same name plus `.sha256` at the end. Keep them in the same folder. The examples below use version `0.4.3`. Replace it, and the platform, with yours.
-
-### Step 4: Verify the download
-
-The `.sha256` file contains one line, in the format that `sha256sum -c` reads: a hash, two spaces, and the archive's file name.
-
-Linux:
-
-```bash
-sha256sum -c aerini-mcp-offline_0.4.3_x86_64-unknown-linux-gnu.tar.gz.sha256
-```
-
-macOS (use `shasum -a 256 -c` instead of `sha256sum -c`):
-
-```bash
-shasum -a 256 -c aerini-mcp-offline_0.4.3_aarch64-apple-darwin.tar.gz.sha256
-```
-
-Both print `<file name>: OK` on a match. Anything else, including `FAILED`, means do not use the file: download it again.
-
-Windows has no `sha256sum`. In PowerShell, print the hash of your download and the line in the checksum file, and compare the two by eye. `Get-FileHash` prints upper-case letters, so convert it to lower case first:
-
-```powershell
-(Get-FileHash .\aerini-mcp-offline_0.4.3_x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
-Get-Content .\aerini-mcp-offline_0.4.3_x86_64-pc-windows-msvc.zip.sha256
-```
-
-The first line printed must equal the long hex string at the start of the second.
-
-A checksum that sits next to the archive in the same release proves the file was not damaged or cut short in transit. It does not prove the release itself was not tampered with, because anyone who could change the archive could change the checksum too.
-
-### Step 5: Unpack it into its own folder
-
-An archive holds exactly two files, the program and `LICENSE`, with no folder around them. Unpack into a new folder so they do not land among your other files.
-
-Linux and macOS:
-
-```bash
-mkdir -p ~/aerini-mcp
-tar -xzf aerini-mcp-offline_0.4.3_x86_64-unknown-linux-gnu.tar.gz -C ~/aerini-mcp
-```
-
-The program is already marked executable. If your system reports "permission denied", run `chmod +x ~/aerini-mcp/aerini-mcp-offline`.
-
-Windows (PowerShell):
-
-```powershell
-Expand-Archive -Path .\aerini-mcp-offline_0.4.3_x86_64-pc-windows-msvc.zip -DestinationPath $HOME\aerini-mcp
-```
-
-The program is `aerini-mcp-offline.exe` there.
-
-Write down the **full path** of the program. Clients do not search your `PATH` for it, and Claude Desktop needs an absolute path. On Linux and macOS, `realpath ~/aerini-mcp/aerini-mcp-offline` prints it. On Windows, `(Resolve-Path $HOME\aerini-mcp\aerini-mcp-offline.exe).Path` does.
-
-### Step 6: Clear the macOS and Windows warnings
-
-The builds are not code-signed, like the desktop installers.
-
-- **macOS:** a program downloaded through a browser carries a quarantine flag, and Gatekeeper refuses to start it from an MCP client. Clear the flag once, on the unpacked program:
-
-  ```bash
-  xattr -d com.apple.quarantine ~/aerini-mcp/aerini-mcp-offline
-  ```
-
-  If the command reports that the attribute does not exist, the flag was not set and you can go on.
-- **Windows:** SmartScreen may warn the first time. Click **More info**, then **Run anyway**. As with the desktop installer, this is expected for a program without a paid code-signing certificate. If your client starts the program without showing you a prompt and the tools never appear, run the program once from PowerShell so the warning has a window to appear in.
-
-### Step 7: Check that it starts
-
-```bash
-~/aerini-mcp/aerini-mcp-offline --version
-```
-
-This prints the program's name and version. `--help` lists every flag, with the same defaults as in [Configuration](#configuration). If both work, the download is good and your system can run it.
-
-To see how it behaves when a client starts it, run it with no arguments. The offline program prints nothing and waits, because it is listening for a client on standard input. Press Ctrl+C to stop it. The online program with no `AERINI_URL` instead exits at once with an error message and exit code `2`. That is not a fault in the file; see the [offline build note](#choosing-a-mode).
-
-### Build it from source
-
-You only need this for a platform with no prebuilt program, or if you want to audit what you run. It needs a Rust toolchain. From the repository root:
-
-```bash
-cargo build --release -p aerini-mcp
-cargo build --release -p aerini-mcp --features offline
-```
-
-Each command leaves `target/release/aerini-mcp`; the second one overwrites the first, so copy the first result somewhere before you run the second. The offline build compiles the engine and its dependencies and takes much longer. A source build of the offline program is called `aerini-mcp`, like the online one, not `aerini-mcp-offline`; rename the copy if you keep both.
-
-### Keep the program and the server on the same release
-
-The server's REST surface only grows, so an older `aerini-mcp` works against a newer server, but a newer `aerini-mcp` against an older server fails on the routes the server does not have; see [Troubleshooting](#troubleshooting).
+Keep `aerini-mcp` and `aerini-server` on the same release: an older `aerini-mcp` works against a newer server, but a newer `aerini-mcp` against an older server fails on the routes the server does not have. See [Troubleshooting](#troubleshooting).
 
 ## Setting up the server side
 
@@ -462,8 +318,8 @@ Start the program by hand to see its start-up error. For online mode: `AERINI_UR
 | `AERINI_URL is set but AERINI_TOKEN is not` | A URL without a token. Add `AERINI_TOKEN` to the client's `env`. A blank value counts as unset. |
 | `AERINI_URL is not a valid URL`, `must start with http:// or https://`, `must not contain a username or password`, or `has no host` | Fix the address. Put the token in `AERINI_TOKEN`, not in the URL. |
 | "Permission denied" (Linux, macOS) | The file is not executable: `chmod +x /path/to/aerini-mcp`. |
-| macOS says the program cannot be opened, or a client reports it was blocked | The quarantine flag is set. See [step 6](#step-6-clear-the-macos-and-windows-warnings). |
-| Windows shows "Windows protected your PC" | SmartScreen. See [step 6](#step-6-clear-the-macos-and-windows-warnings). |
+| macOS says the program cannot be opened, or a client reports it was blocked | The quarantine flag is set. See [step 6](mcp-install.md#step-6-clear-the-macos-and-windows-warnings). |
+| Windows shows "Windows protected your PC" | SmartScreen. See [step 6](mcp-install.md#step-6-clear-the-macos-and-windows-warnings). |
 | The program runs by hand but the client lists no tools | The path in the client is wrong or relative, a Windows backslash is not doubled, or the JSON is invalid. In Claude Desktop, also check that you quit it completely and reopened it. |
 | Tools appear, then vanish after you edit the configuration | Most clients read the configuration only at start-up. Restart the client or start a new session. |
 
@@ -506,6 +362,8 @@ Replace the program with the one from the new release. Nothing is stored between
 
 ## What's next
 
+- [MCP Quickstart](mcp-quickstart.md), the shortest path to a working setup
+- [Install the MCP Program](mcp-install.md), picking, verifying and unpacking the download
 - [Building Workflows with an AI Agent](../guide/agents.md), how an agent should use the tools
 - [Server API Reference](server-api-reference.md), the REST routes behind the online tools
 - [Server Deployment](server-deploy.md), running the server
