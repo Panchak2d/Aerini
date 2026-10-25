@@ -305,7 +305,7 @@ async function init() {
       const id   = `wf_${crypto.randomUUID()}`;
       const name = uniqueWorkflowName(await wfManager.listWorkflowNames(), doc.name);
       canvas.nodes = nodes; canvas.connectors = connectors;
-      canvas.clearSelection(); canvas.fitToScreen();
+      canvas.clearSelection();
       canvas.warnArityViolations();
       wfManager.parallelExecution  = parallelExecution;
       wfManager.maxConcurrentNodes = maxConcurrentNodes;
@@ -317,9 +317,11 @@ async function init() {
       wfManager.currentId = id; wfManager.currentName = name;
       // Unsaved on purpose: the new id has no stored row yet, so it must be written or the import vanishes on the next switch.
       wfManager.markUnsaved(true); setTitle(name);
+      // Fit last: an open drawer shrinks the fit area, and the viewport is persisted under currentId.
+      document.getElementById("output-drawer")!.classList.add("hidden");
+      canvas.fitToScreen();
       wfManager.scheduleAutoSave();
       await wfManager.flushAutoSave();
-      document.getElementById("output-drawer")!.classList.add("hidden");
       setStatus(`Imported "${name}"`);
       wfManager.onNavigate?.();
       wfManager.refreshWorkflowList();

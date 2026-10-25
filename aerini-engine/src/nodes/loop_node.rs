@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::{Node, NodePorts, PortArity, PortDefinition, PortPosition};
+use crate::expression::is_truthy;
 use super::util::{cfg_u64_opt, traverse_dotpath};
 
 /// Loop node — iterates over an array, emitting one item at a time.
@@ -22,6 +23,25 @@ const RESERVED_LOOP_OUTPUT_KEYS: &[&str] = &[
     "total", "item", "index", "all_results", "done",
     "__loop_node_id", "__loop_next_index", "__loop_total",
 ];
+
+/// Truthiness of a resolved `stop_when` value. A string follows the expression
+/// engine's `if()` rule (false when empty, `false`, `0` or `null`) after
+/// trimming, with `false` matched in any case; any other string is true. A JSON boolean is taken as is and a missing or null value
+/// is false. Other types are rejected rather than guessed at.
+fn stop_when_is_true(v: &Value) -> Result<bool, NodeError> {
+    match v {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        Value::String(s) => {
+            let t = s.trim();
+            Ok(!t.eq_ignore_ascii_case("false") && is_truthy(t))
+        }
+        other => Err(NodeError::unrecoverable(
+            "INVALID_STOP_WHEN",
+            format!("stop_when must be text (an expression or a value), got {}", other),
+        )),
+    }
+}
 
 #[async_trait]
 impl Node for LoopNode {
@@ -55,6 +75,10 @@ impl Node for LoopNode {
                 "max_iterations": {
                     "type": "number",
                     "description": "Stop after this many items instead of the full array (default: no limit — every item runs). 0 or blank also means no limit. Can only lower the bound: a value larger than the array, or larger than the 10,000-item cap, has no effect beyond the array's own length."
+                },
+                "stop_when": {
+                    "type": "string",
+                    "description": "Optional. Checked before every item, including the first. If it resolves to true the loop stops and continues from Done. Empty, 'false' (any case), '0' and 'null' count as false; anything else is true. A reference to a node that has not run yet resolves to empty, so the first item always runs. Use an expression that reads an earlier item's result, e.g. {{Agent.output.finished}} or {{$vars.stop}}. Can only shorten the loop; Max Iterations and the array's length still apply."
                 }
             }
         })
@@ -69,7 +93,9 @@ impl Node for LoopNode {
                 "item":        { "description": "Current item in the iteration" },
                 "index":       { "type": "number", "description": "Current zero-based index" },
                 "all_results": { "type": "array", "description": "Collected results from loop body executions" },
-                "done":        { "type": "boolean", "description": "True when all items have been processed" }
+                "done":        { "type": "boolean", "description": "True when all items have been processed" },
+                "stopped_early": { "type": "boolean", "description": "On the Done output: true when Stop When ended the loop before the array or Max Iterations did" },
+                "stop_reason": { "type": ["string", "null"], "description": "On the Done output: \"stop_when\" when Stop When ended the loop, otherwise null" }
             }
         })
     }
@@ -183,9 +209,17 @@ impl Node for LoopNode {
             Err(e) => return NodeOutput::failure(e),
         };
 
+        let stop_requested = match stop_when_is_true(&input.input["stop_when"]) {
+            Ok(b) => b,
+            Err(e) => return NodeOutput::failure(e),
+        };
+
         if total == 0 {
             return NodeOutput::success_with_logs(
-                json!({ "items": [], "total": 0, "all_results": [], "done": true, "item": null, "index": 0 }),
+                json!({
+                    "items": [], "total": 0, "all_results": [], "done": true, "item": null, "index": 0,
+                    "stopped_early": false, "stop_reason": null
+                }),
                 vec!["Loop: empty array, nothing to iterate".to_string()],
             );
         }
@@ -216,9 +250,31 @@ impl Node for LoopNode {
                     "all_results": [],
                     "done": true,
                     "item": null,
-                    "index": current_index
+                    "index": current_index,
+                    "stopped_early": false,
+                    "stop_reason": null
                 }),
                 vec![done_msg],
+            );
+        }
+
+        if stop_requested {
+            let processed: Vec<Value> = items.into_iter().take(current_index).collect();
+            return NodeOutput::success_with_logs(
+                json!({
+                    "items": processed,
+                    "total": current_index,
+                    "all_results": [],
+                    "done": true,
+                    "item": null,
+                    "index": current_index,
+                    "stopped_early": true,
+                    "stop_reason": "stop_when"
+                }),
+                vec![format!(
+                    "Loop stopped early: stop_when was true before item {} of {} (processed {})",
+                    current_index + 1, total, current_index
+                )],
             );
         }
 
@@ -565,5 +621,95 @@ mod tests {
         assert_eq!(data["done"], json!(true));
         assert_eq!(data["items"], json!([10, 20]));
         assert_eq!(data["items"].as_array().unwrap().len() as u64, data["total"].as_u64().unwrap());
+    }
+
+    fn make_input_at(input: Value, items: Value, index: u64) -> NodeInput {
+        let mut outputs = HashMap::new();
+        outputs.insert("n_a".to_string(), json!({ "items": items }));
+        let mut metadata = HashMap::new();
+        metadata.insert("__loop_test_index".to_string(), json!(index));
+        NodeInput {
+            resolved_credentials: std::collections::HashMap::new(),
+            cancel_token: None,
+            node_id:      "test".to_string(),
+            workflow_id:  "wf".to_string(),
+            execution_id: "exec".to_string(),
+            input,
+            context: ExecutionContext {
+                variables:    HashMap::new(),
+                node_outputs: Arc::new(outputs),
+                metadata,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_when_true_ends_loop_and_reports_only_the_items_that_ran() {
+        let cfg = json!({ "array_field": "items", "source_node": "n_a", "stop_when": "true" });
+
+        let out = LoopNode.execute(make_input_at(cfg.clone(), json!([10, 20, 30, 40, 50]), 2)).await;
+        assert!(out.success, "expected success, got: {:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["done"], json!(true));
+        assert_eq!(data["stopped_early"], json!(true));
+        assert_eq!(data["stop_reason"], json!("stop_when"));
+        assert_eq!(data["total"], json!(2));
+        assert_eq!(data["items"], json!([10, 20]));
+        assert_eq!(data["item"], json!(null));
+
+        let out_first = LoopNode.execute(make_input_at(cfg, json!([10, 20, 30]), 0)).await;
+        let first = out_first.output.unwrap();
+        assert_eq!(first["done"], json!(true), "stop_when is checked before the first item too");
+        assert_eq!(first["total"], json!(0));
+        assert_eq!(first["items"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn stop_when_falsy_values_keep_loop_running() {
+        for falsy in [json!(""), json!("  "), json!("false"), json!(" FALSE "), json!("0"), json!("null"), json!(false), json!(null)] {
+            let cfg = json!({ "array_field": "items", "source_node": "n_a", "stop_when": falsy });
+            let out = LoopNode.execute(make_input_at(cfg, json!([10, 20, 30]), 1)).await;
+            assert!(out.success, "stop_when {falsy}: {:?}", out.error);
+            let data = out.output.unwrap();
+            assert_eq!(data["done"], json!(false), "stop_when {falsy} must not stop the loop");
+            assert_eq!(data["item"], json!(20));
+        }
+    }
+
+    #[tokio::test]
+    async fn done_output_without_stop_when_reports_not_stopped_early() {
+        for cfg in [
+            json!({ "array_field": "items", "source_node": "n_a" }),
+            json!({ "array_field": "items", "source_node": "n_a", "stop_when": "   " }),
+        ] {
+            let out = LoopNode.execute(make_input_at(cfg, json!([1, 2, 3]), 3)).await;
+            let data = out.output.unwrap();
+            assert_eq!(data["done"], json!(true));
+            assert_eq!(data["total"], json!(3));
+            assert_eq!(data["items"], json!([1, 2, 3]));
+            assert_eq!(data["stopped_early"], json!(false));
+            assert_eq!(data["stop_reason"], json!(null));
+        }
+    }
+
+    #[tokio::test]
+    async fn max_iterations_reached_first_wins_over_a_true_stop_when() {
+        let cfg = json!({ "array_field": "items", "source_node": "n_a", "max_iterations": 2, "stop_when": "true" });
+        let out = LoopNode.execute(make_input_at(cfg, json!([10, 20, 30, 40, 50]), 2)).await;
+        let data = out.output.unwrap();
+        assert_eq!(data["done"], json!(true));
+        assert_eq!(data["total"], json!(2));
+        assert_eq!(data["items"], json!([10, 20]));
+        assert_eq!(data["stopped_early"], json!(false));
+        assert_eq!(data["stop_reason"], json!(null));
+    }
+
+    #[tokio::test]
+    async fn stop_when_of_unsupported_type_is_rejected() {
+        let cfg = json!({ "array_field": "items", "source_node": "n_a", "stop_when": ["x"] });
+        let out = LoopNode.execute(make_input_at(cfg, json!([1]), 0)).await;
+        assert!(!out.success);
+        assert_eq!(out.error.unwrap().code, "INVALID_STOP_WHEN");
     }
 }

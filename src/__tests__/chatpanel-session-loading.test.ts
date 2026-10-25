@@ -43,6 +43,7 @@ import { ChatPanel } from "../panels/ChatPanel";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
 import type { RunManager } from "../run-manager";
+import { DEFAULT_CHAT_SETTINGS, type ChatSettings } from "../canvas/CanvasSerializer";
 
 const runManagerStub = { addRunStateListener: vi.fn() } as unknown as RunManager;
 
@@ -79,6 +80,7 @@ type PanelInternals = {
   deleteSession(id: string): Promise<void>;
   appendMessage(m: { id: string; role: string; text: string; timestamp: number }): void;
   persist(): Promise<void>;
+  applyToggles(s: ChatSettings): void;
 };
 
 type Deferred<T> = { promise: Promise<T>; resolve(v: T): void; reject(e: unknown): void };
@@ -277,5 +279,23 @@ describe("ChatPanel — loading a session's messages on switch", () => {
     d.resolve();
     await deleting;
     expect(chatMocks.deleteChatSession).toHaveBeenCalledWith("s2");
+  });
+
+  it("turning Session persistence off mid-switch cancels the switch and drops stored-only sessions (edge case)", async () => {
+    const p = await makeLoadedPanel();
+    const d = deferred<ReturnType<typeof wire>>();
+    chatMocks.loadChatMessages.mockReturnValueOnce(d.promise);
+    const switching = p.switchSession("s2");
+    expect(loadingShown()).toBe(true);
+
+    p.applyToggles({ ...DEFAULT_CHAT_SETTINGS, session_persistence: false });
+    d.resolve(wire("m-s2", "two"));
+    await switching;
+
+    expect(loadingShown()).toBe(false);
+    expect(inputLocked()).toBe(false);
+    expect(p.store.activeId).toBe("s1");
+    expect(p.store.sessions.map((s) => s.id)).toEqual(["s1"]);
+    expect(shownText()).toContain("one");
   });
 });

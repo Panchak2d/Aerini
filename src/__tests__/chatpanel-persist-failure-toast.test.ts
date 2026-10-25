@@ -136,4 +136,16 @@ describe("ChatPanel persist() failure toast", () => {
     await p.persist();
     expect(chatMocks.appendChatMessage).not.toHaveBeenCalled();
   });
+
+  it("never writes or toasts while Session persistence is off, even if the backend is down", async () => {
+    chatMocks.appendChatMessage.mockRejectedValue(new Error("backend unreachable"));
+    const toastFn = vi.fn();
+    const p = panelWithMessages(toastFn, ["m1"]);
+    (p as unknown as { storePersistent: boolean }).storePersistent = false;
+
+    await p.persist();
+
+    expect(chatMocks.appendChatMessage).not.toHaveBeenCalled();
+    expect(toastFn).not.toHaveBeenCalled();
+  });
 });

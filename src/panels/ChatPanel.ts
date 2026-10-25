@@ -136,8 +136,10 @@ export class ChatPanel {
   private store: ChatStore = { sessions: [], activeId: "" };
   /** Workflow `store` was loaded for. It can lag `wfManager.currentId` after a workflow switch, until the panel is reopened. */
   private storeWorkflowId = "";
-  /** Set on every panel open via applyToggles(wfManager.chatSettings). */
+  /** Updated by applyToggles(): on every panel open and on every live change in Workflow Settings. */
   private chatSettings: ChatSettings = { ...DEFAULT_CHAT_SETTINGS };
+  /** Whether the loaded `store` is written to the backend. Follows the Session persistence setting of the workflow `store` belongs to, so it can lag the current workflow until the panel is reopened. */
+  private storePersistent = true;
 
   // `awaitingReply` gates the input lock / "one send at a time" rule and turns
   // the send button into Stop. It clears only when the reply lands, the run
@@ -307,14 +309,18 @@ export class ChatPanel {
   }
 
   /**
-   * Reads workflow-scoped Chat settings (called on every panel open — see show()).
+   * Applies workflow-scoped Chat settings. Called on every panel open (see
+   * show()) and whenever a setting changes in Workflow Settings.
    *
-   * `session_persistence` is read here but not enforced: persist() and
-   * loadStoreForCurrentWorkflow() always persist to the backend chat
-   * tables regardless of this toggle.
+   * `session_persistence` takes effect immediately for the loaded
+   * conversation only when it belongs to the current workflow; otherwise the
+   * next loadStoreForCurrentWorkflow() applies it.
    */
   applyToggles(settings: ChatSettings): void {
     this.chatSettings = settings;
+    if (this.storeWorkflowId === this.wfManager.currentId) {
+      this.setStorePersistent(settings.session_persistence !== false);
+    }
 
     if (settings.allow_attachments) {
       this.attachBtn.removeAttribute("aria-disabled");
@@ -1421,7 +1427,19 @@ export class ChatPanel {
    */
   private async loadStoreForCurrentWorkflow(): Promise<void> {
     const workflowId = this.wfManager.currentId;
+    const persistent = this.chatSettings.session_persistence !== false;
+    const lagging = this.storeWorkflowId !== workflowId;
+    if (lagging) this.discardEphemeralSessions();
     await this.persist();
+    if (!persistent) {
+      if (lagging && this.wfManager.currentId === workflowId) {
+        this.cancelPendingSwitch();
+        this.store = { sessions: [], activeId: "" };
+        this.storeWorkflowId = workflowId;
+        this.storePersistent = false;
+      }
+      return;
+    }
     try {
       const metas = await listChatSessionMeta(workflowId);
       if (metas.length > 0) {
@@ -1433,6 +1451,7 @@ export class ChatPanel {
           this.cancelPendingSwitch();
           this.store = { sessions, activeId };
           this.storeWorkflowId = workflowId;
+          this.storePersistent = true;
           for (const s of sessions) {
             this.syncState.set(s.id, {
               loaded: s === active, syncedIds: new Set(s.messages.map((m) => m.id)), metaSynced: true, loading: null,
@@ -1447,6 +1466,7 @@ export class ChatPanel {
           this.cancelPendingSwitch();
           this.store = migrated;
           this.storeWorkflowId = workflowId;
+          this.storePersistent = true;
         }
         return;
       }
@@ -1458,7 +1478,46 @@ export class ChatPanel {
       this.cancelPendingSwitch();
       this.store = { sessions: [], activeId: "" };
       this.storeWorkflowId = workflowId;
+      this.storePersistent = true;
     }
+  }
+
+  /** Switches the loaded store between written-to-backend and memory-only. Turning off hides sessions that exist only in storage; their rows stay on disk. */
+  private setStorePersistent(next: boolean): void {
+    if (this.storePersistent === next) return;
+    this.storePersistent = next;
+    if (next) {
+      void this.persist();
+      return;
+    }
+    const switching = this.pendingSwitchId !== null;
+    this.cancelPendingSwitch();
+    this.store.sessions = this.store.sessions.filter((s) => this.syncOf(s.id).loaded);
+    if (switching) {
+      this.renderSessionLabel();
+      this.renderMessages();
+    }
+  }
+
+  /** Whether the backend may hold rows for this session. A session with no sync entry counts as stored. */
+  private hasStoredRows(id: string): boolean {
+    const sync = this.syncState.get(id);
+    return !sync || sync.metaSynced || sync.syncedIds.size > 0;
+  }
+
+  /** Memory-only sessions of the outgoing store have no stored rows to keep, so their AI Memory is cleared on a best-effort basis. */
+  private discardEphemeralSessions(): void {
+    if (this.storePersistent) return;
+    for (const s of this.store.sessions) {
+      if (s.messages.length > 0 && !this.hasStoredRows(s.id)) {
+        void clearChatSession(s.id).catch(() => {});
+      }
+    }
+  }
+
+  private deleteStoredSession(id: string): Promise<void> {
+    if (!this.storePersistent && !this.hasStoredRows(id)) return Promise.resolve();
+    return this.enqueue(() => deleteChatSession(id));
   }
 
   /** Runs `task` after every earlier chat-history write has finished. A failing task does not block later ones. */
@@ -1477,6 +1536,7 @@ export class ChatPanel {
    * ambiguous failure can't duplicate it.
    */
   private persist(): Promise<void> {
+    if (!this.storePersistent) return Promise.resolve();
     const store = this.store;
     const workflowId = this.storeWorkflowId || this.wfManager.currentId;
     return this.enqueue(() => this.flush(store, workflowId));
@@ -1510,6 +1570,7 @@ export class ChatPanel {
   }
 
   private loadSessionMessages(s: ChatSession): Promise<void> {
+    if (!this.storePersistent) return Promise.resolve();
     const sync = this.syncOf(s.id);
     if (sync.loaded) return Promise.resolve();
     if (!sync.loading) {
@@ -1652,9 +1713,9 @@ export class ChatPanel {
     if (this.pendingSwitchId === id) this.cancelPendingSwitch();
     const wasActive = this.store.activeId === id;
     this.store.sessions = this.store.sessions.filter(s => s.id !== id);
+    const deletion = this.deleteStoredSession(id);
     this.syncState.delete(id);
     if (wasActive) this.store.activeId = "";
-    const deletion = this.enqueue(() => deleteChatSession(id));
 
     if (wasActive) {
       await this.activateSession(this.store.sessions[0].id);
@@ -1707,9 +1768,10 @@ export class ChatPanel {
       fresh.name = current.name;
       this.store.sessions[idx] = fresh;
       this.store.activeId = fresh.id;
+      const deletion = this.deleteStoredSession(current.id);
       this.syncState.delete(current.id);
       try {
-        await this.enqueue(() => deleteChatSession(current.id));
+        await deletion;
       } catch (e) {
         console.error("Aerini: deleteChatSession failed", e);
       }

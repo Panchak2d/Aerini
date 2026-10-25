@@ -26,6 +26,27 @@ The workflow:
 - **Show Result** — Output node displaying the result
 - **Output** — a second output node re-displaying the same result
 
+## AI_Agent_Router.aerini
+
+An AI Agent tool-routing workflow, importable as described in "How to import" above. Its walkthrough is `AI_Agent_Router.md`. It demonstrates:
+- **AI Agent** — reads a question and either answers or asks for one of two declared tools
+- **If / Condition** — rejects a request for an unknown tool or with bad arguments before anything runs
+- **Switch** — routes the request on `tool_calls.0.tool`; the default branch means no tool was needed
+- **HTTP Request** (x2), **Set Variable**, **Merge** — the tool branches, rejoined into one path
+- **AI Agent** (second) — continues the conversation with the tool result and writes the answer
+
+Needs an API key for your AI provider on both AI Agent nodes. Includes the safety rules for acting on a model's tool requests.
+
+## AI_Agent_Loop.aerini
+
+An AI Agent that keeps going until it is done, importable as described in "How to import" above. Its walkthrough is `AI_Agent_Loop.md`. It demonstrates:
+- **Loop** — runs one turn per item of a list, so the list length is the turn budget; **Stop When** ends it early
+- **AI Agent** — reads its own earlier `messages` and the previous turn's tool result, then answers or asks for one tool
+- **If / Condition**, **Switch** — reject a bad request and route a good one to the tool's branch
+- **HTTP Request** (x2), **Set Variable**, **Merge** — the tool branches and the result handed back for the next turn
+
+Needs an API key for your AI provider on the AI Agent. The pattern was tested on Gemini. States what bounds the loop (the list, Stop When, Max Iterations) and what does not (no token budget or time cap), and includes the safety rules for acting on a model's tool requests.
+
 ## Chatbot___AI_Memory___Widget.md
 
 A chatbot workflow template demonstrating:

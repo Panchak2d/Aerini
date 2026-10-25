@@ -423,7 +423,13 @@ impl WorkflowExecutor {
                     iteration_result = Some(val.clone());
                 }
                 let taken_port = Self::resolve_taken_port(&body_output);
-                state.write().await.mark_succeeded(body_id, body_output);
+                {
+                    let mut s = state.write().await;
+                    if let Some((key, v)) = body_output.output.as_ref().and_then(crate::context::variable_write) {
+                        s.set_variable(key, v);
+                    }
+                    s.mark_succeeded(body_id, body_output);
+                }
                 self.emit_node_status(&workflow.id, body_id, "success");
 
                 // Only the edge(s) on the node's actual taken port
@@ -2237,5 +2243,154 @@ mod tests {
              routing after all iterations finish, NOT once per iteration via the body's \
              on_error edge (which must be skipped: after_loop is outside the loop body)"
         );
+    }
+
+    use serde_json::json;
+
+    struct EchoInputNode;
+    #[async_trait::async_trait]
+    impl Node for EchoInputNode {
+        fn type_id(&self) -> &'static str { "echo_input_loop_test" }
+        fn display_name(&self) -> &'static str { "Echo Input" }
+        fn node_type(&self) -> NodeType { NodeType::Utility }
+        fn version(&self) -> &'static str { "1.0" }
+        fn input_schema(&self) -> serde_json::Value { json!({}) }
+        fn output_schema(&self) -> serde_json::Value { json!({}) }
+        async fn execute(&self, input: NodeInput) -> NodeOutput {
+            NodeOutput::success(input.input)
+        }
+    }
+
+    fn plain_node(id: &str, type_id: &str, name: &str, config: serde_json::Value, disabled: bool) -> WorkflowNode {
+        WorkflowNode {
+            id: id.to_string(), node_type_id: type_id.to_string(),
+            node_type: NodeType::Utility, name: name.to_string(),
+            config, credentials: HashMap::new(),
+            input_schema: json!({}), output_schema: json!({}),
+            retry: Default::default(), fallback_node: None, disabled,
+            position: Default::default(),
+        }
+    }
+
+    fn plain_edge(from: &str, from_port: &str, to: &str) -> WorkflowEdge {
+        WorkflowEdge {
+            id: format!("e_{}_{}", from, to), from_node: from.to_string(),
+            from_port: from_port.to_string(), to_node: to.to_string(),
+            to_port: "input".to_string(), condition: None, on_success: None, on_failure: None,
+        }
+    }
+
+    // data_source → Loop → body[0] → body[1] → …, the body nodes chained on
+    // their "output" ports. `loop_extra` is merged into the Loop's config.
+    fn chained_loop_workflow(loop_extra: serde_json::Value, body: Vec<WorkflowNode>) -> Workflow {
+        let mut loop_cfg = json!({ "array_field": "items", "source_node": "data_source" });
+        for (k, v) in loop_extra.as_object().unwrap() {
+            loop_cfg[k] = v.clone();
+        }
+        let mut loop_node = plain_node("loop_node", "loop", "Loop", loop_cfg, false);
+        loop_node.node_type = NodeType::Logic;
+        let mut nodes = vec![
+            plain_node("data_source", "data_source_loop_test", "Source", json!({}), false),
+            loop_node,
+        ];
+        let mut edges = vec![plain_edge("data_source", "output", "loop_node")];
+        let mut prev: Option<(String, &str)> = None;
+        for node in body {
+            let (from, port) = prev.take().unwrap_or(("loop_node".to_string(), "loop_body"));
+            edges.push(plain_edge(&from, port, &node.id));
+            prev = Some((node.id.clone(), "output"));
+            nodes.push(node);
+        }
+        Workflow {
+            schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_vars_test".to_string(),
+            name: "Loop Variables Test".to_string(), description: String::new(),
+            nodes, edges, metadata: Default::default(), max_duration_secs: None,
+            unlimited_duration: false, parallel_execution: false, max_concurrent_nodes: None,
+            settings: Default::default(),
+        }
+    }
+
+    fn loop_registry(items: serde_json::Value) -> NodeRegistry {
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(DataSourceNode { output: json!({ "items": items }) }));
+        registry.register(Arc::new(LoopNode));
+        registry.register(Arc::new(EchoInputNode));
+        registry.register(Arc::new(crate::nodes::variables::SetVariableNode { db: None }));
+        registry.register(Arc::new(FixedOutputNode {
+            tid: "flag_body_loop_test",
+            out: json!({ "flag": "true" }),
+        }));
+        registry
+    }
+
+    #[tokio::test]
+    async fn loop_stop_when_reading_previous_iteration_output_ends_loop_after_first_item() {
+        let workflow = chained_loop_workflow(
+            json!({ "stop_when": "{{Body.output.flag}}" }),
+            vec![plain_node("body_0", "flag_body_loop_test", "Body", json!({}), false)],
+        );
+        let result = WorkflowExecutor::new(Arc::new(loop_registry(json!([1, 2, 3, 4, 5]))), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let loop_out = result.node_outputs.get("loop_node").unwrap();
+        assert_eq!(
+            loop_out["all_results"].as_array().unwrap().len(), 1,
+            "the unresolved reference at index 0 is empty so item 1 runs; item 2 sees flag true and stops"
+        );
+        assert_eq!(loop_out["done"], json!(true));
+        assert_eq!(loop_out["stopped_early"], json!(true));
+        assert_eq!(loop_out["stop_reason"], json!("stop_when"));
+        assert_eq!(loop_out["total"], json!(1));
+        assert_eq!(loop_out["items"], json!([1]));
+    }
+
+    #[tokio::test]
+    async fn loop_body_set_variable_is_readable_by_later_body_nodes_in_every_iteration() {
+        let workflow = chained_loop_workflow(
+            json!({}),
+            vec![
+                plain_node("setter", "set_variable", "Setter",
+                    json!({ "key": "k", "value": "{{Loop.output.index}}" }), false),
+                plain_node("reader", "echo_input_loop_test", "Reader",
+                    json!({ "seen": "{{$vars.k}}" }), false),
+            ],
+        );
+        let result = WorkflowExecutor::new(Arc::new(loop_registry(json!([10, 20, 30]))), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let all_results = &result.node_outputs.get("loop_node").unwrap()["all_results"];
+        assert_eq!(
+            all_results,
+            &json!([{ "seen": "0" }, { "seen": "1" }, { "seen": "2" }]),
+            "each iteration's Set Variable must overwrite the run variable before the next node reads it"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_skipped_body_set_variable_does_not_write_the_variable() {
+        let workflow = chained_loop_workflow(
+            json!({}),
+            vec![
+                plain_node("setter", "set_variable", "Setter",
+                    json!({ "key": "k", "value": "changed" }), true),
+                plain_node("reader", "echo_input_loop_test", "Reader",
+                    json!({ "seen": "{{$vars.k}}" }), false),
+            ],
+        );
+        let vars = HashMap::from([("k".to_string(), json!("init"))]);
+        let result = WorkflowExecutor::new(Arc::new(loop_registry(json!([1, 2]))), Arc::new(NoopCreds))
+            .run(Arc::new(workflow), vars)
+            .await
+            .unwrap();
+
+        assert!(result.success, "workflow failed: {:?}", result.error);
+        let all_results = &result.node_outputs.get("loop_node").unwrap()["all_results"];
+        assert_eq!(all_results, &json!([{ "seen": "init" }, { "seen": "init" }]));
     }
 }

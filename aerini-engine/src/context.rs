@@ -375,6 +375,17 @@ impl ExecutionState {
     }
 }
 
+/// The `(key, value)` a node asks the executor to store as a run variable, read
+/// from the `_variable_key` and `_variable_value` fields of its output. `None`
+/// when the key is missing or blank after trimming, or there is no value.
+pub(crate) fn variable_write(output: &Value) -> Option<(String, Value)> {
+    let key = output["_variable_key"].as_str()?.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), output.get("_variable_value")?.clone()))
+}
+
 pub type SharedExecutionState = Arc<RwLock<ExecutionState>>;
 
 pub fn new_shared_state(
@@ -382,6 +393,25 @@ pub fn new_shared_state(
     variables: HashMap<String, Value>,
 ) -> SharedExecutionState {
     Arc::new(RwLock::new(ExecutionState::new(workflow_id, variables)))
+}
+
+#[cfg(test)]
+mod variable_write_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn variable_write_reads_trimmed_key_and_requires_a_value() {
+        assert_eq!(
+            variable_write(&json!({ "_variable_key": " k ", "_variable_value": 7 })),
+            Some(("k".to_string(), json!(7)))
+        );
+        assert_eq!(variable_write(&json!({ "_variable_key": "k", "_variable_value": null })), Some(("k".to_string(), json!(null))));
+        assert_eq!(variable_write(&json!({ "_variable_key": "  ", "_variable_value": 1 })), None);
+        assert_eq!(variable_write(&json!({ "_variable_key": "k" })), None);
+        assert_eq!(variable_write(&json!({ "key": "k", "value": 1 })), None);
+        assert_eq!(variable_write(&Value::Null), None);
+    }
 }
 
 #[cfg(test)]

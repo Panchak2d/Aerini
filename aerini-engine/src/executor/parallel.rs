@@ -18,8 +18,7 @@ pub(super) enum NodeOutcome {
     Succeeded {
         output:         NodeOutput,
         taken_port:     String,
-        variable_key:   Option<String>,
-        variable_value: Option<Value>,
+        variable:       Option<(String, Value)>,
     },
     Failed {
         output:   NodeOutput,
@@ -450,17 +449,12 @@ pub(super) async fn run_inner_parallel(
 
                     if output.success {
                         let taken_port = WorkflowExecutor::resolve_taken_port(&output);
-                        let variable_key = output.output.as_ref()
-                            .and_then(|v| v["_variable_key"].as_str())
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
-                        let variable_value = variable_key.as_ref()
-                            .and(output.output.as_ref())
-                            .and_then(|v| v.get("_variable_value").cloned());
+                        let variable = output.output.as_ref()
+                            .and_then(crate::context::variable_write);
                         NodeTaskResult {
                             node_id:         nid,
                             outcome:         NodeOutcome::Succeeded {
-                                output, taken_port, variable_key, variable_value,
+                                output, taken_port, variable,
                             },
                             loop_body_nodes: vec![],
                         }
@@ -502,8 +496,8 @@ pub(super) async fn run_inner_parallel(
 
         // ── 5. Process result and update routing state. ───────────────────────
         match task_result.outcome {
-            NodeOutcome::Succeeded { output, taken_port, variable_key, variable_value } => {
-                if let (Some(key), Some(val)) = (variable_key, variable_value) {
+            NodeOutcome::Succeeded { output, taken_port, variable } => {
+                if let Some((key, val)) = variable {
                     state.write().await.set_variable(key, val);
                 }
                 state.write().await.mark_succeeded(&node_id, output);

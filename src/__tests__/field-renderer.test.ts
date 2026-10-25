@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { CanvasNode } from "../canvas/Node";
 import { renderConfigFieldsLoop, renderCredentialSection, getCredentialFieldKeys, type PropSchema } from "../popover/field-renderer";
 import type { ExtensionContext } from "../node-configs/popover-utils";
+import { parseTools, serializeTools } from "../popover/tool-builder";
 
 // CanvasNode → icon-cache → @tauri-apps/api/core (invoke at module level).
 // Command-aware so the path-picker tests below can control pick_file_dialog
@@ -510,5 +511,113 @@ describe("field-renderer — JSON text fields", () => {
       expect(ctx.body.querySelector("textarea"), key).toBeNull();
       expect(ctx.body.querySelector("input"), key).not.toBeNull();
     }
+  });
+});
+
+describe("field-renderer — tool builder", () => {
+  const toolProps = (): Array<[string, PropSchema]> => [["tools", { type: "string", "x-aerini-tool-builder": true }]];
+  const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+    el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const buttonByText = (root: HTMLElement, text: string): HTMLButtonElement => {
+    const b = Array.from(root.querySelectorAll("button")).find(x => x.textContent === text);
+    expect(b, `button "${text}"`).toBeDefined();
+    return b as HTMLButtonElement;
+  };
+  const stored = (node: CanvasNode) => String(node.data.config["tools"]);
+
+  it("normal case: adding a tool and a required parameter saves closed-object JSON and shows the Switch settings for it", () => {
+    const node = makeNode("n1");
+    const ctx = makeCtx(node);
+    renderConfigFieldsLoop(ctx, toolProps(), []);
+
+    buttonByText(ctx.body, "Add tool").click();
+    typeInto(ctx.body.querySelector<HTMLInputElement>(".tool-card input")!, "get_weather");
+    typeInto(ctx.body.querySelector<HTMLTextAreaElement>(".tool-card textarea")!, "Current weather");
+    buttonByText(ctx.body, "Add parameter").click();
+    typeInto(ctx.body.querySelector<HTMLInputElement>(".tool-param-name")!, "city");
+    const required = ctx.body.querySelector<HTMLInputElement>(".tool-param-required input")!;
+    required.checked = true;
+    required.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const expected = [{
+      name: "get_weather",
+      description: "Current weather",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+    }];
+    expect(JSON.parse(stored(node))).toEqual(expected);
+    expect(stored(node)).toBe(JSON.stringify(expected, null, 2));
+    expect(ctx.body.textContent).toContain('Source Node "Node n1", Field tool_calls.0.tool, one case per tool (get_weather)');
+  });
+
+  it("edge case: a list the builder cannot show opens as raw JSON, is never rewritten, and switches to the builder once edited into a shape it can show", () => {
+    const openAiForm = '[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{}}}}]';
+    const node = makeNode("n1");
+    node.data.config["tools"] = openAiForm;
+    const ctx = makeCtx(node);
+    renderConfigFieldsLoop(ctx, toolProps(), []);
+
+    expect(ctx.body.querySelector(".tool-card")).toBeNull();
+    const raw = ctx.body.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(raw.value).toBe(openAiForm);
+    expect(buttonByText(ctx.body, "Use builder").disabled).toBe(true);
+    expect(stored(node)).toBe(openAiForm);
+
+    typeInto(raw, '[{"name":"lookup"}]');
+    const toggle = buttonByText(ctx.body, "Use builder");
+    expect(toggle.disabled).toBe(false);
+    toggle.click();
+    expect(ctx.body.querySelector<HTMLInputElement>(".tool-card input")!.value).toBe("lookup");
+  });
+
+  it("edge case: repeated and invalid tool names are flagged in text, and an unnamed parameter is left out of the saved JSON", () => {
+    const node = makeNode("n1");
+    node.data.config["tools"] = JSON.stringify([{ name: "a" }, { name: "a" }, { name: "bad name" }]);
+    const ctx = makeCtx(node);
+    renderConfigFieldsLoop(ctx, toolProps(), []);
+
+    const errors = () => Array.from(ctx.body.querySelectorAll(".tool-builder-error")).map(e => e.textContent);
+    expect(errors()).toEqual([
+      "Another tool already uses this name.",
+      "Another tool already uses this name.",
+      "Use only letters, digits, underscores and hyphens, up to 64 characters.",
+    ]);
+    expect(ctx.body.querySelector(".tool-card input")!.getAttribute("aria-invalid")).toBe("true");
+
+    buttonByText(ctx.body, "Add parameter").click();
+    expect(errors()).toContain("Not saved until it has a name.");
+    expect(JSON.parse(stored(node))[0].parameters).toEqual({ type: "object", properties: {}, additionalProperties: false });
+  });
+
+  it("parseTools returns null for anything it cannot write back unchanged, and serializeTools round-trips what it accepts", () => {
+    const unrepresentable = [
+      "{{ Previous.output.tools }}",
+      "not json",
+      '{"name":"a"}',
+      '[{"type":"function","function":{"name":"a"}}]',
+      '[{"name":"a","input_schema":{}}]',
+      '[{"name":"a","parameters":{"type":"object","properties":{"o":{"type":"object"}}}}]',
+      '[{"name":"a","parameters":{"type":"object","properties":{},"required":["ghost"]}}]',
+      '[{"name":"a","parameters":{"type":"object","properties":{},"required":["__proto__"]}}]',
+      '[{"name":"a","parameters":{"type":"object","properties":{"n":{"type":"number","enum":["1"]}}}}]',
+      '[{"name":"a","parameters":{"type":"object","properties":{},"additionalProperties":true}}]',
+    ];
+    for (const text of unrepresentable) expect(parseTools(text), text).toBeNull();
+
+    const tools = [{
+      name: "a", description: "d",
+      params: [{ name: "p", type: "string" as const, description: "x", required: true, enumValues: ["u", "v"] }],
+    }];
+    const text = serializeTools(tools);
+    expect(parseTools(text)).toEqual(tools);
+    expect(serializeTools(parseTools(text)!)).toBe(text);
+    expect(parseTools("")).toEqual([]);
+    expect(parseTools([{ name: "a" }])).toHaveLength(1);
   });
 });

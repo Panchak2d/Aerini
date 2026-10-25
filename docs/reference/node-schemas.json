@@ -3,7 +3,7 @@
   "nodes": [
     {
       "author": "",
-      "description": "Give an AI model a set of tools it can invoke to complete a goal autonomously over multiple steps.",
+      "description": "Give an AI model a goal and tool definitions. It makes one model call and returns the answer, or the tools the model asks for; it does not run them.",
       "display_name": "AI Agent",
       "dynamic_ports": false,
       "icon": "",
@@ -21,6 +21,20 @@
             "description": "Additional context to give the agent (from previous nodes, variables, etc.)",
             "type": "string"
           },
+          "effort": {
+            "description": "How hard the model thinks. default: the provider's own default. Anthropic takes low, medium, high, xhigh or max; Gemini takes minimal, low, medium or high; OpenAI-compatible and local servers take none, minimal, low, medium, high, xhigh or max. A level the chosen model does not accept comes back as the provider's API_ERROR. Higher effort uses more of Max Tokens and costs more.",
+            "enum": [
+              "default",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
           "goal": {
             "description": "What the agent should accomplish. Be specific and include constraints.",
             "type": "string"
@@ -33,13 +47,18 @@
             "description": "Maximum tokens per agent response (default: 2048). Higher values allow longer output but increase cost.",
             "type": "number"
           },
+          "messages": {
+            "description": "Earlier conversation to continue, as JSON. Either a list of {role, content} turns where role is user or assistant (AI Memory's messages output fits), or the messages output of an earlier AI Agent run, passed in unchanged. Roles system and developer are refused: use System. Keep Provider, Model, System and Tools the same from turn to turn. At most 4 MiB.",
+            "type": "string",
+            "x-aerini-multiline": true
+          },
           "model": {
             "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash.",
             "type": "string",
             "x-aerini-model-picker": true
           },
           "provider": {
-            "description": "AI provider. OpenAI/Gemini: tool definitions are sent and tool requests returned. Anthropic: single reasoning pass, no tools.",
+            "description": "AI provider. Tool definitions are sent and tool requests returned for every provider.",
             "enum": [
               "openai",
               "anthropic",
@@ -48,6 +67,23 @@
               "auto"
             ],
             "type": "string"
+          },
+          "response_schema": {
+            "description": "JSON Schema the reply must follow, written as a JSON object whose top level has type object. The reply comes back parsed in structured and is checked against the schema in structured_valid. Sent to every provider. OpenAI and Anthropic need additionalProperties false on every object, and OpenAI also needs every property listed in required. A long reply needs a higher max_tokens.",
+            "type": "string",
+            "x-aerini-multiline": true
+          },
+          "return_messages": {
+            "description": "Return the conversation so far in the messages output so a later AI Agent node can continue it. Off by default: the transcript can hold the model's reasoning and any files sent, and it grows with every turn.",
+            "type": "boolean"
+          },
+          "single_tool_call": {
+            "description": "Allow at most one tool request per reply. Off by default, so the model may ask for several. Not available with Gemini, which has no such setting.",
+            "type": "boolean"
+          },
+          "strict_tools": {
+            "description": "Make the model's tool arguments follow each tool's parameters schema exactly. Off by default. Every object in a schema needs additionalProperties false; for OpenAI, every property must also be in required. Not available with Gemini. Anthropic allows 20 strict tools.",
+            "type": "boolean"
           },
           "system": {
             "description": "System instructions for the agent's persona and behavior.",
@@ -61,9 +97,36 @@
             "description": "How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models.",
             "type": "number"
           },
-          "tools": {
-            "description": "JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers; the node returns the model's tool requests and does not run them. Anthropic ignores tools.",
+          "tool_choice": {
+            "description": "Whether the model may, must or must not ask for a tool. auto: the model decides (default). required: the model must ask for at least one tool (not available with Anthropic, whose current models accept only auto and none). none: the model answers in text only. Needs Tools.",
+            "enum": [
+              "auto",
+              "required",
+              "none"
+            ],
             "type": "string"
+          },
+          "tool_results": {
+            "description": "Results for the tools the previous run asked for, as a JSON array of {id, tool, content, is_error}. Needs Messages from an earlier run that had Return Messages on. Every tool request must be answered exactly once, matched by id (by tool name for a provider that sends no ids). content may be text or any JSON; a result over 64 KiB is cut and marked. Goal and Context are not sent again.",
+            "type": "string",
+            "x-aerini-multiline": true
+          },
+          "tools": {
+            "description": "JSON array of tool definitions. Each tool: {name, description, parameters}. Sent to every provider; the node returns the model's tool requests and does not run them. Anthropic accepts names of letters, digits, underscores and hyphens, up to 64 characters.",
+            "type": "string",
+            "x-aerini-tool-builder": true
+          },
+          "web_search": {
+            "description": "Let the model search the web before it answers, using the provider's own search. Off by default. OpenAI needs a search model such as gpt-5-search-api (used when Model is blank); Anthropic and Gemini work with any model that supports search. Not available with local servers. Gemini cannot combine it with Tools, and Anthropic cannot combine it with Response Schema. The provider sees your prompt, charges per search, and the pages it finds are untrusted content.",
+            "type": "boolean"
+          },
+          "web_search_domains": {
+            "description": "Search only these sites (Anthropic only). Separate with commas or new lines and write example.com, not https://example.com; subdomains are included. Blank allows any site. Needs Web Search.",
+            "type": "string"
+          },
+          "web_search_max_uses": {
+            "description": "Most searches the model may run in one reply (Anthropic only, default 5). Needs Web Search.",
+            "type": "number"
           }
         },
         "required": [
@@ -84,21 +147,74 @@
             "description": "True if the model answered cleanly; false if it asked for tools or the reply was cut off",
             "type": "boolean"
           },
+          "input_tokens": {
+            "description": "Input tokens the provider reported",
+            "type": "number"
+          },
           "iterations": {
             "description": "Always 1: the agent makes one model call",
             "type": "number"
           },
+          "messages": {
+            "description": "The conversation after this reply, as {provider, items}, when return_messages is on; otherwise null. Also null when the reply was cut off at max_tokens while asking for a tool, because that request cannot be answered. Pass it unchanged to a later AI Agent's messages. input_tokens and output_tokens count this call only.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "model": {
+            "description": "Model that answered, as the provider reports it",
+            "type": "string"
+          },
+          "output_tokens": {
+            "description": "Output tokens the provider reported; for Gemini this includes thinking tokens",
+            "type": "number"
+          },
+          "provider": {
+            "description": "openai_compatible, anthropic or gemini",
+            "type": "string"
+          },
           "reasoning": {
-            "description": "Step-by-step reasoning trace",
+            "description": "Trace of the run: attachment warnings, the reply, and each tool request",
             "type": "array"
           },
           "result": {
             "description": "Final answer or conclusion from the agent",
             "type": "string"
           },
-          "tool_calls": {
-            "description": "Tools the model asked for: {id, tool, arguments, parsed_arguments}. The node does not run them.",
+          "search_queries": {
+            "description": "The web searches the provider ran, as text. Empty when Web Search is off, or when the provider does not report its queries (OpenAI).",
             "type": "array"
+          },
+          "search_suggestions": {
+            "description": "Gemini only: the Search Suggestions HTML Google requires to be shown with a grounded answer. Empty otherwise. It is HTML from Google: show it as Google's terms ask, and do not paste it into a page you do not control without checking it.",
+            "type": "string"
+          },
+          "sources": {
+            "description": "Pages the reply drew on, as {title, url}, without repeats. Empty when Web Search is off. Gemini reports a redirect address for each page. Treat titles and pages as untrusted content.",
+            "type": "array"
+          },
+          "structured": {
+            "description": "The reply parsed as JSON when response_schema is set and the reply fits it; otherwise null"
+          },
+          "structured_error": {
+            "description": "Why the reply does not fit response_schema, or null. Also null when no schema is set or the model asked for tools.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "structured_valid": {
+            "description": "True when response_schema is set and the reply is JSON that fits it. False when no schema is set, when the model asked for tools, or when the reply does not fit.",
+            "type": "boolean"
+          },
+          "tool_calls": {
+            "description": "Tools the model asked for: {id, tool, arguments, parsed_arguments, arguments_valid, known_tool, error}. The node does not run them. arguments_valid is false when the arguments are not a JSON object or do not match the tool's parameters; known_tool is false when the name is not a declared tool; error says why, or is null.",
+            "type": "array"
+          },
+          "tool_calls_valid": {
+            "description": "True when every tool call names a declared tool and has valid arguments, and when there are no tool calls. Branch on it before running the tools.",
+            "type": "boolean"
           },
           "truncated": {
             "description": "True if the provider cut off the response mid-generation (max_tokens hit). Raise max_tokens to fix.",
@@ -1601,6 +1717,10 @@
           "source_node": {
             "description": "Node ID to read the array from.",
             "type": "string"
+          },
+          "stop_when": {
+            "description": "Optional. Checked before every item, including the first. If it resolves to true the loop stops and continues from Done. Empty, 'false' (any case), '0' and 'null' count as false; anything else is true. A reference to a node that has not run yet resolves to empty, so the first item always runs. Use an expression that reads an earlier item's result, e.g. {{Agent.output.finished}} or {{$vars.stop}}. Can only shorten the loop; Max Iterations and the array's length still apply.",
+            "type": "string"
           }
         },
         "required": [
@@ -1631,6 +1751,17 @@
           "items": {
             "description": "The full array being iterated",
             "type": "array"
+          },
+          "stop_reason": {
+            "description": "On the Done output: \"stop_when\" when Stop When ended the loop, otherwise null",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stopped_early": {
+            "description": "On the Done output: true when Stop When ended the loop before the array or Max Iterations did",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items",

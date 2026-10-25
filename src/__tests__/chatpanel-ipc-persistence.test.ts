@@ -43,6 +43,7 @@ import { ChatPanel } from "../panels/ChatPanel";
 import type { Canvas } from "../canvas/Canvas";
 import type { WorkflowManager } from "../workflow-manager";
 import type { RunManager } from "../run-manager";
+import { DEFAULT_CHAT_SETTINGS, type ChatSettings } from "../canvas/CanvasSerializer";
 
 const runManagerStub = { addRunStateListener: vi.fn() } as unknown as RunManager;
 
@@ -77,7 +78,11 @@ type PanelInternals = {
   persist(): Promise<void>;
   deleteSession(id: string): Promise<void>;
   handleClear(): Promise<void>;
+  applyToggles(s: ChatSettings): void;
+  newSessionObject(): { id: string; name: string; messages: unknown[]; createdAt: number };
 };
+
+const PERSIST_OFF: ChatSettings = { ...DEFAULT_CHAT_SETTINGS, session_persistence: false };
 
 function makeSession(id: string, name: string) {
   return { id, name, messages: [], createdAt: 1_000 };
@@ -233,5 +238,93 @@ describe("ChatPanel load/persist through the backend chat tables", () => {
     expect(wfMocks.clearChatSession).toHaveBeenCalledWith("s1");
     expect(chatMocks.deleteChatSession).toHaveBeenCalledWith("s1");
     expect(p.store.sessions[0].id).not.toBe("s1");
+  });
+});
+
+describe("ChatPanel with Session persistence off", () => {
+  async function loadOn(metas: { id: string; name: string; created_at: number }[]): Promise<PanelInternals> {
+    chatMocks.listChatSessionMeta.mockResolvedValue(metas.map((m) => ({ ...m, workflow_id: "wf1" })));
+    wfMocks.getSetting.mockResolvedValue(metas[0].id);
+    const p = makePanel();
+    await p.loadStoreForCurrentWorkflow();
+    return p;
+  }
+
+  it("reads nothing, writes nothing and keeps the in-memory conversation across a reload of the same workflow (normal case)", async () => {
+    localStorage.setItem("aerini_chat_wf1", JSON.stringify({ sessions: [{ id: "old", name: "Old", messages: [], createdAt: 1 }], activeId: "old" }));
+    const p = makePanel();
+    p.applyToggles(PERSIST_OFF);
+
+    await p.loadStoreForCurrentWorkflow();
+    const live = p.newSessionObject();
+    live.messages.push({ id: "m1", role: "user", text: "hi", timestamp: 1 });
+    p.store = { sessions: [live], activeId: live.id };
+    await p.persist();
+    p.applyToggles(PERSIST_OFF);
+    await p.loadStoreForCurrentWorkflow();
+
+    for (const fn of [chatMocks.listChatSessionMeta, chatMocks.loadChatMessages, chatMocks.appendChatMessage, chatMocks.saveChatSessionMeta, chatMocks.saveChatSession, wfMocks.getSetting, wfMocks.setSetting]) {
+      expect(fn).not.toHaveBeenCalled();
+    }
+    expect(localStorage.getItem("aerini_chat_wf1")).not.toBeNull();
+    expect(p.store.sessions[0]).toBe(live);
+  });
+
+  it("turning it off hides sessions that exist only in storage, and turning it on writes what was said meanwhile (edge case)", async () => {
+    const p = await loadOn([{ id: "s1", name: "A", created_at: 2_000 }, { id: "s2", name: "B", created_at: 1_000 }]);
+    p.store.sessions[0].messages.push({ id: "m-new", role: "user", text: "x", timestamp: 9 });
+    p.store.activeId = "s1";
+
+    p.applyToggles(PERSIST_OFF);
+    expect(p.store.sessions.map((s) => s.id)).toEqual(["s1"]);
+    expect(chatMocks.deleteChatSession).not.toHaveBeenCalled();
+
+    p.applyToggles(DEFAULT_CHAT_SETTINGS);
+    await p.persist();
+    expect(chatMocks.appendChatMessage).toHaveBeenCalledTimes(1);
+    expect(chatMocks.appendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "s1" }), expect.objectContaining({ id: "m-new" }));
+  });
+
+  it("delete and clear skip the row delete for a memory-only session, but still clear AI Memory and still delete stored rows (edge case)", async () => {
+    const p = await loadOn([{ id: "s1", name: "A", created_at: 1_000 }]);
+    p.applyToggles(PERSIST_OFF);
+
+    const e1 = p.newSessionObject();
+    p.store.sessions.unshift(e1);
+    await p.deleteSession(e1.id);
+    expect(wfMocks.clearChatSession).toHaveBeenCalledWith(e1.id);
+    expect(chatMocks.deleteChatSession).not.toHaveBeenCalled();
+
+    const e2 = p.newSessionObject();
+    p.store.sessions.unshift(e2);
+    await p.deleteSession("s1");
+    expect(chatMocks.deleteChatSession).toHaveBeenCalledTimes(1);
+    expect(chatMocks.deleteChatSession).toHaveBeenCalledWith("s1");
+
+    p.store.activeId = e2.id;
+    await p.handleClear();
+    expect(wfMocks.clearChatSession).toHaveBeenCalledWith(e2.id);
+    expect(chatMocks.deleteChatSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("switching workflows clears AI Memory of memory-only sessions that had messages, and nothing else (edge case)", async () => {
+    chatMocks.listChatSessionMeta.mockResolvedValue([]);
+    const wfManager = { currentId: "wf1", chatSettings: {} } as unknown as WorkflowManager;
+    document.body.innerHTML = CHAT_PANEL_HTML;
+    const p = new ChatPanel({ nodes: new Map() } as unknown as Canvas, wfManager, vi.fn(), runManagerStub) as unknown as PanelInternals;
+    p.applyToggles(PERSIST_OFF);
+    await p.loadStoreForCurrentWorkflow();
+    const talked = p.newSessionObject();
+    talked.messages.push({ id: "m1", role: "user", text: "hi", timestamp: 1 });
+    const empty = p.newSessionObject();
+    p.store = { sessions: [talked, empty], activeId: talked.id };
+
+    (wfManager as { currentId: string }).currentId = "wf2";
+    p.applyToggles(DEFAULT_CHAT_SETTINGS);
+    await p.loadStoreForCurrentWorkflow();
+
+    expect(wfMocks.clearChatSession).toHaveBeenCalledTimes(1);
+    expect(wfMocks.clearChatSession).toHaveBeenCalledWith(talked.id);
+    expect(chatMocks.listChatSessionMeta).toHaveBeenCalledWith("wf2");
   });
 });
