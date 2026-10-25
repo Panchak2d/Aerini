@@ -39,6 +39,12 @@ pub fn assert_committed(name: &str, generated: &str) {
             .position(|(a, b)| a != b)
             .unwrap_or_else(|| committed.lines().count().min(generated.lines().count()))
             + 1;
-        panic!("docs/reference/{name} is out of date (first difference at line {line}).\nRegenerate it with: {regen}");
+        panic!(
+            "docs/reference/{name} is out of date (first difference at line {line}).\n\
+             Regenerate it with: {regen}\n\
+             If you just changed or extracted source files and the regeneration still writes the old text, \
+             cargo did not rebuild the engine. Run `touch aerini-engine/src/lib.rs` (or `cargo clean -p aerini-engine`) \
+             and run the command again."
+        );
     }
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   activeBounds, backingSize, computeBounds, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
   hitTopmost, hoverText, minimapLabel, minimapToWorld, nextErrorIndex, normalizeDpr, placeLabel, pulseAlpha, snapStroke,
-  viewBounds, edgePanVelocity, isPanGesture, panView, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
+  viewBounds, viewportToMinimap, edgePanVelocity, followViewport, isPanGesture, panView, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
 } from "../canvas/Minimap";
 
 const NODE: Rect = { x: 100, y: 200, w: 220, h: 100 };
@@ -355,5 +355,28 @@ describe("edgePanVelocity", () => {
     const at = edgePanVelocity({ x: 0, y: 40 }, size).x;
     expect(at).toBeGreaterThan(near);
     expect(edgePanVelocity({ x: -500, y: 40 }, size).x).toBe(at);
+  });
+});
+
+describe("followViewport", () => {
+  const base = computeBounds([NODE], { w: 140, h: 80 })!;
+  const zoomed = zoomView(base, DEFAULT_VIEW, -300, { x: 5, y: 5 });
+  const box = (x: number, y: number): Rect => ({ x, y, w: 40, h: 30 });
+
+  it("leaves the view alone while the view box is still on the panel, or when not zoomed in", () => {
+    const b = viewBounds(base, zoomed)!;
+    const onPanel = minimapToWorld(b, 70, 40);
+    expect(followViewport(base, zoomed, box(onPanel.x, onPanel.y))).toBe(zoomed);
+    expect(followViewport(base, DEFAULT_VIEW, box(90000, 90000))).toBe(DEFAULT_VIEW);
+  });
+
+  it("scrolls the minimap so a view box that left the panel is back on it", () => {
+    const target = box(NODE.x + NODE.w - 20, NODE.y + NODE.h - 15);
+    const before = viewBounds(base, zoomed)!;
+    expect(viewportToMinimap(before, target).x).toBeGreaterThan(before.w);
+    const after = viewBounds(base, followViewport(base, zoomed, target))!;
+    const v = viewportToMinimap(after, target);
+    expect(v.x).toBeLessThan(after.w);
+    expect(v.x + v.w).toBeGreaterThan(0);
   });
 });

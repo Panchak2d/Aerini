@@ -115,17 +115,17 @@ export function buildSidebarPalette(
     {
       label: "Claude (Anthropic)",
       baseTypeId: NODE_IDS.AI_PROMPT,
-      config: { provider: "anthropic", model: "claude-sonnet-4-20250514", temperature: 0.7, max_tokens: 2048 },
+      config: { provider: "anthropic", model: "claude-sonnet-5-5", temperature: 0.7, max_tokens: 2048 },
     },
     {
-      label: "GPT-4o (OpenAI)",
+      label: "GPT (OpenAI)",
       baseTypeId: NODE_IDS.AI_PROMPT,
-      config: { provider: "openai", model: "gpt-4o", temperature: 0.7, max_tokens: 2048 },
+      config: { provider: "openai", model: "gpt-5.6", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "Gemini (Google)",
       baseTypeId: NODE_IDS.AI_PROMPT,
-      config: { provider: "gemini", model: "gemini-2.5-flash", temperature: 0.7, max_tokens: 2048 },
+      config: { provider: "gemini", model: "gemini-3.8-flash", temperature: 0.7, max_tokens: 2048 },
     },
     {
       label: "Ollama (Local)",

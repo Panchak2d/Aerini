@@ -56,7 +56,7 @@ Output: `messages`, an array of `{role, content}` objects, newest first.
 | Setting | Value |
 |---|---|
 | **Provider** | Your chosen provider (OpenAI, Anthropic, Gemini, Ollama, …) |
-| **Model** | e.g. `gpt-5.6`, `claude-sonnet-5`, `gemini-3.6-flash` |
+| **Model** | e.g. `gpt-5.6`, `claude-sonnet-5-5`, `gemini-3.8-flash` |
 | **System** | Your persona, e.g. `You are a helpful assistant for Acme Corp. Be concise and friendly.` |
 | **Prompt** | `Conversation so far (newest first): {{AI Memory (read).output.messages}}\n\nUser: {{Webhook.output.body.message}}` |
 

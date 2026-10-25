@@ -111,7 +111,7 @@ describe("minimap pan", () => {
     const { canvas, el, mm } = magnified();
     const start = panX(mm);
     pointer(el, "pointerdown", 100, 60, { button: 0, ctrlKey: true });
-    pointer(el, "pointermove", 130, 60, { ctrlKey: true });
+    pointer(el, "pointermove", 130, 60, { ctrlKey: true, buttons: 1 });
     pointer(el, "pointerup", 130, 60);
     expect(panX(mm)).not.toBe(start);
     expect(canvas.centerOn).not.toHaveBeenCalled();
@@ -121,9 +121,18 @@ describe("minimap pan", () => {
     const { canvas, el, mm } = magnified();
     const start = panX(mm);
     pointer(el, "pointerdown", 100, 60, { button: 0 });
-    pointer(el, "pointermove", 130, 60);
+    pointer(el, "pointermove", 130, 60, { buttons: 1 });
     pointer(el, "pointerup", 130, 60);
     expect(canvas.centerOn).toHaveBeenCalled();
     expect(panX(mm)).toBe(start);
+  });
+
+  it("a drag whose release was lost does not leave the minimap deaf to the next one", () => {
+    const { canvas, el } = magnified();
+    pointer(el, "pointerdown", 100, 60, { button: 0 });
+    pointer(el, "pointermove", 110, 60, { buttons: 0 });
+    canvas.centerOn.mockClear();
+    pointer(el, "pointerdown", 100, 60, { button: 0 });
+    expect(canvas.centerOn).toHaveBeenCalled();
   });
 });

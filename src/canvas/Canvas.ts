@@ -441,6 +441,8 @@ export class Canvas {
     const ro = new ResizeObserver(() => this.resize());
     ro.observe(this.el);
     const ih = this.input;
+    // onDown's preventDefault cancels the browser's own focus change, so whatever held focus (a sidebar row, the minimap grip, a popover field) would keep it.
+    this.el.addEventListener("mousedown",   () => { if (document.activeElement !== this.el) this.el.focus({ preventScroll: true }); });
     this.el.addEventListener("mousedown",   (e) => ih.onDown(e));
     this.el.addEventListener("mousemove",   (e) => ih.onMove(e));
     this.el.addEventListener("mouseup",     (e) => ih.onUp(e));

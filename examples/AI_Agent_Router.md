@@ -6,7 +6,7 @@ An AI Agent asks for a tool, the workflow checks the request and runs the tool, 
 
 The AI Agent node makes one model call and never runs a tool itself. It returns either an answer or the tools the model asked for. You decide what runs by wiring nodes after it, so every action is a node you can see and guard.
 
-A workflow cannot wire a node back into itself, so there is no loop. A second AI Agent continues the conversation instead, handed the first one's `messages` and the tool's result. The run has a fixed number of model calls (two here), so it cannot run away and its cost is easy to predict.
+A workflow cannot wire a node back into itself, so there is no loop here (for an agent that keeps going until it is done, see [AI Agent Loop](AI_Agent_Loop.md)). A second AI Agent continues the conversation instead, handed the first one's `messages` and the tool's result. The run has a fixed number of model calls (two here), so it cannot run away and its cost is easy to predict.
 
 ## Nodes used
 
@@ -142,6 +142,6 @@ A model can ask for a tool you never declared, or send arguments that do not fit
 - **Anthropic** works as it is. Tool Choice `none` on Answer Agent is allowed there; `required` is not.
 - **Add a tool** by adding it to both Tools fields, a case on the Switch (up to 8), and a branch that ends in a Set Variable for `tool_result` going into Rejoin.
 - **More than one round of tools** means another Answer Agent after the first, with Return Messages on, and so on. Each one is a node you built, so the number of model calls stays fixed and visible. Tokens are counted per call, not for the whole conversation.
-- **No automatic loop.** The agent cannot decide to keep going on its own, because a workflow cannot feed a node's output back into itself. This example does not use a Loop node for that.
+- **No automatic loop.** The agent cannot decide to keep going on its own, because a workflow cannot feed a node's output back into itself. This example does not use a Loop node for that; [AI Agent Loop](AI_Agent_Loop.md) does, within a fixed turn budget.
 - **A request for an undeclared tool or with bad arguments** goes to Show Rejected Request, whose `reasoning` output holds the `[Tool Call Warning]` line saying why.
 - **Return Messages** is on for Ask Agent only. The transcript can hold the model's reasoning, so leave it off wherever the next node is not an AI Agent.

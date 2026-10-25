@@ -259,11 +259,71 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: bash scripts/upload-release-assets.sh "$GITHUB_REPOSITORY" "$TAG" mcp-dist/*
 
+  server:
+    name: Build aerini-server (${{ matrix.target }})
+    # Needs the draft release that the desktop build creates. Holds no signing key, so it
+    # runs after the approval the release job waited for and needs no environment of its own.
+    # Static musl build, the same target the container image uses, so one file runs on any
+    # x86-64 Linux distribution.
+    needs: [verify, release]
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Install the musl C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p aerini-server
+
+      - name: Check the program is static and starts
+        run: |
+          binary="target/${{ matrix.target }}/release/aerini-server"
+          if readelf -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo "ERROR: ${binary} depends on shared libraries" >&2
+            readelf -d "$binary" | grep '(NEEDED)' >&2
+            exit 1
+          fi
+          "$binary" --help >/dev/null
+
+      - name: Package
+        run: |
+          python3 -I scripts/package-mcp.py \
+            --binary "target/${{ matrix.target }}/release/aerini-server" \
+            --name aerini-server --target "${{ matrix.target }}" \
+            --version "${GITHUB_REF_NAME#v}" --license LICENSE --out-dir server-dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/upload-release-assets.sh "$GITHUB_REPOSITORY" "$TAG" server-dist/*
+
   notes:
     name: List downloads in the release notes
-    # Runs once every installer, latest.json and both MCP programs are on the release, so
+    # Runs once every installer, latest.json, both MCP programs and the server program are on the release, so
     # the list covers all of them. Holds no signing key.
-    needs: [release, manifest, mcp]
+    needs: [release, manifest, mcp, server]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

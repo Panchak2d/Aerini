@@ -52,9 +52,19 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
+## v0.4.5 — AI node hardening
+
+- [ ] Share one request and response implementation between AI Prompt and AI Agent, and give AI Prompt the same structured output (response schema) and effort settings the AI Agent has; existing AI Prompt outputs and saved workflows stay unchanged
+- [ ] Model picker hint for Ollama: show whether the selected local model supports tools
+
+---
+
 ## v0.5 — Sub-workflows
 
 - [ ] Sub-workflows (in progress)
+- [ ] AI Agent runs its own tool loop on top of sub-workflows, with caps, per-tool credentials and human approval (design document first)
+- [ ] AI Agent can use tools from external MCP servers (after the tool loop)
+- [ ] Review OpenAI's Responses API and hosted tools for the AI nodes
 - [ ] More trigger types (database poll)
 - [ ] Workflow bundle import
 

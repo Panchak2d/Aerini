@@ -220,7 +220,7 @@ pub async fn generate_server_package(
 
     let env_example = templates::build_env_example(&credentials, &trigger);
 
-    let install_sh = templates::build_install_sh(&wf.name, request.status_port);
+    let install_sh = templates::build_install_sh(&wf.name, request.status_port, dangerous.contains(&"code"));
 
     let service_file = templates::build_service_file(&wf.name, request.status_port, &dangerous);
 
@@ -261,10 +261,9 @@ pub async fn generate_server_package(
         zip.write_all(readme.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        // Bundle the aerini-server binary if it's available as a Tauri resource.
-        // In CI the binary is compiled for x86_64-unknown-linux-musl and placed
-        // in the Tauri resources directory. In dev mode it won't be present and
-        // we skip it — install.sh will warn the user.
+        // Add aerini-server when this build ships it as a Tauri resource.
+        // Without it the zip is still written, and install.sh stops with
+        // build-from-source instructions.
         let resource_path = app.path()
             .resource_dir()
             .ok()

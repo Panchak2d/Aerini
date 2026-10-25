@@ -236,6 +236,12 @@ The release scripts have their own tests: `python3 -m unittest discover -s scrip
 
 See [Testing](docs/development/testing.md) for how all three Rust crates and the frontend suite fit together, and which of them CI runs for you automatically.
 
+### When cargo does not rebuild after you apply a patch
+
+Cargo decides what to rebuild by comparing each source file's modification time with the time of the last build; it does not compare contents. A file whose modification time is older than the last build is skipped, so a test or an `AERINI_REGEN_DOCS=1` run (see [Testing](docs/development/testing.md#regenerating-the-reference-files)) can still use the old code, then compare against or write the old generated text. A zip or other archive can do this when its stored times are read in a different time zone from the one it was made in, or when the tool that extracts it restores old times. Run `touch aerini-engine/src/lib.rs` (or `cargo clean -p aerini-engine`), then run the command again.
+
+To check whether the archive's times are the cause, extract the patch, then run `date` and `stat -c '%y %n' <one extracted file>` (on macOS, `stat -f '%Sm %N' <file>`). If the file's time is hours earlier than the time you extracted it, and earlier than your last `cargo` build, cargo will skip it.
+
 ---
 
 ## Opening a pull request

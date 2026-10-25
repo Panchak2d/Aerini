@@ -46,20 +46,28 @@ If a check or an install fails (no connection, a stalled download, a failed sign
 
 ## Server (`aerini-server`)
 
-A prebuilt `aerini-server` container image is published to GHCR with every release (see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), so the official Docker image now updates by pulling a new tag rather than rebuilding. There's still no standalone, downloadable binary for the other two deployment shapes below — the [Releases page](https://github.com/Panchak2d/aerini/releases) carries desktop installers and the `aerini-mcp` programs, not `aerini-server` — so bare metal and the desktop's Docker export still update by rebuilding from source.
+A prebuilt `aerini-server` container image is published to GHCR with every release (see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), so the official Docker image updates by pulling a new tag rather than rebuilding. Every release also publishes a static x86-64 Linux binary, so bare metal updates by downloading the new archive and replacing the program; building from source still works. The desktop's Docker export still updates by rebuilding.
 
 ### Official Docker image
 
-If you're running the published image (`docker pull ghcr.io/panchak2d/aerini-server:<version>`, see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), update by pulling the new tag and recreating the container:
+If you're running the published image (`docker pull ghcr.io/panchak2d/aerini-server:<version>`, see [Server Deployment §Getting the `aerini-server` binary](server-deploy.md#getting-the-aerini-server-binary)), update by pulling the new tag and recreating the container. With `docker run`, pull the new tag, remove the old container, then run the command from [Server Deployment §Docker](server-deploy.md#docker-recommended) again with that tag:
 
 ```bash
 docker pull ghcr.io/panchak2d/aerini-server:<newer-version>
+docker stop aerini
+docker rm aerini
+```
+
+With the Compose file from the same page, which names the image, change the tag in it (or keep `latest`) and run:
+
+```bash
+docker compose pull
 docker compose up -d
 ```
 
-(or `docker stop`/`docker rm` and `docker run` again with the new tag, if you started it with `docker run` instead of Compose).
+The repository's own `docker-compose.yml` builds the image from source instead of naming one, so `docker compose pull` and a newer tag change nothing there; use the rebuild below.
 
-If you built the image locally instead — `git clone` plus `docker compose up --build`, for customizing the `Dockerfile` — update the same way as before, by pulling the source and rebuilding:
+If you built the image locally instead — `git clone` plus `docker compose up --build`, for customizing the `Dockerfile` — update by pulling the source and rebuilding:
 
 ```bash
 git pull
@@ -68,7 +76,16 @@ docker compose up -d --build
 
 This image's build stage copies your source into the image with `COPY`, so a `git pull` that changes any tracked file invalidates the layers built from it, and the rebuild picks up the new code correctly. No `--no-cache` needed here. Either way, the named data volume isn't touched by an update, so your workflows and run history persist across it.
 
-### Bare metal (Linux, built from source)
+### Bare metal (Linux)
+
+Download the archive and checksum for the new version from the [Releases page](https://github.com/Panchak2d/aerini/releases), check it, and extract `aerini-server`:
+
+```bash
+sha256sum -c aerini-server_<version>_x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf aerini-server_<version>_x86_64-unknown-linux-musl.tar.gz aerini-server
+```
+
+Or build it yourself instead:
 
 ```bash
 git pull

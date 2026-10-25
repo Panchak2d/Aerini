@@ -28,7 +28,7 @@ If it can be described as "when this happens, do these steps," it's a workflow.
 
 ## Building one
 
-The left sidebar lists every node, grouped by category, with search and one-click presets for the AI providers and platforms you'll reach for most (Claude, GPT-4o, Gemini, Ollama, DALL-E 3, Imagen 4, plus ready-to-go Save to Folder and Upload nodes). Drop nodes on the canvas, connect their ports, hit Run. The panel underneath shows a summary, the raw results, an execution transcript, a debug view, and run history, so when something fails you're not guessing where.
+The left sidebar lists every node, grouped by category, with search and one-click presets for the AI providers and platforms you'll reach for most (Claude, GPT, Gemini, Ollama, DALL-E 3, Imagen 4, plus ready-to-go Save to Folder and Upload nodes). Drop nodes on the canvas, connect their ports, hit Run. The panel underneath shows a summary, the raw results, an execution transcript, a debug view, and run history, so when something fails you're not guessing where.
 
 ![Building a branching weather-check workflow with the node palette open](.github/readme/build-visually.png)
 
@@ -77,12 +77,12 @@ More on triggers and run history: [Background Runs](docs/guide/background-runs.m
 
 Aerini itself is built for one person on one machine, but a workflow can run without the desktop app open. `aerini-server` is the headless binary for that.
 
-Click **Export → Export for Server** on a workflow to generate a deployment package. The Linux Server target produces a zip with a self-installing systemd service, no Rust or Node required on the box you're deploying to.  
+Click **Export → Export for Server** on a workflow to generate a deployment package. The Linux Server target produces a zip with an installer script, a systemd service and your workflow's configuration. On x86-64 Linux, `install.sh` downloads the matching `aerini-server` release and checks its SHA-256 checksum, so no Rust is needed; on another architecture, build it from source (see [Server Deployment](docs/operations/server-deploy.md#building-aerini-server-from-source)) and put it in the unzipped folder first, or use the Docker image instead. Node.js is only needed for Code (JS) nodes.  
   
 ![Export for Server dialog with the Linux Server tab selected, listing required credentials and the status page port](.github/readme/export-server.png)  
 
 
-`aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. Get it with `docker pull ghcr.io/panchak2d/aerini-server`, or build it yourself (Docker or from source) if you want to customize it. Full details: [Server Deployment](docs/operations/server-deploy.md).
+`aerini-server` also has an `api` mode for running several workflows behind a real REST API with token auth, for when one exported workflow isn't enough. Get it with `docker pull ghcr.io/panchak2d/aerini-server`, download the Linux binary from the [Releases page](https://github.com/Panchak2d/aerini/releases), or build it yourself (Docker or from source) if you want to customize it. Full details: [Server Deployment](docs/operations/server-deploy.md).
 
 ## Working with an AI agent
 

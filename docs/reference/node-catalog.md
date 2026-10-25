@@ -424,7 +424,7 @@ Ports. In: `input` (In), `attachments` (Files); Out: `output` (Done), `on_error`
 | `max_iterations` | number | No | Not used: the agent makes one call. Kept so saved workflows still load. |
 | `max_tokens` | number | No | Maximum tokens per agent response (default: 2048). Higher values allow longer output but increase cost. |
 | `messages` | string | No | Earlier conversation to continue, as JSON. Either a list of {role, content} turns where role is user or assistant (AI Memory's messages output fits), or the messages output of an earlier AI Agent run, passed in unchanged. Roles system and developer are refused: use System. Keep Provider, Model, System and Tools the same from turn to turn. At most 4 MiB. |
-| `model` | string | No | Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash. |
+| `model` | string | No | Model name, for example gpt-5.6, claude-sonnet-5-5 or gemini-3.8-flash. |
 | `response_schema` | string | No | JSON Schema the reply must follow, written as a JSON object whose top level has type object. The reply comes back parsed in structured and is checked against the schema in structured_valid. Sent to every provider. OpenAI and Anthropic need additionalProperties false on every object, and OpenAI also needs every property listed in required. A long reply needs a higher max_tokens. |
 | `return_messages` | boolean | No | Return the conversation so far in the messages output so a later AI Agent node can continue it. Off by default: the transcript can hold the model's reasoning and any files sent, and it grows with every turn. |
 | `single_tool_call` | boolean | No | Allow at most one tool request per reply. Off by default, so the model may ask for several. Not available with Gemini, which has no such setting. |
@@ -478,7 +478,7 @@ Ports. In: `input` (In), `attachments` (Files); Out: `output` (Success), `on_err
 | `api_key` | string | No | API key — resolved from Connections |
 | `base_url` | string | No | API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here, for local models such as Ollama. |
 | `max_tokens` | number | No | Maximum response tokens. Default 2048. Higher values allow longer output but increase cost and latency. The ceiling that actually applies is set by the provider/model you select above, not by this node. |
-| `model` | string | No | Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3 |
+| `model` | string | No | Model name — e.g. gpt-5.6, claude-sonnet-5-5, gemini-3.8-flash, llama3 |
 | `provider` | string | No | API provider. 'auto' detects from base_url. One of: `auto`, `openai`, `anthropic`, `gemini`, `local`. |
 | `rate_limit_rpm` | number | No | Max requests per minute. 0 = unlimited |
 | `system` | string | No | System / persona instructions |

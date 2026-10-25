@@ -116,6 +116,7 @@ pub fn router(state: StatusState) -> Router {
     Router::new()
         .route("/",              get(status_page))
         .route("/api/status",    get(api_status))
+        .route("/api/health",    get(crate::api_server::routes::workflows::health))
         .route("/api/logs",      get(api_logs))
         .route("/api/run",       post(api_run))
         .route("/api/runs",      get(api_runs))
@@ -567,6 +568,25 @@ mod tests {
             run_history:         None,
             trusted_proxy_count: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn api_health_is_public_and_leaks_no_run_state() {
+        let mut s = make_state(Some("secret"));
+        s.run_state = std::sync::Arc::new(std::sync::RwLock::new(RunState {
+            last_error: Some("postgres://admin:secret@internal-db:5432/prod".into()),
+            ..Default::default()
+        }));
+        let res = router(s)
+            .oneshot(Request::builder().uri("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["version"], aerini_engine::ENGINE_VERSION);
+        assert!(!String::from_utf8_lossy(&body).contains("internal-db"));
     }
 
     #[tokio::test]
