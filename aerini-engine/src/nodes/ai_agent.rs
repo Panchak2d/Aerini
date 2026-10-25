@@ -1112,7 +1112,7 @@ fn check_tool_call(call: &RequestedTool, declared: &[Value]) -> ToolCheck {
 /// or uncompilable schema checks nothing: a tool definition the workflow author
 /// wrote loosely must not make every call of that tool look invalid.
 fn schema_errors(schema: &Value, instance: &Value) -> Vec<String> {
-    if !schema.as_object().is_some_and(|m| !m.is_empty()) {
+    if schema.as_object().is_none_or(|m| m.is_empty()) {
         return Vec::new();
     }
     let Ok(validator) = jsonschema::options()
