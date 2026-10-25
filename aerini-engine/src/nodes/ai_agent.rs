@@ -147,7 +147,7 @@ impl Node for AiAgentNode {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash.",
+                    "description": "Model name, for example gpt-5.6, claude-sonnet-5-5 or gemini-3.8-flash.",
                     "x-aerini-model-picker": true
                 },
                 "base_url": {

@@ -53,7 +53,23 @@ pub(super) fn build_env_example(creds: &[CredentialExport], trigger: &TriggerKin
     s
 }
 
-pub(super) fn build_install_sh(workflow_name: &str, port: u16) -> String {
+pub(super) fn build_install_sh(workflow_name: &str, port: u16, uses_code_node: bool) -> String {
+    // The Code node never searches PATH; it only uses node-bundled beside the
+    // binary or AERINI_NODE_BIN from .env. Only workflows with a Code node need to hear it.
+    let node_note = if uses_code_node {
+        r#"
+if [ ! -f "$INSTALL_DIR/node-bundled" ] && ! grep -qs '^AERINI_NODE_BIN=[^[:space:]]' "$INSTALL_DIR/.env"; then
+  echo ""
+  echo "NOTE: This workflow has a Code (JS) node, which needs one of these:"
+  echo "  - AERINI_NODE_BIN=/path/to/node in $INSTALL_DIR/.env"
+  echo "  - a Node.js binary named node-bundled in $INSTALL_DIR"
+  echo "Installing Node.js with a package manager is not enough on its own."
+  echo "Details: https://docs.aerini.org/operations/server-deploy#code-js-nodes-need-a-bundled-runtime-not-a-system-node-install"
+fi
+"#
+    } else {
+        ""
+    };
     format!(r#"#!/usr/bin/env bash
 set -euo pipefail
 
@@ -61,24 +77,46 @@ umask 077
 
 INSTALL_DIR="$HOME/.aerini-server/{safe_name}"
 SERVICE_NAME="aerini-{safe_name}"
+VERSION="{version}"
+RELEASE_URL="https://github.com/Panchak2d/aerini/releases/download/v$VERSION"
+DOWNLOAD_DIR=""
+trap 'if [ -n "$DOWNLOAD_DIR" ]; then rm -rf "$DOWNLOAD_DIR"; fi' EXIT
 
 echo "Installing Aerini Server for workflow: {safe_name}"
 
-# Check for the binary
-if [ ! -f "aerini-server" ]; then
+cannot_download() {{
   echo ""
-  echo "ERROR: aerini-server binary not found in this directory."
-  echo "Download the binary for your platform from:"
-  echo "  https://github.com/Panchak2d/aerini/releases"
-  echo "Then re-run this installer."
+  echo "ERROR: $1"
+  echo "Add aerini-server to this folder yourself, then re-run this installer:"
+  echo "  https://docs.aerini.org/operations/server-deploy#getting-the-aerini-server-binary"
   exit 1
-fi
+}}
 
-# Check Node.js (required for Code nodes)
-if ! command -v node &>/dev/null; then
-  echo "WARNING: Node.js is not installed. Code nodes will fail."
-  echo "Install with: sudo apt install -y nodejs   (Debian/Ubuntu)"
-  echo "              sudo yum install -y nodejs    (RHEL/CentOS)"
+# Use the program beside this script if there is one. Otherwise fetch the build
+# that matches the Aerini version that exported this package, so the workflow
+# file and the program agree on the schema version.
+if [ ! -f "aerini-server" ]; then
+  echo "aerini-server not found in this folder. Downloading v$VERSION from GitHub Releases."
+  [ "$(uname -s)" = "Linux" ] || cannot_download "This installer only supports Linux."
+  case "$(uname -m)" in
+    x86_64|amd64) TARGET="x86_64-unknown-linux-musl" ;;
+    *) cannot_download "No download is published for the $(uname -m) architecture." ;;
+  esac
+  for tool in curl sha256sum tar mktemp; do
+    command -v "$tool" >/dev/null 2>&1 || cannot_download "$tool is required to download aerini-server but is not installed."
+  done
+  ARCHIVE="aerini-server_${{VERSION}}_${{TARGET}}.tar.gz"
+  DOWNLOAD_DIR="$(mktemp -d)"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$DOWNLOAD_DIR/$ARCHIVE" "$RELEASE_URL/$ARCHIVE" \
+    || cannot_download "Could not download $RELEASE_URL/$ARCHIVE. This version may not be released yet."
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$DOWNLOAD_DIR/$ARCHIVE.sha256" "$RELEASE_URL/$ARCHIVE.sha256" \
+    || cannot_download "Could not download the checksum file for $ARCHIVE."
+  (cd "$DOWNLOAD_DIR" && sha256sum -c "$ARCHIVE.sha256" >/dev/null 2>&1) \
+    || cannot_download "The checksum of $ARCHIVE does not match, so it was not installed."
+  tar -xzf "$DOWNLOAD_DIR/$ARCHIVE" -C "$DOWNLOAD_DIR" aerini-server \
+    || cannot_download "Could not extract aerini-server from $ARCHIVE."
+  mv "$DOWNLOAD_DIR/aerini-server" ./aerini-server
+  echo "Downloaded and verified $ARCHIVE"
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -97,12 +135,12 @@ elif [ ! -f "$INSTALL_DIR/.env" ]; then
   echo "then run: systemctl --user restart $SERVICE_NAME"
 fi
 chmod 600 "$INSTALL_DIR/.env"
-
+{node_note}
 # Install systemd user service
 SERVICE_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SERVICE_DIR"
 
-sed "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" aerini.service > "$SERVICE_DIR/$SERVICE_NAME.service"
+sed "s|{{{{INSTALL_DIR}}}}|$INSTALL_DIR|g" aerini.service > "$SERVICE_DIR/$SERVICE_NAME.service"
 
 # Enable linger so service survives logout
 if loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=no"; then
@@ -116,13 +154,17 @@ systemctl --user start  "$SERVICE_NAME"
 
 echo ""
 echo "Installation complete."
-echo "  Status page: http://$(hostname -I | awk '{{print $1}}'):{port}"
+echo "  Status page: http://127.0.0.1:{port} (the service listens on this server only)"
+echo "  From your own computer: ssh -L {port}:127.0.0.1:{port} <user>@<this-server>, then open the same address"
+echo "  To expose it, put a reverse proxy in front: https://docs.aerini.org/operations/server-deploy#tls-with-a-reverse-proxy"
 echo "  Logs:        journalctl --user -u $SERVICE_NAME -f"
 echo "  Stop:        systemctl --user stop $SERVICE_NAME"
 echo "  Restart:     systemctl --user restart $SERVICE_NAME"
 "#,
         safe_name     = safe_name(workflow_name),
         port          = port,
+        version       = env!("CARGO_PKG_VERSION"),
+        node_note     = node_note,
     )
 }
 
@@ -582,15 +624,22 @@ Treat this zip like a credentials file:\n\
          QUICK START\n\
          -----------\n\
          1. Upload this zip to your Linux server and unzip it.\n\
-         2. {creds}\n\
-         3. Run: chmod +x install.sh && ./install.sh\n\
-         4. Status page: http://your-server-ip:{port}\n\
+         2. aerini-server: install.sh downloads and checks the matching release for\n\
+         \x20  x86-64 Linux if it is not in this folder. On another architecture, build it\n\
+         \x20  from source (https://docs.aerini.org/operations/server-deploy#building-aerini-server-from-source)\n\
+         \x20  and copy target/release/aerini-server here first.\n\
+         3. {creds}\n\
+         4. Run: chmod +x install.sh && ./install.sh\n\
+         5. Status page: http://127.0.0.1:{port} on the server (listens locally only; use an SSH tunnel or a reverse proxy to reach it)\n\
          \n\
          REQUIREMENTS\n\
          ------------\n\
          - Linux x86_64 (Ubuntu 20.04+, Debian 11+, CentOS 7+, Alpine)\n\
          - systemd with user lingering enabled (install.sh handles this)\n\
-         - Node.js (only required if workflow uses Code nodes, and only once enabled — see below)\n\
+         - curl, sha256sum and tar, only if install.sh has to download aerini-server.\n\
+         - A Node.js binary, only if the workflow uses Code nodes and --allow-code is set.\n\
+         \x20 Aerini does not search PATH: set AERINI_NODE_BIN=/path/to/node in .env, or put a\n\
+         \x20 binary named node-bundled next to aerini-server.\n\
          \n\
          CREDENTIALS\n\
          -----------\n\
@@ -801,7 +850,7 @@ mod generated_name_tests {
     #[test]
     fn every_generated_file_uses_the_same_name() {
         let service = build_service_file("My Flow!", 7700, &[]);
-        let script = build_install_sh("My Flow!", 7700);
+        let script = build_install_sh("My Flow!", 7700, false);
         let readme = build_readme("My Flow!", "Schedule", 7700, &[], &[]);
         let docker_readme = build_docker_readme("My <b>Flow</b>", "Schedule", 7700, &[], &[]);
         assert!(service.contains("Description=Aerini Workflow: my-flow"));
@@ -819,10 +868,64 @@ mod generated_name_tests {
 
     #[test]
     fn install_script_restricts_permissions_before_copying_files() {
-        let out = build_install_sh("wf", 7700);
+        let out = build_install_sh("wf", 7700, false);
         let umask = out.find("umask 077").expect("umask line missing");
         let first_copy = out.find("cp aerini-server").expect("copy missing");
         assert!(umask < first_copy);
+    }
+
+    #[test]
+    fn install_script_names_the_two_places_the_code_node_looks_for_node_only_when_it_has_one() {
+        let with_code = build_install_sh("wf", 7700, true);
+        assert!(!with_code.contains("command -v node"));
+        assert!(with_code.contains("AERINI_NODE_BIN"));
+        assert!(with_code.contains("$INSTALL_DIR/node-bundled"));
+
+        let without_code = build_install_sh("wf", 7700, false);
+        assert!(!without_code.contains("AERINI_NODE_BIN"));
+        assert!(!without_code.contains("node-bundled"));
+    }
+
+    #[test]
+    fn install_script_downloads_and_verifies_the_matching_release_when_the_binary_is_missing() {
+        let out = build_install_sh("wf", 7700, false);
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(out.contains(&format!("VERSION=\"{version}\"")));
+        assert!(out.contains("https://github.com/Panchak2d/aerini/releases/download/v$VERSION"));
+        assert!(out.contains("aerini-server_${VERSION}_${TARGET}.tar.gz"));
+        assert!(out.contains("x86_64|amd64) TARGET=\"x86_64-unknown-linux-musl\""));
+        assert!(out.contains("sha256sum -c"));
+        let check = out.find("sha256sum -c").unwrap();
+        let extract = out.find("tar -xzf").unwrap();
+        let first_install = out.find("cp aerini-server").unwrap();
+        assert!(check < extract && extract < first_install);
+        assert!(out.contains("set -euo pipefail"));
+    }
+
+    #[test]
+    fn install_script_prints_the_address_the_service_really_listens_on() {
+        let out = build_install_sh("wf", 7700, false);
+        assert!(!out.contains("hostname -I"));
+        assert!(out.contains("http://127.0.0.1:7700"));
+        assert!(out.contains("ssh -L 7700:127.0.0.1:7700"));
+    }
+
+    #[test]
+    fn install_script_replaces_the_placeholder_the_service_file_contains() {
+        let service = build_service_file("wf", 7700, &[]);
+        let script = build_install_sh("wf", 7700, false);
+        assert!(service.contains("WorkingDirectory={{INSTALL_DIR}}"));
+        assert!(script.contains("sed \"s|{{INSTALL_DIR}}|$INSTALL_DIR|g\" aerini.service"));
+    }
+
+    #[test]
+    fn readme_tells_the_user_to_add_the_binary_and_how_code_nodes_find_node() {
+        let readme = build_readme("wf", "Schedule", 7700, &[], &[]);
+        let quick_start = readme.find("QUICK START").expect("quick start missing");
+        let binary_step = readme.find("2. aerini-server: install.sh downloads").expect("binary step missing");
+        let run_step = readme.find("./install.sh").expect("run step missing");
+        assert!(quick_start < binary_step && binary_step < run_step);
+        assert!(readme.contains("AERINI_NODE_BIN=/path/to/node"));
     }
 }
 
@@ -839,7 +942,7 @@ mod security_hardening_tests {
 
     #[test]
     fn install_sh_chmods_env_file() {
-        let out = build_install_sh("wf", 7700);
+        let out = build_install_sh("wf", 7700, false);
         assert!(out.contains(r#"chmod 600 "$INSTALL_DIR/.env""#));
     }
 }

@@ -36,6 +36,10 @@ MCP = [
     for suffix in ("", ".sha256")
 ]
 ALL = INSTALLERS + SIGNATURES + MCP + ["latest.json"]
+SERVER = [
+    f"aerini-server_{VERSION}_x86_64-unknown-linux-musl.tar.gz",
+    f"aerini-server_{VERSION}_x86_64-unknown-linux-musl.tar.gz.sha256",
+]
 
 
 def sections(block):
@@ -93,6 +97,20 @@ class RenderTest(unittest.TestCase):
         alone = render.render(TAG, REPO, [bundle])
         self.assertLess(alone.index("### macOS"), alone.index(f"/{bundle})"))
         self.assertNotIn("Auto-update files", alone)
+
+    def test_server_download_has_its_own_section_with_its_checksum(self):
+        block = render.render(TAG, REPO, ALL + SERVER)
+        for name in SERVER:
+            self.assertEqual(block.count(f"/releases/download/{TAG}/{quote(name, safe='')})"), 1, name)
+        server = sections(block)["Server (`aerini-server`)"]
+        self.assertIn("Linux x64", server)
+        self.assertIn(".sha256", server)
+        self.assertNotIn("### Other files", block)
+
+    def test_server_checksum_without_its_archive_is_listed_as_other(self):
+        block = render.render(TAG, REPO, [SERVER[1]])
+        self.assertNotIn("### Server", block)
+        self.assertIn(SERVER[1], sections(block)["Other files"])
 
     def test_mcp_table_is_collapsed_under_its_heading(self):
         mcp_section = sections(render.render(TAG, REPO, ALL))["MCP server (`aerini-mcp`)"]

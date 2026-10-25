@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Package a built aerini-mcp program as a release archive with a checksum file.
+"""Package a built aerini-mcp or aerini-server program as a release archive with a checksum file.
 
 Usage:
-  package-mcp.py --binary PATH --name aerini-mcp|aerini-mcp-offline --target TRIPLE \
+  package-mcp.py --binary PATH --name aerini-mcp|aerini-mcp-offline|aerini-server --target TRIPLE \
       --version X.Y.Z[-pre] --license LICENSE --out-dir DIR
 
 Writes "<name>_<version>_<target>.tar.gz" (".zip" for a Windows target) holding the
@@ -21,7 +21,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-NAMES = ("aerini-mcp", "aerini-mcp-offline")
+NAMES = ("aerini-mcp", "aerini-mcp-offline", "aerini-server")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 TARGET_RE = re.compile(r"^[a-z0-9_]+(?:-[a-z0-9_]+){2,3}$")
 FIXED_MTIME = 0

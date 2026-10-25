@@ -72,6 +72,7 @@ If you're deciding whether it's safe to expose a Webhook node to the internet, y
 | Drop a chat widget onto a web page | [Widget Embedding](guide/widget-embedding.md) |
 | See a worked example end to end | [Examples](guide/examples.md) |
 | Fix a stuck or failed run | [Troubleshooting](troubleshooting.md) |
+| See current limits and planned work | [Known Issues](known-issues.md) |
 | Run Aerini unattended on a server | [Server Deployment](operations/server-deploy.md) |
 | Update the desktop app, a server deployment, or an old workflow file | [Updating](operations/updating.md) |
 | Understand how the pieces fit together internally | [Architecture](development/architecture.md) |

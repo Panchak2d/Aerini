@@ -293,7 +293,7 @@ export class CredentialPanel {
         <div class="field-group">
           <label class="field-label">Model</label>
           <div class="field-multiline-wrap">
-            <input id="cred-meta-model" type="text" placeholder="e.g. gpt-4o, claude-sonnet-4-6" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
+            <input id="cred-meta-model" type="text" placeholder="e.g. gpt-5.6, claude-sonnet-5-5" autocomplete="off" value="${escHtml(e?.model ?? "")}" />
             <button type="button" class="code-load-btn" id="cred-fetch-models">Fetch Models</button>
             <div id="cred-ollama-slot"></div>
             <div id="cred-model-list-slot"></div>

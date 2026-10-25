@@ -6,6 +6,8 @@ PORT=7799
 TOKEN="smoke-test-token-0123456789abcdef"
 CONTAINER=""
 SAVE_BODY_FILE=""
+SERVE_CONFIG_FILE=""
+SERVE_VOLUME=""
 
 [ -f Dockerfile ] || { echo "Run this from the repo root (Dockerfile not found in $(pwd))."; exit 1; }
 
@@ -17,11 +19,17 @@ cleanup() {
   if [ -n "$SAVE_BODY_FILE" ]; then
     rm -f "$SAVE_BODY_FILE" || true
   fi
+  if [ -n "$SERVE_CONFIG_FILE" ]; then
+    rm -f "$SERVE_CONFIG_FILE" || true
+  fi
+  if [ -n "$SERVE_VOLUME" ]; then
+    docker volume rm -f "$SERVE_VOLUME" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
 fail_with_logs() {
-  echo "TIER2: FAIL ($1)"
+  echo "SMOKE: FAIL ($1)"
   if [ -n "$CONTAINER" ]; then
     echo "── container logs ──"
     docker logs "$CONTAINER" 2>&1 || true
@@ -83,4 +91,63 @@ case "$CHECK" in
   FAIL) fail_with_logs "code node did not return the expected result" ;;
   *)    echo "TIER2: ${CHECK}" ;;
 esac
+
+docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+CONTAINER=""
+
+echo
+echo "── Tier 3: serve mode answers health and reports healthy to Docker ──"
+SERVE_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/aerini-smoke-serve.XXXXXX")"
+SERVE_VOLUME="aerini-smoke-serve-$$"
+python3 - "$SERVE_CONFIG_FILE" <<'PY'
+import json, sys
+workflow = {
+    "id": "smoke-test-serve",
+    "name": "smoke serve",
+    "nodes": [{
+        "id": "n1", "node_type_id": "schedule", "node_type": "action",
+        "name": "Schedule", "input_schema": {}, "output_schema": {},
+        "config": {"mode": "interval", "interval_secs": 3600},
+    }],
+    "edges": [],
+}
+config = {
+    "workflow_name": "smoke serve",
+    "workflow_json": json.dumps(workflow),
+    "status_port": 7700,
+    "exported_at": "2026-01-01T00:00:00Z",
+    "credential_env_vars": {},
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(config, f)
+PY
+chmod 644 "$SERVE_CONFIG_FILE"
+docker volume create "$SERVE_VOLUME" >/dev/null
+
+CONTAINER="$(docker run -d -p "127.0.0.1:${PORT}:7700" \
+  -v "${SERVE_VOLUME}:/data" \
+  -v "${SERVE_CONFIG_FILE}:/data/aerini-server.json:ro" \
+  "$IMAGE" serve --config /data/aerini-server.json --bind 0.0.0.0)"
+
+SERVE_UP=0
+for _ in $(seq 1 30); do
+  curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1 && { SERVE_UP=1; break; }
+  sleep 1
+done
+[ "$SERVE_UP" -eq 1 ] || fail_with_logs "serve mode never answered /api/health within 30s"
+
+curl -fsS "http://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1 \
+  || fail_with_logs "serve mode /api/status did not answer"
+curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 \
+  || fail_with_logs "serve mode status page did not answer"
+
+# The image's HEALTHCHECK waits 10s, then probes every 30s; allow for two probes.
+DOCKER_HEALTH=""
+for _ in $(seq 1 90); do
+  DOCKER_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+  [ "$DOCKER_HEALTH" = "healthy" ] && break
+  sleep 1
+done
+[ "$DOCKER_HEALTH" = "healthy" ] || fail_with_logs "docker health status is '${DOCKER_HEALTH}', expected 'healthy'"
+echo "TIER3: PASS"
 exit 0

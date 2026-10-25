@@ -20,8 +20,9 @@ TARGETS = (
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-musl",
 )
-NAMES = ("aerini-mcp", "aerini-mcp-offline")
+NAMES = ("aerini-mcp", "aerini-mcp-offline", "aerini-server")
 
 
 def stage(tmp, content=b"program"):
@@ -90,7 +91,7 @@ class PackageTest(unittest.TestCase):
             empty.write_bytes(b"")
             out = Path(tmp) / "out"
             cases = (
-                (binary, "aerini-server", TARGETS[0], "1.2.3", license_file),
+                (binary, "aerini-unknown", TARGETS[0], "1.2.3", license_file),
                 (binary, "aerini-mcp", TARGETS[0], "v1.2.3", license_file),
                 (binary, "aerini-mcp", "linux", "1.2.3", license_file),
                 (Path(tmp) / "missing", "aerini-mcp", TARGETS[0], "1.2.3", license_file),

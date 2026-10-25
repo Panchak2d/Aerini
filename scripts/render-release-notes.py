@@ -28,6 +28,8 @@ REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ARCH_RE = re.compile(r"(?<![A-Za-z0-9])(x86_64|amd64|x64|aarch64|arm64)(?![A-Za-z0-9])")
 MCP_RE = re.compile(r"^(aerini-mcp|aerini-mcp-offline)_([^_]+)_(.+?)(\.tar\.gz|\.zip)(\.sha256)?$")
 
+SERVER_RE = re.compile(r"^aerini-server_([^_]+)_(.+?)(\.tar\.gz)(\.sha256)?$")
+
 OS_ORDER = ("Windows", "macOS", "Linux")
 ARCH_ORDER = ("x64", "ARM64")
 ARCH_NAMES = {
@@ -92,6 +94,12 @@ def classify(name):
         platform = mcp_platform(target)
         if platform:
             return ("mcp", program, platform, "checksum" if checksum else "archive")
+    match = SERVER_RE.match(name)
+    if match:
+        _, target, _, checksum = match.groups()
+        platform = mcp_platform(target)
+        if platform:
+            return ("server", platform, "checksum" if checksum else "archive")
     for suffix, os_name, fmt in INSTALLER_SUFFIXES:
         if name.endswith(suffix):
             archs = ARCH_RE.findall(name[: -len(suffix)])
@@ -117,6 +125,7 @@ def render(tag, repo, names):
 
     installers = {}
     mcp = {}
+    server = {}
     manifests, signatures, other = [], [], []
     for name in sorted(set(names)):
         kind = classify(name)
@@ -128,6 +137,9 @@ def render(tag, repo, names):
         elif kind[0] == "mcp":
             _, program, platform, part = kind
             mcp.setdefault(platform, {}).setdefault(program, {})[part] = name
+        elif kind[0] == "server":
+            _, platform, part = kind
+            server.setdefault(platform, {})[part] = name
         elif kind[0] == "manifest":
             manifests.append(name)
         else:
@@ -137,7 +149,11 @@ def render(tag, repo, names):
         for program in cells.values():
             if "archive" not in program:
                 other.append(program.pop("checksum"))
+    for cell in server.values():
+        if "archive" not in cell:
+            other.append(cell.pop("checksum"))
     other.sort()
+    server = {platform: cell for platform, cell in server.items() if "archive" in cell}
 
     mac = installers.get("macOS", [])
     disk_image_archs = {row[3] for row in mac if row[4] == "dmg"}
@@ -161,6 +177,26 @@ def render(tag, repo, names):
             if fmt == RECOMMENDED_FORMAT[os_name]:
                 note = f"**Recommended.** {note}"
             out.append(f"| {link(name)} | {arch_label(os_name, arch)} | {note} |")
+
+    if server:
+        out += [
+            "",
+            "### Server (`aerini-server`)",
+            "",
+            "The headless program for running workflows on a server. The Linux package from "
+            "**Export → Export for Server** downloads and checks the matching file itself, so you only need "
+            "one of these to install by hand. "
+            f"See the [deployment guide](https://github.com/{repo}/blob/main/docs/operations/server-deploy.md).",
+            "",
+            "| Platform | Download |",
+            "|---|---|",
+        ]
+        for platform in sorted(server, key=lambda p: (OS_ORDER.index(p[0]), ARCH_ORDER.index(p[1]))):
+            cell = server[platform]
+            text = f"[.tar.gz]({url(cell['archive'])})"
+            if "checksum" in cell:
+                text += f" · [.sha256]({url(cell['checksum'])})"
+            out.append(f"| {platform[0]} {arch_label(*platform)} | {text} |")
 
     mcp = {platform: cells for platform, cells in mcp.items() if any(cells.values())}
     if mcp:

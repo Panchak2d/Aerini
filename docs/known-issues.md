@@ -68,3 +68,19 @@ These paths are covered only by tests against local stand-ins, not by a real ser
 - Nano Banana with `gemini-nano-banana-2.1` or `gemini-3.1-flash-lite-image`: Google's documentation does not confirm those models work with the request this node sends, so the default model is unchanged. If one fails, switch back to `gemini-2.5-flash-image` until Google retires it.
 - Notion `create_page` with a **Data Source ID**, which is sent with Notion API version `2025-09-03`.
 - Instagram upload: the reply to `GET /me?fields=user_id,username` is read as a flat `user_id` (then `id`) or as `data[0].user_id`, because Meta's own sample and other code disagree on the shape. Confirm on a real professional account.
+
+## Planned work and open questions
+
+Gaps in the AI nodes and in server packaging that this release does not close. Each has an ID so a release note or an issue can point at it, and a target version where one is planned; a target is a plan, not a promise.
+
+| ID | What is missing | Target |
+|---|---|---|
+| I10, I11 | The AI Agent does not run tools itself: a tool loop inside the node waits on sub-workflows, per-tool credentials and a human-approval step, so for now you wire each tool as nodes ([AI Agent Router](https://github.com/Panchak2d/Aerini/blob/main/examples/AI_Agent_Router.md), [AI Agent Loop](https://github.com/Panchak2d/Aerini/blob/main/examples/AI_Agent_Loop.md)), and the Loop example is bounded only by its turn count, with no token budget or time limit. | v0.5.0 |
+| I15 | The AI Agent cannot use tools from an external MCP server; that comes after the tool loop. | v0.5.0 |
+| B5 | The OpenAI nodes use Chat Completions only; OpenAI's Responses API and hosted tools have not been reviewed yet. | v0.5.0 |
+| I17 | AI Prompt and AI Agent each carry their own request code, and AI Prompt has no Response Schema or Effort setting yet. | v0.4.5 |
+| B3 | The model picker does not show whether a local Ollama model supports tools; a model without tool support fails the AI Agent with `TOOLS_NOT_SUPPORTED`. | v0.4.5 |
+| BL1 | The Linux Server package from Export for Server does not contain `aerini-server`, and the Releases page does not publish it; build it from source or run the Docker image instead ([Server Deployment](operations/server-deploy.md#getting-the-aerini-server-binary)). | not scheduled |
+| BL2 | There is no single end-to-end walkthrough for a new VPS (create the server, install Docker, run Aerini, add TLS); [Server Deployment](operations/server-deploy.md) covers each step separately. | not scheduled |
+| BL3 | In the AI Agent Loop example, Stop When on `finished` does not end the Loop when a reply is cut off at Max Tokens, and whether `awaiting_tools` is a better condition has not been tested. | open question |
+| BL4 | The AI Agent in a Loop has been run on Gemini only; OpenAI, Anthropic and local models are untested there. | untested |

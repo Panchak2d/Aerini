@@ -57,7 +57,7 @@ impl Node for AiPromptNode {
             "properties": {
                 "prompt":         { "type": "string",  "description": "User prompt" },
                 "system":         { "type": "string",  "description": "System / persona instructions" },
-                "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5, gemini-3.6-flash, llama3", "x-aerini-model-picker": true },
+                "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5-5, gemini-3.8-flash, llama3", "x-aerini-model-picker": true },
                 "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini", "local"], "description": "API provider. 'auto' detects from base_url." },
                 "base_url":       { "type": "string",  "description": "API base URL. Leave blank for OpenAI. Loopback and private-network addresses are allowed here, for local models such as Ollama." },
                 "api_key":        { "type": "string",  "description": "API key — resolved from Connections" },

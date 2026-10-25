@@ -570,3 +570,27 @@ describe("preset preview tooltip — show delay", () => {
     vi.useRealTimers();
   });
 });
+
+describe("AI provider presets", () => {
+  beforeEach(() => {
+    document.body.innerHTML = `<div id="node-palette"></div><div id="canvas"></div>`;
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["gpt", "GPT (OpenAI)", "openai", "gpt-5.6"],
+    ["gemini", "Gemini (Google)", "gemini", "gemini-3.8-flash"],
+  ])("%s preset places a node with the current model", (search, name, provider, model) => {
+    const placed = { data: { config: {} as Record<string, unknown>, name: "" } };
+    const canvas = { ...mockCanvas, placeNode: vi.fn().mockReturnValue(placed) };
+    buildSidebarPalette([AI_NODE], canvas as never, vi.fn());
+
+    document.querySelector<HTMLElement>(`.palette-preset[data-search*="${search}"]`)!.click();
+
+    expect(placed.data.name).toBe(name);
+    expect(placed.data.config).toMatchObject({ provider, model });
+  });
+});

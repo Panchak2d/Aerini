@@ -221,6 +221,15 @@ export function edgePanVelocity(p: Point, size: Size): Point {
   return { x: axis(p.x, size.w), y: axis(p.y, size.h) };
 }
 
+// A zoomed-in minimap shows only part of the workflow, so when the canvas view leaves that part (fit to screen, jump to a node, canvas zoom) the minimap scrolls to bring the view box back to its centre.
+export function followViewport(base: MinimapBounds | null, view: MinimapView, viewport: Rect): MinimapView {
+  if (!base || view.zoom <= 1) return view;
+  const b = viewBounds(base, view)!;
+  const v = viewportToMinimap(b, viewport);
+  if (overlapsEnough(v.x, v.x + v.w, 0, b.w) && overlapsEnough(v.y, v.y + v.h, 0, b.h)) return view;
+  return panView(base, view, b.w / 2 - (v.x + v.w / 2), b.h / 2 - (v.y + v.h / 2));
+}
+
 // Ctrl/Cmd + primary drag, or a middle-button drag, pans a magnified minimap; any other drag moves the canvas view as before.
 export function isPanGesture(button: number, modifier: boolean, zoom: number): boolean {
   return zoom > 1 && (button === 1 || (button === 0 && modifier));
@@ -473,6 +482,7 @@ export class Minimap {
   private _pointerId: number | null = null;
   private _pan: { id: number; last: Point } | null = null;
   private _dragPointer: Point | null = null;
+  private _lastViewport: Rect | null = null;
   private _edgeTime: number | null = null;
   private _label = "";
   private _noteSrc: CanvasThemeColors | null = null;
@@ -504,6 +514,7 @@ export class Minimap {
     mmEl.addEventListener("wheel", (e) => this._onWheel(e), { passive: false });
     mmEl.addEventListener("pointerleave", () => { this._hover = null; });
     mmEl.addEventListener("dblclick", (e) => this._onDoubleClick(e));
+    mmEl.addEventListener("contextmenu", (e) => e.preventDefault());
 
     if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
       const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -563,6 +574,10 @@ export class Minimap {
       this._base = computeBounds(worldRects, this._size, viewport);
     }
     this._edgePan();
+    const last = this._lastViewport;
+    const moved = !last || last.x !== viewport.x || last.y !== viewport.y || last.w !== viewport.w || last.h !== viewport.h;
+    this._lastViewport = viewport;
+    if (moved && !this._drag && !this._pan) this._view = followViewport(this._base, this._view, viewport);
     const bounds = activeBounds(this._drag, viewBounds(this._base, this._view));
     this._bounds = bounds;
     this._viewport = viewport;
@@ -868,7 +883,18 @@ export class Minimap {
     try { el.setPointerCapture?.(e.pointerId); } catch { /* pointer already gone; the pan still ends on pointerup/cancel */ }
   }
 
+  // A release lost to a context menu, another window or a dropped capture would otherwise leave the minimap stuck mid-gesture and deaf to new ones.
+  private _dropStaleGesture(e: PointerEvent): void {
+    if (e.buttons !== 0 || !(this._pan || this._drag)) return;
+    this._pan = null;
+    this._drag = null;
+    this._dragPointer = null;
+    this._pointerId = null;
+    if (this.el) this.el.style.cursor = "";
+  }
+
   private _onMove(e: PointerEvent): void {
+    this._dropStaleGesture(e);
     const pan = this._pan;
     if (pan) {
       if (e.pointerId !== pan.id) return;
