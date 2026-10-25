@@ -288,13 +288,8 @@ impl WorkflowExecutor {
 
                 {
                     let mut s = state.write().await;
-                    if let Some(ref val) = output.output {
-                        let key = val["_variable_key"].as_str().unwrap_or("").trim();
-                        if !key.is_empty() {
-                            if let Some(v) = val.get("_variable_value") {
-                                s.set_variable(key.to_string(), v.clone());
-                            }
-                        }
+                    if let Some((key, v)) = output.output.as_ref().and_then(crate::context::variable_write) {
+                        s.set_variable(key, v);
                     }
                     s.mark_succeeded(node_id, output);
                 }

@@ -4,6 +4,7 @@ import type { CanvasNode } from "../canvas/Node";
 import { showExpressionPicker } from "../expression-picker";
 import { describeModelFetchError, type OllamaTarget } from "../ipc/providers";
 import { mountOllamaModelControl } from "../ollama-model-control";
+import { renderToolBuilderField } from "./tool-builder";
 import {
   mk, mkSection, mkField, mkCustomSelect, CRON_PRESETS,
   type ExtensionContext, type NodeConfigExtension,
@@ -44,6 +45,11 @@ export interface PropSchema {
    *  flag is per schema, so another node's field of the same name is not
    *  affected. */
   "x-aerini-multiline"?: true;
+  /** Renders a string field holding a JSON array of tool definitions as a
+   *  form (name, description, typed parameters) with an always-available
+   *  "Edit as JSON" switch. The stored value stays the same JSON text; a value
+   *  the form cannot show without loss opens in the raw editor untouched. */
+  "x-aerini-tool-builder"?: true;
 }
 
 const CREDENTIAL_KEYS = new Set(["api_key", "password"]);
@@ -758,7 +764,7 @@ export function storedValueFitsField(prop: PropSchema, value: unknown): boolean 
 }
 
 /** Render one config field. Checks: cron key → model-picker flag → AI-node
- *  base_url → path-picker flag → enum → multiline flag or key → array (string/enum
+ *  base_url → path-picker flag → tool-builder flag → enum → multiline flag or key → array (string/enum
  *  items) → type dispatch table → text fallback. Order is load-bearing — do
  *  not reorder. */
 function renderField(
@@ -772,6 +778,10 @@ function renderField(
   if (prop["x-aerini-model-picker"]) return renderModelPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired, fetchModels, ctx);
   if (key === "base_url" && AI_NODE_IDS.has(node.data.node_type_id)) return renderBaseUrlField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   if (prop["x-aerini-path-picker"]) return renderPathPickerField(key, prop, cur, node, canvasEl, onChange, syncRequired);
+  if (prop["x-aerini-tool-builder"]) {
+    return renderToolBuilderField(key, node, onChange, syncRequired,
+      (text) => renderMultilineField(key, prop, text, node, canvasEl, onChange, syncRequired));
+  }
   if (prop.enum)            return renderEnumField(key, prop, cur, node, onChange, syncRequired);
   if (prop["x-aerini-multiline"] || MULTILINE_KEYS.includes(key)) return renderMultilineField(key, prop, cur, node, canvasEl, onChange, syncRequired);
   // Array-of-object fields (items.type === "object", e.g. Collect Files'

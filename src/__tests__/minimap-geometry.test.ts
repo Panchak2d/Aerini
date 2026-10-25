@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   activeBounds, backingSize, computeBounds, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
   hitTopmost, hoverText, minimapLabel, minimapToWorld, nextErrorIndex, normalizeDpr, placeLabel, pulseAlpha, snapStroke,
-  viewBounds, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
+  viewBounds, edgePanVelocity, isPanGesture, panView, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
 } from "../canvas/Minimap";
 
 const NODE: Rect = { x: 100, y: 200, w: 220, h: 100 };
@@ -307,5 +307,53 @@ describe("minimap own zoom (viewBounds / zoomView)", () => {
     const b = viewBounds(base, { ...v, panX: 99999, panY: -99999 })!;
     expect(b.offX).toBeLessThanOrEqual(0);
     expect(b.offY).toBeLessThanOrEqual(0);
+  });
+});
+
+describe("minimap pan (panView / isPanGesture)", () => {
+  const base = computeBounds([NODE], { w: 140, h: 80 })!;
+  const zoomed = zoomView(base, DEFAULT_VIEW, -300, { x: 70, y: 40 });
+
+  it("shifts the magnified content by the drag distance", () => {
+    const before = viewBounds(base, zoomed)!;
+    const after = viewBounds(base, panView(base, zoomed, 4, 0))!;
+    expect(after.offX - before.offX).toBeCloseTo(4, 6);
+    expect(after.offY).toBeCloseTo(before.offY, 6);
+  });
+
+  it("past an edge it stops there and keeps no slack: the opposite drag moves at once", () => {
+    const pinned = panView(base, zoomed, 99999, 0);
+    expect(viewBounds(base, pinned)!.offX).toBeCloseTo(0, 6);
+    expect(viewBounds(base, panView(base, pinned, -5, 0))!.offX).toBeCloseTo(-5, 6);
+  });
+
+  it("at zoom 1 there is nothing to pan", () => {
+    expect(panView(base, DEFAULT_VIEW, 10, 10)).toEqual(DEFAULT_VIEW);
+    expect(panView(null, zoomed, 10, 10)).toEqual(DEFAULT_VIEW);
+  });
+
+  it("only a magnified minimap pans, on Ctrl/Cmd + primary or a middle-button drag", () => {
+    expect(isPanGesture(0, true, 2)).toBe(true);
+    expect(isPanGesture(1, false, 2)).toBe(true);
+    expect(isPanGesture(0, false, 2)).toBe(false);
+    expect(isPanGesture(0, true, 1)).toBe(false);
+  });
+});
+
+describe("edgePanVelocity", () => {
+  const size = { w: 140, h: 80 };
+
+  it("is zero away from the edges, and pushes content toward the pointer's side when it nears one", () => {
+    expect(edgePanVelocity({ x: 70, y: 40 }, size)).toEqual({ x: 0, y: 0 });
+    expect(edgePanVelocity({ x: 2, y: 40 }, size).x).toBeGreaterThan(0);
+    expect(edgePanVelocity({ x: 138, y: 40 }, size).x).toBeLessThan(0);
+    expect(edgePanVelocity({ x: 70, y: 79 }, size).y).toBeLessThan(0);
+  });
+
+  it("speeds up toward the edge and is capped there", () => {
+    const near = edgePanVelocity({ x: 12, y: 40 }, size).x;
+    const at = edgePanVelocity({ x: 0, y: 40 }, size).x;
+    expect(at).toBeGreaterThan(near);
+    expect(edgePanVelocity({ x: -500, y: 40 }, size).x).toBe(at);
   });
 });

@@ -317,6 +317,6 @@ fn parse_usize_clamped(s: &str, max: usize) -> usize {
     s.trim().parse::<i64>().map(|n| (n.max(0) as usize).min(max)).unwrap_or(0)
 }
 
-fn is_truthy(s: &str) -> bool {
+pub(crate) fn is_truthy(s: &str) -> bool {
     !s.is_empty() && s != "false" && s != "0" && s != "null"
 }

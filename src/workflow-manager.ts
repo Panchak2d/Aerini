@@ -1629,18 +1629,18 @@ export class WorkflowManager {
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.warnArityViolations();
-      if (localStorage.getItem("aerini_autofit") !== "false") {
-        this.canvas.fitToScreen();
-      } else {
-        // Restore saved viewport for this workflow if available
-        const saved = localStorage.getItem(`aerini_viewport_${wfId}`);
-        const vp = saved ? parseSavedViewport(saved, this.canvas.MIN_ZOOM, this.canvas.MAX_ZOOM) : null;
-        if (vp) { this.canvas.panX = vp.panX; this.canvas.panY = vp.panY; this.canvas.zoom = vp.zoom; }
-      }
       this.currentId = wfId; this.currentName = name;
       this.markUnsaved(false); this.onTitleChange(name);
       this.onPanelClose?.();
       document.getElementById("output-drawer")!.classList.add("hidden");
+      // Fit after the drawer collapses and currentId switches: an open drawer shrinks the fit area, and the viewport persists under currentId.
+      if (localStorage.getItem("aerini_autofit") !== "false") {
+        this.canvas.fitToScreen();
+      } else {
+        const saved = localStorage.getItem(`aerini_viewport_${wfId}`);
+        const vp = saved ? parseSavedViewport(saved, this.canvas.MIN_ZOOM, this.canvas.MAX_ZOOM) : null;
+        if (vp) { this.canvas.panX = vp.panX; this.canvas.panY = vp.panY; this.canvas.zoom = vp.zoom; }
+      }
       await this.refreshWorkflowList();
       this.onStatusChange(`Loaded "${name}"`);
       this.onNavigate?.();
@@ -1714,11 +1714,11 @@ export class WorkflowManager {
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.warnArityViolations();
-      this.canvas.fitToScreen();
       this.currentId = wfId; this.currentName = name;
       this.markUnsaved(true); this.onTitleChange(name);
       this.onPanelClose?.();
       document.getElementById("output-drawer")!.classList.add("hidden");
+      this.canvas.fitToScreen();
       this.onStatusChange(`Loaded "${name}"`);
       this.onNavigate?.();
     } catch (e) {
@@ -1836,9 +1836,9 @@ export class WorkflowManager {
       this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.warnArityViolations();
-      this.canvas.fitToScreen();
       this.currentId   = wfId;
       this.currentName = name;
+      this.canvas.fitToScreen();
       this.markUnsaved(true);
       this.onTitleChange(name);
       return { id: wfId, name };

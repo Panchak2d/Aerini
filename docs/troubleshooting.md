@@ -46,6 +46,10 @@ There's one case worth calling out on its own, because it doesn't just come out 
 
 A credential that fails to resolve produces the same kind of warning through an unrelated mechanism: not an unresolved expression, but a credential ID the workflow references that no longer resolves in the store it's running against. See [A credential isn't showing up in a node's dropdown](#a-credential-isnt-showing-up-in-a-nodes-dropdown) below for that case specifically.
 
+## An AI Agent fails with `TOOLS_NOT_SUPPORTED`
+
+The model behind the node can't use tools, and the server refused the request because the **Tools** field is filled in. This mostly happens with local models: tool support depends on the specific model you pulled, not on its size. Pick a model whose page in the Ollama library lists "tools", or clear the Tools field if you only want a text answer. See [Local Models](guide/local-models.md#ai-agent) for more.
+
 ## A credential isn't showing up in a node's dropdown
 
 For most nodes, a field described as coming from your saved credentials shows a picker. A few don't, even though their description says they should: [Credentials](guide/credentials.md#using-a-credential-in-a-node) has the full list, currently Discord's webhook URL, S3's access keys, and the OAuth `client_id`/`client_secret` pair on both Google Sheets and Social Upload. For those, typing the value straight into the node field is the correct, working flow, not a workaround.

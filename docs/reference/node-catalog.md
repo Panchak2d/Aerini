@@ -409,26 +409,37 @@ Output fields: `body`, `files`, `headers`, `method`, `path`.
 
 `ai_agent` version 1.0.0
 
-Give an AI model a set of tools it can invoke to complete a goal autonomously over multiple steps.
+Give an AI model a goal and tool definitions. It makes one model call and returns the answer, or the tools the model asks for; it does not run them.
 
 Ports. In: `input` (In), `attachments` (Files); Out: `output` (Done), `on_error` (Error).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `goal` | string | Yes | What the agent should accomplish. Be specific and include constraints. |
-| `provider` | string | Yes | AI provider. OpenAI/Gemini: tool definitions are sent and tool requests returned. Anthropic: single reasoning pass, no tools. One of: `openai`, `anthropic`, `gemini`, `local`, `auto`. |
+| `provider` | string | Yes | AI provider. Tool definitions are sent and tool requests returned for every provider. One of: `openai`, `anthropic`, `gemini`, `local`, `auto`. |
 | `api_key` | string | No | API key — resolved from Connections |
 | `base_url` | string | No | API base URL (leave blank for default) |
 | `context` | string | No | Additional context to give the agent (from previous nodes, variables, etc.) |
+| `effort` | string | No | How hard the model thinks. default: the provider's own default. Anthropic takes low, medium, high, xhigh or max; Gemini takes minimal, low, medium or high; OpenAI-compatible and local servers take none, minimal, low, medium, high, xhigh or max. A level the chosen model does not accept comes back as the provider's API_ERROR. Higher effort uses more of Max Tokens and costs more. One of: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `max_iterations` | number | No | Not used: the agent makes one call. Kept so saved workflows still load. |
 | `max_tokens` | number | No | Maximum tokens per agent response (default: 2048). Higher values allow longer output but increase cost. |
+| `messages` | string | No | Earlier conversation to continue, as JSON. Either a list of {role, content} turns where role is user or assistant (AI Memory's messages output fits), or the messages output of an earlier AI Agent run, passed in unchanged. Roles system and developer are refused: use System. Keep Provider, Model, System and Tools the same from turn to turn. At most 4 MiB. |
 | `model` | string | No | Model name. OpenAI: gpt-5.6. Anthropic: claude-sonnet-5. Gemini: gemini-3.6-flash. |
+| `response_schema` | string | No | JSON Schema the reply must follow, written as a JSON object whose top level has type object. The reply comes back parsed in structured and is checked against the schema in structured_valid. Sent to every provider. OpenAI and Anthropic need additionalProperties false on every object, and OpenAI also needs every property listed in required. A long reply needs a higher max_tokens. |
+| `return_messages` | boolean | No | Return the conversation so far in the messages output so a later AI Agent node can continue it. Off by default: the transcript can hold the model's reasoning and any files sent, and it grows with every turn. |
+| `single_tool_call` | boolean | No | Allow at most one tool request per reply. Off by default, so the model may ask for several. Not available with Gemini, which has no such setting. |
+| `strict_tools` | boolean | No | Make the model's tool arguments follow each tool's parameters schema exactly. Off by default. Every object in a schema needs additionalProperties false; for OpenAI, every property must also be in required. Not available with Gemini. Anthropic allows 20 strict tools. |
 | `system` | string | No | System instructions for the agent's persona and behavior. |
 | `temperature` | number | No | Creativity (0.0-1.0). Agents work best at 0.2-0.5. |
 | `timeout_secs` | number | No | How long to wait for the model's reply, in seconds. Default 3600 (1 hour), range 10-86400. A request that runs past it fails with TIMEOUT and is not retried. Raise it for slow local models. |
-| `tools` | string | No | JSON array of tool definitions. Each tool: {name, description, parameters}. Used with OpenAI-compatible and Gemini providers; the node returns the model's tool requests and does not run them. Anthropic ignores tools. |
+| `tool_choice` | string | No | Whether the model may, must or must not ask for a tool. auto: the model decides (default). required: the model must ask for at least one tool (not available with Anthropic, whose current models accept only auto and none). none: the model answers in text only. Needs Tools. One of: `auto`, `required`, `none`. |
+| `tool_results` | string | No | Results for the tools the previous run asked for, as a JSON array of {id, tool, content, is_error}. Needs Messages from an earlier run that had Return Messages on. Every tool request must be answered exactly once, matched by id (by tool name for a provider that sends no ids). content may be text or any JSON; a result over 64 KiB is cut and marked. Goal and Context are not sent again. |
+| `tools` | string | No | JSON array of tool definitions. Each tool: {name, description, parameters}. Sent to every provider; the node returns the model's tool requests and does not run them. Anthropic accepts names of letters, digits, underscores and hyphens, up to 64 characters. |
+| `web_search` | boolean | No | Let the model search the web before it answers, using the provider's own search. Off by default. OpenAI needs a search model such as gpt-5-search-api (used when Model is blank); Anthropic and Gemini work with any model that supports search. Not available with local servers. Gemini cannot combine it with Tools, and Anthropic cannot combine it with Response Schema. The provider sees your prompt, charges per search, and the pages it finds are untrusted content. |
+| `web_search_domains` | string | No | Search only these sites (Anthropic only). Separate with commas or new lines and write example.com, not https://example.com; subdomains are included. Blank allows any site. Needs Web Search. |
+| `web_search_max_uses` | number | No | Most searches the model may run in one reply (Anthropic only, default 5). Needs Web Search. |
 
-Output fields: `awaiting_tools`, `finished`, `iterations`, `reasoning`, `result`, `tool_calls`, `truncated`.
+Output fields: `awaiting_tools`, `finished`, `input_tokens`, `iterations`, `messages`, `model`, `output_tokens`, `provider`, `reasoning`, `result`, `search_queries`, `search_suggestions`, `sources`, `structured`, `structured_error`, `structured_valid`, `tool_calls`, `tool_calls_valid`, `truncated`.
 
 ### AI Memory
 
@@ -572,8 +583,9 @@ Ports. In: `input` (In); Out: `loop_body` (Each Item), `done` (Done).
 | `index_var` | string | No | Variable name for the current index (default: 'index') |
 | `item_var` | string | No | Variable name for the current item (default: 'item') |
 | `max_iterations` | number | No | Stop after this many items instead of the full array (default: no limit — every item runs). 0 or blank also means no limit. Can only lower the bound: a value larger than the array, or larger than the 10,000-item cap, has no effect beyond the array's own length. |
+| `stop_when` | string | No | Optional. Checked before every item, including the first. If it resolves to true the loop stops and continues from Done. Empty, 'false' (any case), '0' and 'null' count as false; anything else is true. A reference to a node that has not run yet resolves to empty, so the first item always runs. Use an expression that reads an earlier item's result, e.g. &#123;&#123;Agent.output.finished&#125;&#125; or &#123;&#123;$vars.stop&#125;&#125;. Can only shorten the loop; Max Iterations and the array's length still apply. |
 
-Output fields: `all_results`, `done`, `index`, `item`, `items`, `total`.
+Output fields: `all_results`, `done`, `index`, `item`, `items`, `stop_reason`, `stopped_early`, `total`.
 
 ### Merge
 

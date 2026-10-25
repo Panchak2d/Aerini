@@ -19,3 +19,4 @@ mod functions;
 mod parser;
 
 pub use resolver::{resolve_string, resolve_all_strings};
+pub(crate) use functions::is_truthy;

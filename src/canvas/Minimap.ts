@@ -73,6 +73,9 @@ const WHEEL_NOTCH_DELTA = 100;
 const MAX_WHEEL_DELTA = 300;
 const WHEEL_LINE_PX = 33;
 export const EDGE_INSET = 3;
+const EDGE_PAN_ZONE = 16;
+const EDGE_PAN_SPEED = 360;
+const EDGE_PAN_MAX_DT = 0.05;
 const DISABLED_ALPHA = 0.35;
 // Highest outside-the-viewport dim that keeps every node mark at 3:1 against the panel in Midnight and Paper (Paper is the limit, about 0.28).
 const DIM_ALPHA = 0.25;
@@ -192,6 +195,35 @@ export function zoomView(base: MinimapBounds | null, view: MinimapView, deltaY: 
     panX: pointer.x - wx * base.scale * z - (base.offX - cx) * z - cx,
     panY: pointer.y - wy * base.scale * z - (base.offY - cy) * z - cy,
   };
+}
+
+function viewFromOffsets(base: MinimapBounds, zoom: number, offX: number, offY: number): MinimapView {
+  return { zoom, panX: offX - ((base.offX - base.w / 2) * zoom + base.w / 2), panY: offY - ((base.offY - base.h / 2) * zoom + base.h / 2) };
+}
+
+// Moves the magnified content by (dx, dy) panel pixels, like dragging it. The stored pan is re-clamped to the content edges, so dragging past an edge leaves no slack the next drag would have to burn through first.
+export function panView(base: MinimapBounds | null, view: MinimapView, dx: number, dy: number): MinimapView {
+  if (!base) return DEFAULT_VIEW;
+  const z = Math.min(MAX_VIEW_ZOOM, Math.max(MIN_VIEW_ZOOM, view.zoom));
+  if (z === 1) return DEFAULT_VIEW;
+  const cur = viewBounds(base, view)!;
+  const moved = viewBounds(base, viewFromOffsets(base, z, cur.offX + dx, cur.offY + dy))!;
+  return viewFromOffsets(base, z, moved.offX, moved.offY);
+}
+
+// Panel pixels per second to shift a zoomed-in minimap while the view box is dragged against its edge; the closer to the edge, the faster. Positive moves the content right/down, revealing what lies left/up.
+export function edgePanVelocity(p: Point, size: Size): Point {
+  const axis = (v: number, len: number): number => {
+    if (v < EDGE_PAN_ZONE) return EDGE_PAN_SPEED * Math.min(1, (EDGE_PAN_ZONE - v) / EDGE_PAN_ZONE);
+    if (v > len - EDGE_PAN_ZONE) return -EDGE_PAN_SPEED * Math.min(1, (v - (len - EDGE_PAN_ZONE)) / EDGE_PAN_ZONE);
+    return 0;
+  };
+  return { x: axis(p.x, size.w), y: axis(p.y, size.h) };
+}
+
+// Ctrl/Cmd + primary drag, or a middle-button drag, pans a magnified minimap; any other drag moves the canvas view as before.
+export function isPanGesture(button: number, modifier: boolean, zoom: number): boolean {
+  return zoom > 1 && (button === 1 || (button === 0 && modifier));
 }
 
 export function activeBounds(drag: DragState | null, live: MinimapBounds | null): MinimapBounds | null {
@@ -439,6 +471,9 @@ export class Minimap {
   private _viewport: Rect | null = null;
   private _drag: DragState | null = null;
   private _pointerId: number | null = null;
+  private _pan: { id: number; last: Point } | null = null;
+  private _dragPointer: Point | null = null;
+  private _edgeTime: number | null = null;
   private _label = "";
   private _noteSrc: CanvasThemeColors | null = null;
   private _noteColors: Record<string, NoteColorSet> = {};
@@ -527,6 +562,7 @@ export class Minimap {
       if (stale) this._view = DEFAULT_VIEW;
       this._base = computeBounds(worldRects, this._size, viewport);
     }
+    this._edgePan();
     const bounds = activeBounds(this._drag, viewBounds(this._base, this._view));
     this._bounds = bounds;
     this._viewport = viewport;
@@ -777,6 +813,22 @@ export class Minimap {
     this.canvas.onViewportChange?.();
   }
 
+  // Runs every frame: while the view box is held against the edge of a zoomed-in minimap, scrolls the minimap and keeps the box under the pointer.
+  private _edgePan(): void {
+    const drag = this._drag, p = this._dragPointer, base = this._base;
+    if (!drag || !p || !base || this._view.zoom <= 1) { this._edgeTime = null; return; }
+    const now = performance.now();
+    const dt = this._edgeTime === null ? 0 : Math.min((now - this._edgeTime) / 1000, EDGE_PAN_MAX_DT);
+    this._edgeTime = now;
+    const v = edgePanVelocity(p, this._size);
+    if (dt === 0 || (v.x === 0 && v.y === 0)) return;
+    this._view = panView(base, this._view, v.x * dt, v.y * dt);
+    const next = viewBounds(base, this._view);
+    if (!next) return;
+    drag.bounds = next;
+    this._panTo(minimapToWorld(next, p.x, p.y), drag);
+  }
+
   private _panTo(world: Point, drag: DragState): void {
     const target = dragCenter(world, drag.offset);
     this.canvas.centerOn(target.x, target.y);
@@ -785,7 +837,12 @@ export class Minimap {
 
   private _onDown(e: PointerEvent): void {
     const el = this.el, bounds = this._bounds, viewport = this._viewport;
-    if (!el || !bounds || !viewport || e.button !== 0 || this._drag) return;
+    if (!el || !bounds || !viewport || this._drag || this._pan) return;
+    if (isPanGesture(e.button, e.ctrlKey || e.metaKey, this._view.zoom)) {
+      this._beginPan(e);
+      return;
+    }
+    if (e.button !== 0) return;
     if (this._overBadge(e)) {
       this._cycleError(e.shiftKey);
       return;
@@ -795,18 +852,40 @@ export class Minimap {
     if (!world) return;
     const drag: DragState = { bounds, offset: grabOffset(world, viewport), moved: false };
     this._drag = drag;
+    this._dragPointer = this._pointerContent(e);
+    this._edgeTime = null;
     this._pointerId = e.pointerId;
     try { el.setPointerCapture?.(e.pointerId); } catch { /* pointer already gone; the drag still ends on pointerup/cancel */ }
     this._panTo(world, drag);
   }
 
+  private _beginPan(e: PointerEvent): void {
+    const el = this.el, p = this._pointerContent(e);
+    if (!el || !p) return;
+    this._hover = null;
+    this._pan = { id: e.pointerId, last: p };
+    el.style.cursor = "grabbing";
+    try { el.setPointerCapture?.(e.pointerId); } catch { /* pointer already gone; the pan still ends on pointerup/cancel */ }
+  }
+
   private _onMove(e: PointerEvent): void {
+    const pan = this._pan;
+    if (pan) {
+      if (e.pointerId !== pan.id) return;
+      const p = this._pointerContent(e);
+      if (!p) return;
+      this._view = panView(this._base, this._view, p.x - pan.last.x, p.y - pan.last.y);
+      pan.last = p;
+      return;
+    }
     const drag = this._drag;
     if (!drag) {
       this._hover = this._pointerContent(e);
+      if (this.el) this.el.style.cursor = this._view.zoom > 1 && (e.ctrlKey || e.metaKey) ? "grab" : "";
       return;
     }
     if (e.pointerId !== this._pointerId) return;
+    this._dragPointer = this._pointerContent(e);
     const world = this._pointerWorld(e, drag.bounds);
     if (world) this._panTo(world, drag);
   }
@@ -826,7 +905,7 @@ export class Minimap {
 
   private _onWheel(e: WheelEvent): void {
     e.preventDefault();
-    if (this._drag || e.deltaY === 0) return;
+    if (this._drag || this._pan || e.deltaY === 0) return;
     if (!(e.ctrlKey || e.metaKey)) {
       if (e.deltaY < 0) this.canvas.zoomIn();
       else this.canvas.zoomOut();
@@ -839,9 +918,17 @@ export class Minimap {
   }
 
   private _onEnd(e: PointerEvent): void {
+    const pan = this._pan;
+    if (pan && e.pointerId === pan.id) {
+      this._pan = null;
+      if (this.el) this.el.style.cursor = "";
+      try { this.el?.releasePointerCapture?.(e.pointerId); } catch { /* capture already released */ }
+      return;
+    }
     const drag = this._drag;
     if (!drag || e.pointerId !== this._pointerId) return;
     this._drag = null;
+    this._dragPointer = null;
     this._pointerId = null;
     try { this.el?.releasePointerCapture?.(e.pointerId); } catch { /* capture already released */ }
     if (drag.moved) this.canvas.onViewportChange?.();

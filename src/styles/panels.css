@@ -2192,3 +2192,86 @@ button.field-interp-hint:hover {
 }
 .path-picker-row:empty { display: none; }
 
+
+
+/* ── TOOL BUILDER (x-aerini-tool-builder fields, e.g. AI Agent Tools) ───────── */
+/* Buttons reuse .folder-pick-btn; the parameter remove button reuses
+   .field-chip-remove. */
+
+.tool-builder,
+.tool-builder-body,
+.tool-builder-form,
+.tool-builder-list,
+.tool-param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tool-builder-bar { display: flex; justify-content: flex-end; }
+.tool-builder-form > .folder-pick-btn { align-self: flex-start; }
+
+.tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+}
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tool-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--t1);
+}
+.tool-card-label {
+  font-size: 11px;
+  color: var(--t2);
+  margin-top: 2px;
+}
+.tool-card textarea { resize: vertical; }
+
+.tool-param {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg1);
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+}
+.tool-param-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-param-name { flex: 1; min-width: 0; }
+.tool-param-top .csel-wrap { flex-shrink: 0; width: 104px; }
+.tool-param-required {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--t2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tool-param-required input { width: auto; margin-right: 4px; }
+
+.tool-builder-error {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--red);
+}
+.tool-builder-error:empty { display: none; }

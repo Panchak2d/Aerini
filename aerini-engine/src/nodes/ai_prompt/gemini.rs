@@ -125,7 +125,8 @@ pub(super) async fn call_gemini(
 
     let model_used = resp_json["modelVersion"].as_str().unwrap_or(model).to_string();
     let input_tok  = resp_json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);
-    let output_tok = resp_json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0);
+    let output_tok = resp_json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0)
+        + resp_json["usageMetadata"]["thoughtsTokenCount"].as_u64().unwrap_or(0);
 
     NodeOutput::success_with_logs(
         json!({
@@ -341,5 +342,20 @@ mod tests {
             .await
             .expect_err("invalid key must surface as an error");
         assert_eq!(err.code, "BAD_KEY");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thinking_tokens_count_as_output_tokens() {
+        let (base_url, _) = super::super::shared::spawn_sequence_mock(vec![(
+            200,
+            r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"modelVersion":"m","usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":4,"thoughtsTokenCount":3}}"#,
+        )]).await;
+        let out = call_gemini(
+            reqwest::Client::new(), &base_url, "test-key", "gemini-3.6-flash",
+            DEFAULT_SYSTEM, false, "hello", 0.7, 100, &[], &[], std::time::Duration::from_secs(30),
+        ).await;
+        let output = out.output.expect("output");
+        assert_eq!(output["input_tokens"], 2);
+        assert_eq!(output["output_tokens"], 7);
     }
 }

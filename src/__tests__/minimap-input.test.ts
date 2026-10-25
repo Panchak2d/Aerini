@@ -14,7 +14,7 @@ function fakeNode(x: number, y: number): CanvasNode {
 
 function setup(nodes: CanvasNode[] = []) {
   const canvas = {
-    zoomIn: vi.fn(), zoomOut: vi.fn(), fitToScreen: vi.fn(), revealNode: vi.fn(),
+    zoomIn: vi.fn(), zoomOut: vi.fn(), fitToScreen: vi.fn(), revealNode: vi.fn(), centerOn: vi.fn(), onViewportChange: vi.fn(),
     nodes: new Map(nodes.map(n => [n.data.id, n])), connectors: new Map(),
     panX: 0, panY: 0, zoom: 1,
   };
@@ -88,5 +88,42 @@ describe("minimap double-click", () => {
     dblclick(el, 3, 3);
     expect(canvas.revealNode).not.toHaveBeenCalled();
     expect(canvas.fitToScreen).toHaveBeenCalledTimes(1);
+  });
+});
+
+function pointer(el: HTMLElement, type: string, x: number, y: number, init: MouseEventInit = {}): void {
+  const e = new MouseEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true, ...init });
+  Object.defineProperty(e, "pointerId", { value: 1 });
+  el.dispatchEvent(e);
+}
+
+describe("minimap pan", () => {
+  function magnified() {
+    const s = setup([fakeNode(0, 0)]);
+    s.mm.draw(800, 600);
+    wheel(s.el, -300, { ctrlKey: true, clientX: 100, clientY: 60 });
+    s.mm.draw(800, 600);
+    return s;
+  }
+  const panX = (mm: Minimap) => (mm as unknown as { _view: { panX: number } })._view.panX;
+
+  it("Ctrl + drag on a magnified minimap moves the minimap content and leaves the canvas view alone", () => {
+    const { canvas, el, mm } = magnified();
+    const start = panX(mm);
+    pointer(el, "pointerdown", 100, 60, { button: 0, ctrlKey: true });
+    pointer(el, "pointermove", 130, 60, { ctrlKey: true });
+    pointer(el, "pointerup", 130, 60);
+    expect(panX(mm)).not.toBe(start);
+    expect(canvas.centerOn).not.toHaveBeenCalled();
+  });
+
+  it("a plain drag still moves the canvas view, magnified or not", () => {
+    const { canvas, el, mm } = magnified();
+    const start = panX(mm);
+    pointer(el, "pointerdown", 100, 60, { button: 0 });
+    pointer(el, "pointermove", 130, 60);
+    pointer(el, "pointerup", 130, 60);
+    expect(canvas.centerOn).toHaveBeenCalled();
+    expect(panX(mm)).toBe(start);
   });
 });
