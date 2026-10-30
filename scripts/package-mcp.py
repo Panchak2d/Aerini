@@ -14,6 +14,7 @@ never ends in a suffix that scripts/build-updater-manifest.py reads as an instal
 """
 
 import argparse
+import gzip
 import hashlib
 import re
 import sys
@@ -37,7 +38,9 @@ def archive_name(name, version, target):
 
 
 def write_tar(path, program, program_name, license_path):
-    with tarfile.open(path, "w:gz") as archive:
+    with open(path, "wb") as raw, \
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=FIXED_MTIME) as compressed, \
+            tarfile.open(fileobj=compressed, mode="w") as archive:
         for source, member, mode in (
             (program, program_name, 0o755),
             (license_path, "LICENSE", 0o644),

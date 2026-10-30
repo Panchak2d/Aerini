@@ -17,7 +17,7 @@ pub(super) fn extract_err_msg(obj: &serde_json::Map<String, Value>, default: &st
 /// string-shaped error as "no error field", which falls through to the
 /// success path with empty output instead of surfacing the failure.
 /// `pub(crate)` (not `pub(super)` like the rest of this module) so
-/// `ai_agent.rs`'s three provider call sites can share it too, the same way
+/// the `ai_agent` node's three provider call sites can share it too, the same way
 /// `ai_prompt::attachments` is already re-exported for cross-node reuse.
 pub(crate) fn extract_provider_error(json: &Value, default: &str) -> Option<String> {
     match &json["error"] {

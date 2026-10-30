@@ -38,7 +38,7 @@ A background Webhook trigger works differently from Schedule: instead of waiting
 
 Two workflows can't claim the same port at once. If you try, Aerini tells you which workflow already has it rather than failing with a raw connection error.
 
-Everything about the port, path, secret, and dedup window is the same as the field-level detail already covered in [Nodes Reference](nodes.md#webhook), including the reminder that the webhook only ever binds to `127.0.0.1`. Reaching it from outside your machine, in server mode or otherwise, needs a reverse proxy in front of it.
+Everything about the port, path, secret, and dedup window is the same as the field-level detail already covered in [Nodes Reference](nodes.md#webhook), including the reminder that the webhook only ever binds to `127.0.0.1`. Reaching it from outside your machine, in server mode or otherwise, needs a reverse proxy in front of it; [Server Deployment §Webhook workflows](../operations/server-deploy.md#webhook-workflows) covers the one the Docker package generates and a Caddy setup for bare metal.
 
 ## How trigger plugins behave in the background
 

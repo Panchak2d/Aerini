@@ -97,6 +97,27 @@ function pointer(el: HTMLElement, type: string, x: number, y: number, init: Mous
   el.dispatchEvent(e);
 }
 
+describe("minimap press", () => {
+  it("with the whole workflow in view there is no box to grab, so a press jumps the view to that spot", () => {
+    const { canvas, el, mm } = setup([fakeNode(0, 0)]);
+    mm.draw(800, 600);
+    pointer(el, "pointerdown", 100, 60, { button: 0 });
+    const [x, y] = canvas.centerOn.mock.calls[0];
+    expect(x).toBeCloseTo(110, 0);
+    expect(y).toBeCloseTo(40, 0);
+  });
+
+  it("with a box on show, a press inside it grabs it and does not move the view", () => {
+    const { canvas, el, mm } = setup([fakeNode(0, 0)]);
+    canvas.zoom = 4;
+    mm.draw(800, 600);
+    pointer(el, "pointerdown", 90, 60, { button: 0 });
+    const [x, y] = canvas.centerOn.mock.calls[0];
+    expect(x).toBeCloseTo(100, 6);
+    expect(y).toBeCloseTo(75, 6);
+  });
+});
+
 describe("minimap pan", () => {
   function magnified() {
     const s = setup([fakeNode(0, 0)]);

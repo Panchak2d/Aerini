@@ -64,8 +64,6 @@ export interface MinimapNodeStyle {
 }
 
 const BOUNDS_MARGIN = 30;
-// The view rectangle may stretch the minimap's world box to at most this multiple of the node box on each axis, so nodes always keep a readable share of the panel when the canvas is zoomed far out.
-const MAX_VIEWPORT_GROWTH = 2;
 export const MIN_VIEW_ZOOM = 1;
 export const MAX_VIEW_ZOOM = 8;
 const WHEEL_ZOOM_STEP = 1.25;
@@ -128,7 +126,8 @@ export function backingSize(css: Size, dpr: number): Size {
   return { w: Math.max(1, Math.round(css.w * d)), h: Math.max(1, Math.round(css.h * d)) };
 }
 
-export function computeBounds(nodes: readonly Rect[], size: Size, viewport?: Rect): MinimapBounds | null {
+// The frame depends on the nodes alone, so it holds still while the canvas pans and zooms and the view box is the only thing that moves.
+export function computeBounds(nodes: readonly Rect[], size: Size): MinimapBounds | null {
   if (nodes.length === 0 || !(size.w > 2 * EDGE_INSET && size.h > 2 * EDGE_INSET)) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const n of nodes) {
@@ -136,16 +135,6 @@ export function computeBounds(nodes: readonly Rect[], size: Size, viewport?: Rec
     y0 = Math.min(y0, n.y - BOUNDS_MARGIN);
     x1 = Math.max(x1, n.x + n.w + BOUNDS_MARGIN);
     y1 = Math.max(y1, n.y + n.h + BOUNDS_MARGIN);
-  }
-  if (viewport) {
-    const padX = ((x1 - x0) * (MAX_VIEWPORT_GROWTH - 1)) / 2;
-    const padY = ((y1 - y0) * (MAX_VIEWPORT_GROWTH - 1)) / 2;
-    const vx0 = Math.max(viewport.x, x0 - padX), vx1 = Math.min(viewport.x + viewport.w, x1 + padX);
-    const vy0 = Math.max(viewport.y, y0 - padY), vy1 = Math.min(viewport.y + viewport.h, y1 + padY);
-    if (vx1 > vx0 && vy1 > vy0) {
-      x0 = Math.min(x0, vx0); x1 = Math.max(x1, vx1);
-      y0 = Math.min(y0, vy0); y1 = Math.max(y1, vy1);
-    }
   }
   const ww = Math.max(x1 - x0, 1);
   const wh = Math.max(y1 - y0, 1);
@@ -261,6 +250,37 @@ function overlapsEnough(a0: number, a1: number, b0: number, b1: number): boolean
 export function viewportOnContent(b: MinimapBounds, viewport: Rect): boolean {
   const v = viewportToMinimap(b, viewport);
   return overlapsEnough(v.x, v.x + v.w, Math.max(b.offX, 0), Math.min(b.w - b.offX, b.w)) && overlapsEnough(v.y, v.y + v.h, Math.max(b.offY, 0), Math.min(b.h - b.offY, b.h));
+}
+
+// The nodes' own box in world space, without the fitting margin, recovered from the unmagnified fit.
+export function contentRect(base: MinimapBounds): Rect {
+  return {
+    x: base.minX + BOUNDS_MARGIN,
+    y: base.minY + BOUNDS_MARGIN,
+    w: (base.w - 2 * base.offX) / base.scale - 2 * BOUNDS_MARGIN,
+    h: (base.h - 2 * base.offY) / base.scale - 2 * BOUNDS_MARGIN,
+  };
+}
+
+export interface OpenSides { left: boolean; top: boolean; right: boolean; bottom: boolean }
+
+export type ViewState =
+  | { kind: "all" }
+  | { kind: "away" }
+  | { kind: "box"; rect: Rect; open: OpenSides };
+
+// What the minimap shows for the canvas view. A view that already holds every node needs no box (it would only trace the panel's own border), so the map stays clean; a view elsewhere gets a pointer arrow; otherwise a box whose sides that reach past the nodes are marked open instead of being drawn.
+export function viewState(b: MinimapBounds, viewport: Rect, content: Rect): ViewState {
+  const right = viewport.x + viewport.w, bottom = viewport.y + viewport.h;
+  const open: OpenSides = {
+    left: viewport.x <= content.x,
+    top: viewport.y <= content.y,
+    right: right >= content.x + content.w,
+    bottom: bottom >= content.y + content.h,
+  };
+  if (open.left && open.top && open.right && open.bottom) return { kind: "all" };
+  if (!viewportOnContent(b, viewport)) return { kind: "away" };
+  return { kind: "box", rect: viewportToMinimap(b, viewport), open };
 }
 
 export function edgeArrow(b: MinimapBounds, viewport: Rect): [Point, Point, Point] | null {
@@ -492,6 +512,7 @@ export class Minimap {
   private _errorTargets: Point[] = [];
   private _errorIndex = -1;
   private _reducedMotion = false;
+  private _allInView = false;
 
   constructor(canvas: Canvas, mmEl: HTMLCanvasElement | null) {
     this.canvas = canvas;
@@ -551,6 +572,7 @@ export class Minimap {
       this._hits = [];
       this._view = DEFAULT_VIEW;
       this._viewport = null;
+      this._allInView = false;
       this._setLabel(minimapLabel(0, 0));
       return;
     }
@@ -571,7 +593,7 @@ export class Minimap {
     const stale = !this._base || this._base.w !== this._size.w || this._base.h !== this._size.h;
     if (!this._drag && (this._view.zoom === 1 || stale)) {
       if (stale) this._view = DEFAULT_VIEW;
-      this._base = computeBounds(worldRects, this._size, viewport);
+      this._base = computeBounds(worldRects, this._size);
     }
     this._edgePan();
     const last = this._lastViewport;
@@ -581,7 +603,8 @@ export class Minimap {
     const bounds = activeBounds(this._drag, viewBounds(this._base, this._view));
     this._bounds = bounds;
     this._viewport = viewport;
-    if (!bounds) return;
+    const base = this._base;
+    if (!bounds || !base) return;
 
     let hasSelection = false;
     for (const n of c.nodes.values()) {
@@ -697,37 +720,9 @@ export class Minimap {
       if (style.selected) mc.strokeRect(rect.x - 2, rect.y - 2, rect.w + 4, rect.h + 4);
     }
 
-    if (viewportOnContent(bounds, viewport)) {
-      const v = viewportToMinimap(bounds, viewport);
-      // Clamped to the panel so a view larger than the map still shows its outline along the edge instead of vanishing.
-      const edge = OUTLINE_WIDTH / 2;
-      const x0 = Math.max(snapStroke(v.x, OUTLINE_WIDTH, dpr), edge), y0 = Math.max(snapStroke(v.y, OUTLINE_WIDTH, dpr), edge);
-      const x1 = Math.min(snapStroke(v.x + v.w, OUTLINE_WIDTH, dpr), w - edge), y1 = Math.min(snapStroke(v.y + v.h, OUTLINE_WIDTH, dpr), h - edge);
-      mc.globalAlpha = DIM_ALPHA;
-      mc.fillStyle = mm.panel;
-      mc.beginPath();
-      mc.rect(0, 0, w, h);
-      mc.rect(x0, y0, x1 - x0, y1 - y0);
-      mc.fill("evenodd");
-      mc.globalAlpha = 1;
-      mc.strokeStyle = mm.nav;
-      mc.lineWidth = OUTLINE_WIDTH;
-      mc.strokeRect(x0, y0, x1 - x0, y1 - y0);
-    } else {
-      const arrow = edgeArrow(bounds, viewport);
-      if (arrow) {
-        mc.beginPath();
-        mc.moveTo(arrow[0].x, arrow[0].y);
-        mc.lineTo(arrow[1].x, arrow[1].y);
-        mc.lineTo(arrow[2].x, arrow[2].y);
-        mc.closePath();
-        mc.lineWidth = 2;
-        mc.strokeStyle = mm.panel;
-        mc.stroke();
-        mc.fillStyle = mm.nav;
-        mc.fill();
-      }
-    }
+    const state = viewState(bounds, viewport, contentRect(base));
+    this._allInView = state.kind === "all";
+    this._drawView(mc, state, bounds, viewport, dpr, mm);
 
     this._badge = null;
     mc.font = LABEL_FONT;
@@ -766,6 +761,50 @@ export class Minimap {
     }
 
     this._setLabel(minimapLabel(c.nodes.size, errors));
+  }
+
+  private _drawView(mc: CanvasRenderingContext2D, state: ViewState, bounds: MinimapBounds, viewport: Rect, dpr: number, mm: MinimapColors): void {
+    if (state.kind === "away") {
+      const arrow = edgeArrow(bounds, viewport);
+      if (!arrow) return;
+      mc.beginPath();
+      mc.moveTo(arrow[0].x, arrow[0].y);
+      mc.lineTo(arrow[1].x, arrow[1].y);
+      mc.lineTo(arrow[2].x, arrow[2].y);
+      mc.closePath();
+      mc.lineWidth = 2;
+      mc.strokeStyle = mm.panel;
+      mc.stroke();
+      mc.fillStyle = mm.nav;
+      mc.fill();
+      return;
+    }
+    if (state.kind !== "box") return;
+    const { w, h } = this._size;
+    const { rect: v, open } = state;
+    const edge = OUTLINE_WIDTH / 2;
+    // A side counts as open when it reaches past the nodes or past the panel of a magnified minimap: no line is drawn there and the dim stops at the panel edge, so the box reads as continuing beyond.
+    const openL = open.left || v.x < edge, openT = open.top || v.y < edge;
+    const openR = open.right || v.x + v.w > w - edge, openB = open.bottom || v.y + v.h > h - edge;
+    const x0 = openL ? 0 : snapStroke(v.x, OUTLINE_WIDTH, dpr), y0 = openT ? 0 : snapStroke(v.y, OUTLINE_WIDTH, dpr);
+    const x1 = openR ? w : snapStroke(v.x + v.w, OUTLINE_WIDTH, dpr), y1 = openB ? h : snapStroke(v.y + v.h, OUTLINE_WIDTH, dpr);
+    mc.globalAlpha = DIM_ALPHA;
+    mc.fillStyle = mm.panel;
+    mc.beginPath();
+    mc.rect(0, 0, w, h);
+    mc.rect(x0, y0, x1 - x0, y1 - y0);
+    mc.fill("evenodd");
+    mc.globalAlpha = 1;
+    mc.strokeStyle = mm.nav;
+    mc.lineWidth = OUTLINE_WIDTH;
+    mc.lineCap = "square";
+    mc.beginPath();
+    if (!openT) { mc.moveTo(x0, y0); mc.lineTo(x1, y0); }
+    if (!openR) { mc.moveTo(x1, y0); mc.lineTo(x1, y1); }
+    if (!openB) { mc.moveTo(x1, y1); mc.lineTo(x0, y1); }
+    if (!openL) { mc.moveTo(x0, y1); mc.lineTo(x0, y0); }
+    mc.stroke();
+    mc.lineCap = "butt";
   }
 
   private _drawDecor(mc: CanvasRenderingContext2D, rect: Rect, style: MinimapNodeStyle, node: CanvasNode, panel: string, ink: string): void {
@@ -865,7 +904,8 @@ export class Minimap {
     this._hover = null;
     const world = this._pointerWorld(e, bounds);
     if (!world) return;
-    const drag: DragState = { bounds, offset: grabOffset(world, viewport), moved: false };
+    // With no box on show there is nothing to grab, so a press jumps the view to that spot.
+    const drag: DragState = { bounds, offset: this._allInView ? { x: 0, y: 0 } : grabOffset(world, viewport), moved: false };
     this._drag = drag;
     this._dragPointer = this._pointerContent(e);
     this._edgeTime = null;

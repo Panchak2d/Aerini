@@ -38,7 +38,7 @@ Starts a workflow when an HTTP request hits a local address. Outputs the request
 
 | Field | Label | Notes |
 |---|---|---|
-| `port` | Port | Port to listen on, 1024-65535. Default 3456. A value that isn't a whole number in that range fails with `INVALID_PORT` instead of falling back to the default. In server/API mode, outside traffic can't reach `127.0.0.1` directly, so you'll need a reverse proxy in front of it. |
+| `port` | Port | Port to listen on, 1024-65535. Default 3456. A value that isn't a whole number in that range fails with `INVALID_PORT` instead of falling back to the default. In server/API mode, outside traffic can't reach `127.0.0.1` directly, so you'll need a reverse proxy in front of it; the Docker package from Export for Server includes one, see [Server Deployment §Webhook workflows](../operations/server-deploy.md#webhook-workflows). |
 | `path` | Path | URL path to listen on. Default `/webhook`. A leading `/` is added if you leave it out. |
 | `method` | Method | `GET`, `POST`, `PUT`, or `ANY`. Not case-sensitive; blank means `ANY`. |
 | `secret` | Secret | Optional shared secret, checked against an `x-webhook-secret` header. This confirms the caller knows the secret, but it does not sign the body, so a captured request can be replayed as-is. For providers that send their own body signature (Stripe, GitHub), verify their native signature header in a Code node right after this one instead of relying on this field alone. |

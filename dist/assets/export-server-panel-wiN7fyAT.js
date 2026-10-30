@@ -1,4 +1,4 @@
-import{C as e,N as t,S as n}from"./index-BKQWL_w1.js";var r=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function i(e,n){let i=document.getElementById(`export-server-panel-overlay`);i&&i.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};if(document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),!e){l.innerHTML=`
+import{C as e,N as t,S as n}from"./index-BGECBc4n.js";var r=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function i(e,n){let i=document.getElementById(`export-server-panel-overlay`);i&&i.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};if(document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),!e){l.innerHTML=`
       <div class="panel-header">
         <h2 class="panel-title">Export for Server</h2>
         <button class="panel-close-btn" aria-label="Close">${r}</button>
@@ -105,16 +105,17 @@ import{C as e,N as t,S as n}from"./index-BKQWL_w1.js";var r=`<svg width="12" hei
         <div class="esp-callout esp-mt">
           <strong>Package saved.</strong><br>
           Upload it to your server and run:<br>
-          <code>unzip aerini-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code>
+          <code>unzip aerini-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code><br>
+          A fresh server may not have <code>unzip</code>: <code>sudo apt install unzip</code>
         </div>
       </div>
     </div>
 
     <div id="esp-pane-docker" role="tabpanel" aria-labelledby="esp-tab-docker" hidden>
       <p class="esp-note esp-pane-desc">
-        Generates a zip with a <code>Dockerfile</code> and <code>docker-compose.yml</code>
-        for single-workflow serve mode.
-        Run <code>docker compose up --build -d</code> — no Rust required on the host.
+        Generates a zip with a <code>docker-compose.yml</code> that runs the official Aerini
+        image for single-workflow serve mode, plus a build-from-source option for ARM servers
+        and forks. A workflow that starts on a Webhook also gets a Caddy container for HTTPS; you will need a domain name. Run <code>docker compose up -d</code> — no Rust required on the host.
       </p>
 
       <h3 class="esp-section-title">Credentials</h3>
@@ -142,7 +143,7 @@ import{C as e,N as t,S as n}from"./index-BKQWL_w1.js";var r=`<svg width="12" hei
         <div class="esp-callout esp-mt">
           <strong>Package saved.</strong><br>
           Extract the zip, fill in <code>.env</code>, then run:<br>
-          <code>docker compose up --build -d</code>
+          <code>docker compose up -d</code>
         </div>
       </div>
     </div>`;let p=l.querySelector(`#esp-tab-linux`),m=l.querySelector(`#esp-tab-docker`),h=l.querySelector(`#esp-pane-linux`),g=l.querySelector(`#esp-pane-docker`),_=e=>{let t=e===`linux`;p?.classList.toggle(`esp-tab--active`,t),m?.classList.toggle(`esp-tab--active`,!t),p?.setAttribute(`aria-selected`,String(t)),m?.setAttribute(`aria-selected`,String(!t)),h&&(h.hidden=!t),g&&(g.hidden=t)};p?.addEventListener(`click`,()=>_(`linux`)),m?.addEventListener(`click`,()=>_(`docker`));let v=l.querySelector(`#esp-generate-linux-btn`),y=l.querySelector(`#esp-generating-linux`),b=l.querySelector(`#esp-success-linux`),x=l.querySelector(`#esp-port-linux`);v?.addEventListener(`click`,async()=>{let e=parseInt(x?.value??`7700`,10);if(isNaN(e)||e<1024||e>65535){o(`Port must be between 1024 and 65535`,`error`);return}v.disabled=!0,y&&(y.hidden=!1);try{let n=await t(`generate_server_package`,{request:{workflow_id:r,status_port:e}}),i=`aerini-server-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await t(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&b&&(b.hidden=!1),a&&(o(`Linux server package saved`,`success`),s(l,n.run_secret_plaintext))}catch(e){o(`Export failed: ${String(e)}`,`error`)}finally{v.disabled=!1,y&&(y.hidden=!0)}});let S=l.querySelector(`#esp-generate-docker-btn`),C=l.querySelector(`#esp-generating-docker`),w=l.querySelector(`#esp-success-docker`),T=l.querySelector(`#esp-port-docker`);S?.addEventListener(`click`,async()=>{let e=parseInt(T?.value??`7700`,10);if(isNaN(e)||e<1024||e>65535){o(`Port must be between 1024 and 65535`,`error`);return}S.disabled=!0,C&&(C.hidden=!1);try{let n=await t(`generate_docker_package`,{request:{workflow_id:r,status_port:e}}),i=`aerini-docker-${n.workflow_name.replace(/[^a-z0-9-]/gi,`_`)}.zip`,a=await t(`save_export_zip`,{zipPath:n.zip_path,filename:i}).catch(e=>{if(e!==`cancelled`)throw Error(e);return null});a&&w&&(w.hidden=!1),a&&(o(`Docker package saved`,`success`),s(l,n.run_secret_plaintext))}catch(e){o(`Export failed: ${String(e)}`,`error`)}finally{S.disabled=!1,C&&(C.hidden=!0)}})}function s(t,r){if(!t)return;t.querySelector(`.esp-run-secret-banner`)?.remove();let i=document.createElement(`div`);i.className=`esp-run-secret-banner`,i.innerHTML=`

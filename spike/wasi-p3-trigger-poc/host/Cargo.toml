@@ -5,7 +5,7 @@ name = "aerini-spike-trigger-host"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "P8.0 spike (throwaway) -- async host harness for the WASI P3 echo-stream trigger guest. Not wired into aerini-engine/plugin_loader.rs."
+description = "P8.0 spike (throwaway) -- async host harness for the WASI P3 echo-stream trigger guest. Not wired into aerini-engine/plugin_loader/."
 
 [[bin]]
 name = "spike-host"

@@ -347,8 +347,9 @@ fn collect_vars(wf: &Workflow) -> Result<Vec<String>, String> {
 }
 
 /// Generate a Docker deployment package for single-workflow serve mode.
-/// Produces a zip containing: Dockerfile, docker-compose.yml, .env.example,
-/// aerini-server.json, and README.md.
+/// Produces a zip containing: docker-compose.yml (runs the official image),
+/// docker-compose.build.yml and Dockerfile.source (build from source), .env.example,
+/// aerini-server.json, and README.md, plus a Caddyfile when the trigger is a Webhook.
 #[tauri::command]
 pub async fn generate_docker_package(
     request: ExportRequest,
@@ -403,10 +404,13 @@ pub async fn generate_docker_package(
     let server_config_str = serde_json::to_string_pretty(&server_config)
         .map_err(|e| e.to_string())?;
 
+    let webhook         = templates::webhook_proxy_for(&trigger)?;
     let dockerfile      = templates::build_serve_dockerfile();
-    let docker_compose  = templates::build_serve_docker_compose(&wf.name, request.status_port, &credentials, &dangerous);
-    let env_example     = templates::build_docker_env_example(&credentials);
-    let readme          = templates::build_docker_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous);
+    let docker_compose  = templates::build_serve_docker_compose(&wf.name, request.status_port, &credentials, &dangerous, webhook.as_ref());
+    let caddyfile       = webhook.as_ref().map(|hook| templates::build_serve_caddyfile(&wf.name, hook));
+    let build_override  = templates::build_serve_docker_compose_build_override(&wf.name);
+    let env_example     = templates::build_docker_env_example(&credentials, webhook.as_ref());
+    let readme          = templates::build_docker_readme(&wf.name, &trigger_desc, request.status_port, &credentials, &dangerous, webhook.as_ref());
 
     let (zip_file, zip_path) = create_export_file()?;
 
@@ -420,7 +424,7 @@ pub async fn generate_docker_package(
         zip.write_all(server_config_str.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        zip.start_file("Dockerfile", options)
+        zip.start_file("Dockerfile.source", options)
             .map_err(|e| e.to_string())?;
         zip.write_all(dockerfile.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -429,6 +433,18 @@ pub async fn generate_docker_package(
             .map_err(|e| e.to_string())?;
         zip.write_all(docker_compose.as_bytes())
             .map_err(|e| e.to_string())?;
+
+        zip.start_file("docker-compose.build.yml", options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(build_override.as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        if let Some(caddyfile) = &caddyfile {
+            zip.start_file("Caddyfile", options)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(caddyfile.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
 
         zip.start_file(".env.example", options)
             .map_err(|e| e.to_string())?;

@@ -5,7 +5,7 @@
 ///   2. Panel calls validate_workflow_for_export — shows trigger + credential table
 ///   3. User picks deployment type (Linux Server / Docker), sets port, clicks Generate Package
 ///   4. Panel calls generate_server_package or generate_docker_package — saves zip via dialog
-///   5. Linux: user runs ./install.sh   Docker: user runs docker compose up --build -d
+///   5. Linux: user runs ./install.sh   Docker: user runs docker compose up -d
 
 import { invoke } from "@tauri-apps/api/core";
 import { escapeHtml, copyWithButtonFeedback } from "./utils";
@@ -237,16 +237,17 @@ function renderReady(
         <div class="esp-callout esp-mt">
           <strong>Package saved.</strong><br>
           Upload it to your server and run:<br>
-          <code>unzip aerini-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code>
+          <code>unzip aerini-server-*.zip &amp;&amp; chmod +x install.sh &amp;&amp; ./install.sh</code><br>
+          A fresh server may not have <code>unzip</code>: <code>sudo apt install unzip</code>
         </div>
       </div>
     </div>
 
     <div id="esp-pane-docker" role="tabpanel" aria-labelledby="esp-tab-docker" hidden>
       <p class="esp-note esp-pane-desc">
-        Generates a zip with a <code>Dockerfile</code> and <code>docker-compose.yml</code>
-        for single-workflow serve mode.
-        Run <code>docker compose up --build -d</code> — no Rust required on the host.
+        Generates a zip with a <code>docker-compose.yml</code> that runs the official Aerini
+        image for single-workflow serve mode, plus a build-from-source option for ARM servers
+        and forks. A workflow that starts on a Webhook also gets a Caddy container for HTTPS; you will need a domain name. Run <code>docker compose up -d</code> — no Rust required on the host.
       </p>
 
       <h3 class="esp-section-title">Credentials</h3>
@@ -274,7 +275,7 @@ function renderReady(
         <div class="esp-callout esp-mt">
           <strong>Package saved.</strong><br>
           Extract the zip, fill in <code>.env</code>, then run:<br>
-          <code>docker compose up --build -d</code>
+          <code>docker compose up -d</code>
         </div>
       </div>
     </div>`;

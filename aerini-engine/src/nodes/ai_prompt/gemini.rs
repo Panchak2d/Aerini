@@ -200,8 +200,8 @@ mod tests {
 
     /// Minimal mock that always returns a valid Gemini success body and hands
     /// the captured request body back over a oneshot channel — same technique
-    /// as ai_agent.rs's spawn_capturing_mock, reimplemented locally since that
-    /// one is private to its own file's test module.
+    /// as the `ai_agent` test fixture `spawn_capturing_mock`, reimplemented
+    /// locally since that one is private to the ai_agent test module.
     async fn spawn_capturing_mock() -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

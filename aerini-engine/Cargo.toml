@@ -168,7 +168,7 @@ aws-smithy-runtime-api = "1"
 # ordinary action plugins).
 # wasmtime-wasi-http adds wasi:http/outgoing-handler support: "p2" backs
 # the sync plugin engine's HTTP linking, "p3" backs the trigger engine's
-# (see plugin_loader.rs's module doc, "Trigger plugins").
+# (see plugin_loader/mod.rs's module doc, "Trigger plugins").
 #
 # `wasmtime-wasi`'s "p3" feature gates `wasmtime_wasi::p3` (WASI 0.3 /
 # component-model-async), used by the second, dedicated async Engine that
@@ -185,10 +185,15 @@ aws-smithy-runtime-api = "1"
 # p3 surfaces this crate depends on with no warning; an exact pin turns the
 # next bump into a deliberate, reviewed upgrade instead of a silent one.
 # Bump only all three together, and re-verify the p3 surfaces this crate
-# depends on (plugin_loader.rs's trigger-engine linking) before doing so.
+# depends on (plugin_loader/trigger/execute.rs's trigger-engine linking) before doing so.
 # Wasmtime only patches its two most recent releases (plus periodic LTS
 # lines), so an exact pin also has to be moved forward when the next major ships.
-wasmtime           = { version = "=49.0.4", features = ["component-model"] }
+# wasmtime's default feature set minus `cache`: that feature pulls in the zstd crates, and nothing in
+# this crate configures a module cache. Re-enable it only once the zstd crates it needs have no open
+# RUSTSEC advisories.
+wasmtime           = { version = "=49.0.4", default-features = false, features = [
+    "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser",
+] }
 wasmtime-wasi      = { version = "=49.0.4", features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "=49.0.4", features = ["p2", "p3"] }
 
@@ -201,7 +206,7 @@ rustls        = { version = "0.23", default-features = false, features = ["ring"
 tokio-rustls  = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots  = "1.0.10"
 
-# Filesystem watching (WIT `fs-watch` import backing, plugin_loader.rs's
+# Filesystem watching (WIT `fs-watch` import backing, plugin_loader/fs_watch.rs's
 # FsWatchRegistry). Cross-platform: inotify (Linux), FSEvents (macOS),
 # ReadDirectoryChangesW (Windows) — the same crate `cargo watch`,
 # `rust-analyzer`, and `watchexec` use. Latest stable is 8.2.0; `"8"` picks
