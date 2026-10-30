@@ -12,11 +12,13 @@
 
 ```toml
 [dependencies]
-aerini-engine = { git = "https://github.com/Panchak2d/aerini" }
+aerini-engine = { git = "https://github.com/Panchak2d/aerini", tag = "v0.4.4" }
 tokio         = { version = "1", features = ["full"] }
 async-trait   = "0.1"
 serde_json    = "1.0"
 ```
+
+Pin a release `tag`, as above, and use the [latest release](https://github.com/Panchak2d/aerini/releases/latest) rather than `v0.4.4` if it is newer. Without a `tag` Cargo follows the default branch, which changes between releases, and versions before 1.0 can change the engine's API from one release to the next.
 
 The crate has one optional feature, `schema`, which derives JSON Schema for the workflow file types in `model.rs`. It exists to generate `docs/reference/workflow.schema.json`, is off by default, and adds nothing to a build that doesn't enable it.
 
@@ -153,4 +155,4 @@ For run history and saved workflow variables, pass `Some(Arc::new(workflow_db))`
 
 ## What this page doesn't cover
 
-Running workflows on a schedule or from a webhook without a UI in front of them means wiring up `aerini-engine`'s `scheduler` module yourself; nothing here does that for you. Loading `.wasm` plugins into a `NodeRegistry` you built yourself works the same way `plugin_loader.rs` already does it for the desktop app, covered in `plugin-authoring.md`. Adding an entirely new built-in node type, as opposed to embedding the 40 that already exist, is `node-authoring.md`'s job.
+Running workflows on a schedule or from a webhook without a UI in front of them means wiring up `aerini-engine`'s `scheduler` module yourself; nothing here does that for you. Loading `.wasm` plugins into a `NodeRegistry` you built yourself works the same way `plugin_loader/` already does it for the desktop app, covered in `plugin-authoring.md`. Adding an entirely new built-in node type, as opposed to embedding the 40 that already exist, is `node-authoring.md`'s job.

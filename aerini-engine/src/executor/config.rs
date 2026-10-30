@@ -152,7 +152,7 @@ impl WorkflowExecutorConfig {
 
     /// Re-checks invariants that a single `with_*` call can't fully enforce on
     /// its own. Called automatically by `with_max_concurrent_nodes` (clamp) and
-    /// by `with_shell_disabled` / `with_code_disabled` (informational warning).
+    /// by `with_shell_disabled` / `with_code_disabled` (informational debug log).
     /// Not part of the public API — `WorkflowExecutor`'s builder methods are
     /// the only public surface, and their signatures are unchanged.
     ///
@@ -167,7 +167,7 @@ impl WorkflowExecutorConfig {
             self.max_concurrent_nodes = 1;
         }
         if self.shell_exec_disabled && self.code_exec_disabled {
-            tracing::warn!(
+            tracing::debug!(
                 "WorkflowExecutorConfig: shell and code execution are both disabled \
                  simultaneously — informational only, no action needed if intentional"
             );

@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn auto_is_not_a_registered_provider() {
         // "auto" is a meta-value resolved by callers via detect_from_url()
-        // *before* hitting the registry (see ai_prompt.rs / ai_agent.rs).
+        // *before* hitting the registry (see the ai_prompt and ai_agent nodes).
         // It must never be a real ProviderRecord, or a caller that forgets
         // to pre-resolve it would silently fall through to default behavior
         // instead of failing loudly.

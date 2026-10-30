@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  activeBounds, backingSize, computeBounds, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
+  activeBounds, backingSize, computeBounds, contentRect, viewState, DEFAULT_VIEW, MAX_VIEW_ZOOM, contentPoint, dragCenter, edgeArrow, EDGE_INSET, floorRect, grabOffset,
   hitTopmost, hoverText, minimapLabel, minimapToWorld, nextErrorIndex, normalizeDpr, placeLabel, pulseAlpha, snapStroke,
   viewBounds, viewportToMinimap, edgePanVelocity, followViewport, isPanGesture, panView, viewportOnContent, wireControlOffset, zoomView, wireKind, worldToMinimap, nodeDecor, triggerRadii, visiblePart, wireArrow, wireBaseAlpha, type Point, type Rect,
 } from "../canvas/Minimap";
@@ -245,24 +245,37 @@ describe("sizing helpers", () => {
   });
 });
 
-describe("computeBounds with a canvas viewport", () => {
-  const size = { w: 140, h: 80 };
+describe("view state", () => {
+  const base = computeBounds([NODE], { w: 140, h: 80 })!;
+  const content = contentRect(base);
 
-  it("a viewport inside the nodes changes nothing", () => {
-    const inside: Rect = { x: 150, y: 220, w: 40, h: 30 };
-    expect(computeBounds([NODE], size, inside)).toEqual(computeBounds([NODE], size));
+  it("recovers the nodes' own box, without the fitting margin", () => {
+    expect(content.x).toBeCloseTo(NODE.x, 6);
+    expect(content.y).toBeCloseTo(NODE.y, 6);
+    expect(content.w).toBeCloseTo(NODE.w, 6);
+    expect(content.h).toBeCloseTo(NODE.h, 6);
   });
 
-  it("a huge viewport grows the box by at most 2x, so the nodes keep a readable share", () => {
-    const huge: Rect = { x: -50000, y: -50000, w: 100000, h: 100000 };
-    const plain = computeBounds([NODE], size)!, grown = computeBounds([NODE], size, huge)!;
-    expect(grown.scale).toBeLessThan(plain.scale);
-    expect(grown.scale).toBeGreaterThanOrEqual(plain.scale / 2 - 1e-9);
+  it("shows no box once the view holds every node, however far it reaches past them", () => {
+    expect(viewState(base, { x: 0, y: 0, w: 800, h: 600 }, content)).toEqual({ kind: "all" });
+    expect(viewState(base, { x: 99, y: 199, w: 222, h: 102 }, content)).toEqual({ kind: "all" });
+    expect(viewState(base, { x: -50000, y: -50000, w: 100000, h: 100000 }, content)).toEqual({ kind: "all" });
   });
 
-  it("a viewport far from the nodes is ignored", () => {
-    const away: Rect = { x: 90000, y: 90000, w: 800, h: 600 };
-    expect(computeBounds([NODE], size, away)).toEqual(computeBounds([NODE], size));
+  it("closes every side of a view that sits inside the nodes", () => {
+    const s = viewState(base, { x: 150, y: 220, w: 40, h: 30 }, content);
+    expect(s).toMatchObject({ kind: "box", open: { left: false, top: false, right: false, bottom: false } });
+  });
+
+  it("opens only the sides that reach past the nodes", () => {
+    const s = viewState(base, { x: 200, y: 150, w: 400, h: 300 }, content);
+    expect(s).toMatchObject({ kind: "box", open: { left: false, top: true, right: true, bottom: true } });
+    if (s.kind === "box") expect(s.rect).toEqual(viewportToMinimap(base, { x: 200, y: 150, w: 400, h: 300 }));
+  });
+
+  it("points toward a view that is off the nodes, and does so for a view that is not a number", () => {
+    expect(viewState(base, { x: 90000, y: 90000, w: 800, h: 600 }, content)).toEqual({ kind: "away" });
+    expect(viewState(base, { x: NaN, y: 0, w: 1, h: 1 }, content)).toEqual({ kind: "away" });
   });
 });
 

@@ -21,7 +21,7 @@ With a workflow open on the canvas, **Export → Export for Server** opens a pan
 - **Credentials**: one row per credential the workflow actually references, a ✓ or ⚠ showing whether it's currently filled in on the desktop app, the environment variable name it'll export as, and which node uses it. Only names are ever written into the package; you set the real values as environment variables on the server yourself. If the workflow also uses a `{{$vars.x}}` variable, a **Required variables** table above this one lists each one's suggested environment key the same way.
 - **Status page port**: the port the exported package's status page listens on, `7700` by default, must be between `1024` and `65535`. On the Docker tab this maps that port on the host; the container always listens on `7700` internally regardless of what you set here.
 
-Click **Generate Linux Package** or **Generate Docker Package**, choose where to save the zip, and the panel tells you the exact next command to run (`./install.sh`, or `docker compose up --build -d`). The steps below pick up from there.
+Click **Generate Linux Package** or **Generate Docker Package**, choose where to save the zip, and the panel tells you the exact next command to run (`./install.sh`, or `docker compose up -d`). The steps below pick up from there.
 
 ## Getting the `aerini-server` binary
 
@@ -100,7 +100,7 @@ volumes:
 
 ### The desktop's "Export for Server → Docker" package
 
-The **Docker** tab in the Export for Server panel generates a different Dockerfile: one that `git clone`s the Aerini repository at build time and produces a plain `debian:bookworm-slim` image, rather than reusing the official one above. That generated image downloads and checksum-verifies the same pinned Node.js runtime the official image uses (from the cloned repository's own `NODE_VERSION` file) and places it next to `aerini-server` as `node-bundled`, which is the only place Aerini's Code node ever looks for it (it never searches `PATH`, and never did; see below). A workflow with a Code (JS) node runs the same way in this package as it does in the official image above, once `--allow-code` is set. Workflows without Code nodes are unaffected either way.
+The **Docker** tab in the Export for Server panel generates a `docker-compose.yml` that runs the official image above, pinned to the release that exported the package, and starts it with `serve` on a fixed container port (the port you chose is only the host side of the mapping). It needs no build and no Rust. The image is published for x86-64 only and only for released versions; for an ARM server, a fork, a branch, or a version whose image does not exist, the package also holds `docker-compose.build.yml` and `Dockerfile.source`, and `docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d` builds from source instead. That source build is a different Dockerfile: one that `git clone`s the Aerini repository at build time and produces a plain `debian:bookworm-slim` image, rather than reusing the official one. It downloads and checksum-verifies the same pinned Node.js runtime the official image uses (from the cloned repository's own `NODE_VERSION` file) and places it next to `aerini-server` as `node-bundled`, which is the only place Aerini's Code node ever looks for it (it never searches `PATH`, and never did; see below). A workflow with a Code (JS) node runs the same way in this package as it does in the official image above, once `--allow-code` is set. Workflows without Code nodes are unaffected either way.
 
 ## Bare metal (Linux)
 
@@ -119,7 +119,7 @@ Rust 1.96+ is required to build `aerini-server` and the desktop app, as [Install
 
 ### `serve` mode
 
-Unzip the package from Export for Server (**Export → Export for Server → 🖥 Linux Server**) then either run `./install.sh` (on x86-64 Linux it downloads and checks `aerini-server` if the folder doesn't already hold one, otherwise put the binary you built next to it first; installs a systemd user service, handles `.env`, enables lingering so it survives logout; the service listens on `127.0.0.1`, so reach it over an SSH tunnel or [a reverse proxy](#tls-with-a-reverse-proxy)) or run it directly:
+Unzip the package from Export for Server (**Export → Export for Server → 🖥 Linux Server**; a fresh Ubuntu server may not have `unzip`, so run `sudo apt install unzip` first) then either run `./install.sh` (on x86-64 Linux it downloads and checks `aerini-server` if the folder doesn't already hold one, otherwise put the binary you built next to it first; installs a systemd user service, handles `.env`, tries to enable lingering so it survives logout and reboot, and if the system refuses it prints the one command to run, `sudo loginctl enable-linger $USER`, which you must run or the service will not start after a reboot; the service listens on `127.0.0.1`, so reach it over an SSH tunnel or [a reverse proxy](#tls-with-a-reverse-proxy)) or run it directly:
 
 ```bash
 ./aerini-server serve --config aerini-server.json --port 7700
@@ -211,6 +211,31 @@ Either works for `serve` mode's systemd service (`.env` is loaded via `Environme
 `serve` mode never touches the encrypted credential store the desktop app uses. It reads environment variables instead, one per credential, named and generated automatically at export time; see [Credentials §Running headless](../guide/credentials.md#running-headless-aerini-server-and-environment-variables) for the exact naming rule and the generated `.env.example`.
 
 `api` mode is different: it has its own encrypted credential store (`POST`/`GET`/`DELETE /api/credentials`, gated by `write`/`read` scope), separate from both the desktop app's store and `serve` mode's environment variables. Pass `--keychain` to back its encryption key with the OS keyring (falls back to a file automatically, with a warning, if the keyring isn't available); without it, the key lives in a file under `--data-dir`. If credentials are already saved and the key can't be found (the key file was deleted, or the keyring entry is gone with no fallback file), the server exits with an error instead of creating a new key that can't decrypt them. Restore the original key file; deleting `credentials.db` as well starts an empty store.
+
+## Webhook workflows
+
+A workflow that starts on a Webhook node listens on `127.0.0.1:<webhook port>` only, never on a public address (Aerini's webhook listener has no setting for that). From outside the machine it is reachable only through a proxy running next to it. The status page in `serve` mode is separate and has its own port.
+
+**Docker export.** The package from **Export → Export for Server → Docker** does this for you when the trigger is a Webhook. The listener's loopback address is inside the container, which Docker cannot publish, so the generated `docker-compose.yml` adds a `caddy` service that joins the app container's network namespace (`network_mode: "service:aerini-<name>"`). Caddy then reaches the listener at its own `127.0.0.1`, and because it shares the app's network, ports 80, 443 and 443/udp are published on the app service. The package's `Caddyfile` passes through only the webhook's path and method and answers everything else with 404; the status page is not reachable through it. To use it, point a DNS name at the server, set `AERINI_DOMAIN` in `.env`, open ports 80 and 443 (also in your cloud provider's firewall, since Caddy needs them to get its certificate), and run `docker compose up -d`. The export refuses a path with characters other than letters, digits and `/ _ . ~ -`, and a webhook port of 7700, which is the status page's port inside the container.
+
+**Bare metal.** Both programs are on the same host, so any proxy can reach the listener. With Caddy, put this in `/etc/caddy/Caddyfile`, with your domain, the webhook's own port and path, and the method if the node restricts one:
+
+```
+hooks.example.com {
+    @webhook {
+        path /webhook
+        method POST
+    }
+    handle @webhook {
+        reverse_proxy 127.0.0.1:3456
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+Set a secret in the Webhook node. Without one the listener accepts every request, and a public proxy then lets anyone on the internet run the workflow; callers send the secret in the `x-webhook-secret` header.
 
 ## TLS with a reverse proxy
 
@@ -317,7 +342,7 @@ See [Server API Reference §Workflows](server-api-reference.md#workflows) for th
 
 ## Updating
 
-There's no in-place binary updater for `aerini-server`. The official Docker image updates by pulling a newer tag and recreating the container; bare metal and the desktop's generated Docker export update by rebuilding. See [Updating §Server (`aerini-server`)](updating.md#server-aerini-server) for the exact commands for each of the three shapes above (official Docker image, bare metal, and the desktop's generated Docker export, which has its own cache gotcha the other two don't), plus what happens when a workflow's schema version doesn't match the binary loading it.
+There's no in-place binary updater for `aerini-server`. The official Docker image updates by pulling a newer tag and recreating the container; bare metal updates by replacing the binary, and the desktop's generated Docker export updates by exporting the package again from a newer app (or, for a source build, by rebuilding). See [Updating §Server (`aerini-server`)](updating.md#server-aerini-server) for the exact commands for each of the three shapes above (official Docker image, bare metal, and the desktop's generated Docker export, whose optional source build has a cache gotcha the other two don't), plus what happens when a workflow's schema version doesn't match the binary loading it.
 
 ## What's next
 

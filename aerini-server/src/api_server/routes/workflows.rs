@@ -24,7 +24,7 @@ const NODE_CHECK_FAILED_MESSAGE: &str = "bundled Node.js check failed; see the s
 /// route does not flood the log.
 fn node_check_failed(already_logged: &AtomicBool, cause: impl std::fmt::Display) -> Value {
     if !already_logged.swap(true, Ordering::Relaxed) {
-        tracing::error!(error = %cause, "bundled Node.js health check failed");
+        tracing::warn!(error = %cause, "bundled Node.js health check failed");
     }
     json!({"status": "error", "message": NODE_CHECK_FAILED_MESSAGE})
 }

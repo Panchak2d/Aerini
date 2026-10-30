@@ -5,8 +5,8 @@ mod anthropic;
 mod gemini;
 pub mod ollama;
 
-// Re-export the types and helpers that ai_agent.rs imports via `super::ai_prompt::`.
-// Keeps ai_agent.rs import path unchanged after the module split.
+// Re-export the types and helpers that the ai_agent node imports via
+// `crate::nodes::ai_prompt::`.
 pub(crate) use attachments::{
     ImageAttachment,
     DocAttachment,
@@ -171,7 +171,7 @@ impl Node for AiPromptNode {
         // Must branch by provider_id: an Anthropic or Gemini call with no `model`
         // set would otherwise silently send an OpenAI model string to that
         // provider's API, guaranteeing a model-not-found failure. Matches
-        // ai_agent.rs's pattern.
+        // the ai_agent node's pattern.
         let default_model = match provider_id {
             "anthropic" => "claude-sonnet-5",
             "gemini"    => "gemini-3.6-flash",

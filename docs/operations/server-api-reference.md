@@ -4,7 +4,7 @@
 
 ## Authentication and scopes
 
-Every route below requires an `Authorization: Bearer <token>` header, except `GET /api/health`, `GET /aerini-widget.js`, `POST /api/widget/:workflow_id/trigger`, and `POST /api/widget/:workflow_id/mint-token` (see [Widget trigger](#widget-trigger)). A missing or invalid token returns `401 Unauthorized` with `{"error": "Invalid or missing token"}`.
+Every route below requires an `Authorization: Bearer <token>` header, except `GET /api/health`, `GET /aerini-widget.js`, `POST /api/widget/:workflow_id/trigger`, and `POST /api/widget/:workflow_id/mint-token` (see [Widget trigger](#widget-trigger)). The routes under [Serve mode status routes](#serve-mode-status-routes) belong to `aerini-server serve` and are not covered by this rule. A missing or invalid token returns `401 Unauthorized` with `{"error": "Invalid or missing token"}`.
 
 Each token carries one or more scopes: `read`, `write`, `admin`. A route's required scope is checked against the token's scope list; `admin` satisfies any check, so an admin token never needs `read` or `write` listed separately. Failing a scope check returns `403 Forbidden` with `{"error": "<scope> scope required"}` (token management routes use `{"error": "admin scope required for token management"}` instead).
 
@@ -234,6 +234,24 @@ Six event types are emitted:
 | `scheduler-ready` | `job_count`, `timestamp` (no `workflow_id`; sent once at scheduler startup and forwarded to every connection regardless of ACL, the one event type an ACL filter can't narrow) |
 
 `scheduler-status` is what a widget or dashboard should watch for a workflow triggered through [`POST /api/widget/:workflow_id/trigger`](#widget-trigger), since that route's own response never carries the run's actual output.
+
+## Serve mode status routes
+
+`aerini-server serve` runs one workflow and answers a small set of routes on its status port (`7700` by default, bound to `127.0.0.1` unless you pass `--bind`). They are separate from everything above: no API tokens or scopes apply. The protected routes take the workflow's `run_secret` as `Authorization: Bearer <run_secret>`.
+
+| Method | Path | Auth |
+|---|---|---|
+| `GET` | `/` | none |
+| `GET` | `/api/health` | none |
+| `GET` | `/api/status` | none (`last_error` needs `run_secret`) |
+| `GET` | `/api/logs?n=50` | `run_secret` |
+| `GET` | `/api/runs?limit=50&offset=0&filter=success\|failed` | `run_secret` |
+| `GET` | `/api/runs/{id}` | `run_secret` |
+| `POST` | `/api/run` | `run_secret` |
+
+`GET /` is the HTML status page. `GET /api/health` returns the same body as [Health](#health) above. `GET /api/status` returns `workflow_name`, `trigger`, `status`, `run_count`, `last_run_at`, `next_run_at` and `last_duration_ms`, plus `last_error` only when the request carries a valid `run_secret` (the error text can contain internal paths). `GET /api/logs` returns the last `n` log entries, `n` from 1 to 1000. `GET /api/runs` returns `{"items": [...], "limit": N, "offset": N}` with `limit` from 1 to 500; the list is empty when the server keeps no run history. `GET /api/runs/{id}` returns one run, or `404` if there is none. `POST /api/run` starts a run and answers `202 Run triggered`; it answers `403 Manual trigger is disabled` when the package was exported without a `run_secret`.
+
+A protected route answers `403` for a wrong secret (`Invalid secret`) and for a server that has no `run_secret` set (`Run history requires a run secret. Set one at export time.`). Every route shares one limit of 120 requests per 60 seconds per client address; going over it returns `429 Rate limit exceeded`.
 
 ## See also
 

@@ -15,6 +15,8 @@ import { activateZone } from "./sidebar-sections";
 import { isMonitorModeActive } from "./monitor-mode";
 import { bindDrawerResize } from "./resize";
 import { bindMinimapResize } from "./minimap-resize";
+import { toggleMinimap, restoreMinimapVisibility } from "./minimap-visibility";
+import { storageGet, storageSet } from "./safe-storage";
 import { bindDrawerInset } from "./drawer-inset";
 import { loadBgPanel } from "./bg-panel-loader";
 import { NODE_IDS } from "./node-ids";
@@ -336,17 +338,17 @@ export function bindToolbar(
 
   const gridSnapEl = document.getElementById("setting-grid-snap") as HTMLInputElement | null;
   if (gridSnapEl) {
-    gridSnapEl.checked = localStorage.getItem("aerini_grid_snap") === "true";
+    gridSnapEl.checked = storageGet("aerini_grid_snap") === "true";
     gridSnapEl.addEventListener("change", () => {
-      localStorage.setItem("aerini_grid_snap", String(gridSnapEl.checked));
+      storageSet("aerini_grid_snap", String(gridSnapEl.checked));
     });
   }
 
   const autofitEl = document.getElementById("setting-autofit") as HTMLInputElement | null;
   if (autofitEl) {
-    autofitEl.checked = localStorage.getItem("aerini_autofit") !== "false";
+    autofitEl.checked = storageGet("aerini_autofit") !== "false";
     autofitEl.addEventListener("change", () => {
-      localStorage.setItem("aerini_autofit", String(autofitEl.checked));
+      storageSet("aerini_autofit", String(autofitEl.checked));
     });
   }
 
@@ -393,22 +395,11 @@ export function bindToolbar(
     }
     if (inInput) return;
     if (e.key === "?" || e.key === "/") { $("shortcuts-modal").classList.remove("hidden"); return; }
-    if (e.key === "m" || e.key === "M") {
-      const w      = document.getElementById("minimap-wrap");
-      const hidden = w?.classList.toggle("minimap-hidden");
-      localStorage.setItem("aerini_minimap_hidden", String(!!hidden));
-    }
+    if (e.key === "m" || e.key === "M") toggleMinimap();
   });
 
-  // Minimap toggle
-  const minimapWrap   = document.getElementById("minimap-wrap");
-  const minimapBtn    = document.getElementById("btn-minimap-toggle");
-  const minimapHidden = localStorage.getItem("aerini_minimap_hidden") === "true";
-  if (minimapHidden) minimapWrap?.classList.add("minimap-hidden");
-  minimapBtn?.addEventListener("click", () => {
-    const hidden = minimapWrap?.classList.toggle("minimap-hidden");
-    localStorage.setItem("aerini_minimap_hidden", String(!!hidden));
-  });
+  restoreMinimapVisibility();
+  document.getElementById("btn-minimap-toggle")?.addEventListener("click", toggleMinimap);
 
   bindZoomControls(canvas);
   bindHistoryControls(canvas, toast);

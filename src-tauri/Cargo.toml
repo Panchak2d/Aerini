@@ -76,7 +76,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 # dependency (aerini-engine uses it for the same "need a real temp file"
 # pattern); version already resolved in Cargo.lock at 3.27.0, no new
 # transitive dependencies. Also used by this crate's own tests (tempdir-based,
-# matching plugin_loader.rs's existing test style).
+# matching plugin_loader's existing test style).
 tempfile = "3"
 
 [dev-dependencies]

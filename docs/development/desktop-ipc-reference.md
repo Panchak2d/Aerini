@@ -149,7 +149,7 @@ Reports the port an OAuth callback listener would actually bind if a flow starte
 
 ## Plugins
 
-`plugins.rs` (1,676 lines, by far the largest command file), seven commands, all wrapped in `src/ipc/workflow.ts` rather than a `plugins.ts` file of their own.
+`plugins.rs` (seven commands, with their helpers split into the `plugins/` directory beside it), all wrapped in `src/ipc/workflow.ts` rather than a `plugins.ts` file of their own.
 
 | Command | Parameters | Returns | Frontend caller |
 |---|---|---|---|

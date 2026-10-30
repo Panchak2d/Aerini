@@ -46,16 +46,28 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.4.4 — Canvas polish
+## v0.4.4 — AI Agent controls and canvas polish (shipped — v0.4.4)
 
-- [ ] Improved minimap
+- [x] AI Agent: tool use for Anthropic, tool controls (Tool Choice, Single Tool Call, Strict Tools), and validated tool requests (`tool_calls_valid`)
+- [x] AI Agent: Response Schema (structured output), Effort and Web Search settings
+- [x] AI Agent: continue a conversation across nodes (Return Messages, Messages, Tool Results)
+- [x] AI Agent: Tools form with typed parameters and an Edit as JSON switch
+- [x] Loop: optional Stop When setting to end a loop early
+- [x] New examples: AI Agent Router and AI Agent Loop
+- [x] Local models: pull and delete Ollama models from the app
+- [x] Chat panel: Stop button, Chat bot template, and no more timeout error for slow models
+- [x] Improved minimap: node kinds and status, zoom and pan, resize, hover details, error badge
+- [x] New node look on the canvas
+- [x] Export for Server → Docker: webhook triggers reachable over HTTPS through Caddy, and the official image in the package's Compose file
+- [x] `aerini-server` published for x86-64 Linux, and `install.sh` downloads it
 
 ---
 
-## v0.4.5 — AI node hardening
+## v0.4.5 — AI node hardening and Feed Parser
 
 - [ ] Share one request and response implementation between AI Prompt and AI Agent, and give AI Prompt the same structured output (response schema) and effort settings the AI Agent has; existing AI Prompt outputs and saved workflows stay unchanged
 - [ ] Model picker hint for Ollama: show whether the selected local model supports tools
+- [ ] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
 
 ---
 

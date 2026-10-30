@@ -80,7 +80,7 @@ Gaps in the AI nodes and in server packaging that this release does not close. E
 | B5 | The OpenAI nodes use Chat Completions only; OpenAI's Responses API and hosted tools have not been reviewed yet. | v0.5.0 |
 | I17 | AI Prompt and AI Agent each carry their own request code, and AI Prompt has no Response Schema or Effort setting yet. | v0.4.5 |
 | B3 | The model picker does not show whether a local Ollama model supports tools; a model without tool support fails the AI Agent with `TOOLS_NOT_SUPPORTED`. | v0.4.5 |
-| BL1 | The Linux Server package from Export for Server does not contain `aerini-server`, and the Releases page does not publish it; build it from source or run the Docker image instead ([Server Deployment](operations/server-deploy.md#getting-the-aerini-server-binary)). | not scheduled |
+| BL1 | The Linux Server package from Export for Server does not contain `aerini-server`. `install.sh` downloads the matching release, which is published for x86-64 Linux only; on another architecture, or for a desktop build with no release, build it from source or run the Docker image instead ([Server Deployment](operations/server-deploy.md#getting-the-aerini-server-binary)). | not scheduled |
 | BL2 | There is no single end-to-end walkthrough for a new VPS (create the server, install Docker, run Aerini, add TLS); [Server Deployment](operations/server-deploy.md) covers each step separately. | not scheduled |
 | BL3 | In the AI Agent Loop example, Stop When on `finished` does not end the Loop when a reply is cut off at Max Tokens, and whether `awaiting_tools` is a better condition has not been tested. | open question |
 | BL4 | The AI Agent in a Loop has been run on Gemini only; OpenAI, Anthropic and local models are untested there. | untested |
