@@ -194,11 +194,11 @@ aws-smithy-runtime-api = "1"
 # wasmtime's default feature set minus `cache`: that feature pulls in the zstd crates, and nothing in
 # this crate configures a module cache. Re-enable it only once the zstd crates it needs have no open
 # RUSTSEC advisories.
-wasmtime           = { version = "=49.0.5", default-features = false, features = [
+wasmtime           = { version = "=50.0.0", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser",
 ] }
-wasmtime-wasi      = { version = "=49.0.5", features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=49.0.5", features = ["p2", "p3"] }
+wasmtime-wasi      = { version = "=50.0.0", features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.0", features = ["p2", "p3"] }
 
 # plugin_http.rs needs these directly. They are declared the way
 # wasmtime-wasi-http 49.0.5 declares them (ring, no default features), so no
