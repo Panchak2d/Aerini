@@ -22,4 +22,4 @@ version = "0.4.4"
 edition = "2021"
 license = "AGPL-3.0-only"
 # Shared floor for every crate in the workspace (set by wasmtime's rust-version).
-rust-version = "1.96"
+rust-version = "1.97"

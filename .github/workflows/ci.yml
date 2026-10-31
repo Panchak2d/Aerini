@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   # Bump deliberately, together with the same value in release.yml. Every locked
   # dependency's rust-version is at or below this workspace's 1.96 floor.
-  RUST_TOOLCHAIN: 1.96.0
+  RUST_TOOLCHAIN: 1.97.0
 
 permissions:
   contents: read

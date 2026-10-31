@@ -180,7 +180,7 @@ aws-smithy-runtime-api = "1"
 # listed explicitly because "p3" does not imply it and both linkers register
 # `wasmtime_wasi::p2`.
 #
-# All three pinned to an EXACT version (`=49.0.5`) rather than a caret range:
+# All three pinned to an EXACT version (`=50.0.1`) rather than a caret range:
 # both `wasmtime-wasi::p3` and `wasmtime-wasi-http::p3` document themselves as
 # "not compliant with semver and not ready for production use" with no
 # patch-release guarantee even for security fixes. A caret range on a crate
@@ -194,14 +194,14 @@ aws-smithy-runtime-api = "1"
 # wasmtime's default feature set minus `cache`: that feature pulls in the zstd crates, and nothing in
 # this crate configures a module cache. Re-enable it only once the zstd crates it needs have no open
 # RUSTSEC advisories.
-wasmtime           = { version = "=49.0.5", default-features = false, features = [
+wasmtime           = { version = "=50.0.1", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser",
 ] }
-wasmtime-wasi      = { version = "=49.0.5", features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=49.0.5", features = ["p2", "p3"] }
+wasmtime-wasi      = { version = "=50.0.1", features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.1", features = ["p2", "p3"] }
 
 # plugin_http.rs needs these directly. They are declared the way
-# wasmtime-wasi-http 49.0.5 declares them (ring, no default features), so no
+# wasmtime-wasi-http 50.0.1 declares them (ring, no default features), so no
 # second crypto backend is pulled in. The tree also links aws-lc-rs, so
 # plugin_http.rs names the ring provider explicitly instead of relying on a
 # process-wide default.
