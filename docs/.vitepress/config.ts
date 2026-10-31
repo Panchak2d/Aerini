@@ -74,6 +74,7 @@ export default defineConfig({
         text: 'Operations',
         items: [
           { text: 'Server Deployment', link: '/operations/server-deploy' },
+          { text: 'New Server, Start to Finish', link: '/operations/vps-walkthrough' },
           { text: 'Server CLI Reference', link: '/operations/server-cli-reference' },
           { text: 'Server API Reference', link: '/operations/server-api-reference' },
           { text: 'MCP Server for AI Agents', link: '/operations/mcp' },
