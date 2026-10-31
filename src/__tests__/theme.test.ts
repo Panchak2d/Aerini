@@ -80,3 +80,17 @@ describe("initTheme", () => {
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
   });
 });
+
+describe("unavailable storage", () => {
+  it("still applies and reads a theme when localStorage throws", () => {
+    const blocked = () => { throw new DOMException("denied", "SecurityError"); };
+    Object.defineProperty(globalThis, "localStorage", {
+      value: { getItem: blocked, setItem: blocked, removeItem: blocked, clear: blocked } as unknown as Storage,
+      writable: true,
+      configurable: true,
+    });
+    expect(getStoredTheme()).toBe("midnight");
+    expect(() => applyTheme("paper")).not.toThrow();
+    expect(document.documentElement.getAttribute("data-theme")).toBe("paper");
+  });
+});

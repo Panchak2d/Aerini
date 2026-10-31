@@ -44,7 +44,7 @@ You'll need:
 | Tool | Version |
 |---|---|
 | Rust (stable) | 1.96+ |
-| Node.js | 20.19+, 22.13+, or 24+ |
+| Node.js | 20.19+ or 22.12+ to build; 22.12+, 24, or 26+ to run the tests |
 | Tauri CLI | 2.x |
 
 ```bash

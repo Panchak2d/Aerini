@@ -39,14 +39,6 @@ export function initModals(
     document.getElementById("shortcuts-modal")!.classList.remove("hidden");
   });
 
-  // Settings persistence
-  const snapCb = document.getElementById("setting-grid-snap") as HTMLInputElement;
-  const fitCb  = document.getElementById("setting-autofit")   as HTMLInputElement;
-  snapCb.checked = localStorage.getItem("aerini_grid_snap") === "true";
-  fitCb.checked  = localStorage.getItem("aerini_autofit") !== "false";
-  snapCb.addEventListener("change", () => localStorage.setItem("aerini_grid_snap", String(snapCb.checked)));
-  fitCb.addEventListener("change",  () => localStorage.setItem("aerini_autofit",  String(fitCb.checked)));
-
   // theme select — options built from THEMES so a future theme
   // needs no HTML edit here, only a new registry entry +
   // CSS block. initTheme() (theme.ts, called once at app startup, before

@@ -1,5 +1,6 @@
 import { _resetCanvasColorCache } from "./canvas/theme-colors";
 import { preloadAllIcons } from "./icon-cache";
+import { storageGet, storageSet } from "./safe-storage";
 
 
 export interface ThemeDef {
@@ -28,7 +29,7 @@ function isKnownTheme(id: string): boolean {
  * since-removed theme, or hand-edited storage) — never returns an id with
  * no matching CSS block. */
 export function getStoredTheme(): string {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = storageGet(STORAGE_KEY);
   return stored && isKnownTheme(stored) ? stored : DEFAULT_THEME;
 }
 
@@ -45,7 +46,7 @@ export function applyTheme(id: string): void {
   } else {
     document.documentElement.setAttribute("data-theme", theme);
   }
-  localStorage.setItem(STORAGE_KEY, theme);
+  storageSet(STORAGE_KEY, theme);
 
   // Re-warm icon-cache.ts's bitmap cache for the new theme's accent colors.
   // getIconBitmap does an exact string-key lookup with no cross-theme

@@ -15,6 +15,7 @@ import { parseSavedViewport } from "./canvas/viewport";
 import { activateZone } from "./sidebar-sections";
 import { openMenu, type MenuEntry } from "./menu";
 import { openTagPopover, type TagEditorChip } from "./tag-editor";
+import { storageGet } from "./safe-storage";
 import {
   MAX_TAGS_PER_WORKFLOW, applyListFilters, applyTagEdit, buildTagFacets, buildTagIndex, normalizeTags,
   pruneSelectedTags, tagKey, type TagEdit, type TagIndex,
@@ -1634,10 +1635,10 @@ export class WorkflowManager {
       this.onPanelClose?.();
       document.getElementById("output-drawer")!.classList.add("hidden");
       // Fit after the drawer collapses and currentId switches: an open drawer shrinks the fit area, and the viewport persists under currentId.
-      if (localStorage.getItem("aerini_autofit") !== "false") {
+      if (storageGet("aerini_autofit") !== "false") {
         this.canvas.fitToScreen();
       } else {
-        const saved = localStorage.getItem(`aerini_viewport_${wfId}`);
+        const saved = storageGet(`aerini_viewport_${wfId}`);
         const vp = saved ? parseSavedViewport(saved, this.canvas.MIN_ZOOM, this.canvas.MAX_ZOOM) : null;
         if (vp) { this.canvas.panX = vp.panX; this.canvas.panY = vp.panY; this.canvas.zoom = vp.zoom; }
       }

@@ -149,8 +149,7 @@ impl Node for TextToFileNode {
 // ---------------------------------------------------------------------------
 mod export {
     use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
-    use docx_rs::{BreakType, Docx, Paragraph, Run};
-    use std::io::Cursor;
+    use crate::nodes::docx_writer::{self, Inline, Paragraph, TextRun};
 
     /// Exact mm→pt conversion (72pt / 25.4mm per inch).
     const MM_TO_PT: f64 = 2.834_645_669;
@@ -509,26 +508,17 @@ mod export {
         pdf.finish()
     }
 
-    /// Drops characters that XML 1.0 forbids; one of them in a run makes Word
-    /// refuse to open the whole document.
-    fn xml_safe(s: &str) -> String {
-        s.chars()
-            .filter(|&c| matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && c != '\u{FFFE}' && c != '\u{FFFF}'))
-            .collect()
-    }
-
-    fn runs_for(line: &str) -> Vec<Run> {
+    /// Splits one source line into text runs with its `**bold**` / `*italic*` spans.
+    fn runs_for(line: &str) -> Vec<Inline> {
         inline_spans(line)
             .into_iter()
             .map(|span| {
-                let mut run = Run::new().add_text(span.text);
-                if span.bold {
-                    run = run.bold();
-                }
-                if span.italic {
-                    run = run.italic();
-                }
-                run
+                Inline::Text(TextRun {
+                    text: span.text,
+                    bold: span.bold,
+                    italic: span.italic,
+                    size_half_pt: None,
+                })
             })
             .collect()
     }
@@ -537,12 +527,12 @@ mod export {
     /// (`\n\n`); a leading #/##/### marks a heading (bold, larger size);
     /// `**bold**` / `*italic*` are rendered as real DOCX run formatting.
     pub fn text_to_docx_bytes(content: &str) -> Result<Vec<u8>, String> {
-        let content = xml_safe(&content.replace("\r\n", "\n"));
-        let mut docx = Docx::new();
+        let content = content.replace("\r\n", "\n");
+        let mut paragraphs = Vec::new();
 
         for raw_para in content.split("\n\n") {
             if raw_para.trim().is_empty() {
-                docx = docx.add_paragraph(Paragraph::new());
+                paragraphs.push(Paragraph::default());
                 continue;
             }
 
@@ -558,30 +548,30 @@ mod export {
                     heading_text.push(' ');
                     heading_text.push_str(&plain_text(rest.trim_start()));
                 }
-                let size_half_pt: usize = match level { 1 => 36, 2 => 30, _ => 26 };
-                let run = Run::new().add_text(heading_text).bold().size(size_half_pt);
-                docx = docx.add_paragraph(Paragraph::new().add_run(run));
+                let size_half_pt: u32 = match level { 1 => 36, 2 => 30, _ => 26 };
+                paragraphs.push(Paragraph {
+                    inlines: vec![Inline::Text(TextRun {
+                        text: heading_text,
+                        bold: true,
+                        italic: false,
+                        size_half_pt: Some(size_half_pt),
+                    })],
+                });
                 continue;
             }
 
             let body_lines: Vec<&str> = raw_para.lines().collect();
-            let mut paragraph = Paragraph::new();
+            let mut inlines = Vec::new();
             for (i, line) in body_lines.iter().enumerate() {
-                for run in runs_for(line) {
-                    paragraph = paragraph.add_run(run);
-                }
+                inlines.extend(runs_for(line));
                 if i + 1 < body_lines.len() {
-                    paragraph = paragraph.add_run(Run::new().add_break(BreakType::TextWrapping));
+                    inlines.push(Inline::LineBreak);
                 }
             }
-            docx = docx.add_paragraph(paragraph);
+            paragraphs.push(Paragraph { inlines });
         }
 
-        let mut buf = Cursor::new(Vec::new());
-        docx.build()
-            .pack(&mut buf)
-            .map_err(|e| format!("{e:?}"))?;
-        Ok(buf.into_inner())
+        docx_writer::build(&paragraphs)
     }
 
     #[cfg(test)]
@@ -631,6 +621,24 @@ mod export {
             }
             let rejoined: String = wrap_line(&long_word, max, 11.0, false).concat();
             assert_eq!(rejoined, long_word, "splitting a word must not drop characters");
+        }
+
+        #[test]
+        fn docx_maps_headings_inline_styles_and_blank_paragraphs() {
+            use std::io::Read;
+            let bytes = text_to_docx_bytes("# Head\n\na **bold** *it*\nsecond\n\n\n\nlast").unwrap();
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            let mut doc = String::new();
+            archive.by_name("word/document.xml").unwrap().read_to_string(&mut doc).unwrap();
+            for expected in [
+                "<w:b/><w:bCs/><w:sz w:val=\"36\"/><w:szCs w:val=\"36\"/></w:rPr><w:t xml:space=\"preserve\">Head</w:t>",
+                "<w:b/><w:bCs/></w:rPr><w:t xml:space=\"preserve\">bold</w:t>",
+                "<w:i/><w:iCs/></w:rPr><w:t xml:space=\"preserve\">it</w:t>",
+                "<w:r><w:br/></w:r>",
+                "<w:p></w:p>",
+            ] {
+                assert!(doc.contains(expected), "missing {expected} in {doc}");
+            }
         }
     }
 }

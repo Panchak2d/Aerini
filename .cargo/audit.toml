@@ -38,17 +38,6 @@ ignore = [
     # Transitive build dep. No prod impact. Track replacement upstream.
     "RUSTSEC-2024-0370",
 
-    # zip 8.6.0 (RUSTSEC-2026-0367, -0368, -0369): symlink escape, symlink-followed permission
-    # changes and preserved SUID/SGID bits, all in `ZipArchive::extract` / `ZipStreamReader::extract`.
-    # Patched only in zip >=9.0.0. The one remaining copy of zip 8 is transitive via docx-rs
-    # (latest 0.4.22 requires `zip ^8.6.0`), used by the Text to File node to write `.docx`.
-    # Not reachable: docx-rs 0.4.22 never calls either `extract` (VERIFIED by reading its source),
-    # and Aerini's own zip use is on zip 9. The updater's older zip 4 copy is gone: src-tauri turns
-    # off the updater's `zip` feature. Remove these three entries once docx-rs moves to zip >=9.
-    "RUSTSEC-2026-0367",
-    "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
-
     # zbus family (RUSTSEC-2026-0370 zvariant, -0371 zbus_names, -0372 zvariant_derive): "unmaintained", no vulnerability. The crates were merged into zbus 6.0.0 and
     # every standalone release is flagged, so no bump of these crates clears the advisory.
     # Two trees remain: zbus 4 via keyring 3.6.3 -> secret-service 4.0.0, and zbus 5 via the
