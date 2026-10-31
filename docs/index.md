@@ -79,6 +79,7 @@ If you're deciding whether it's safe to expose a Webhook node to the internet, y
 | Fix a stuck or failed run | [Troubleshooting](troubleshooting.md) |
 | See current limits and planned work | [Known Issues](known-issues.md) |
 | Run Aerini unattended on a server | [Server Deployment](operations/server-deploy.md) |
+| Set up a new server from scratch, with HTTPS for a webhook | [New Server, Start to Finish](operations/vps-walkthrough.md) |
 | Update the desktop app, a server deployment, or an old workflow file | [Updating](operations/updating.md) |
 | Understand how the pieces fit together internally | [Architecture](development/architecture.md) |
 

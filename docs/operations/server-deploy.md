@@ -346,6 +346,7 @@ There's no in-place binary updater for `aerini-server`. The official Docker imag
 
 ## What's next
 
+- [New Server, Start to Finish](vps-walkthrough.md), for one path from an empty server to a running export, with HTTPS for a webhook
 - [Server CLI Reference](server-cli-reference.md), for every flag on both subcommands
 - [Server API Reference](server-api-reference.md), for the full REST route table
 - [MCP Server for AI Agents](mcp.md), for letting an AI agent build and run workflows against an `api` instance
