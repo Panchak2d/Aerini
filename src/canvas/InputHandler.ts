@@ -4,6 +4,7 @@ import { PendingConnector, Connector } from "./Connector";
 import { historyShortcut } from "./UndoManager";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 import { isMonitorModeActive } from "../monitor-mode";
+import { storageGet } from "../safe-storage";
 
 /** Screen pixels a pressed port must travel before the press becomes a drag. */
 const PORT_DRAG_THRESHOLD = 4;
@@ -340,7 +341,7 @@ export class InputHandler {
     if (this.draggingNode) {
       this.didDrag = true;
       let nx = wx - this.dragOffX, ny = wy - this.dragOffY;
-      if (localStorage.getItem("aerini_grid_snap") === "true") {
+      if (storageGet("aerini_grid_snap") === "true") {
         const G = 20;
         nx = Math.round(nx / G) * G;
         ny = Math.round(ny / G) * G;

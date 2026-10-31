@@ -42,7 +42,7 @@ base64  = "0.22"
 # Password hashing for run_secret (argon2 is brute-force resistant; BLAKE3 is not)
 argon2  = "0.5"
 # SHA-256 hashing for CSP header values computed in middleware.rs
-sha2    = "0.10"
+sha2    = "0.11"
 
 # SQLite (for TokenStore; SQLite already bundled via aerini-engine)
 rusqlite    = { version = "0.38", features = ["bundled"] }

@@ -36,6 +36,7 @@ pub mod switch;
 pub mod telegram;
 pub mod text_splitter;
 pub mod text_to_file;
+mod docx_writer;
 pub mod transform;
 pub mod variables;
 pub mod wait_node;

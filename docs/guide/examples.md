@@ -1,12 +1,12 @@
 # Examples
 
-Six worked examples, each a plain-language walkthrough of a complete workflow: what it does, which nodes it uses, and how to wire them together. None of these are one-click imports from this page. For four of the six, building one means opening a new workflow in Aerini and following its steps by hand on the canvas; the fifth ships differently, and the sixth also comes as a workflow file you can drag onto the canvas, both noted below. [The examples folder's own README](https://github.com/Panchak2d/Aerini/blob/main/examples/README.md) covers the general mechanics of importing a workflow file, for the cases where you do have one.
+Seven worked examples, each a plain-language walkthrough of a complete workflow: what it does, which nodes it uses, and how to wire them together. None of these are one-click imports from this page. For four of the seven, building one means opening a new workflow in Aerini and following its steps by hand on the canvas; Getting Started ships differently, as a Docker package, and the last two also come as workflow files you can drag onto the canvas, all noted below. [The examples folder's own README](https://github.com/Panchak2d/Aerini/blob/main/examples/README.md) covers the general mechanics of importing a workflow file, for the cases where you do have one.
 
 This page assumes you've read [Nodes Reference](nodes.md) and [Expressions](expressions.md), and it doesn't repeat their field-by-field detail. If an example uses a scheduled or webhook trigger, [Background Runs](background-runs.md) covers what happens once it's running unattended. If it needs an API key, [Credentials](credentials.md) covers where that goes.
 
 ## Getting Started: Fetch and Show
 
-The simplest workflow of the five: a **Schedule** trigger fires every 10 seconds, an **HTTP Request** node calls a public API, and two **Output** nodes display the result. A good first build, just to confirm a fresh install works before trying anything real.
+The simplest workflow of the seven: a **Schedule** trigger fires every 10 seconds, an **HTTP Request** node calls a public API, and two **Output** nodes display the result. A good first build, just to confirm a fresh install works before trying anything real.
 
 This one ships differently from the rest, as a self-hosted Docker deployment package rather than a Markdown walkthrough. [See the Examples README](https://github.com/Panchak2d/Aerini/blob/main/examples/README.md) for how to unzip and run it, and to recreate the workflow itself on the canvas.
 

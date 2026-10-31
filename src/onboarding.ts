@@ -1,19 +1,20 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { WorkflowManager } from "./workflow-manager";
 import { NODE_IDS } from "./node-ids";
+import { storageGet, storageSet } from "./safe-storage";
 
 export function initOnboarding(canvas: Canvas, wfManager: WorkflowManager): void {
   const modal   = document.getElementById("onboarding-modal")!;
   const dismiss = document.getElementById("onboarding-dismiss")!;
   const example = document.getElementById("onboarding-load-example")!;
 
-  if (localStorage.getItem("aerini_onboarded")) return;
+  if (storageGet("aerini_onboarded")) return;
 
   setTimeout(() => modal.classList.remove("hidden"), 400);
 
   const close = () => {
     modal.classList.add("hidden");
-    localStorage.setItem("aerini_onboarded", "1");
+    storageSet("aerini_onboarded", "1");
   };
 
   dismiss.addEventListener("click", close);

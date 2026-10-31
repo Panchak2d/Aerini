@@ -21,11 +21,16 @@ You don't need to know which of these you are before you start. Everyone begins 
 
 A workflow is nodes connected in an order, so anything you can break into "when this happens, do these steps" fits. In practice, people use Aerini for things like:
 
-- A morning report: fetch numbers from an API, reshape them, and email or message the result.
-- An alert: check something on a timer, and only notify someone when it looks wrong.
-- A webhook receiver: accept a notification from GitHub or Stripe, and act on it.
-- Small AI pipelines: prompt a model, transform its answer, and hand the result to another node.
-- File and data shuffling: read files, change their contents, write the results somewhere else.
+- A price or stock watcher: check a listing or API on a timer, and message yourself only when it drops below your number.
+- A private daily summary: a local model (through Ollama) condenses your notes each night, and the prompt and reply never leave your machine.
+- The same automations on a server or home machine, running while your laptop is off ([Server Deployment](operations/server-deploy.md)).
+- A scheduled report: a weekday-morning cron job pulls one number from an API and emails it ([Examples](guide/examples.md#scheduled-report)).
+- A contact-form inbox: a form tool that sends a webhook posts each submission to a Webhook workflow, which emails you and posts to Slack.
+- GitHub push alerts: a Webhook workflow posts to Slack only for pushes to `main` ([Examples](guide/examples.md#webhook-receiver)).
+- A deploy check: your CI pipeline calls the server's REST API to run a workflow, and the workflow tests your site and posts the result.
+- A chat bubble on your website ([Widget Embedding](guide/widget-embedding.md)) or a chat panel in the desktop app ([Chat Panel](guide/chat-panel.md)), backed by a workflow.
+- Your own Rust program running workflows through `aerini-engine` ([Embedding aerini-engine](development/embedding.md)).
+- An AI agent drafting workflows for you ([MCP Quickstart](operations/mcp-quickstart.md)).
 
 [Nodes Reference](guide/nodes.md) lists every building block available. Skim it once you have a sense of what a node is (see [Concepts](getting-started/concepts.md)), rather than reading it end to end now.
 

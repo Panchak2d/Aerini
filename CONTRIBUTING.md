@@ -39,7 +39,7 @@ it differently, but the executor and scheduler use only the trait.
 | Tool | Version |
 |------|---------|
 | Rust (stable) | 1.96+ |
-| Node.js | 20.19+, 22.13+, or 24+ (only to run `npm`/Vite, not needed to use the Code (JS) node, see below) |
+| Node.js | 20.19+ or 22.12+ to build; 22.12+, 24, or 26+ to run the tests (only to run `npm`/Vite and the tests, not needed to use the Code (JS) node, see below) |
 | Tauri CLI | 2.x (`cargo install tauri-cli --version "^2"`) |
 | Linux system packages | `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`, `xdg-utils` (only needed to build or test the `aerini` desktop crate on Linux; not needed for `aerini-engine` or `aerini-server` alone) |
 
@@ -277,7 +277,7 @@ Delete this directory to reset all workflows, credentials, and run history durin
 | Tool | Version | Install |
 |------|---------|---------|
 | Rust | 1.96+ | [rustup.rs](https://rustup.rs/) |
-| Node.js | 20.19+, 22.13+, or 24+ | [nodejs.org](https://nodejs.org/), required to build the frontend (`npm`/Vite) only |
+| Node.js | 20.19+ or 22.12+ to build; 22.12+, 24, or 26+ to run the tests | [nodejs.org](https://nodejs.org/), required to build the frontend (`npm`/Vite) and run the tests only |
 | Tauri CLI | 2.x | `cargo install tauri-cli --version "^2" --locked` |
 
 ### Steps
