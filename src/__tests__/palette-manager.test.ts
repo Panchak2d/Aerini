@@ -63,6 +63,19 @@ const SLACK_NODE = {
 
 const ALL_NODES = [HTTP_NODE, AI_NODE, SLACK_NODE];
 
+const FEED_NODE = {
+  type_id: "feed_parser",
+  display_name: "Feed Parser",
+  node_type: "utility" as const,
+  version: "1.0",
+  input_schema: {},
+  output_schema: {},
+  ports: {
+    inputs:  [makePort("input",  "left")],
+    outputs: [makePort("output", "right")],
+  },
+};
+
 const PLUGIN_NODE = {
   type_id: "custom_plugin_node",
   display_name: "Custom Plugin",
@@ -158,6 +171,49 @@ describe("command palette — name filter", () => {
 
     expect(document.querySelector(".palette-empty")).not.toBeNull();
     expect(document.querySelectorAll(".palette-result").length).toBe(0);
+  });
+});
+
+describe("Feed Parser — found by words its name does not contain", () => {
+  afterEach(() => {
+    if (document.getElementById("command-palette-overlay")) closePalette();
+    document.body.innerHTML = "";
+  });
+
+  it("command palette: 'rss' and 'atom' find Feed Parser and nothing else", () => {
+    document.body.innerHTML = `
+      <div id="command-palette-overlay" class="hidden">
+        <input id="palette-search" type="text" />
+        <div id="palette-results"></div>
+      </div>
+      <div id="canvas"></div>
+    `;
+    registerNodeDescriptors([...ALL_NODES, FEED_NODE]);
+    initCommandPalette(mockCanvas as never, vi.fn());
+    openPalette();
+    const inp = document.getElementById("palette-search") as HTMLInputElement;
+    for (const q of ["rss", "ATOM"]) {
+      inp.value = q;
+      inp.dispatchEvent(new Event("input"));
+      const rows = document.querySelectorAll(".palette-result");
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain("Feed Parser");
+    }
+  });
+
+  it("sidebar palette: the item's search text includes 'rss'", () => {
+    document.body.innerHTML = `
+      <div id="node-palette"></div>
+      <input id="node-search" type="text" value="" />
+      <div id="canvas"></div>
+    `;
+    buildSidebarPalette([...ALL_NODES, FEED_NODE], mockCanvas as never, vi.fn());
+    const feed = Array.from(document.querySelectorAll<HTMLElement>(".palette-item"))
+      .find(el => el.dataset.search?.includes("feed_parser"))!;
+    expect(feed.dataset.search).toContain("rss");
+    const others = Array.from(document.querySelectorAll<HTMLElement>(".palette-item"))
+      .filter(el => el !== feed);
+    expect(others.some(el => el.dataset.search?.includes("rss"))).toBe(false);
   });
 });
 

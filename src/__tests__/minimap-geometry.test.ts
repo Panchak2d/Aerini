@@ -161,14 +161,21 @@ describe("flow arrows and node decor", () => {
     expect(wireArrow(pt(0, 0), pt(50, 0), pt(-50, 0), pt(0, 0))).toBeNull();
   });
 
-  it("gives a node mark an icon chip once it fits one, and its name once it is wider still", () => {
+  it("shrinks the icon chip to fit a small node mark and only drops it below a few pixels", () => {
     const at = (w: number, h: number): Rect => ({ x: 10, y: 20, w, h });
-    expect(nodeDecor(at(17, 20))).toEqual({ chip: null, name: null });
-    expect(nodeDecor(at(30, 13))).toEqual({ chip: null, name: null });
+    expect(nodeDecor(at(9, 9))).toEqual({ chip: null, name: null });
+    const small = nodeDecor(at(12, 12));
+    expect(small.chip).toMatchObject({ w: 8, h: 8 });
+    expect(small.name).toBeNull();
+    const short = nodeDecor(at(40, 13));
+    expect(short.chip).toMatchObject({ w: 9, h: 9 });
     const chipOnly = nodeDecor(at(30, 20));
     expect(chipOnly.chip).toMatchObject({ w: 12, h: 12 });
     expect(chipOnly.name).toBeNull();
-    const named = nodeDecor(at(80, 20));
+  });
+
+  it("gives a node mark its name once it is wide enough, beside the chip and inside the mark", () => {
+    const named = nodeDecor({ x: 10, y: 20, w: 80, h: 20 });
     expect(named.name!.x).toBeGreaterThan(named.chip!.x + named.chip!.w);
     expect(named.name!.x + named.name!.maxW).toBeLessThanOrEqual(10 + 80);
   });

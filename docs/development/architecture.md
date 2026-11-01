@@ -24,7 +24,7 @@ This split isn't just organizational. Aerini's CI pipeline builds and tests `aer
 `aerini-engine` is where a workflow actually runs. Its crate-root file declares twenty public modules (`session_bus` is Linux-only); a few carry most of the weight:
 
 - **`node`** defines the `Node` trait every node type implements, and `NodeRegistry`, the map from a node's `type_id` string to the object that runs it.
-- **`nodes`** holds the built-in node implementations themselves (40 of them, registered by `register_builtins`) and is the source [Nodes Reference](../guide/nodes.md) is written from.
+- **`nodes`** holds the built-in node implementations themselves (41 of them, registered by `register_builtins`) and is the source [Nodes Reference](../guide/nodes.md) is written from.
 - **`model`** is the serde layer: `Workflow`, `WorkflowNode`, `WorkflowEdge`, and the rest of the types that cross the Rust/TypeScript wire contract.
 - **`graph`** wraps petgraph to turn a `Workflow` into a topologically sorted execution order and to catch cycles before a run starts.
 - **`validation`** checks a `Workflow` against a `NodeRegistry` without running it (unknown node types, dangling or cyclic edges, port-arity violations, edges naming ports a node does not have, empty required fields) and returns a report of errors and warnings. `aerini-server` serves it as [`POST /api/validate-workflow`](../operations/server-api-reference.md#node-catalog-and-validation).

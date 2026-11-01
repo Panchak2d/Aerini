@@ -11,9 +11,12 @@ import { Minimap } from "./Minimap";
 import { SnapEngine } from "./SnapEngine";
 import { ContextMenu } from "./ContextMenu";
 import { InputHandler } from "./InputHandler";
-import { getCanvasColors, tintOver } from "./theme-colors";
+import { getCanvasColors, tintOver, withAlpha } from "./theme-colors";
 import { getNodeDescriptor } from "./node-registry";
 import { visibleViewport, fitViewports } from "./viewport";
+import { markDirty, consumeDirty, watchMap, installRepaintNet } from "./render-state";
+import { moveCamera, stepCamera, cancelCamera, type CameraTarget } from "./camera";
+import { setIconScale } from "../icon-cache";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -21,22 +24,38 @@ export class Canvas {
   ctx: CanvasRenderingContext2D;
   private dpr = 1;
 
-  private _nodes:      Map<string, CanvasNode> = new Map();
-  private _connectors: Map<string, Connector>  = new Map();
+  private _nodes:      Map<string, CanvasNode> = watchMap(new Map());
+  private _connectors: Map<string, Connector>  = watchMap(new Map());
 
   get nodes(): Map<string, CanvasNode> { return this._nodes; }
   /** Replacing the map means another workflow was loaded, so the previous workflow's undo history is dropped. */
-  set nodes(m: Map<string, CanvasNode>) { this._nodes = m; this.undoMgr?.clear(); }
+  set nodes(m: Map<string, CanvasNode>) {
+    this.onNodesReplaced?.();
+    this.mapsReplacedAt = performance.now();
+    cancelCamera(this);
+    this._nodes = watchMap(m); markDirty(); this.undoMgr?.clear();
+  }
 
   get connectors(): Map<string, Connector> { return this._connectors; }
-  set connectors(m: Map<string, Connector>) { this._connectors = m; this.undoMgr?.clear(); }
+  set connectors(m: Map<string, Connector>) { this.mapsReplacedAt = performance.now(); this._connectors = watchMap(m); markDirty(); this.undoMgr?.clear(); }
 
-  panX = 0; panY = 0; zoom = 1;
+  private _panX = 0; private _panY = 0; private _zoom = 1;
+  get panX(): number { return this._panX; }
+  set panX(v: number) { if (v !== this._panX) { this._panX = v; markDirty(); } }
+  get panY(): number { return this._panY; }
+  set panY(v: number) { if (v !== this._panY) { this._panY = v; markDirty(); } }
+  get zoom(): number { return this._zoom; }
+  set zoom(v: number) { if (v !== this._zoom) { this._zoom = v; markDirty(); } }
   readonly MIN_ZOOM = 0.05;
   readonly MAX_ZOOM = 4;
 
-  pendingInsert: NodeDescriptor | null = null;
-  insertGhost:   { x: number; y: number } | null = null;
+  private _pendingInsert: NodeDescriptor | null = null;
+  private _insertGhost: { x: number; y: number } | null = null;
+  private ghostNode: CanvasNode | null = null;
+  get pendingInsert(): NodeDescriptor | null { return this._pendingInsert; }
+  set pendingInsert(d: NodeDescriptor | null) { if (d !== this._pendingInsert) { this._pendingInsert = d; this.ghostNode = null; markDirty(); } }
+  get insertGhost(): { x: number; y: number } | null { return this._insertGhost; }
+  set insertGhost(g: { x: number; y: number } | null) { this._insertGhost = g; markDirty(); }
 
   private focusMode = false;
 
@@ -49,8 +68,10 @@ export class Canvas {
   selectedNode:  CanvasNode | null = null;
   selectedConn:  Connector  | null = null;
   hoveredConn:   Connector  | null = null;
+  private _deleteHandleHot = false;
   /** True while the pointer is over the wire delete button. */
-  deleteHandleHot = false;
+  get deleteHandleHot(): boolean { return this._deleteHandleHot; }
+  set deleteHandleHot(v: boolean) { if (v !== this._deleteHandleHot) { this._deleteHandleHot = v; markDirty(); } }
 
   private emptyEl: HTMLElement | null = null;
   private wasEmpty: boolean | null = null;
@@ -66,10 +87,25 @@ export class Canvas {
   onRunNode:        ((nodeId: string) => void) | null = null;
   onZoomChange:     ((zoom: number) => void) | null = null;
   onViewportChange: (() => void) | null = null;
+  /** Runs just before `nodes` is replaced, while the outgoing workflow's view is still current. */
+  onNodesReplaced: (() => void) | null = null;
+  camAnim: { from: CameraTarget; to: CameraTarget; start: number | null } | null = null;
+  mapsReplacedAt: number | undefined = undefined;
+  private frameId = 0;
+  private rectFrame = -1;
+  private rectCache: DOMRect | null = null;
   /** Called when a connection is made between potentially incompatible ports. Non-blocking. */
   onWarn:           ((msg: string) => void) | null = null;
 
   private lastTs = 0;
+  private ready = false;
+  /** Number of frames painted so far; tests and profiling read it to tell an idle canvas from a repainting one. */
+  renderCount = 0;
+  private sig = [0, 0, 0, 0, 0, 0];
+  private readonly connectedPorts = new Set<string>();
+  private readonly outCount = new Map<string, number>();
+  private readonly inCount = new Map<string, number>();
+  private readonly overfed = new Set<string>();
 
   // Sub-modules — not private so peers can cross-reference via canvas ref
   input:   InputHandler;
@@ -93,49 +129,124 @@ export class Canvas {
     this.emptyEl = document.getElementById("canvas-empty-state");
     this.resize();
     this.bind();
+    installRepaintNet();
+    this.ready = true;
+    markDirty();
     requestAnimationFrame((t) => this.loop(t));
   }
 
   // ── Resize ────────────────────────────────────────────────────────────────
 
+  /**
+   * Re-reads the element size. The backing bitmap is reassigned, and the scene
+   * repainted before the browser paints, only when the size actually changed:
+   * assigning width/height clears the bitmap even at the same value.
+   */
   resize() {
-    this.dpr = window.devicePixelRatio || 1;
-    const r  = this.el.getBoundingClientRect();
-    this.el.width  = Math.round(r.width  * this.dpr);
-    this.el.height = Math.round(r.height * this.dpr);
+    const dpr = window.devicePixelRatio || 1;
+    this.rectCache = null;
+    const r   = this.cachedRect();
+    const w   = Math.round(r.width  * dpr);
+    const h   = Math.round(r.height * dpr);
+    this.dpr = dpr;
     if (this.panX === 0 && this.panY === 0) {
       this.panX = r.width  / 2;
       this.panY = r.height / 2;
     }
+    if (this.el.width === w && this.el.height === h) return;
+    this.el.width  = w;
+    this.el.height = h;
+    markDirty();
+    if (this.ready) this.renderNow();
+  }
+
+  private renderNow(): void {
+    consumeDirty();
+    this.updateSignature();
+    this.draw(0);
   }
 
   s2w(sx: number, sy: number) {
     return { x: (sx - this.panX) / this.zoom, y: (sy - this.panY) / this.zoom };
   }
 
+  /** The canvas's client rect, read from layout at most once per frame. */
+  cachedRect(): DOMRect {
+    if (!this.rectCache || this.rectFrame !== this.frameId) {
+      this.rectCache = this.el.getBoundingClientRect();
+      this.rectFrame = this.frameId;
+    }
+    return this.rectCache;
+  }
+
   evSX(e: MouseEvent) {
-    const r = this.el.getBoundingClientRect();
+    const r = this.cachedRect();
     return { sx: e.clientX - r.left, sy: e.clientY - r.top };
   }
+
+  cancelCameraAnimation(): void { cancelCamera(this); }
 
   // ── Loop ──────────────────────────────────────────────────────────────────
 
   private loop(ts: number) {
     const dt = Math.min((ts - this.lastTs) / 1000, 0.1);
     this.lastTs = ts;
-    this.draw(dt);
+    this.frameId++;
+    this.input.flushHover();
+    if (this.camAnim) stepCamera(this, ts);
+    const sceneChanged = this.updateSignature();
+    if (consumeDirty() || sceneChanged || this.isAnimating()) this.draw(dt);
     requestAnimationFrame((t) => this.loop(t));
   }
 
+  /** True while something on screen changes without further input: a running node, a flowing wire, a gesture in flight or a camera move. */
+  isAnimating(): boolean {
+    const ih = this.input;
+    if (this.camAnim || ih.isGestureActive() || this.pendingInsert || this.insertGhost || this.minimap.isInteracting()) return true;
+    for (const n of this._nodes.values()) if (n.status === "running") return true;
+    for (const c of this._connectors.values()) if (c.active) return true;
+    return false;
+  }
+
+  /**
+   * Cheap fingerprint of what the canvas draws that is edited in place (node
+   * positions, names, sizes, note text), so an edit that forgot to request a
+   * repaint still gets one. Returns true when it changed since the last call.
+   */
+  private updateSignature(): boolean {
+    let i = 0, px = 0, py = 0, hh = 0, nm = 0, nt = 0;
+    for (const n of this._nodes.values()) {
+      i++;
+      const p = n.data.position;
+      px += p.x * i; py += p.y * i; hh += n.height * i;
+      nm += (n.data.name.length + (n.disabled ? 7 : 0)) * i;
+      if (n.data.node_type_id === NODE_IDS.NOTE) {
+        nt += String(n.data.config["text"] ?? "").length * i + String(n.data.config["color"] ?? "").length;
+      }
+    }
+    let cs = this._connectors.size;
+    for (const c of this._connectors.values()) {
+      const d = c.data;
+      cs += d.from_node.length + d.to_node.length + d.from_port.length + d.to_port.length + (d.on_success !== null ? 3 : 0) + (d.on_failure !== null ? 5 : 0);
+    }
+    const next = [i + cs * 65536, px, py + hh, nm, nt, cs];
+    let changed = false;
+    for (let k = 0; k < next.length; k++) if (next[k] !== this.sig[k]) { changed = true; this.sig[k] = next[k]; }
+    return changed;
+  }
+
   private draw(dt: number) {
+    this.renderCount++;
     const dpr = this.dpr;
     const W   = this.el.width  / dpr;
     const H   = this.el.height / dpr;
     const ctx = this.ctx;
     const ih  = this.input;
+    const vp  = this._nodes.size ? visibleViewport(this.cachedRect()) : { width: W, height: H };
 
     if (this.hoveredConn && (ih.isDragActive() || this.connectors.get(this.hoveredConn.data.id) !== this.hoveredConn)) this.setHoveredConn(null);
 
+    setIconScale(this.zoom);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.setTransform(dpr * this.zoom, 0, 0, dpr * this.zoom, this.panX * dpr, this.panY * dpr);
@@ -143,8 +254,11 @@ export class Canvas {
     // Draw connectors (wires being moved stay visible but dimmed)
     const moving = ih.reconnEdge?.conn;
     const movingGroup = ih.moveGroup;
+    const vx0 = -this.panX / this.zoom, vy0 = -this.panY / this.zoom;
+    const vx1 = vx0 + W / this.zoom,    vy1 = vy0 + H / this.zoom;
     for (const c of this.connectors.values()) {
       c.highlighted = ih.isCutting && this.edgeCrossesPath(c);
+      if (!c.highlighted && !c.active && !this.wireOnScreen(c, vx0, vy0, vx1, vy1)) continue;
       if (c === moving || movingGroup?.includes(c)) ctx.globalAlpha = 0.25;
       c.draw(ctx, this.nodes, dt);
       ctx.globalAlpha = 1;
@@ -160,12 +274,12 @@ export class Canvas {
         ctx.save();
         ctx.beginPath();
         ctx.arc(snap.x, snap.y, PORT_RADIUS + 7, 0, Math.PI * 2);
-        ctx.strokeStyle = colors.actionNav + "cc";
+        ctx.strokeStyle = withAlpha(colors.actionNav, "cc");
         ctx.lineWidth   = 2 / this.zoom;
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(snap.x, snap.y, PORT_RADIUS + 3, 0, Math.PI * 2);
-        ctx.fillStyle = colors.actionNav + "22";
+        ctx.fillStyle = withAlpha(colors.actionNav, "22");
         ctx.fill();
         ctx.restore();
       }
@@ -178,7 +292,7 @@ export class Canvas {
         ctx.save();
         ctx.beginPath();
         ctx.arc(srcPort.x, srcPort.y, PORT_RADIUS + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = colors.actionNav + "88";
+        ctx.strokeStyle = withAlpha(colors.actionNav, "88");
         ctx.lineWidth   = 2 / this.zoom;
         ctx.stroke();
         ctx.restore();
@@ -202,21 +316,29 @@ export class Canvas {
 
     // One pass over the connectors builds the connected-port lookup (port
     // fill state) and the per-port wire counts (output badges, overfed inputs).
-    const connectedPorts = new Set<string>();
-    const outCount = new Map<string, number>();
-    const inCount = new Map<string, number>();
+    const connectedPorts = this.connectedPorts, outCount = this.outCount, inCount = this.inCount;
+    connectedPorts.clear(); outCount.clear(); inCount.clear();
     for (const c of this.connectors.values()) {
-      const fromKey = `${c.data.from_node}:${c.data.from_port}`;
-      const toKey   = `${c.data.to_node}:${c.data.to_port}`;
+      const fromKey = c.fromKey;
+      const toKey   = c.toKey;
       connectedPorts.add(fromKey);
       connectedPorts.add(toKey);
       outCount.set(fromKey, (outCount.get(fromKey) ?? 0) + 1);
       inCount.set(toKey, (inCount.get(toKey) ?? 0) + 1);
     }
 
-    // Draw nodes
-    const overfedPorts = this.overfedFromCounts(inCount);
-    for (const n of this.nodes.values()) n.draw(ctx, dt, connectedPorts, overfedPorts);
+    // Draw nodes; ones fully outside the view are skipped, and the node being dragged is drawn last so it passes over its neighbours.
+    const overfedPorts = this.fillOverfed(inCount);
+    const raised = ih.draggingNode;
+    const lifted = raised && this.selectedNodes.size > 1 && this.selectedNodes.has(raised.data.id);
+    for (const n of this.nodes.values()) {
+      if (raised && (n === raised || (lifted && n.selected))) continue;
+      if (this.nodeOnScreen(n, vx0, vy0, vx1, vy1)) n.draw(ctx, dt, connectedPorts, overfedPorts);
+    }
+    if (raised) {
+      if (lifted) { for (const n of this.nodes.values()) if (n.selected && n !== raised) n.draw(ctx, dt, connectedPorts, overfedPorts); }
+      raised.draw(ctx, dt, connectedPorts, overfedPorts);
+    }
 
     this.drawWireDeleteButton();
 
@@ -253,13 +375,16 @@ export class Canvas {
     }
 
     // Hover tooltip for nodes with truncated names
-    this.drawNodeTooltips();
-    this.drawWireDeleteTooltip();
+    this.drawNodeTooltips(vp.width);
+    this.drawWireDeleteTooltip(vp.width);
 
     // Draw ghost
     if (this.pendingInsert && this.insertGhost) {
+      const d = this.ghostNode ?? (this.ghostNode = createNodeFromDescriptor(this.pendingInsert, 0, 0));
+      d.data.position.x = this.insertGhost.x - NODE_WIDTH / 2;
+      d.data.position.y = this.insertGhost.y - 20;
+      d.updatePortPositions();
       ctx.globalAlpha = 0.35;
-      const d = createNodeFromDescriptor(this.pendingInsert, this.insertGhost.x - NODE_WIDTH / 2, this.insertGhost.y - 20);
       d.draw(ctx, 0);
       ctx.globalAlpha = 1;
     }
@@ -269,7 +394,7 @@ export class Canvas {
       ctx.save();
       const bx = Math.min(ih.bx0, ih.bx1), by = Math.min(ih.by0, ih.by1);
       const bw = Math.abs(ih.bx1 - ih.bx0), bh = Math.abs(ih.by1 - ih.by0);
-      ctx.fillStyle   = colors.actionNav + "0f";
+      ctx.fillStyle   = withAlpha(colors.actionNav, "0f");
       ctx.strokeStyle = colors.actionNav;
       ctx.lineWidth   = 1.5 / this.zoom;
       ctx.fillRect(bx, by, bw, bh);
@@ -293,7 +418,7 @@ export class Canvas {
     // Snap guides
     if (this.snap.snapGuides.length && ih.draggingNode) {
       ctx.save();
-      ctx.strokeStyle = colors.actionNav + "66";
+      ctx.strokeStyle = withAlpha(colors.actionNav, "66");
       ctx.lineWidth   = 1 / this.zoom;
       for (const g of this.snap.snapGuides) {
         ctx.beginPath();
@@ -315,15 +440,42 @@ export class Canvas {
       this.wasEmpty = isEmpty;
     }
 
-    const vp = this.nodes.size ? visibleViewport(this.el.getBoundingClientRect()) : { width: W, height: H };
     this.minimap.draw(vp.width, vp.height);
   }
 
+  private nodeOnScreen(n: CanvasNode, x0: number, y0: number, x1: number, y1: number): boolean {
+    const p = n.data.position, m = 48;
+    return p.x + NODE_WIDTH + m > x0 && p.x - m < x1 && p.y + n.height + m > y0 && p.y - m < y1;
+  }
+
+  /** False only when the wire's whole span, control points included, lies outside the view. */
+  private wireOnScreen(c: Connector, x0: number, y0: number, x1: number, y1: number): boolean {
+    const fn = this._nodes.get(c.data.from_node), tn = this._nodes.get(c.data.to_node);
+    if (!fn || !tn) return false;
+    const fp = fn.ports.find(p => p.id === c.data.from_port && !p.isInput);
+    const tp = tn.ports.find(p => p.id === c.data.to_port && p.isInput);
+    if (!fp || !tp) return false;
+    const m = 24;
+    return Math.max(fp.x, tp.x) + Math.max(Math.abs(tp.x - fp.x) * 0.55, 80) + m > x0
+      && Math.min(fp.x, tp.x) - Math.max(Math.abs(tp.x - fp.x) * 0.55, 80) - m < x1
+      && Math.max(fp.y, tp.y) + m > y0 && Math.min(fp.y, tp.y) - m < y1;
+  }
+
+  private fillOverfed(counts: Map<string, number>): Set<string> {
+    const out = this.overfed;
+    out.clear();
+    for (const [key, count] of counts) {
+      if (count < 2) continue;
+      const i = key.indexOf(":");
+      if (!this.isMultiInput(key.slice(0, i), key.slice(i + 1))) out.add(key);
+    }
+    return out;
+  }
+
   // Screen-space tooltip for a hovered node whose name is truncated.
-  private drawNodeTooltips(): void {
+  private drawNodeTooltips(W: number): void {
     const ctx = this.ctx;
     const dpr = this.dpr;
-    const W   = visibleViewport(this.el.getBoundingClientRect()).width;
 
     for (const n of this.nodes.values()) {
       if (!n.hovered) continue;
@@ -399,12 +551,11 @@ export class Canvas {
     ctx.restore();
   }
 
-  private drawWireDeleteTooltip(): void {
+  private drawWireDeleteTooltip(W: number): void {
     const target = this.deleteHandleTarget();
     if (!target || !this.deleteHandleHot) return;
     const ctx = this.ctx;
     const dpr = this.dpr;
-    const W   = visibleViewport(this.el.getBoundingClientRect()).width;
     const colors = getCanvasColors();
     const sx = target.x * this.zoom + this.panX;
     const sy = target.y * this.zoom + this.panY;
@@ -457,6 +608,8 @@ export class Canvas {
     this.el.addEventListener("touchend",    ()  => ih.onTouchEnd());
     window.addEventListener("keydown", ih._keyH);
     window.addEventListener("keyup",   ih._keyUpH);
+    window.addEventListener("blur", () => ih.cancelGestures());
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") ih.cancelGestures(); });
   }
 
   // No destroy()/teardown method: Canvas is instantiated exactly once, at
@@ -930,6 +1083,7 @@ export class Canvas {
   }
 
   applyConfigPatches(patches: ConfigPatch[], side: "before" | "after"): void {
+    markDirty();
     for (const patch of patches) {
       const n = this.nodes.get(patch.nodeId);
       if (!n) continue;
@@ -1103,22 +1257,22 @@ export class Canvas {
 
   // ── Undo ──────────────────────────────────────────────────────────────────
 
-  pushUndo(a: UndoAction, label?: string) { this.undoMgr.push(a, { label }); }
+  pushUndo(a: UndoAction, label?: string) { markDirty(); this.undoMgr.push(a, { label }); }
   /** Groups every pushUndo made inside `fn` into one undo step. */
   transact<T>(label: string, fn: () => T): T { return this.undoMgr.transact(label, fn); }
-  undo(): boolean { return this.undoMgr.undo().ok; }
-  redo(): boolean { return this.undoMgr.redo().ok; }
+  undo(): boolean { markDirty(); return this.undoMgr.undo().ok; }
+  redo(): boolean { markDirty(); return this.undoMgr.redo().ok; }
   canUndo(): boolean { return this.undoMgr.canUndo(); }
   canRedo(): boolean { return this.undoMgr.canRedo(); }
   historyState(): HistoryState { return this.undoMgr.state(); }
-  undoStep(): HistoryResult { return this.undoMgr.undo(); }
-  redoStep(): HistoryResult { return this.undoMgr.redo(); }
+  undoStep(): HistoryResult { markDirty(); return this.undoMgr.undo(); }
+  redoStep(): HistoryResult { markDirty(); return this.undoMgr.redo(); }
 
   /** Property edits (name, enabled, retry, config) become undoable between begin and commit. */
   beginNodeEdit(n: CanvasNode) { this.undoMgr.trackNode(n); }
-  commitNodeEdit(n: CanvasNode, removedWires: Connector[] = []) { this.undoMgr.commitNode(n, { wires: removedWires }); }
+  commitNodeEdit(n: CanvasNode, removedWires: Connector[] = []) { markDirty(); this.undoMgr.commitNode(n, { wires: removedWires }); }
   /** Applies `mutate` to one node as a single, non-merging undo step. */
-  editNode(n: CanvasNode, mutate: () => void) { this.undoMgr.editNode(n, mutate); this.onCanvasChanged?.(); }
+  editNode(n: CanvasNode, mutate: () => void) { markDirty(); this.undoMgr.editNode(n, mutate); this.onCanvasChanged?.(); }
 
   /** True while a drag, wire pull, box-select or cut is in flight; undo would corrupt its start state. */
   isGestureActive(): boolean { return this.input?.isGestureActive?.() ?? false; }
@@ -1183,7 +1337,7 @@ export class Canvas {
     const cx = vp.width / 2, cy = vp.height / 2;
     const screenX = sx ?? cx, screenY = sy ?? cy;
     const { x, y } = this.s2w(screenX, screenY);
-    const atCenter = Math.abs(screenX - cx) < 30 && Math.abs(screenY - cy) < 30;
+    const atCenter = sx === undefined && sy === undefined;
     let px = x - NODE_WIDTH / 2, py = y - 20;
 
     if (atCenter && this.nodes.size > 0) {
@@ -1201,21 +1355,33 @@ export class Canvas {
       node.data.name = this._pendingPresetName;
       this._pendingPresetName = undefined;
     }
+    const askedX = node.data.position.x, askedY = node.data.position.y;
     this.snap.avoidOverlap(node);
+    const shoved = node.data.position.x !== askedX || node.data.position.y !== askedY;
     this.transact(`Add "${node.data.name}"`, () => {
       this.nodes.set(node.data.id, node);
       this.pushUndo({ type: "add_node", node });
       this.tryWireInsert(node);
     });
     this.onCanvasChanged?.();
-    this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
+    if (shoved) { this.clearSelection(); this.selectNode(node); }
+    if ((sx === undefined || shoved) && !this.nodeFullyVisible(node)) {
+      this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
+    }
     return node;
   }
 
-  centerOn(wx: number, wy: number) {
+  private nodeFullyVisible(n: CanvasNode): boolean {
+    const vp = visibleViewport(this.cachedRect());
+    const p = n.data.position;
+    const x0 = p.x * this.zoom + this.panX, y0 = p.y * this.zoom + this.panY;
+    return x0 >= 0 && y0 >= 0 && x0 + NODE_WIDTH * this.zoom <= vp.width && y0 + n.height * this.zoom <= vp.height;
+  }
+
+  /** Eased unless `instant`; a drag that must track the pointer passes `instant`. */
+  centerOn(wx: number, wy: number, instant = false) {
     const vp = visibleViewport(this.el.getBoundingClientRect());
-    this.panX = vp.width  / 2 - wx * this.zoom;
-    this.panY = vp.height / 2 - wy * this.zoom;
+    moveCamera(this, { panX: vp.width / 2 - wx * this.zoom, panY: vp.height / 2 - wy * this.zoom, zoom: this.zoom }, instant);
   }
 
   setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) { n.status = s; if (s === "success") n.missingRequired = false; } }
@@ -1242,12 +1408,7 @@ export class Canvas {
       const z = Math.max(this.MIN_ZOOM, Math.min((cw - pad * 2) / spanX, (ch - pad * 2) / spanY, 1.2));
       if (z > zoom) { zoom = z; w = cw; h = ch; }
     }
-    this.zoom = zoom;
-    this.panX = w / 2 - ((mnX + mxX) / 2) * this.zoom;
-    this.panY = h / 2 - ((mnY + mxY) / 2) * this.zoom;
-    // Notify zoom-hint and viewport-persistence listeners, same as onWheel
-    // does after every zoom change -- fitToScreen is just another way the
-    // zoom/pan can change.
+    moveCamera(this, { panX: w / 2 - ((mnX + mxX) / 2) * zoom, panY: h / 2 - ((mnY + mxY) / 2) * zoom, zoom });
     this.onZoomChange?.(this.zoom);
     this.onViewportChange?.();
   }
@@ -1257,7 +1418,8 @@ export class Canvas {
    * onWheel already uses, just anchored at the viewport center instead of the
    * cursor position (a button click has no cursor-over-canvas position to
    * anchor on). No new zoom math — mirrors the existing formula exactly. */
-  private zoomAtCenter(factor: number) {
+  zoomAtCenter(factor: number) {
+    cancelCamera(this);
     const vp = visibleViewport(this.el.getBoundingClientRect());
     const cx = vp.width / 2, cy = vp.height / 2;
     const { x: wx, y: wy } = this.s2w(cx, cy);

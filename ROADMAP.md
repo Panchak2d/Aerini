@@ -63,11 +63,26 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.4.5 — AI node hardening and Feed Parser
+## v0.4.5 — Canvas smoothness and Feed Parser
+
+- [x] Canvas repaints only when something changes, so an idle canvas uses no CPU, and nodes and wires off screen are not drawn
+- [x] Resizing the sidebar, drawer or window no longer flashes the canvas blank
+- [x] Smooth, proportional scroll zoom, with a Scroll wheel setting (Auto, Zoom, Pan); trackpad scrolling pans, and pinch and Ctrl+scroll zoom
+- [x] Fit to screen and centring glide into place, and skip the motion when your system asks for reduced motion
+- [x] Dragging, hovering and placing nodes stay responsive in large workflows; a placed node stays under the cursor; box select takes every node it touches; switching away mid-drag no longer leaves a stuck gesture
+- [x] The view you last used in a workflow is saved once you stop moving it
+- [x] The window opens once the first frame is ready, with no empty shell, and node icons are ready when a workflow opens and stay sharp when zoomed in
+- [x] The bundled JetBrains Mono font loads in installed builds
+- [x] Minimap repaints only when it changes and zooms in proportion to the wheel
+- [x] Notifications stack instead of overlapping
+- [ ] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
+
+---
+
+## v0.4.6 — AI node hardening
 
 - [ ] Share one request and response implementation between AI Prompt and AI Agent, and give AI Prompt the same structured output (response schema) and effort settings the AI Agent has; existing AI Prompt outputs and saved workflows stay unchanged
 - [ ] Model picker hint for Ollama: show whether the selected local model supports tools
-- [ ] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
 
 ---
 

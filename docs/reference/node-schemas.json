@@ -984,6 +984,140 @@
     },
     {
       "author": "",
+      "description": "Read an RSS, Atom or JSON Feed into normalized items, with filters, sorting, a ready-to-use digest and an option to return only items not seen in earlier runs.",
+      "display_name": "Feed Parser",
+      "dynamic_ports": false,
+      "icon": "",
+      "input_schema": {
+        "properties": {
+          "base_url": {
+            "description": "Address of the feed, used to turn relative links into absolute ones. Optional.",
+            "type": "string"
+          },
+          "dedup_by": {
+            "default": "id",
+            "description": "With only_new, what identifies an item. Use link or title for feeds whose ids change.",
+            "enum": [
+              "id",
+              "link",
+              "title"
+            ],
+            "type": "string"
+          },
+          "exclude_keywords": {
+            "description": "Comma-separated words. Drop items whose title or summary contains any of them, ignoring case.",
+            "type": "string"
+          },
+          "include_keywords": {
+            "description": "Comma-separated words. Keep only items whose title or summary contains at least one of them, ignoring case.",
+            "type": "string"
+          },
+          "max_items": {
+            "default": 20,
+            "description": "Most items to return, 1 to 500.",
+            "type": "number"
+          },
+          "max_text_chars": {
+            "default": 2000,
+            "description": "Longest plain-text summary and content, in characters. Longer text is cut and ends with an ellipsis.",
+            "type": "number"
+          },
+          "on_first_run": {
+            "default": "baseline",
+            "description": "With only_new, what the first run does. baseline marks every current item as seen and returns none; emit returns them.",
+            "enum": [
+              "baseline",
+              "emit"
+            ],
+            "type": "string"
+          },
+          "only_new": {
+            "default": false,
+            "description": "Return only items not seen in earlier runs of this node. Needs the app's database; fails in a server without one. Items are marked as seen when the node runs, so an item is delivered at most once even if a later node fails.",
+            "type": "boolean"
+          },
+          "since": {
+            "description": "Drop items dated before this ISO-8601 date or timestamp, such as 2026-10-31 or 2026-10-31T08:00:00Z. Items without a date are kept.",
+            "type": "string"
+          },
+          "sort": {
+            "default": "newest",
+            "description": "newest puts the most recent items first and items without a date last; feed keeps the order of the document.",
+            "enum": [
+              "newest",
+              "feed"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "description": "The feed content as text: an RSS, Atom or JSON Feed document, normally the body of an HTTP Request node. Required.",
+            "x-aerini-multiline": true
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "is_plugin": false,
+      "node_type": "utility",
+      "output_schema": {
+        "properties": {
+          "count": {
+            "description": "Number of items returned",
+            "type": "number"
+          },
+          "digest": {
+            "description": "Markdown bullet list of the returned items, one line each",
+            "type": "string"
+          },
+          "feed": {
+            "description": "title, link, description, language, updated and type (rss2, rss1, rss0, atom or json)",
+            "type": "object"
+          },
+          "items": {
+            "description": "The returned items; each has id, title, link, published, updated, author, authors, categories, summary, content, summary_html, content_html, image and enclosures",
+            "type": "array"
+          },
+          "latest": {
+            "description": "The first returned item, or null when there are none",
+            "type": "object"
+          },
+          "new_count": {
+            "description": "Only with only_new: items not seen before, ahead of the max_items limit",
+            "type": "number"
+          },
+          "total": {
+            "description": "Number of items in the feed before filtering",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "input",
+            "label": "In",
+            "port_type": null,
+            "position": "left"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "output",
+            "label": "Out",
+            "port_type": null,
+            "position": "right"
+          }
+        ]
+      },
+      "trigger_capable": false,
+      "type_id": "feed_parser",
+      "version": "1.0.0"
+    },
+    {
+      "author": "",
       "description": "Read, write, or delete a file at a given path on the host machine.",
       "display_name": "File",
       "dynamic_ports": false,
@@ -1917,8 +2051,16 @@
       "node_type": "action",
       "output_schema": {
         "properties": {
+          "body": {
+            "description": "The body that was shown (empty if none)",
+            "type": "string"
+          },
           "sent": {
             "type": "boolean"
+          },
+          "title": {
+            "description": "The title that was shown",
+            "type": "string"
           }
         },
         "type": "object"

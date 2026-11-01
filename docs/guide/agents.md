@@ -12,7 +12,7 @@ An AI agent connected through [`aerini-mcp`](../operations/mcp.md) can find out 
 6. **A person reviews the saved workflow.**
 7. **`run_workflow`**, only once the person has approved running it.
 
-Do not skip step 2. Config fields differ for each of the 40 built-in nodes, and a field name that was guessed instead of read from the schema is an easy way to get a workflow that looks right and fails when it runs.
+Do not skip step 2. Config fields differ for each of the 41 built-in nodes, and a field name that was guessed instead of read from the schema is an easy way to get a workflow that looks right and fails when it runs.
 
 ## What a workflow looks like
 

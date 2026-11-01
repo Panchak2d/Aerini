@@ -49,7 +49,6 @@
     radial-gradient(circle, color-mix(in srgb, var(--bd) 65%, transparent) 1px, transparent 1.4px) 0 0 / 26px 26px;
   cursor: default; outline: none; min-width: 0; min-height: 0;
 }
-#canvas:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 #canvas.shift-held { cursor: crosshair !important; }
 
 #status-bar { background: var(--bg0); border-top: 1px solid var(--bd); display: flex; align-items: center; padding: 0 14px; gap: 10px; min-height: var(--status-h); }

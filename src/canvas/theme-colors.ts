@@ -13,6 +13,8 @@
 // A new theme touches only variables.css (one `html[data-theme="x"]` block). This
 // module reads tokens by name, not by theme, like theme.ts's THEMES registry.
 
+import { markDirty } from "./render-state";
+
 export interface CanvasThemeColors {
   surface1: string; surface2: string; surface3: string;
   border: string;
@@ -86,7 +88,7 @@ function ensureObserver(): void {
   if (_observerAttached) return;
   _observerAttached = true;
   if (typeof MutationObserver === "undefined") return; // defensive; not expected missing wherever `document` exists
-  new MutationObserver(() => { _cache = null; })
+  new MutationObserver(() => { _cache = null; markDirty(); })
     .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 }
 
@@ -103,6 +105,17 @@ export function getCanvasColors(): CanvasThemeColors {
   const cs = getComputedStyle(document.documentElement);
   _cache = resolveCanvasColors((name) => cs.getPropertyValue(name));
   return _cache;
+}
+
+const _alphaMemo = new Map<string, Map<string, string>>();
+
+/** `color + alpha` memoized per pair, so per-node draw code does not build the same string every frame. */
+export function withAlpha(color: string, alpha: string): string {
+  let byAlpha = _alphaMemo.get(color);
+  if (!byAlpha) { byAlpha = new Map(); _alphaMemo.set(color, byAlpha); }
+  let out = byAlpha.get(alpha);
+  if (out === undefined) { out = color + alpha; byAlpha.set(alpha, out); }
+  return out;
 }
 
 /** Forces the next getCanvasColors() call to re-resolve instead of waiting

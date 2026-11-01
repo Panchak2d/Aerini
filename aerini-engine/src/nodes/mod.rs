@@ -12,6 +12,7 @@ pub mod database;
 pub mod delay;
 pub mod discord;
 pub mod email;
+pub mod feed_parser;
 pub mod file;
 pub(crate) mod fs_sandbox;
 pub mod github;
@@ -150,6 +151,7 @@ pub fn register_builtins(
     registry.register(Arc::new(text_to_file::TextToFileNode));      // Files
     registry.register(Arc::new(transform::TransformNode));
     registry.register(Arc::new(json_node::JsonNode));
+    registry.register(Arc::new(feed_parser::FeedParserNode { db: db.clone() }));
     registry.register(Arc::new(variables::SetVariableNode { db: db.clone() }));
     registry.register(Arc::new(variables::GetVariableNode { db }));
     registry.register(Arc::new(output_node::OutputNode));

@@ -7,8 +7,8 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Action | Shortcut |
 |---|---|
 | Search / command palette | `Space` or `Ctrl+K` |
-| Pan canvas | Middle-drag |
-| Zoom | Scroll |
+| Pan canvas | Middle-drag, trackpad scroll, or `Shift`+scroll |
+| Zoom | Scroll with a mouse wheel, `Ctrl`+scroll, or pinch |
 | Fit to screen | `Ctrl+Shift+F` |
 | Toggle minimap (not while editing a field) | `M` |
 | Focus mode — hides the sidebar for a distraction-free canvas | `F` (not while editing a field) |
@@ -18,7 +18,7 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 
 | Action | Shortcut |
 |---|---|
-| Box select | Shift-drag |
+| Box select — selects every node the box touches, not only those it fully covers | Shift-drag |
 | Select all | `Ctrl+A` |
 | Duplicate | `Ctrl+D` |
 | Delete | `Del` or `Backspace` |

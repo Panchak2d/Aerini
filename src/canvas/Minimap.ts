@@ -1,6 +1,9 @@
 import type { Canvas } from "./Canvas";
 import { NODE_WIDTH, typeMeta, statusAccent, roundedRect, type CanvasNode, type CornerRadii } from "./Node";
 import { getIconBitmap } from "../icon-cache";
+import { markDirty } from "./render-state";
+import { cancelCamera } from "./camera";
+import { wheelZoomFactor } from "./wheel";
 import { NODE_IDS } from "../node-ids";
 import { isTriggerNodeType } from "./node-registry";
 import {
@@ -63,6 +66,11 @@ export interface MinimapNodeStyle {
   minH: number;
 }
 
+const SNAP_HEAD = 17;
+const SNAP_NODE_NUMS = 6;
+const SNAP_NODE_REFS = 3;
+const SNAP_CONN_NUMS = 2;
+const SNAP_CONN_REFS = 5;
 const BOUNDS_MARGIN = 30;
 export const MIN_VIEW_ZOOM = 1;
 export const MAX_VIEW_ZOOM = 8;
@@ -78,6 +86,8 @@ const DISABLED_ALPHA = 0.35;
 // Highest outside-the-viewport dim that keeps every node mark at 3:1 against the panel in Midnight and Paper (Paper is the limit, about 0.28).
 const DIM_ALPHA = 0.25;
 const OUTLINE_WIDTH = 1;
+const VIEW_LIFT_ALPHA = 0.07;
+const VIEW_FRAME_ALPHA = 0.6;
 const ARROW_LENGTH = 7;
 const ARROW_HALF_WIDTH = 4;
 const MIN_VISIBLE_PX = 2;
@@ -95,8 +105,7 @@ const WIRE_ARROW_LENGTH = 5;
 const WIRE_ARROW_HALF_WIDTH = 3;
 const WIRE_ARROW_MIN_CHORD = 28;
 const CHIP_SIZE = 12;
-const CHIP_MIN_W = 18;
-const CHIP_MIN_H = 14;
+const CHIP_MIN_SIZE = 6;
 const CHIP_INSET = 2;
 const NAME_MIN_W = 52;
 const NAME_GAP = 3;
@@ -106,10 +115,10 @@ const TRIGGER_MAX_RADIUS = 6;
 const STATUS_RANK: Record<NodeStatus, number> = { idle: 1, success: 2, running: 3, error: 4 };
 const NOTE_RANK = 0;
 const MIN_SIZE: Record<NodeStatus, Size> = {
-  idle:    { w: 4, h: 3 },
-  success: { w: 5, h: 4 },
-  running: { w: 6, h: 5 },
-  error:   { w: 8, h: 6 },
+  idle:    { w: 12, h: 12 },
+  success: { w: 13, h: 13 },
+  running: { w: 14, h: 14 },
+  error:   { w: 16, h: 16 },
 };
 const STATUS_RING_WIDTH: Record<NodeStatus, number> = { idle: 0, success: 1, running: 1, error: 1.5 };
 
@@ -343,11 +352,13 @@ export interface NodeDecor {
   name: { x: number; y: number; maxW: number } | null;
 }
 
-// What a node block has room for: an icon chip once it is big enough, plus the node's name beside it once it is wider still.
+// What a node block has room for: an icon chip (shrunk to fit, never dropped above a few pixels), plus the node's name beside it once it is wider still.
 export function nodeDecor(rect: Rect): NodeDecor {
-  if (rect.w < CHIP_MIN_W || rect.h < CHIP_MIN_H) return { chip: null, name: null };
-  const chip: Rect = { x: rect.x + CHIP_INSET, y: rect.y + (rect.h - CHIP_SIZE) / 2, w: CHIP_SIZE, h: CHIP_SIZE };
-  if (rect.w < NAME_MIN_W) return { chip, name: null };
+  const size = Math.min(CHIP_SIZE, rect.w - 2 * CHIP_INSET, rect.h - 2 * CHIP_INSET);
+  if (!(size >= CHIP_MIN_SIZE)) return { chip: null, name: null };
+  const y = rect.y + (rect.h - size) / 2;
+  if (rect.w < NAME_MIN_W) return { chip: { x: rect.x + (rect.w - size) / 2, y, w: size, h: size }, name: null };
+  const chip: Rect = { x: rect.x + CHIP_INSET, y, w: size, h: size };
   const x = chip.x + chip.w + NAME_GAP;
   return { chip, name: { x, y: rect.y + rect.h / 2, maxW: rect.x + rect.w - CHIP_INSET - x } };
 }
@@ -513,6 +524,15 @@ export class Minimap {
   private _errorIndex = -1;
   private _reducedMotion = false;
   private _allInView = false;
+  /** Number of repaints so far. A frame whose inputs match the previous paint is skipped, so tests and profiling read this to tell an idle minimap from a repainting one. */
+  paintCount = 0;
+  private _prevNum = new Float64Array(0);
+  private _nextNum = new Float64Array(0);
+  private _prevLen = -1;
+  private _prevRef: unknown[] = [];
+  private _nextRef: unknown[] = [];
+  private _prevRefLen = -1;
+  private _prevColors: CanvasThemeColors | null = null;
 
   constructor(canvas: Canvas, mmEl: HTMLCanvasElement | null) {
     this.canvas = canvas;
@@ -533,7 +553,7 @@ export class Minimap {
     mmEl.addEventListener("pointercancel", (e) => this._onEnd(e));
     mmEl.addEventListener("lostpointercapture", (e) => this._onEnd(e));
     mmEl.addEventListener("wheel", (e) => this._onWheel(e), { passive: false });
-    mmEl.addEventListener("pointerleave", () => { this._hover = null; });
+    mmEl.addEventListener("pointerleave", () => { this._hover = null; markDirty(); });
     mmEl.addEventListener("dblclick", (e) => this._onDoubleClick(e));
     mmEl.addEventListener("contextmenu", (e) => e.preventDefault());
 
@@ -546,9 +566,64 @@ export class Minimap {
     if (typeof ResizeObserver !== "undefined") {
       new ResizeObserver((entries) => {
         const r = entries[entries.length - 1]?.contentRect;
-        if (r) this._size = { w: r.width, h: r.height };
+        if (r) { this._size = { w: r.width, h: r.height }; markDirty(); }
       }).observe(mmEl);
     }
+  }
+
+  /** True while a drag, pan or edge-scroll on the minimap is in flight. */
+  isInteracting(): boolean { return !!this._drag || !!this._pan; }
+
+  /**
+   * Whether anything the minimap shows differs from its last paint. Compares
+   * the inputs in place against a snapshot, allocating nothing once the
+   * snapshot buffers are big enough. A gesture on the minimap or a running
+   * node (pulsing mark) always counts as a change.
+   */
+  private _sceneChanged(vW: number, vH: number): boolean {
+    const c = this.canvas;
+    const nodes = c.nodes, conns = c.connectors;
+    const need = SNAP_HEAD + nodes.size * SNAP_NODE_NUMS + conns.size * SNAP_CONN_NUMS;
+    const refsNeed = nodes.size * SNAP_NODE_REFS + conns.size * SNAP_CONN_REFS;
+    if (this._nextNum.length < need) {
+      this._nextNum = new Float64Array(need * 2);
+      this._prevNum = new Float64Array(need * 2);
+      this._prevLen = -1;
+    }
+    const a = this._nextNum, r = this._nextRef;
+    const hover = this._hover;
+    let k = 0, q = 0, animating = !!(this._drag || this._pan);
+    a[k++] = nodes.size; a[k++] = conns.size; a[k++] = vW; a[k++] = vH;
+    a[k++] = c.panX; a[k++] = c.panY; a[k++] = c.zoom;
+    a[k++] = normalizeDpr(window.devicePixelRatio);
+    a[k++] = this._size.w; a[k++] = this._size.h;
+    a[k++] = this._view.zoom; a[k++] = this._view.panX; a[k++] = this._view.panY;
+    a[k++] = hover ? hover.x : -1e9; a[k++] = hover ? hover.y : -1e9;
+    a[k++] = this._errorIndex; a[k++] = this._reducedMotion ? 1 : 0;
+    for (const n of nodes.values()) {
+      a[k++] = n.data.position.x; a[k++] = n.data.position.y; a[k++] = n.height;
+      a[k++] = STATUS_RANK[n.status];
+      a[k++] = (n.selected ? 1 : 0) | (n.disabled ? 2 : 0);
+      a[k++] = n.ports.length;
+      if (n.status === "running") animating = true;
+      r[q++] = n; r[q++] = n.data.name; r[q++] = n.data.config["color"];
+    }
+    for (const conn of conns.values()) {
+      a[k++] = conn.active ? 1 : 0; a[k++] = conn.selected ? 1 : 0;
+      const d = conn.data;
+      r[q++] = conn; r[q++] = d.from_node; r[q++] = d.to_node; r[q++] = d.from_port; r[q++] = d.to_port;
+    }
+    const colors = getCanvasColors();
+    let same = this._prevLen === k && this._prevRefLen === q && this._prevColors === colors && q === refsNeed;
+    if (same) {
+      const p = this._prevNum, pr = this._prevRef;
+      for (let i = 0; i < k; i++) if (a[i] !== p[i]) { same = false; break; }
+      if (same) for (let i = 0; i < q; i++) if (r[i] !== pr[i]) { same = false; break; }
+    }
+    this._nextNum = this._prevNum; this._prevNum = a;
+    this._nextRef = this._prevRef; this._prevRef = r;
+    this._prevLen = k; this._prevRefLen = q; this._prevColors = colors;
+    return !same || animating;
   }
 
   draw(vW: number, vH: number): void {
@@ -556,6 +631,8 @@ export class Minimap {
     if (!el || !mc) return;
     const { w, h } = this._size;
     if (!(w > 0 && h > 0)) return;
+    if (!this._sceneChanged(vW, vH)) return;
+    this.paintCount++;
 
     // ResizeObserver does not fire when only devicePixelRatio changes (browser zoom, moving between monitors).
     const dpr = normalizeDpr(window.devicePixelRatio);
@@ -722,7 +799,7 @@ export class Minimap {
 
     const state = viewState(bounds, viewport, contentRect(base));
     this._allInView = state.kind === "all";
-    this._drawView(mc, state, bounds, viewport, dpr, mm);
+    this._drawView(mc, state, bounds, viewport, dpr, mm, colors.textPrimary);
 
     this._badge = null;
     mc.font = LABEL_FONT;
@@ -763,7 +840,7 @@ export class Minimap {
     this._setLabel(minimapLabel(c.nodes.size, errors));
   }
 
-  private _drawView(mc: CanvasRenderingContext2D, state: ViewState, bounds: MinimapBounds, viewport: Rect, dpr: number, mm: MinimapColors): void {
+  private _drawView(mc: CanvasRenderingContext2D, state: ViewState, bounds: MinimapBounds, viewport: Rect, dpr: number, mm: MinimapColors, ink: string): void {
     if (state.kind === "away") {
       const arrow = edgeArrow(bounds, viewport);
       if (!arrow) return;
@@ -775,7 +852,7 @@ export class Minimap {
       mc.lineWidth = 2;
       mc.strokeStyle = mm.panel;
       mc.stroke();
-      mc.fillStyle = mm.nav;
+      mc.fillStyle = ink;
       mc.fill();
       return;
     }
@@ -794,8 +871,11 @@ export class Minimap {
     mc.rect(0, 0, w, h);
     mc.rect(x0, y0, x1 - x0, y1 - y0);
     mc.fill("evenodd");
-    mc.globalAlpha = 1;
-    mc.strokeStyle = mm.nav;
+    mc.globalAlpha = VIEW_LIFT_ALPHA;
+    mc.fillStyle = ink;
+    mc.fillRect(x0, y0, x1 - x0, y1 - y0);
+    mc.globalAlpha = VIEW_FRAME_ALPHA;
+    mc.strokeStyle = ink;
     mc.lineWidth = OUTLINE_WIDTH;
     mc.lineCap = "square";
     mc.beginPath();
@@ -805,6 +885,7 @@ export class Minimap {
     if (!openL) { mc.moveTo(x0, y1); mc.lineTo(x0, y0); }
     mc.stroke();
     mc.lineCap = "butt";
+    mc.globalAlpha = 1;
   }
 
   private _drawDecor(mc: CanvasRenderingContext2D, rect: Rect, style: MinimapNodeStyle, node: CanvasNode, panel: string, ink: string): void {
@@ -815,7 +896,7 @@ export class Minimap {
     mc.fillStyle = panel;
     roundedRect(mc, chip.x, chip.y, chip.w, chip.h, 3);
     mc.fill();
-    const bmp = getIconBitmap(node.data.node_type_id, style.glyphAccent);
+    const bmp = getIconBitmap(node.data.node_type_id, style.glyphAccent, 1);
     if (bmp) {
       mc.drawImage(bmp, chip.x + 1, chip.y + 1, chip.w - 2, chip.h - 2);
     } else {
@@ -849,6 +930,13 @@ export class Minimap {
   private _pointerWorld(e: PointerEvent, bounds: MinimapBounds): Point | null {
     const p = this._pointerContent(e);
     return p ? minimapToWorld(bounds, p.x, p.y) : null;
+  }
+
+  private _idleCursor(e: PointerEvent): string {
+    if (this._view.zoom > 1 && (e.ctrlKey || e.metaKey)) return "grab";
+    const b = this._bounds, v = this._viewport, p = this._hover;
+    if (!b || !v || !p || this._allInView) return "";
+    return insideRect(p, viewportToMinimap(b, v)) ? "grab" : "";
   }
 
   private _overBadge(e: MouseEvent): boolean {
@@ -885,11 +973,13 @@ export class Minimap {
 
   private _panTo(world: Point, drag: DragState): void {
     const target = dragCenter(world, drag.offset);
-    this.canvas.centerOn(target.x, target.y);
+    this.canvas.centerOn(target.x, target.y, true);
     drag.moved = true;
   }
 
   private _onDown(e: PointerEvent): void {
+    cancelCamera(this.canvas);
+    markDirty();
     const el = this.el, bounds = this._bounds, viewport = this._viewport;
     if (!el || !bounds || !viewport || this._drag || this._pan) return;
     if (isPanGesture(e.button, e.ctrlKey || e.metaKey, this._view.zoom)) {
@@ -910,6 +1000,7 @@ export class Minimap {
     this._dragPointer = this._pointerContent(e);
     this._edgeTime = null;
     this._pointerId = e.pointerId;
+    el.style.cursor = "grabbing";
     try { el.setPointerCapture?.(e.pointerId); } catch { /* pointer already gone; the drag still ends on pointerup/cancel */ }
     this._panTo(world, drag);
   }
@@ -934,6 +1025,7 @@ export class Minimap {
   }
 
   private _onMove(e: PointerEvent): void {
+    markDirty();
     this._dropStaleGesture(e);
     const pan = this._pan;
     if (pan) {
@@ -947,7 +1039,7 @@ export class Minimap {
     const drag = this._drag;
     if (!drag) {
       this._hover = this._pointerContent(e);
-      if (this.el) this.el.style.cursor = this._view.zoom > 1 && (e.ctrlKey || e.metaKey) ? "grab" : "";
+      if (this.el) this.el.style.cursor = this._idleCursor(e);
       return;
     }
     if (e.pointerId !== this._pointerId) return;
@@ -958,6 +1050,7 @@ export class Minimap {
 
   // Double-click a node: select it on the canvas and bring it to the centre. Anywhere else: reset the minimap zoom and fit the workflow.
   private _onDoubleClick(e: MouseEvent): void {
+    markDirty();
     if (this._overBadge(e)) return;
     const p = this._pointerContent(e);
     const hit = p ? hitTopmost(this._hits.map(h => h.rect), p) : -1;
@@ -970,11 +1063,11 @@ export class Minimap {
   }
 
   private _onWheel(e: WheelEvent): void {
+    markDirty();
     e.preventDefault();
     if (this._drag || this._pan || e.deltaY === 0) return;
     if (!(e.ctrlKey || e.metaKey)) {
-      if (e.deltaY < 0) this.canvas.zoomIn();
-      else this.canvas.zoomOut();
+      this.canvas.zoomAtCenter(wheelZoomFactor(e, this._size.h));
       return;
     }
     // Ctrl/Cmd (also what a trackpad pinch reports) magnifies the minimap itself.
@@ -984,6 +1077,7 @@ export class Minimap {
   }
 
   private _onEnd(e: PointerEvent): void {
+    markDirty();
     const pan = this._pan;
     if (pan && e.pointerId === pan.id) {
       this._pan = null;
@@ -996,6 +1090,7 @@ export class Minimap {
     this._drag = null;
     this._dragPointer = null;
     this._pointerId = null;
+    if (this.el) this.el.style.cursor = "";
     try { this.el?.releasePointerCapture?.(e.pointerId); } catch { /* capture already released */ }
     if (drag.moved) this.canvas.onViewportChange?.();
   }

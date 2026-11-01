@@ -336,6 +336,49 @@ async fn loop_correct_iterations() {
     );
 }
 
+/// ManualTrigger → Feed Parser → Loop over `items`
+///
+/// Feed Parser reads a three-item RSS document, and the Loop takes its
+/// `items` array through `array_field`, the same wiring the Feed Parser docs
+/// describe. The loop must see every item the parser returned.
+#[tokio::test]
+async fn feed_parser_items_drive_loop() {
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Demo</title><link>https://example.com/</link>
+<item><title>One</title><link>https://example.com/1</link><guid>a</guid><pubDate>Mon, 26 Oct 2026 10:00:00 GMT</pubDate></item>
+<item><title>Two</title><link>https://example.com/2</link><guid>b</guid><pubDate>Tue, 27 Oct 2026 10:00:00 GMT</pubDate></item>
+<item><title>Three</title><link>https://example.com/3</link><guid>c</guid><pubDate>Wed, 28 Oct 2026 10:00:00 GMT</pubDate></item>
+</channel></rss>"#;
+
+    let mut wf = Workflow::new("wf-feed-loop", "Feed Loop Test");
+    wf.nodes = vec![
+        node("n_trigger", "manual_trigger", NodeType::Action, json!({})),
+        node("n_feed", "feed_parser", NodeType::Utility, json!({ "text": rss })),
+        node(
+            "n_loop",
+            "loop",
+            NodeType::Logic,
+            json!({ "source_node": "n_feed", "array_field": "items" }),
+        ),
+        node("n_done", "output", NodeType::Utility, json!({})),
+    ];
+    wf.edges = vec![
+        edge("e1", "n_trigger", "output", "n_feed"),
+        edge("e2", "n_feed", "output", "n_loop"),
+        edge("e3", "n_loop", "done", "n_done"),
+    ];
+
+    let result = make_executor()
+        .run(Arc::new(wf), HashMap::new())
+        .await
+        .expect("run must not return Err");
+
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.node_outputs["n_feed"]["count"], json!(3));
+    assert_eq!(result.node_outputs["n_loop"]["total"], json!(3));
+    assert_eq!(result.node_outputs["n_loop"]["done"], json!(true));
+}
+
 /// Workflow with a cycle (A → B → A) must return Err(CycleDetected) before
 /// any node executes.  The executor must not spin forever.
 #[tokio::test]

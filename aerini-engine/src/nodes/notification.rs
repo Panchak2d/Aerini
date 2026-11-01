@@ -40,7 +40,9 @@ impl Node for NotificationNode {
         json!({
             "type": "object",
             "properties": {
-                "sent": { "type": "boolean" }
+                "sent":  { "type": "boolean" },
+                "title": { "type": "string", "description": "The title that was shown" },
+                "body":  { "type": "string", "description": "The body that was shown (empty if none)" }
             }
         })
     }
@@ -76,7 +78,7 @@ impl Node for NotificationNode {
 
         match send_notification(&title, &body, &urgency).await {
             Ok(method) => NodeOutput::success_with_logs(
-                json!({ "sent": true }),
+                sent_output(&title, &body),
                 vec![format!("Notification sent via {method}: {title}")],
             ),
             Err(e) => NodeOutput::failure(NodeError::unrecoverable(
@@ -84,6 +86,10 @@ impl Node for NotificationNode {
             )),
         }
     }
+}
+
+fn sent_output(title: &str, body: &str) -> Value {
+    json!({ "sent": true, "title": title, "body": body })
 }
 
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -342,6 +348,15 @@ mod tests {
             .execute(make_input(json!({ "title": "t", "urgency": "urgent" })))
             .await;
         assert_eq!(out.error.unwrap().code, "INVALID_URGENCY");
+    }
+
+    #[test]
+    fn sent_output_carries_the_title_and_body_that_were_shown() {
+        assert_eq!(
+            sent_output("T", "a < b"),
+            json!({ "sent": true, "title": "T", "body": "a < b" }),
+        );
+        assert_eq!(sent_output("T", "")["body"], "");
     }
 
     #[test]

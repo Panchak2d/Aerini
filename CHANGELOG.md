@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ## [Unreleased]
 
+### Added
+- Feed Parser: a new Utility node (`feed_parser`) reads an RSS, Atom or JSON Feed into normalized items (`items`, `latest`, `count`, `total`, `feed`) and a Markdown `digest` ready for an AI Prompt, Send Email or File node. It can sort, cap, filter by keyword and date, and, with **Only New**, return only items not seen in earlier runs (the first run just remembers what is there, so nothing floods the workflow). Only New needs the workflow database and fails with `PERSIST_UNAVAILABLE` without one. Searching the node picker or command palette for `rss` or `atom` finds it
+- Examples: a new **Private Daily Briefing** example, `examples/Private_Daily_Briefing___Feed_Parser___AI.aerini` with a walkthrough, fetches a feed on a schedule, lets Feed Parser pick out the newest unseen item, has a local model summarize it in two sentences, and appends it to a text file
+- Canvas (desktop): a new **Scroll wheel** setting under Settings → Canvas, with **Auto** (the default), **Zoom** and **Pan**. Auto pans when you scroll with a trackpad and zooms with a mouse wheel; `Ctrl`+scroll and pinch always zoom, and `Shift`+scroll pans sideways. If Auto guesses your device wrong, pick Zoom or Pan. The Shortcuts list shows the new pan and zoom gestures
+
+### Changed
+- Desktop Notification: the node's output now includes the `title` and `body` it showed, so the text can be read again in a run's Results and History after the notification closes
+- Canvas (desktop): scroll zoom is now smooth and proportional, so a trackpad no longer races through the zoom range and a mouse wheel steps evenly. Two-finger trackpad scrolling now pans the canvas instead of zooming it
+- Canvas (desktop): fit to screen and centring on a node now glide into place and stop the moment you scroll, drag or press a key; they jump at once when your system asks for reduced motion
+- Canvas (desktop): box select (`Shift`-drag) now selects every node the box touches, not only those whose top-left corner it contains
+
+### Fixed
+- Launch (desktop): the window now opens once your workflow list has loaded and the first frame is drawn, so you no longer see an empty shell fill in. If something loads slowly it still opens after at most 0.8 seconds
+- Canvas (desktop): node icons are loaded a few at a time while the app is idle after launch, and the ones a workflow needs are loaded when you open it, so they no longer pop in from letters. Icons stay sharp when you zoom in past 100%
+- Desktop: the JetBrains Mono font bundled in the app is no longer blocked by the app's content security policy, so installed builds use it instead of the system monospace font
+- Canvas (desktop): the minimap now repaints only when something it shows has changed, and scrolling over it zooms the canvas smoothly and in proportion, the same as scrolling over the canvas, instead of in fixed steps
+- Desktop: notifications no longer pile on top of each other. They stack above the status bar, up to three at a time, and any others wait their turn
+- Canvas (desktop): resizing the sidebar, the output drawer or the window no longer flashes the canvas blank, and the canvas no longer repaints while nothing on it is moving, which cuts idle CPU use and battery drain. Nodes and wires fully off screen are no longer drawn, so large workflows pan and zoom more smoothly
+- Canvas (desktop): after using the keyboard (`Ctrl`+`Shift`+`F`, `Delete`, placing a node), a blue frame no longer stays around the canvas until you click elsewhere
+- Canvas (desktop): a node you click to place now stays under the cursor instead of jumping to the right of the workflow or being centred away. Adding a node from the sidebar or with `Space` moves the view only when the new node would be out of sight, and a node that had to be moved to avoid overlapping another is selected so you can find it
+- Canvas (desktop): dragging nodes, hovering over wires and scrolling stay responsive in large workflows, and the view you last used in a workflow is saved once you stop moving it instead of on every scroll tick
+- Canvas (desktop): switching to another window or app in the middle of a drag no longer leaves the canvas stuck mid-gesture; a dragged node returns to where it started
+- Canvas (desktop): the minimap shows every node's icon, shrinking it to fit small marks instead of dropping it, and no longer draws your view as a blue outline. The view is now a faint lifted area with a neutral frame, with a grab cursor over it
+
 ---
 
 ## [0.4.4] - 2026-10-31
