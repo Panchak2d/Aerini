@@ -21,6 +21,7 @@ import { bindDrawerInset } from "./drawer-inset";
 import { loadBgPanel } from "./bg-panel-loader";
 import { NODE_IDS } from "./node-ids";
 import { findTriggerNodeTypeId } from "./canvas/node-registry";
+import { parseScrollMode, SCROLL_MODE_KEY } from "./canvas/wheel";
 import { buildIconBtn, type Toast } from "./toolbar-helpers";
 import { bindHistoryControls } from "./history-controls";
 
@@ -341,6 +342,18 @@ export function bindToolbar(
     gridSnapEl.checked = storageGet("aerini_grid_snap") === "true";
     gridSnapEl.addEventListener("change", () => {
       storageSet("aerini_grid_snap", String(gridSnapEl.checked));
+    });
+  }
+
+  const scrollModeEl = document.getElementById("setting-scroll-wheel") as HTMLSelectElement | null;
+  const initialScrollMode = parseScrollMode(storageGet(SCROLL_MODE_KEY));
+  canvas.input.setScrollMode(initialScrollMode);
+  if (scrollModeEl) {
+    scrollModeEl.value = initialScrollMode;
+    scrollModeEl.addEventListener("change", () => {
+      const mode = parseScrollMode(scrollModeEl.value);
+      storageSet(SCROLL_MODE_KEY, mode);
+      canvas.input.setScrollMode(mode);
     });
   }
 

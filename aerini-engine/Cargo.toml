@@ -42,6 +42,11 @@ zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "rustls", "query", "form", "multipart"], default-features = false }
 url     = "2"
 
+# Feed Parser node: RSS, Atom and JSON Feed into one model. 3.0.0 is the current stable
+# release on crates.io (not yanked). default-features = false leaves out the optional HTML
+# sanitiser; the node strips markup to plain text itself.
+feed-rs = { version = "3.0.0", default-features = false }
+
 # Webhook node HTTP server (already transitive via reqwest; listed explicitly for clarity)
 hyper          = { version = "1", features = ["server", "client", "http1"] }
 hyper-util     = { version = "0.1", features = ["tokio"] }

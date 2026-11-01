@@ -9,6 +9,16 @@ import { NODE_DESCRIPTION_FALLBACK } from "./node-descriptions";
 
 interface Category { label: string; nodes: NodeDescriptor[] }
 
+/** Extra words that find a node whose name does not contain them. */
+const NODE_SEARCH_ALIASES: Readonly<Record<string, string>> = {
+  [NODE_IDS.FEED_PARSER]: "rss atom",
+};
+
+function nodeSearchText(desc: NodeDescriptor): string {
+  const alias = NODE_SEARCH_ALIASES[desc.type_id];
+  return `${desc.display_name} ${desc.node_type} ${desc.type_id}${alias ? ` ${alias}` : ""}`.toLowerCase();
+}
+
 function makeCategoryHeader(label: string): HTMLButtonElement {
   const h = document.createElement("button");
   h.type = "button";
@@ -221,7 +231,7 @@ export function buildSidebarPalette(
     for (const desc of cat.nodes) {
       const item = document.createElement("div");
       item.className = "palette-item";
-      item.dataset.search = `${desc.display_name} ${desc.node_type} ${desc.type_id}`.toLowerCase();
+      item.dataset.search = nodeSearchText(desc);
       // Trigger identity overlay (filter-facing only) — mirrors Node.ts's
       // canvas draw() overlay exactly: the trigger check is a plain id set plus the plugin flag,
       // unrelated to the 4-value NodeType union, so desc.node_type (and
@@ -346,7 +356,7 @@ function renderPaletteResults(q: string): void {
   const lower = q.toLowerCase().trim();
   const allNodes = getAllNodeDescriptors();
   paletteFiltered = lower
-    ? allNodes.filter(t => t.display_name.toLowerCase().includes(lower) || t.type_id.includes(lower))
+    ? allNodes.filter(t => t.display_name.toLowerCase().includes(lower) || t.type_id.includes(lower) || (NODE_SEARCH_ALIASES[t.type_id] ?? "").includes(lower))
     : allNodes;
 
   if (!paletteFiltered.length) {

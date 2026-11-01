@@ -73,7 +73,7 @@ The automated `aerini-mcp` tests use a mock server. This check runs the real pro
 4. Start Inspector with that token: `npx @modelcontextprotocol/inspector -e AERINI_URL=http://localhost:7700 -e AERINI_TOKEN=<agent-token> ./target/release/aerini-mcp --allow-write`. Open the URL it prints.
 5. Connect and open **Tools**. Eleven tools should be listed in this order: `delete_workflow`, `get_node_schema`, `get_scheduler_status`, `get_workflow`, `list_nodes`, `list_workflows`, `run_workflow`, `save_workflow`, `start_schedule`, `stop_schedule`, `validate_workflow`.
 6. Run, in order, with the `hello` workflow from [Building Workflows with an AI Agent](../guide/agents.md#what-a-workflow-looks-like) as the `workflow` argument:
-   - `list_nodes`: 40 built-in nodes; the Code node shows `enabled: false`.
+   - `list_nodes`: 41 built-in nodes; the Code node shows `enabled: false`.
    - `get_node_schema` with `type_id` `set_variable`.
    - `validate_workflow` with `hello`: valid. Change a `node_type_id` to a name that does not exist: an error naming the unknown type.
    - `save_workflow` with `hello`, then `run_workflow` with `id` `hello`, then `get_workflow` (a JSON object, not a string, plus `row_version`), `list_workflows` (with `limit` 1), and `delete_workflow` with `id` `hello`.

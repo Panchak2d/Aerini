@@ -47,6 +47,17 @@ An AI Agent that keeps going until it is done, importable as described in "How t
 
 Needs an API key for your AI provider on the AI Agent. The pattern was tested on Gemini. States what bounds the loop (the list, Stop When, Max Iterations) and what does not (no token budget or time cap), and includes the safety rules for acting on a model's tool requests.
 
+## Private_Daily_Briefing___Feed_Parser___AI.aerini
+
+A private daily briefing, importable as described in "How to import" above. Its walkthrough is `Private_Daily_Briefing___Feed_Parser___AI.md`. It demonstrates:
+- **Schedule**, **HTTP Request** — fetch an RSS or Atom feed every morning
+- **Feed Parser** — turns the feed into items and, with **Only New**, returns only an item not seen in an earlier run (the first run just remembers the feed)
+- **If / Condition** — stops the run quietly when there is nothing new
+- **AI Prompt** — a local Ollama model summarizes the item in two sentences
+- **File** (append), **Desktop Notification** — keep the summary and show it
+
+Needs Ollama and a pulled model; no API key and no Code node. Replace the placeholder feed URL before running.
+
 ## Chatbot___AI_Memory___Widget.md
 
 A chatbot workflow template demonstrating:

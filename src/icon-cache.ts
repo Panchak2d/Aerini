@@ -20,6 +20,7 @@ const NODE_SVG_INNER: Record<string, string> = {
   json:           `<path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1" /><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />`,
   set_variable:   `<line x1="5" x2="19" y1="9" y2="9" /><line x1="5" x2="19" y1="15" y2="15" />`,
   get_variable:   `<path d="M8 21s-4-3-4-9 4-9 4-9" /><path d="M16 3s4 3 4 9-4 9-4 9" /><line x1="15" x2="9" y1="9" y2="15" /><line x1="9" x2="15" y1="9" y2="15" />`,
+  feed_parser:    `<path d="M4 11a9 9 0 0 1 9 9" /><path d="M4 4a16 16 0 0 1 16 16" /><circle cx="5" cy="19" r="1" />`,
   ai_prompt:      `<path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" /><path d="M20 2v4" /><path d="M22 4h-4" /><circle cx="4" cy="20" r="2" />`,
   ai_agent:       `<path d="M12 8V4H8" /><rect width="16" height="12" x="4" y="8" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M15 13v2" /><path d="M9 13v2" />`,
   ai_memory:      `<path d="M12 18V5" /><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4" /><path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5" /><path d="M17.997 5.125a4 4 0 0 1 2.526 5.77" /><path d="M18 18a4 4 0 0 0 2-7.464" /><path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517" /><path d="M6 18a4 4 0 0 1-2-7.464" /><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77" />`,
@@ -91,9 +92,41 @@ function buildSvg(typeId: string, inner: string, color: string, size: number): s
 }
 
 const _bitmapCache = new Map<string, ImageBitmap>();
+const _loads = new Map<string, Promise<void>>();
+let _scale = 1;
 
-export function getIconBitmap(typeId: string, color: string): ImageBitmap | null {
-  return _bitmapCache.get(`${typeId}:${color}`) ?? null;
+export type IconTier = 1 | 2 | 4;
+
+/** Raster size multiple for a canvas zoom: bitmaps are drawn at 16 world units, so a zoomed-in canvas needs more pixels than the base bitmap holds. */
+export function iconTier(scale: number): IconTier {
+  return scale <= 1.25 ? 1 : scale <= 2.5 ? 2 : 4;
+}
+
+/** Sets the canvas zoom that getIconBitmap sizes its bitmaps for when the caller names no scale. */
+export function setIconScale(zoom: number): void {
+  _scale = zoom;
+}
+
+function cacheKey(typeId: string, color: string, tier: IconTier): string {
+  return tier === 1 ? `${typeId}:${color}` : `${typeId}:${color}@${tier}`;
+}
+
+/**
+ * The bitmap for a node icon at the current zoom, or null until it is ready. A
+ * miss starts the load at once and requests a repaint when it lands; while a
+ * sharper raster is still loading the base one is returned.
+ */
+export function getIconBitmap(typeId: string, color: string, scale: number = _scale): ImageBitmap | null {
+  const tier = iconTier(scale);
+  if (tier > 1) {
+    const sharp = _bitmapCache.get(cacheKey(typeId, color, tier));
+    if (sharp) return sharp;
+    void loadBitmap(typeId, color, tier);
+  }
+  const base = _bitmapCache.get(cacheKey(typeId, color, 1));
+  if (base) return base;
+  void loadBitmap(typeId, color, 1);
+  return null;
 }
 
 // Chromium rejects createImageBitmap(svgBlob) with InvalidStateError, so the SVG goes through an <img> first.
@@ -106,17 +139,27 @@ async function decodeSvg(svg: string): Promise<ImageBitmap> {
   return await createImageBitmap(img);
 }
 
-async function loadBitmap(typeId: string, inner: string, color: string, size: number): Promise<void> {
-  const key = `${typeId}:${color}`;
-  if (_bitmapCache.has(key)) return;
-  try {
-    _bitmapCache.set(key, await decodeSvg(buildSvg(typeId, inner, color, size)));
-  } catch {
-    // Silently skip — canvas falls back to accent letter
-  }
+function loadBitmap(typeId: string, color: string, tier: IconTier): Promise<void> {
+  const key = cacheKey(typeId, color, tier);
+  const existing = _loads.get(key);
+  if (existing) return existing;
+  const inner = NODE_SVG_INNER[typeId];
+  if (!inner) return Promise.resolve();
+  const load = (async () => {
+    try {
+      const size = Math.round((window.devicePixelRatio || 1) * 16 * tier);
+      _bitmapCache.set(key, await decodeSvg(buildSvg(typeId, inner, color, size)));
+      markDirty();
+    } catch {
+      // The canvas keeps drawing the accent letter for this icon.
+    }
+  })();
+  _loads.set(key, load);
+  return load;
 }
 
 import { getCanvasColors, resolveNoteColors } from "./canvas/theme-colors";
+import { markDirty } from "./canvas/render-state";
 
 // The exact, complete set of colors Node.ts's draw() can ever pass as
 // `accent` to getIconBitmap (its one call site) — verified against
@@ -144,20 +187,46 @@ export function noteInkColors(): string[] {
   return [...new Set(Object.values(resolveNoteColors(getCanvasColors())).map((n) => n.text))];
 }
 
-// Preload at physical pixel size (dpr * 16) so bitmaps are sharp on retina displays.
-// The canvas transform (dpr * zoom) maps 16 world-coord units to exactly these pixels at zoom=1.
+const PRELOAD_CHUNK = 24;
+const IDLE_TIMEOUT_MS = 300;
+export const ICON_WAIT_MS = 200;
+let _generation = 0;
+
+function whenIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: IDLE_TIMEOUT_MS });
+    else setTimeout(resolve, 0);
+  });
+}
+
+/**
+ * Warms every node icon for the live theme, a few at a time between idle
+ * callbacks so the work stays out of the way of first paint. Icons that are
+ * drawn before their turn are loaded on demand by getIconBitmap. A newer call
+ * (a theme switch) abandons the remaining work of an older one.
+ */
 export async function preloadAllIcons(): Promise<void> {
-  const size  = Math.round(window.devicePixelRatio * 16);
+  const generation = ++_generation;
+  const colors = accentColors();
+  const pairs: Array<[string, string]> = [];
+  for (const typeId of Object.keys(NODE_SVG_INNER)) for (const color of colors) pairs.push([typeId, color]);
+  for (const color of noteInkColors()) pairs.push(["note", color]);
+  for (let i = 0; i < pairs.length; i += PRELOAD_CHUNK) {
+    await whenIdle();
+    if (generation !== _generation) return;
+    await Promise.allSettled(pairs.slice(i, i + PRELOAD_CHUNK).map(([typeId, color]) => loadBitmap(typeId, color, 1)));
+  }
+}
+
+/** Resolves once the given node types have bitmaps for every accent color, or after `capMs`, whichever comes first, so a slow decode never holds up the caller. */
+export function ensureIcons(typeIds: Iterable<string>, capMs: number = ICON_WAIT_MS): Promise<void> {
+  const colors = accentColors();
   const tasks: Promise<void>[] = [];
-  for (const [typeId, inner] of Object.entries(NODE_SVG_INNER)) {
-    for (const color of accentColors()) {
-      tasks.push(loadBitmap(typeId, inner, color, size));
-    }
-  }
-  for (const color of noteInkColors()) {
-    tasks.push(loadBitmap("note", NODE_SVG_INNER.note, color, size));
-  }
-  await Promise.allSettled(tasks);
+  for (const typeId of new Set(typeIds)) for (const color of colors) tasks.push(loadBitmap(typeId, color, 1));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, capMs);
+    void Promise.allSettled(tasks).then(() => { clearTimeout(timer); resolve(); });
+  });
 }
 
 export function wrapIconSvg(inner: string): string {

@@ -10,27 +10,31 @@ export class SnapEngine {
     this.canvas = canvas;
   }
 
+  private addGuide(x1: number, y1: number, x2: number, y2: number): void {
+    for (const g of this.snapGuides) if (g.x1 === x1 && g.y1 === y1 && g.x2 === x2 && g.y2 === y2) return;
+    this.snapGuides.push({ x1, y1, x2, y2 });
+  }
+
   computeSnap(moving: CanvasNode): void {
-    this.snapGuides = [];
+    this.snapGuides.length = 0;
     const SNAP = 8;
     const mx = moving.data.position.x, my = moving.data.position.y;
     const mw = NODE_WIDTH, mh = moving.height;
     for (const n of this.canvas.nodes.values()) {
-      if (n.data.id === moving.data.id) continue;
+      if (n === moving || n.data.id === moving.data.id) continue;
       const nx = n.data.position.x, ny = n.data.position.y, nh = n.height;
-      for (const [a, b] of [[mx, nx], [mx, nx + NODE_WIDTH - mw], [mx + mw / 2, nx + NODE_WIDTH / 2]] as [number, number][]) {
-        if (Math.abs(a - b) < SNAP) {
-          this.snapGuides.push({ x1: b, y1: Math.min(my, ny) - 20, x2: b, y2: Math.max(my + mh, ny + nh) + 20 });
-        }
-      }
-      // y-axis (row) alignment — top edge, bottom edge, vertical center.
-      // Mirrors the x-axis loop above; needed here (unlike width) since node
-      // heights genuinely vary (e.g. Note nodes via effectiveHeight()).
-      for (const [a, b] of [[my, ny], [my, ny + nh - mh], [my + mh / 2, ny + nh / 2]] as [number, number][]) {
-        if (Math.abs(a - b) < SNAP) {
-          this.snapGuides.push({ x1: Math.min(mx, nx) - 20, y1: b, x2: Math.max(mx + mw, nx + NODE_WIDTH) + 20, y2: b });
-        }
-      }
+      const vy1 = Math.min(my, ny) - 20, vy2 = Math.max(my + mh, ny + nh) + 20;
+      if (Math.abs(mx - nx) < SNAP) this.addGuide(nx, vy1, nx, vy2);
+      const right = nx + NODE_WIDTH - mw;
+      if (Math.abs(mx - right) < SNAP) this.addGuide(right, vy1, right, vy2);
+      const midX = nx + NODE_WIDTH / 2;
+      if (Math.abs(mx + mw / 2 - midX) < SNAP) this.addGuide(midX, vy1, midX, vy2);
+      const hx1 = Math.min(mx, nx) - 20, hx2 = Math.max(mx + mw, nx + NODE_WIDTH) + 20;
+      if (Math.abs(my - ny) < SNAP) this.addGuide(hx1, ny, hx2, ny);
+      const bottom = ny + nh - mh;
+      if (Math.abs(my - bottom) < SNAP) this.addGuide(hx1, bottom, hx2, bottom);
+      const midY = ny + nh / 2;
+      if (Math.abs(my + mh / 2 - midY) < SNAP) this.addGuide(hx1, midY, hx2, midY);
     }
   }
 

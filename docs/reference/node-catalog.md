@@ -1,6 +1,6 @@
 # Node Catalog
 
-Every built-in node, generated from the engine (40 nodes, engine 0.4.4, workflow schema version 1.0). The same data is in `docs/reference/node-schemas.json` as machine-readable JSON Schema. For what each node does in practice, gotchas and examples, see the [Nodes Reference](../guide/nodes.md).
+Every built-in node, generated from the engine (41 nodes, engine 0.4.4, workflow schema version 1.0). The same data is in `docs/reference/node-schemas.json` as machine-readable JSON Schema. For what each node does in practice, gotchas and examples, see the [Nodes Reference](../guide/nodes.md).
 
 This page is generated. Do not edit it by hand; see [Regenerating the reference files](../development/testing.md#regenerating-the-reference-files).
 
@@ -190,7 +190,7 @@ Ports. In: `input` (In); Out: `output` (Out).
 | `body` | string | No | Notification message body |
 | `urgency` | string | No | Urgency level (Linux only) One of: `low`, `normal`, `critical`. Default: `normal`. |
 
-Output fields: `sent`.
+Output fields: `body`, `sent`, `title`.
 
 ### Notion
 
@@ -642,6 +642,30 @@ Ports. In: `input` (In); Out: `output` (Out).
 |---|---|---|---|
 | `duration` | number | No | How long to wait Default: `1`. |
 | `unit` | string | No | One of: `ms`, `s`, `m`, `h`. Default: `s`. |
+
+### Feed Parser
+
+`feed_parser` version 1.0.0
+
+Read an RSS, Atom or JSON Feed into normalized items, with filters, sorting, a ready-to-use digest and an option to return only items not seen in earlier runs.
+
+Ports. In: `input` (In); Out: `output` (Out).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | any | Yes | The feed content as text: an RSS, Atom or JSON Feed document, normally the body of an HTTP Request node. Required. |
+| `base_url` | string | No | Address of the feed, used to turn relative links into absolute ones. Optional. |
+| `dedup_by` | string | No | With only_new, what identifies an item. Use link or title for feeds whose ids change. One of: `id`, `link`, `title`. Default: `id`. |
+| `exclude_keywords` | string | No | Comma-separated words. Drop items whose title or summary contains any of them, ignoring case. |
+| `include_keywords` | string | No | Comma-separated words. Keep only items whose title or summary contains at least one of them, ignoring case. |
+| `max_items` | number | No | Most items to return, 1 to 500. Default: `20`. |
+| `max_text_chars` | number | No | Longest plain-text summary and content, in characters. Longer text is cut and ends with an ellipsis. Default: `2000`. |
+| `on_first_run` | string | No | With only_new, what the first run does. baseline marks every current item as seen and returns none; emit returns them. One of: `baseline`, `emit`. Default: `baseline`. |
+| `only_new` | boolean | No | Return only items not seen in earlier runs of this node. Needs the app's database; fails in a server without one. Items are marked as seen when the node runs, so an item is delivered at most once even if a later node fails. Default: `false`. |
+| `since` | string | No | Drop items dated before this ISO-8601 date or timestamp, such as 2026-10-31 or 2026-10-31T08:00:00Z. Items without a date are kept. |
+| `sort` | string | No | newest puts the most recent items first and items without a date last; feed keeps the order of the document. One of: `newest`, `feed`. Default: `newest`. |
+
+Output fields: `count`, `digest`, `feed`, `items`, `latest`, `new_count`, `total`.
 
 ### Get Variable
 

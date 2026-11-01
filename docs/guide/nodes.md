@@ -1,6 +1,6 @@
 # Nodes Reference
 
-Every built-in **[node](../glossary.md#node)** Aerini ships with: 40 in total, one entry each. Each entry lists what the node does, its config fields (with the exact label you'll see in the app), its ports, and anything worth knowing before you rely on it.
+Every built-in **[node](../glossary.md#node)** Aerini ships with: 41 in total, one entry each. Each entry lists what the node does, its config fields (with the exact label you'll see in the app), its ports, and anything worth knowing before you rely on it.
 
 This page assumes you already know what a node and a connection are. If "workflow," "node," or "trigger" aren't familiar yet, read [Concepts](../getting-started/concepts.md) first.
 
@@ -8,7 +8,7 @@ Nodes are grouped here the same way they're grouped in the app's node picker: Tr
 
 The [Node Catalog](../reference/node-catalog.md) lists the same nodes with their config fields, types, ports, and output fields, generated from the code each time the tests run. If it and this page ever disagree on a field name or type, the catalog is the one that matches the build. A running `aerini-server api` lists its own node types, plugins included, at [`GET /api/nodes`](../operations/server-api-reference.md#node-catalog-and-validation).
 
-A few things that apply across every node on this page, so they're not repeated 40 times:
+A few things that apply across every node on this page, so they're not repeated 41 times:
 
 - **Fields marked "resolved from Connections"** don't show a plain text box. They open the saved-credential picker instead, so the actual secret lives in Aerini's encrypted credential store, not typed into the node. See [Credentials](credentials.md).
 - **Any text field can take a `{{...}}` expression** to pull in a value from an earlier node, a workflow variable, or the current run. Number and dropdown (enum) fields can't, since there's nowhere in a number box to type `{{`. See [Expressions](expressions.md) for the full syntax.
@@ -147,7 +147,7 @@ Show a desktop notification on the machine running the workflow, while it runs.
 
 **Ports:** default (In → Out).
 
-**Output:** `sent`.
+**Output:** `sent`, plus the `title` and `body` that were shown, so the text stays readable in Results and History after the notification disappears.
 
 **Gotcha:** the notifier (`notify-send`, `osascript`, or PowerShell on Windows) is stopped if it has not finished after 15 seconds, and the failure (`NOTIFY_ERROR`) includes whatever it printed to stderr, such as a missing notification daemon. On Windows, Aerini first adds a per-user registry key, `HKCU\Software\Classes\AppUserModelId\Aerini`, with the display name `Aerini`, because Windows shows a notification only for an application it knows. A notification that fails is never retried.
 
@@ -831,6 +831,40 @@ Parse a JSON string into an object, or serialize an object into a JSON string.
 **Output:** `result`.
 
 **Gotcha:** with Source Node blank, these four operations read the whole run context, and `stringify` serializes every node's output, including data you may not mean to expose. The run log shows a warning each time. Set Source Node; it will become required in a future minor release. `parse` does not use it. A Source Node that names no node in the run fails with `SOURCE_NOT_FOUND`.
+
+### Feed Parser
+
+Read an RSS, Atom or JSON Feed into normalized items, with filters, sorting, a ready-to-use digest and an option to return only items not seen in earlier runs. Wire it after an HTTP Request node that fetches the feed.
+
+| Field | Label | Notes |
+|---|---|---|
+| `text` | Text | Required. The feed document as text, normally `{{HTTP Request.output.body}}`. A feed the HTTP Request node already parsed as JSON (a JSON Feed) is accepted too. Up to 10 MiB. |
+| `base_url` | Base URL | The feed's own address. Turns relative links in the feed into absolute ones. |
+| `max_items` | Max Items | Default 20, from 1 to 500. |
+| `sort` | Sort | `newest` (default) puts the most recent items first and items without a date last. `feed` keeps the document's order. |
+| `include_keywords` | Include Keywords | Comma-separated. Keep only items whose title or summary contains at least one, ignoring case. |
+| `exclude_keywords` | Exclude Keywords | Comma-separated. Drop items whose title or summary contains any, ignoring case. |
+| `since` | Since | A date or timestamp such as `2026-10-31` or `2026-10-31T08:00:00Z`. Drops older items. Items without a date are kept. |
+| `only_new` | Only New | Return only items not seen in earlier runs of this node. Default off. Needs the app's database. |
+| `on_first_run` | On First Run | With Only New. `baseline` (default) marks every current item as seen and returns none, so the first run does not flood the workflow. `emit` returns them. |
+| `dedup_by` | Dedup By | With Only New. What identifies an item: `id` (default), `link` or `title`. Use `link` or `title` for feeds whose ids change. |
+| `max_text_chars` | Max Text Chars | Longest plain-text `summary` and `content`. Default 2000. Longer text is cut and ends with an ellipsis. |
+
+**Ports:** default (In → Out).
+
+**Output:** `feed` (`title`, `link`, `description`, `language`, `updated`, `type`: `rss2`, `rss1`, `rss0`, `atom` or `json`), `items`, `latest` (the first returned item, or `null`), `count` (items returned), `total` (items in the feed before filtering), `new_count` (only with Only New: new items before the Max Items limit), `digest` (a Markdown bullet list, one `- [title](link)` line per returned item, ready for an AI Prompt, Send Email or File node). Each entry in `items` has `id`, `title`, `link`, `published`, `updated`, `author`, `authors`, `categories`, `summary`, `content`, `summary_html`, `content_html`, `image` and `enclosures` (a list of `url`, `type`, `size`). Dates are ISO-8601 timestamps, or `null` when the feed gives none.
+
+**Loop over the items:** set a Loop node's Array Field to `items` and its Source Node to this node. A Loop cannot sit inside another Loop.
+
+**Gotcha, Only New is at most once.** Items are marked as seen when this node runs. If a later node fails, those items are not offered again. To retry failed items, leave Only New off and keep your own list with Set Variable and Get Variable.
+
+**Gotcha, Only New needs a database.** The seen list lives in the workflow database, per node, up to 1000 items (the oldest are dropped first), and is removed with the workflow. Where no database is available, for example `aerini-server serve` without one, the node fails with `PERSIST_UNAVAILABLE` instead of returning every item on every run.
+
+**Gotcha, `summary_html` and `content_html` are raw feed HTML.** Do not put them into Send Email with HTML on, or into a widget, unescaped. `summary` and `content` are plain text with the tags removed.
+
+**Gotcha, encoding.** HTTP Request turns the response into text as UTF-8 before this node sees it, so a feed in another encoding (for example ISO-8859-1) can arrive with replacement characters that this node cannot repair. Feed Parser itself ignores the encoding named in the feed's XML header, because the text is already decoded.
+
+**Errors:** `MISSING_INPUT` (Text is blank), `INPUT_TOO_LARGE` (over 10 MiB), `NOT_A_FEED` (the text is not a feed, often an HTML page or an error response), `INVALID_CONFIG` (a field holds a value it cannot read), `PERSIST_UNAVAILABLE`, `STATE_ERROR` (the seen list could not be read or saved).
 
 ### Set Variable
 

@@ -14,7 +14,7 @@ function fakeNode(x: number, y: number): CanvasNode {
 
 function setup(nodes: CanvasNode[] = []) {
   const canvas = {
-    zoomIn: vi.fn(), zoomOut: vi.fn(), fitToScreen: vi.fn(), revealNode: vi.fn(), centerOn: vi.fn(), onViewportChange: vi.fn(),
+    zoomAtCenter: vi.fn(), fitToScreen: vi.fn(), revealNode: vi.fn(), centerOn: vi.fn(), onViewportChange: vi.fn(),
     nodes: new Map(nodes.map(n => [n.data.id, n])), connectors: new Map(),
     panX: 0, panY: 0, zoom: 1,
   };
@@ -42,24 +42,29 @@ describe("minimap wheel", () => {
   it("plain scroll up zooms the canvas in, scroll down zooms it out, and the page scroll is cancelled", () => {
     const { canvas, el } = setup();
     expect(wheel(el, -100).defaultPrevented).toBe(true);
-    expect(canvas.zoomIn).toHaveBeenCalledTimes(1);
+    expect(canvas.zoomAtCenter).toHaveBeenLastCalledWith(expect.closeTo(1 / 0.9, 6));
     expect(wheel(el, 100).defaultPrevented).toBe(true);
-    expect(canvas.zoomOut).toHaveBeenCalledTimes(1);
+    expect(canvas.zoomAtCenter).toHaveBeenLastCalledWith(expect.closeTo(0.9, 6));
+  });
+
+  it("many small scroll events add up to the zoom of one notch, so a trackpad is not faster than a wheel", () => {
+    const { canvas, el } = setup();
+    for (let i = 0; i < 10; i++) wheel(el, -10);
+    const total = canvas.zoomAtCenter.mock.calls.reduce((acc, [f]) => acc * f, 1);
+    expect(total).toBeCloseTo(1 / 0.9, 6);
   });
 
   it("Ctrl or Cmd + scroll leaves the canvas zoom alone and still cancels the browser's page zoom", () => {
     const { canvas, el } = setup();
     expect(wheel(el, -100, { ctrlKey: true }).defaultPrevented).toBe(true);
     expect(wheel(el, 100, { metaKey: true }).defaultPrevented).toBe(true);
-    expect(canvas.zoomIn).not.toHaveBeenCalled();
-    expect(canvas.zoomOut).not.toHaveBeenCalled();
+    expect(canvas.zoomAtCenter).not.toHaveBeenCalled();
   });
 
   it("a zero-delta wheel event changes nothing", () => {
     const { canvas, el } = setup();
     wheel(el, 0);
-    expect(canvas.zoomIn).not.toHaveBeenCalled();
-    expect(canvas.zoomOut).not.toHaveBeenCalled();
+    expect(canvas.zoomAtCenter).not.toHaveBeenCalled();
   });
 });
 

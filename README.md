@@ -10,7 +10,7 @@ Aerini is pre-1.0 and under active development. The workflow file format and int
 
 Get it at **[aerini.org](https://aerini.org/)**, or from the [Releases page](https://github.com/Panchak2d/aerini/releases) if you'd rather skip the website. Docs are at **[docs.aerini.org](https://docs.aerini.org/)**, and the source is in [`docs/`](docs/index.md). Pricing for the commercial license is at [aerini.org/pricing](https://aerini.org/pricing).
 
-**On this page:** [What it is](#what-aerini-is-and-isnt) · [Quick start](#quick-start-five-minutes) · [Use cases](#what-people-use-it-for) · [Building one](#building-one) · [Nodes](#40-nodes-seven-categories) · [Versions](#every-change-is-a-version-you-can-get-back) · [Plugins](#plugins) · [Background runs](#background-runs-and-keeping-an-eye-on-things) · [Server](#running-it-unattended) · [AI agents](#working-with-an-ai-agent) · [Engine](#using-the-engine-in-your-own-program) · [Install](#installing) · [Docs](#documentation) · [License](#license)
+**On this page:** [What it is](#what-aerini-is-and-isnt) · [Quick start](#quick-start-five-minutes) · [Use cases](#what-people-use-it-for) · [Building one](#building-one) · [Nodes](#41-nodes-seven-categories) · [Versions](#every-change-is-a-version-you-can-get-back) · [Plugins](#plugins) · [Background runs](#background-runs-and-keeping-an-eye-on-things) · [Server](#running-it-unattended) · [AI agents](#working-with-an-ai-agent) · [Engine](#using-the-engine-in-your-own-program) · [Install](#installing) · [Docs](#documentation) · [License](#license)
 
 ## What Aerini is, and isn't
 
@@ -81,6 +81,14 @@ Fetch the top Hacker News story each morning, summarise it with a model, and fil
 - **Flow:** Schedule → HTTP Request (story IDs) → HTTP Request (story detail) → AI Prompt → Notion.
 - **Keep in mind:** give the two HTTP Request nodes different names. Two nodes left with the same name make an expression such as `HTTP Request.output...` resolve to whichever comes first, silently ignoring the other. The summary needs a rich-text column in your Notion database, because the Notion node writes database properties, not a page body.
 - **Walkthrough:** [AI Pipeline](examples/AI_Pipeline___Schedule___Prompt___Notion.md).
+
+#### A private daily briefing
+
+Read an RSS or Atom feed each morning, summarize the newest unseen item with a local model, and keep it in a text file.
+
+- **Flow:** Schedule → HTTP Request → Feed Parser (Only New) → If / Condition → AI Prompt (local) → File → Desktop Notification.
+- **Needs:** Ollama and a pulled model. No API key, no Code node.
+- **Walkthrough:** [Private Daily Briefing](examples/Private_Daily_Briefing___Feed_Parser___AI.md).
 
 ### Self-hosted, running while your laptop is off
 
@@ -192,7 +200,7 @@ A few habits that save time:
 - **Keep secrets in Credentials.** Store API keys under **Settings → Credentials** and pick them from a node's Saved Credential dropdown, instead of pasting them into a field.
 - **Branch with Stop.** End a branch you don't care about with a Stop node. Other independent branches keep going.
 
-## 40 nodes, seven categories
+## 41 nodes, seven categories
 
 | Category | Nodes |
 | - | - |
@@ -202,7 +210,7 @@ A few habits that save time:
 | **Integrations** | Slack, Discord, GitHub, Google Sheets, Notion, Telegram, SendGrid, Stripe |
 | **AI** | AI Prompt, AI Agent, AI Memory, Text Splitter, Image Generation |
 | **Logic** | If / Condition, Switch, Loop (For Each), Stop, Merge, Collect Files |
-| **Utility** | Delay, Wait, Transform Data, JSON, Set Variable, Get Variable, Text to File, Output |
+| **Utility** | Delay, Wait, Transform Data, JSON, Feed Parser, Set Variable, Get Variable, Text to File, Output |
 
 Notes on a few of them:
 
@@ -271,7 +279,7 @@ Start with the [MCP Quickstart](docs/operations/mcp-quickstart.md), which needs 
 
 ## Using the engine in your own program
 
-`aerini-engine` is a plain Rust crate: no Tauri, no UI dependency. Pull it into your own program, register your own nodes alongside or instead of the 40 built-ins, supply your own credential resolver and event sink, and run workflows headless. It's the same engine behind the desktop app and `aerini-server`, so retries, parallel execution, expressions, and plugins all behave the same way embedded as they do anywhere else.
+`aerini-engine` is a plain Rust crate: no Tauri, no UI dependency. Pull it into your own program, register your own nodes alongside or instead of the 41 built-ins, supply your own credential resolver and event sink, and run workflows headless. It's the same engine behind the desktop app and `aerini-server`, so retries, parallel execution, expressions, and plugins all behave the same way embedded as they do anywhere else.
 
 See [Embedding aerini-engine](docs/development/embedding.md) for a working example and what's safe to depend on across versions.
 

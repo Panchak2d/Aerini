@@ -5,6 +5,9 @@ import { historyShortcut } from "./UndoManager";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 import { isMonitorModeActive } from "../monitor-mode";
 import { storageGet } from "../safe-storage";
+import { markDirty } from "./render-state";
+import { cancelCamera } from "./camera";
+import { WheelInterpreter, type ScrollMode } from "./wheel";
 
 /** Screen pixels a pressed port must travel before the press becomes a drag. */
 const PORT_DRAG_THRESHOLD = 4;
@@ -48,6 +51,10 @@ export class InputHandler {
 
   shiftHeld = false;
 
+  private readonly wheel = new WheelInterpreter();
+  private hoverPending: { sx: number; sy: number } | null = null;
+  private snapToGrid = false;
+
   _multiDragFrom: Map<string, { x: number; y: number }> | null = null;
 
   lastPinchDist = 0;
@@ -64,7 +71,16 @@ export class InputHandler {
     this.canvas = canvas;
   }
 
+  setScrollMode(mode: ScrollMode): void { this.wheel.mode = mode; }
+
+  private setCursor(v: string): void {
+    const style = this.canvas.el.style;
+    if (style.cursor !== v) style.cursor = v;
+  }
+
   onKey(e: KeyboardEvent): void {
+    markDirty();
+    cancelCamera(this.canvas);
     if (isMonitorModeActive()) return;
     const activeEl = document.activeElement;
     const inInput = activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement
@@ -118,7 +134,7 @@ export class InputHandler {
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       c.pendingInsert = null; c.insertGhost = null;
       c._pendingInputWireDrop = null;
-      c.clearSelection(); c.el.style.cursor = "default";
+      c.clearSelection(); this.setCursor("default");
     }
   }
 
@@ -173,13 +189,16 @@ export class InputHandler {
   }
 
   onDown(e: MouseEvent): void {
+    markDirty();
+    cancelCamera(this.canvas);
+    this.hoverPending = null;
     e.preventDefault();
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);
 
     this.wireDeletePress = null;
-    if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; c.el.style.cursor = "crosshair"; return; }
+    if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; this.setCursor("crosshair"); return; }
     if (e.button === 1) { this.startPan(sx, sy); return; }
     if (e.button !== 0) return;
 
@@ -214,6 +233,7 @@ export class InputHandler {
       this.draggingNode = n;
       this.dragOffX = wx - n.data.position.x; this.dragOffY = wy - n.data.position.y;
       this.dragFromX = n.data.position.x; this.dragFromY = n.data.position.y;
+      this.snapToGrid = storageGet("aerini_grid_snap") === "true";
       if (c.selectedNodes.size > 1) {
         this._multiDragFrom = new Map();
         for (const id of c.selectedNodes) {
@@ -223,7 +243,7 @@ export class InputHandler {
       } else {
         this._multiDragFrom = null;
       }
-      this.didDrag = false; c.el.style.cursor = "grab"; return;
+      this.didDrag = false; this.setCursor("grab"); return;
     }
 
     // Wire click
@@ -234,7 +254,7 @@ export class InputHandler {
     // Empty space: Shift = box-select, plain = pan + deselect
     if (e.shiftKey) {
       this.isBoxSel = true; this.bx0 = wx; this.by0 = wy; this.bx1 = wx; this.by1 = wy;
-      c.el.style.cursor = "crosshair";
+      this.setCursor("crosshair");
     } else {
       c.clearSelection();
       this.startPan(sx, sy);
@@ -244,7 +264,7 @@ export class InputHandler {
   startPan(sx: number, sy: number): void {
     this.isPanning = true; this.panStartX = sx; this.panStartY = sy;
     this.panOriginX = this.canvas.panX; this.panOriginY = this.canvas.panY;
-    this.canvas.el.style.cursor = "grabbing";
+    this.setCursor("grabbing");
   }
 
   /** The wire a drag from this input would pick up: the sole wire on a single-arity input. */
@@ -281,7 +301,7 @@ export class InputHandler {
       this.pendingConn = new PendingConnector(press.node, press.port, port.x, port.y, this.moveGroup ? "move" : "forward");
     }
     this.pendingConn.toX = wx; this.pendingConn.toY = wy;
-    c.el.style.cursor = "crosshair";
+    this.setCursor("crosshair");
     return true;
   }
 
@@ -313,11 +333,12 @@ export class InputHandler {
 
   onWinMove(e: MouseEvent): void {
     if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
-    const r = this.canvas.el.getBoundingClientRect();
+    const r = this.canvas.cachedRect();
     this._move(e, e.clientX - r.left, e.clientY - r.top);
   }
 
   _move(_e: MouseEvent, sx: number, sy: number): void {
+    markDirty();
     const c = this.canvas;
     const { x: wx, y: wy } = c.s2w(sx, sy);
     if (c.pendingInsert) c.insertGhost = { x: wx, y: wy };
@@ -325,23 +346,23 @@ export class InputHandler {
     if (this.isPanning) {
       c.panX = this.panOriginX + (sx - this.panStartX);
       c.panY = this.panOriginY + (sy - this.panStartY);
-      c.el.style.cursor = "grabbing"; return;
+      this.setCursor("grabbing"); return;
     }
     if (this.isCutting) { this.cutPath.push({ x: wx, y: wy }); return; }
 
     if (this.wireDeletePress) {
       const over = c.deleteHandleAt(wx, wy) === this.wireDeletePress;
       c.deleteHandleHot = over;
-      c.el.style.cursor = over ? "pointer" : "default";
+      this.setCursor(over ? "pointer" : "default");
       return;
     }
 
     if (this.portPress && !this.promotePortPress(sx, sy, wx, wy)) return;
 
     if (this.draggingNode) {
-      this.didDrag = true;
+      if (!this.didDrag) { this.didDrag = true; c.onCanvasChanged?.(); }
       let nx = wx - this.dragOffX, ny = wy - this.dragOffY;
-      if (storageGet("aerini_grid_snap") === "true") {
+      if (this.snapToGrid) {
         const G = 20;
         nx = Math.round(nx / G) * G;
         ny = Math.round(ny / G) * G;
@@ -353,7 +374,7 @@ export class InputHandler {
         this.draggingNode.data.position.x = nx; this.draggingNode.data.position.y = ny;
         this.draggingNode.updatePortPositions(); c.snap.computeSnap(this.draggingNode);
       }
-      c.onCanvasChanged?.(); c.el.style.cursor = "grabbing"; return;
+      this.setCursor("grabbing"); return;
     }
 
     if (this.pendingConn) {
@@ -365,20 +386,33 @@ export class InputHandler {
       this.bx1 = wx; this.by1 = wy;
       const x1 = Math.min(this.bx0, wx), y1 = Math.min(this.by0, wy), x2 = Math.max(this.bx0, wx), y2 = Math.max(this.by0, wy);
       for (const n of c.nodes.values()) {
-        const ins = n.data.position.x >= x1 && n.data.position.x <= x2 && n.data.position.y >= y1 && n.data.position.y <= y2;
+        const p = n.data.position;
+        const ins = p.x + NODE_WIDTH >= x1 && p.x <= x2 && p.y + n.height >= y1 && p.y <= y2;
         n.selected = ins; if (ins) c.selectedNodes.add(n.data.id); else c.selectedNodes.delete(n.data.id);
       }
       return;
     }
 
+    this.hoverPending = { sx, sy };
+  }
+
+  /** Runs the hover hit-tests for the last pointer position, once per frame from the canvas loop. */
+  flushHover(): void {
+    const pending = this.hoverPending;
+    if (!pending) return;
+    this.hoverPending = null;
+    if (this.isGestureActive()) return;
+    const c = this.canvas;
+    const { x: wx, y: wy } = c.s2w(pending.sx, pending.sy);
+    markDirty();
     this.updateWireHover(wx, wy);
     c.deleteHandleHot = !!c.deleteHandleAt(wx, wy);
     if (c.deleteHandleHot) {
       for (const n of c.nodes.values()) n.hovered = false;
-      c.el.style.cursor = "pointer"; return;
+      this.setCursor("pointer"); return;
     }
 
-    if (c.wireHandleAt(wx, wy)) { c.el.style.cursor = "grab"; return; }
+    if (c.wireHandleAt(wx, wy)) { this.setCursor("grab"); return; }
 
     let any = false;
     for (const n of c.nodes.values()) {
@@ -386,21 +420,22 @@ export class InputHandler {
       if (n.hovered) {
         any = true;
         const port = n.portAtPoint(wx, wy);
-        c.el.style.cursor = !port ? "grab" : port.isInput && this.pickupWire(n.data.id, port.id) ? "grab" : "crosshair";
+        this.setCursor(!port ? "grab" : port.isInput && this.pickupWire(n.data.id, port.id) ? "grab" : "crosshair");
       }
     }
-    if (!any) c.el.style.cursor = this.shiftHeld ? "crosshair" : "default";
+    if (!any) this.setCursor(this.shiftHeld ? "crosshair" : "default");
   }
 
   onUp(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._up(e, sx, sy); }
 
   onWinUp(e: MouseEvent): void {
     if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
-    const r = this.canvas.el.getBoundingClientRect();
+    const r = this.canvas.cachedRect();
     this._up(e, e.clientX - r.left, e.clientY - r.top);
   }
 
   _up(_e: MouseEvent, sx: number, sy: number): void {
+    markDirty();
     const c = this.canvas;
     const { x: wx, y: wy } = c.s2w(sx, sy);
 
@@ -409,13 +444,13 @@ export class InputHandler {
       this.wireDeletePress = null;
       if (c.deleteHandleAt(wx, wy) === pressed) c.deleteConnector(pressed);
       c.deleteHandleHot = false;
-      c.el.style.cursor = "default";
+      this.setCursor("default");
       return;
     }
 
     if (c.pendingInsert && sx >= 0 && sy >= 0) {
       c.placeNode(c.pendingInsert, sx, sy);
-      c.pendingInsert = null; c.insertGhost = null; c.el.style.cursor = "default"; return;
+      c.pendingInsert = null; c.insertGhost = null; this.setCursor("default"); return;
     }
     c.pendingInsert = null; c.insertGhost = null;
 
@@ -429,11 +464,11 @@ export class InputHandler {
       return;
     }
 
-    if (this.isPanning) { this.isPanning = false; c.el.style.cursor = "default"; c.onViewportChange?.(); return; }
+    if (this.isPanning) { this.isPanning = false; this.setCursor("default"); c.onViewportChange?.(); return; }
 
     if (this.isCutting) {
       if (c.doCut().length) c.onCanvasChanged?.();
-      this.isCutting = false; this.cutPath = []; c.el.style.cursor = "default"; return;
+      this.isCutting = false; this.cutPath = []; this.setCursor("default"); return;
     }
 
     if (this.pendingConn) {
@@ -457,7 +492,7 @@ export class InputHandler {
         c._pendingWireDrop = { fromNode, fromPort, wx, wy };
         c.onWireDropRequest?.(fromNode, fromPort, wx, wy);
       }
-      this.reconnEdge = null; this.pendingConn = null; this.moveGroup = null; c.el.style.cursor = "default"; return;
+      this.reconnEdge = null; this.pendingConn = null; this.moveGroup = null; this.setCursor("default"); return;
     }
 
     if (this.draggingNode) {
@@ -482,11 +517,12 @@ export class InputHandler {
           }
         }
       }
+      if (this.didDrag) c.onCanvasChanged?.();
       this._multiDragFrom = null;
-      this.draggingNode = null; c.el.style.cursor = "default"; return;
+      this.draggingNode = null; this.setCursor("default"); return;
     }
 
-    if (this.isBoxSel) { this.isBoxSel = false; c.el.style.cursor = this.shiftHeld ? "crosshair" : "default"; }
+    if (this.isBoxSel) { this.isBoxSel = false; this.setCursor(this.shiftHeld ? "crosshair" : "default"); }
   }
 
   /** True while a drag, wire pull, box-select, pan or cut is in progress. */
@@ -501,12 +537,15 @@ export class InputHandler {
   }
 
   onLeave(): void {
+    markDirty();
+    this.hoverPending = null;
     this.clearWireHover();
     if (!this.isPanning && !this.draggingNode && !this.isCutting)
       for (const n of this.canvas.nodes.values()) n.hovered = false;
   }
 
   onRightClick(e: MouseEvent): void {
+    markDirty();
     if (this.portPress || this.pendingConn) return;
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
@@ -535,6 +574,7 @@ export class InputHandler {
   }
 
   onDbl(e: MouseEvent): void {
+    markDirty();
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);
@@ -549,37 +589,75 @@ export class InputHandler {
   }
 
   onWheel(e: WheelEvent): void {
+    markDirty();
+    cancelCamera(this.canvas);
     e.preventDefault();
     const c = this.canvas;
+    this.hoverPending = null;
     this.clearWireHover();
-    const r = c.el.getBoundingClientRect();
+    const r = c.cachedRect();
+    const action = this.wheel.interpret(e, r.height, performance.now());
+    if (action.kind === "pan") {
+      c.panX -= action.dx; c.panY -= action.dy;
+      c.onViewportChange?.();
+      return;
+    }
     const sx = e.clientX - r.left, sy = e.clientY - r.top;
     const { x: wx, y: wy } = c.s2w(sx, sy);
-    const isPinch = e.ctrlKey;
-    const factor  = e.deltaY > 0 ? (isPinch ? 0.95 : 0.90) : (isPinch ? 1 / 0.95 : 1 / 0.90);
-    const nz = Math.min(c.MAX_ZOOM, Math.max(c.MIN_ZOOM, c.zoom * factor));
+    const nz = Math.min(c.MAX_ZOOM, Math.max(c.MIN_ZOOM, c.zoom * action.factor));
     c.panX = sx - wx * nz; c.panY = sy - wy * nz; c.zoom = nz;
     c.onZoomChange?.(c.zoom);
     c.onViewportChange?.();
   }
 
+  /** Ends every gesture in flight when the window loses focus or is hidden, because the matching mouseup will never arrive. A node drag goes back to where it started. */
+  cancelGestures(): void {
+    const c = this.canvas;
+    if (this.draggingNode) {
+      if (this._multiDragFrom) {
+        for (const [id, from] of this._multiDragFrom) {
+          const n = c.nodes.get(id);
+          if (n) { n.data.position.x = from.x; n.data.position.y = from.y; n.updatePortPositions(); }
+        }
+      } else {
+        this.draggingNode.data.position.x = this.dragFromX;
+        this.draggingNode.data.position.y = this.dragFromY;
+        this.draggingNode.updatePortPositions();
+      }
+    }
+    this.draggingNode = null; this.didDrag = false; this._multiDragFrom = null;
+    this.isPanning = false; this.isPinching = false;
+    this.pendingConn = null; this.reconnEdge = null; this.portPress = null; this.moveGroup = null;
+    this.wireDeletePress = null; c.deleteHandleHot = false;
+    this.isCutting = false; this.cutPath = [];
+    this.isBoxSel = false;
+    this.shiftHeld = false; c.el.classList.remove("shift-held");
+    c.snap.snapGuides = [];
+    this.hoverPending = null;
+    this.setCursor("default");
+    markDirty();
+  }
+
   onTouchStart(e: TouchEvent): void {
+    markDirty();
+    cancelCamera(this.canvas);
     const c = this.canvas;
     if (e.touches.length === 2) {
       e.preventDefault(); this.isPinching = true;
       this.lastPinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
     } else if (e.touches.length === 1) {
-      const r = c.el.getBoundingClientRect();
+      const r = c.cachedRect();
       this.startPan(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top);
     }
   }
 
   onTouchMove(e: TouchEvent): void {
+    markDirty();
     e.preventDefault();
     const c = this.canvas;
     if (e.touches.length === 2 && this.isPinching) {
       const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      const r    = c.el.getBoundingClientRect();
+      const r    = c.cachedRect();
       const cx   = ((e.touches[0].clientX + e.touches[1].clientX) / 2) - r.left;
       const cy   = ((e.touches[0].clientY + e.touches[1].clientY) / 2) - r.top;
       const { x: wx, y: wy } = c.s2w(cx, cy);
@@ -590,12 +668,12 @@ export class InputHandler {
       c.onZoomChange?.(c.zoom);
       c.onViewportChange?.();
     } else if (e.touches.length === 1 && this.isPanning) {
-      const r  = c.el.getBoundingClientRect();
+      const r  = c.cachedRect();
       const sx = e.touches[0].clientX - r.left, sy = e.touches[0].clientY - r.top;
       c.panX = this.panOriginX + (sx - this.panStartX);
       c.panY = this.panOriginY + (sy - this.panStartY);
     }
   }
 
-  onTouchEnd(): void { this.isPinching = false; this.isPanning = false; }
+  onTouchEnd(): void { markDirty(); this.isPinching = false; this.isPanning = false; }
 }

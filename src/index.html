@@ -502,8 +502,8 @@
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Canvas</div>
           <div class="shortcut-row"><span>Search / Command palette</span><div class="shortcut-keys"><kbd>Space</kbd><kbd>Ctrl+K</kbd></div></div>
-          <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd></div></div>
-          <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd></div></div>
+          <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd><kbd>Trackpad scroll</kbd><kbd>Shift+Scroll</kbd></div></div>
+          <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd><kbd>Ctrl+Scroll</kbd><kbd>Pinch</kbd></div></div>
           <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
           <div class="shortcut-row"><span>Toggle minimap <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>M</kbd></div></div>
           <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
@@ -621,6 +621,14 @@
           <div class="settings-row">
             <div><div class="settings-label">Grid snap</div><div class="settings-desc">Snap nodes to grid while dragging</div></div>
             <input type="checkbox" id="setting-grid-snap" class="settings-toggle" />
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Scroll wheel</div><div class="settings-desc">What scrolling over the canvas does. Auto pans with a trackpad and zooms with a mouse wheel; Ctrl+scroll and pinch always zoom, Shift+scroll pans sideways</div></div>
+            <select id="setting-scroll-wheel" class="settings-select">
+              <option value="auto">Auto</option>
+              <option value="zoom">Zoom</option>
+              <option value="pan">Pan</option>
+            </select>
           </div>
           <div class="settings-row">
             <div><div class="settings-label">Auto-fit on load</div><div class="settings-desc">Fit viewport to workflow when loading</div></div>

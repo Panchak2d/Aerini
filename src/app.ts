@@ -25,7 +25,9 @@ import { initSidebarSections, bindSectionSearchToggles, bindWorkflowSectionContr
 import { setMonitorWfManager } from "./panels/MonitorPanel";
 import { isTauri } from "./utils";
 import { invoke } from "@tauri-apps/api/core";
-import { preloadAllIcons } from "./icon-cache";
+import { preloadAllIcons, ensureIcons } from "./icon-cache";
+import { createReveal } from "./startup-reveal";
+import { showToast } from "./toast";
 
 import { showConfirm } from "./confirm";
 import { initInterpolationAutocomplete } from "./interpolation";
@@ -41,6 +43,8 @@ import { loadBgPanel, getBgPanelIfLoaded } from "./bg-panel-loader";
 import type { ChatPanel as ChatPanelType } from "./panels/ChatPanel";
 import { initTheme } from "./theme";
 import { bindExternalLinks } from "./external-links";
+import { createViewportPersist } from "./viewport-persist";
+import { storageSet } from "./safe-storage";
 
 // applied as the very first thing this module does, ahead of every
 // function declaration and ahead of init()'s own call at the bottom of this
@@ -51,17 +55,15 @@ initTheme();
 // ── App bootstrap ─────────────────────────────────────────────────────────────
 
 async function init() {
-  preloadAllIcons(); // fire-and-forget: canvas falls back to accent letter until bitmaps ready
+  const reveal = isTauri() ? createReveal(() => { invoke("show_main_window").catch(console.error); }) : null;
+  const nodeTypes = getNodeTypes().catch((): NodeDescriptor[] => []);
+  void preloadAllIcons();
   initTooltips();
 
-  // Restore the active sidebar zone synchronously, before any await below.
   // index.html ships #zone-nodes as the hardcoded default `active` zone; this
-  // call corrects it to the last-used zone (e.g. "bgruns" if a background job
-  // was running last session). It must run before the getNodeTypes() IPC
-  // round-trip — otherwise the static default stays visibly active until
-  // that call resolves, producing a flash of the wrong zone on startup. That
-  // window is negligible under `vite dev`'s HMR server but long enough to be
-  // visible in a production/Tauri cold start.
+  // corrects it to the last-used zone (e.g. "bgruns" if a background job was
+  // running last session). It runs before the first await so the static
+  // default is never visible while the node list loads.
   initSidebarSections();
 
   // Lazy BgJobsPanel — deferred after first paint
@@ -69,30 +71,12 @@ async function init() {
     if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 200 });
     else setTimeout(fn, 0);
   }
-  const allNodes = await getNodeTypes().catch((): NodeDescriptor[] => []);
-  registerNodeDescriptors(allNodes);
-
   const canvasEl   = document.getElementById("canvas") as HTMLCanvasElement;
   const canvas     = new Canvas(canvasEl);
   // Expose canvas on the DOM element so popover positioning can access zoom/pan
   (canvasEl as unknown as Record<string, unknown>).__canvas = canvas;
 
-  // Window is created hidden (tauri.conf.json) to avoid a flash of the desktop
-  // showing through before content paints. Reveal it only once the browser has
-  // actually drawn the first real frame (two rAFs = layout + paint committed).
-  if (isTauri()) {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      invoke("show_main_window").catch(console.error);
-    }));
-  }
-
-  function toast(msg: string, type: "success" | "error" | "info" | "warning" = "info") {
-    const colors = { success: "var(--green)", error: "var(--red)", info: "var(--blue)", warning: "var(--amber)" };
-    const t = document.createElement("div");
-    t.className = "toast"; t.style.background = colors[type]; t.textContent = msg;
-    document.body.appendChild(t);
-    setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 300); }, 2800);
-  }
+  const toast = showToast;
 
   function setStatus(m: string) {
     const el = document.getElementById("status-text"); if (el) el.textContent = m;
@@ -114,16 +98,15 @@ async function init() {
     el.textContent = hint; el.title = hint;
   }
 
-  // Persist viewport per workflow so zoom/pan survive workflow switches
-  canvas.onViewportChange = () => {
-    if (!wfManager.currentId) return;
-    try {
-      localStorage.setItem(
-        `aerini_viewport_${wfManager.currentId}`,
-        JSON.stringify({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom })
-      );
-    } catch { /* storage full or unavailable — viewport simply isn't remembered */ }
-  };
+  const viewportPersist = createViewportPersist({
+    currentId: () => wfManager.currentId,
+    read: () => ({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom }),
+    write: storageSet,
+  });
+  canvas.onViewportChange = viewportPersist.note;
+  canvas.onNodesReplaced = viewportPersist.flush;
+  window.addEventListener("pagehide", viewportPersist.flush);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") viewportPersist.flush(); });
 
   if (!isTauri()) {
     setTimeout(() => {
@@ -291,6 +274,8 @@ async function init() {
     (document.getElementById("node-search") as HTMLInputElement)?.blur();
   }, { capture: true });
 
+  const allNodes = await nodeTypes;
+  registerNodeDescriptors(allNodes);
   buildSidebarPalette(allNodes, canvas, setStatus);
   bindSidebarSearch();
   document.querySelectorAll<HTMLElement>(".cat-chip").forEach(chip => {
@@ -304,6 +289,7 @@ async function init() {
       // An import is always a new workflow: keeping the file's own id would overwrite any stored workflow exported from the same source.
       const id   = `wf_${crypto.randomUUID()}`;
       const name = uniqueWorkflowName(await wfManager.listWorkflowNames(), doc.name);
+      await ensureIcons(Array.from(nodes.values(), n => n.data.node_type_id));
       canvas.nodes = nodes; canvas.connectors = connectors;
       canvas.clearSelection();
       canvas.warnArityViolations();
@@ -326,9 +312,6 @@ async function init() {
       wfManager.onNavigate?.();
       wfManager.refreshWorkflowList();
       const renamed = name !== doc.name ? ` (name "${doc.name}" was already taken)` : "";
-      // One toast either way — this app has no toast queue/stacking, so a
-      // second call right after would just render on top of the first at
-      // the same fixed position (see .toast in base.css).
       if (importWarnings.length) toast(`Imported "${name}"${renamed} — ${importWarnings.join(" ")}`, "warning");
       else toast(`Imported "${name}"${renamed}`, "success");
       return true;
@@ -374,6 +357,7 @@ async function init() {
   );
 
   await wfManager.refreshWorkflowList();
+  if (reveal) void Promise.allSettled([document.fonts?.ready]).then(reveal.afterPaint);
 
   bindSectionSearchToggles();
   bindWorkflowSectionControls((sortMode) => wfManager.setSortMode(sortMode), (query) => wfManager.setSearchQuery(query));

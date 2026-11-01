@@ -22,7 +22,7 @@ can be merged. See [CLA.md](CLA.md) Section C8 for instructions. See
 ## Architecture
 
 ```
-aerini-engine/     core library: Node trait, executor, scheduler, DB, 40 nodes
+aerini-engine/     core library: Node trait, executor, scheduler, DB, 41 nodes
 src-tauri/        Tauri shell: IPC commands, tray, app lifecycle
 aerini-server/     headless binary for server-side workflow execution
 src/              TypeScript/Vite frontend (vanilla TS, no framework)
@@ -71,7 +71,7 @@ npm run build:unsigned   # installers → src-tauri/target/release/bundle/
 
 ## Adding a new node
 
-All 40 built-in nodes follow the same pattern. Copy any existing node file as a starting point
+All 41 built-in nodes follow the same pattern. Copy any existing node file as a starting point
 (e.g. `aerini-engine/src/nodes/delay.rs` for a simple action node).
 
 ### 1. Create the file
@@ -181,7 +181,7 @@ Adding is fine. Renaming or removing breaks the TypeScript frontend.
 `NodeDescriptor`, `ScheduledJobRow`, `SchedulerStatusEvent`, `SchedulerError`, `PortConflict`,
 `CredentialEntry`, `RunRecord`, `VersionRow`, `TriggerKind`.
 
-**`async_trait` impls:** all 40 `impl Node for X`, both `CredentialResolver` impls,
+**`async_trait` impls:** all 41 `impl Node for X`, both `CredentialResolver` impls,
 both `SchedulerDb` impls, all `EventSink` impls. Zero direct call sites is intentional
 (dyn dispatch). Do not remove any impl even if nothing visibly calls it.
 

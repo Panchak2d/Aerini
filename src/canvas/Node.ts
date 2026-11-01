@@ -1,7 +1,8 @@
 import type { NodeDescriptor, PortDefinition } from "../ipc/workflow";
 import { NODE_IDS, DANGEROUS_NODE_IDS } from "../node-ids";
 import { getIconBitmap } from "../icon-cache";
-import { getCanvasColors, tileTint, resolveNoteColors } from "./theme-colors";
+import { getCanvasColors, tileTint, resolveNoteColors, withAlpha } from "./theme-colors";
+import { markDirty } from "./render-state";
 import { isPluginNodeType, isUnregisteredNodeType, isTriggerNodeType } from "./node-registry";
 
 export interface CanvasNodeData {
@@ -83,16 +84,33 @@ export function statusAccent(status: CanvasNode["status"], colors: ReturnType<ty
 export class CanvasNode {
   data: CanvasNodeData;
   ports: Port[] = [];
-  selected  = false;
-  hovered   = false;
-  status: "idle" | "running" | "success" | "error" = "idle";
+  private _selected = false;
+  private _hovered = false;
+  private _status: "idle" | "running" | "success" | "error" = "idle";
+  private _missingRequired = false;
+  private _outputPreview: string | null = null;
+  private _showOutput = false;
+
+  get selected(): boolean { return this._selected; }
+  set selected(v: boolean) { if (v !== this._selected) { this._selected = v; markDirty(); } }
+
+  get hovered(): boolean { return this._hovered; }
+  set hovered(v: boolean) { if (v !== this._hovered) { this._hovered = v; markDirty(); } }
+
+  get status(): "idle" | "running" | "success" | "error" { return this._status; }
+  set status(v: "idle" | "running" | "success" | "error") { if (v !== this._status) { this._status = v; markDirty(); } }
+
   // True when this node has a required config field left empty after its
   // popover was closed. Cleared on a successful run.
-  missingRequired = false;
+  get missingRequired(): boolean { return this._missingRequired; }
+  set missingRequired(v: boolean) { if (v !== this._missingRequired) { this._missingRequired = v; markDirty(); } }
 
   // Output preview (set after execution)
-  outputPreview: string | null = null;
-  showOutput    = false;
+  get outputPreview(): string | null { return this._outputPreview; }
+  set outputPreview(v: string | null) { if (v !== this._outputPreview) { this._outputPreview = v; markDirty(); } }
+
+  get showOutput(): boolean { return this._showOutput; }
+  set showOutput(v: boolean) { if (v !== this._showOutput) { this._showOutput = v; markDirty(); } }
 
   // Running animation phase (0–1, loops)
   private _runPhase = 0;
@@ -108,6 +126,7 @@ export class CanvasNode {
 
   get disabled(): boolean { return this._disabled; }
   set disabled(v: boolean) {
+    if (v !== this._disabled) markDirty();
     this._disabled = v;
     this.data.disabled = v;
   }
@@ -242,10 +261,10 @@ export class CanvasNode {
     if (this.disabled) ctx.globalAlpha = 0.35;
 
     if (this.selected) {
-      drawCornerBrackets(ctx, x, y, w, h, accent + "88", 2);
+      drawCornerBrackets(ctx, x, y, w, h, withAlpha(accent, "88"), 2);
     } else if (this.hovered) {
       roundedRect(ctx, x - 2, y - 2, w + 4, h + 4, radii);
-      ctx.strokeStyle = colors.border + "b0";
+      ctx.strokeStyle = withAlpha(colors.border, "b0");
       ctx.lineWidth   = 1.5;
       ctx.stroke();
     }
@@ -256,8 +275,8 @@ export class CanvasNode {
     ctx.strokeStyle = this.selected
       ? accent
       : this.hovered
-      ? colors.border + "99"
-      : colors.border + "80";
+      ? withAlpha(colors.border, "99")
+      : withAlpha(colors.border, "80");
     ctx.lineWidth = this.selected ? 1.5 : 1;
     ctx.stroke();
 
@@ -388,8 +407,8 @@ export class CanvasNode {
       // Port fill — solid when connected, hollow when empty
       ctx.beginPath();
       ctx.arc(port.x, port.y, PORT_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle   = isConnected ? accent + "cc" : colors.surface2;
-      ctx.strokeStyle = accent + "cc";
+      ctx.fillStyle   = isConnected ? withAlpha(accent, "cc") : colors.surface2;
+      ctx.strokeStyle = withAlpha(accent, "cc");
       ctx.lineWidth   = 1.5;
       ctx.fill();
       ctx.stroke();
@@ -397,7 +416,7 @@ export class CanvasNode {
       // Port dot — full opacity when connected, dim when empty
       ctx.beginPath();
       ctx.arc(port.x, port.y, 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = isConnected ? accent : accent + "33";
+      ctx.fillStyle = isConnected ? accent : withAlpha(accent, "33");
       ctx.fill();
 
       // Port label
@@ -418,13 +437,13 @@ export class CanvasNode {
       ctx.beginPath();
       ctx.moveTo(x + 3, previewY);
       ctx.lineTo(x + w, previewY);
-      ctx.strokeStyle = colors.border + "30";
+      ctx.strokeStyle = withAlpha(colors.border, "30");
       ctx.lineWidth   = 1;
       ctx.stroke();
 
       // Preview text
       ctx.font         = "11px 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-      ctx.fillStyle    = colors.actionRun + "88";
+      ctx.fillStyle    = withAlpha(colors.actionRun, "88");
       ctx.textBaseline = "middle";
       ctx.textAlign    = "left";
       ctx.fillText(trunc(this.outputPreview, 28), x + 10, previewY + 17);

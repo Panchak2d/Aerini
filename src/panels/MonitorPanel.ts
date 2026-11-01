@@ -6,6 +6,7 @@ import {
   type WorkflowSummary,
 } from "../ipc/workflow";
 import { getBgJobs } from "../run-manager";
+import { showToast } from "../toast";
 import { isWorkflowRunning, type WorkflowManager } from "../workflow-manager";
 import { getMemoryBreakdown, getProcessMemory, type RunBreakdown } from "../ipc/memory";
 import { getRecentPerformance } from "../ipc/performance";
@@ -811,20 +812,4 @@ function startCountdown(rowId: string, nextRunAt: string, el: HTMLElement): void
     update();
   }, 1000);
   _countdownIntervals.set(rowId, id);
-}
-
-let _toastCount = 0;
-function showToast(msg: string, type: "success" | "error" | "info" = "info"): void {
-  const colors = { success: "var(--green)", error: "var(--red)", info: "var(--blue)" };
-  const t = document.createElement("div");
-  t.className = "toast";
-  t.style.background = colors[type];
-  t.style.bottom = `${34 + _toastCount * 44}px`; // stack above any toast already showing instead of overlapping it — Start All/Stop All can now fire several at once
-  t.textContent = msg;
-  document.body.appendChild(t);
-  _toastCount++;
-  setTimeout(() => {
-    t.style.opacity = "0";
-    setTimeout(() => { t.remove(); _toastCount--; }, 300);
-  }, 2800);
 }

@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { serialize, deserialize, type ChatSettings, type WorkflowDocument, DEFAULT_CHAT_SETTINGS } from "./canvas/CanvasSerializer";
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
+import { ensureIcons } from "./icon-cache";
 import type { Connector } from "./canvas/Connector";
 import { isTauri } from "./utils";
 import { isWorkflowNameTaken } from "./workflow-names";
@@ -1627,6 +1628,7 @@ export class WorkflowManager {
       this.chatSettings = chatSettings;
       this.currentTags = tags;
       this.currentCollectionId = collectionId;
+      await ensureIcons(Array.from(nodes.values(), n => n.data.node_type_id));
       this.canvas.nodes = nodes; this.canvas.connectors = connectors;
       this.canvas.clearSelection();
       this.canvas.warnArityViolations();

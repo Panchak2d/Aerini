@@ -1,0 +1,249 @@
+{
+  "schema_version": "1.0",
+  "id": "private-daily-briefing-feed-parser-ai-2611011101",
+  "name": "Private Daily Briefing (Feed Parser + AI)",
+  "description": "Every morning: fetch an RSS or Atom feed, keep only the newest item not seen before, have a local model summarize it in two sentences, and append the summary to a text file and show a notification. Quiet when there is nothing new. No Code node, no cloud AI.",
+  "nodes": [
+    {
+      "id": "daily",
+      "node_type_id": "schedule",
+      "node_type": "action",
+      "name": "Every Morning",
+      "config": {
+        "mode": "cron",
+        "cron_expr": "0 8 * * *"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 0.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "fetch",
+      "node_type_id": "http_request",
+      "node_type": "action",
+      "name": "Fetch Feed",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/feed.xml"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 340.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "feed",
+      "node_type_id": "feed_parser",
+      "node_type": "utility",
+      "name": "Newest Item",
+      "config": {
+        "text": "{{Fetch Feed.output.body}}",
+        "base_url": "https://example.com/feed.xml",
+        "only_new": true,
+        "on_first_run": "baseline",
+        "max_items": 1
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 680.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "any",
+      "node_type_id": "if_condition",
+      "node_type": "logic",
+      "name": "Anything New",
+      "config": {
+        "condition": "{{Newest Item.output.count}} > 0"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1020.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "sum",
+      "node_type_id": "ai_prompt",
+      "node_type": "ai",
+      "name": "Summarize",
+      "config": {
+        "provider": "local",
+        "base_url": "http://localhost:11434/v1",
+        "model": "llama3",
+        "prompt": "Summarize this in two sentences:\n\nTitle: {{Newest Item.output.latest.title}}\nLink: {{Newest Item.output.latest.link}}\n\n{{Newest Item.output.latest.summary}}"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1360.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "log",
+      "node_type_id": "file",
+      "node_type": "action",
+      "name": "Append to Briefing",
+      "config": {
+        "operation": "append",
+        "path": "daily-briefing.txt",
+        "content": "{{Newest Item.output.latest.title}}\n{{Summarize.output.content}}\n{{Newest Item.output.latest.link}}\n\n"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1700.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "note",
+      "node_type_id": "notification",
+      "node_type": "action",
+      "name": "Notify Me",
+      "config": {
+        "title": "{{Newest Item.output.latest.title}}",
+        "body": "{{Summarize.output.content}}"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 2040.0,
+        "y": 120.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from_node": "daily",
+      "from_port": "output",
+      "to_node": "fetch",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e2",
+      "from_node": "fetch",
+      "from_port": "output",
+      "to_node": "feed",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e3",
+      "from_node": "feed",
+      "from_port": "output",
+      "to_node": "any",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e4",
+      "from_node": "any",
+      "from_port": "on_true",
+      "to_node": "sum",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e5",
+      "from_node": "sum",
+      "from_port": "output",
+      "to_node": "log",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e6",
+      "from_node": "log",
+      "from_port": "output",
+      "to_node": "note",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    }
+  ],
+  "metadata": {
+    "author": "user",
+    "created_at": "2026-11-01T11:01:56.000Z",
+    "updated_at": "2026-11-01T11:01:56.000Z",
+    "version": "1.0.0",
+    "tags": [
+      "schedule",
+      "ai",
+      "rss"
+    ],
+    "collection_id": null
+  },
+  "max_duration_secs": null
+}

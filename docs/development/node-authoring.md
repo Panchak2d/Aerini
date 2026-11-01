@@ -1,6 +1,6 @@
 # Adding a Built-in Node
 
-A built-in node is a Rust type compiled directly into `aerini-engine`, one of the 40 that ship with every install. This page walks through adding one: the trait it implements, where it gets registered, and what else (icon, palette placement, danger list) actually needs a matching change versus what doesn't. It assumes you've read [Architecture](architecture.md); this page only covers the compiled-in path. A `.wasm` plugin implements the same `Node` trait indirectly, through `WasmPluginNode`, and is a different, separately compiled artifact; that path belongs to [Writing a Plugin Node](plugin-authoring.md), not here.
+A built-in node is a Rust type compiled directly into `aerini-engine`, one of the 41 that ship with every install. This page walks through adding one: the trait it implements, where it gets registered, and what else (icon, palette placement, danger list) actually needs a matching change versus what doesn't. It assumes you've read [Architecture](architecture.md); this page only covers the compiled-in path. A `.wasm` plugin implements the same `Node` trait indirectly, through `WasmPluginNode`, and is a different, separately compiled artifact; that path belongs to [Writing a Plugin Node](plugin-authoring.md), not here.
 
 `CONTRIBUTING.md` has its own shorter "Adding a new node" section. Several details in it are stale against the current source, covered below as they come up. Treat this page as the current reference where the two disagree.
 
@@ -91,7 +91,7 @@ A single emoji or an inline SVG string both work; every existing entry uses one 
 
 ## description() and the legacy fallback map
 
-`node.rs`'s own doc comment on `description()` mentions a frontend fallback map for nodes that haven't migrated to the trait method yet. That map, `NODE_DESCRIPTION_FALLBACK` in `src/node-descriptions.ts`, has exactly one entry today: `note`, a frontend-only canvas annotation with no backing `Node` implementation at all. Every one of the 40 currently registered nodes overrides `description()` directly in Rust. There is no live built-in node relying on that fallback map, and a new node should implement `description()` the same way, not add anything to the frontend map.
+`node.rs`'s own doc comment on `description()` mentions a frontend fallback map for nodes that haven't migrated to the trait method yet. That map, `NODE_DESCRIPTION_FALLBACK` in `src/node-descriptions.ts`, has exactly one entry today: `note`, a frontend-only canvas annotation with no backing `Node` implementation at all. Every one of the 41 currently registered nodes overrides `description()` directly in Rust. There is no live built-in node relying on that fallback map, and a new node should implement `description()` the same way, not add anything to the frontend map.
 
 ## Dangerous nodes
 
@@ -113,4 +113,4 @@ Adding a node, or changing a node's schema or description, also changes the gene
 
 ## What this page doesn't cover
 
-[Writing a Plugin Node](plugin-authoring.md) covers the `.wasm` path: the same `Node` trait, implemented by `WasmPluginNode` on top of a compiled component instead of directly in this crate, with its own sandbox and registration story. [Desktop IPC Reference](desktop-ipc-reference.md) covers the Tauri commands a node's config panel might call into, if it needs to (file pickers, OAuth flows); nothing here does that on its own account. [Nodes Reference](../guide/nodes.md) documents the 40 nodes that already exist for someone building a workflow; this page is for adding number 41, not for using any of the current ones.
+[Writing a Plugin Node](plugin-authoring.md) covers the `.wasm` path: the same `Node` trait, implemented by `WasmPluginNode` on top of a compiled component instead of directly in this crate, with its own sandbox and registration story. [Desktop IPC Reference](desktop-ipc-reference.md) covers the Tauri commands a node's config panel might call into, if it needs to (file pickers, OAuth flows); nothing here does that on its own account. [Nodes Reference](../guide/nodes.md) documents the 41 nodes that already exist for someone building a workflow; this page is for adding number 42, not for using any of the current ones.

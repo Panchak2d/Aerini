@@ -1,5 +1,6 @@
 import type { CanvasNode } from "./Node";
 import { getCanvasColors } from "./theme-colors";
+import { markDirty } from "./render-state";
 
 export interface ConnectorData {
   id: string;
@@ -21,10 +22,43 @@ export const WIRE_DELETE_T_BRANCHED = 0.35;
 
 export class Connector {
   data:        ConnectorData;
-  selected     = false;
-  hovered      = false;
-  highlighted  = false; // cut preview
-  active       = false; // execution flow
+  private _selected    = false;
+  private _hovered     = false;
+  private _highlighted = false; // cut preview
+  private _active      = false; // execution flow
+
+  get selected(): boolean { return this._selected; }
+  set selected(v: boolean) { if (v !== this._selected) { this._selected = v; markDirty(); } }
+
+  get hovered(): boolean { return this._hovered; }
+  set hovered(v: boolean) { if (v !== this._hovered) { this._hovered = v; markDirty(); } }
+
+  get highlighted(): boolean { return this._highlighted; }
+  set highlighted(v: boolean) { if (v !== this._highlighted) { this._highlighted = v; markDirty(); } }
+
+  get active(): boolean { return this._active; }
+  set active(v: boolean) { if (v !== this._active) { this._active = v; markDirty(); } }
+
+  private _keyFn = ""; private _keyFp = ""; private _keyTn = ""; private _keyTp = "";
+  private _fromKey = ""; private _toKey = "";
+
+  /** "node:port" of the output end; rebuilt only when the wire's endpoints change. */
+  get fromKey(): string {
+    const d = this.data;
+    if (this._keyFn !== d.from_node || this._keyFp !== d.from_port) {
+      this._keyFn = d.from_node; this._keyFp = d.from_port; this._fromKey = `${d.from_node}:${d.from_port}`;
+    }
+    return this._fromKey;
+  }
+
+  /** "node:port" of the input end; rebuilt only when the wire's endpoints change. */
+  get toKey(): string {
+    const d = this.data;
+    if (this._keyTn !== d.to_node || this._keyTp !== d.to_port) {
+      this._keyTn = d.to_node; this._keyTp = d.to_port; this._toKey = `${d.to_node}:${d.to_port}`;
+    }
+    return this._toKey;
+  }
 
   // Flow animation phase (0–1, driven by Canvas dt)
   flowPhase    = 0;
@@ -187,6 +221,8 @@ export class Connector {
     const tp = tn.ports.find(p => p.id === this.data.to_port  &&  p.isInput);
     if (!fp || !tp) return false;
     const cp = Math.max(Math.abs(tp.x - fp.x) * 0.55, 80);
+    if (wx < Math.min(fp.x, tp.x - cp) - tol || wx > Math.max(tp.x, fp.x + cp) + tol
+      || wy < Math.min(fp.y, tp.y) - tol || wy > Math.max(fp.y, tp.y) + tol) return false;
     for (let t = 0; t <= 1; t += 0.04) {
       if (Math.hypot(wx - bez(fp.x,fp.x+cp,tp.x-cp,tp.x,t),
                      wy - bez(fp.y,fp.y,   tp.y,   tp.y,t)) < tol) return true;

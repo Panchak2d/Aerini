@@ -60,10 +60,12 @@ describe("wire hover", () => {
     const at = anchorOf(canvas, w1);
 
     canvas.input.onMove(mouse(at.x, at.y));
+    canvas.input.flushHover();
     expect(canvas.hoveredConn).toBe(w1);
     expect(w1.hovered).toBe(true);
 
     canvas.input.onMove(mouse(5000, 5000));
+    canvas.input.flushHover();
     expect(canvas.hoveredConn).toBeNull();
     expect(w1.hovered).toBe(false);
   });
@@ -78,6 +80,7 @@ describe("wire hover", () => {
     expect(mem.containsPoint(at.x, at.y)).toBe(true);
 
     canvas.input.onMove(mouse(at.x, at.y));
+    canvas.input.flushHover();
 
     expect(canvas.hoveredConn).toBeNull();
   });
@@ -88,10 +91,12 @@ describe("wire hover", () => {
     canvas.connectors.set("w1", w1);
     const at = anchorOf(canvas, w1);
     canvas.input.onMove(mouse(at.x, at.y));
+    canvas.input.flushHover();
 
     const offY = at.y + WIRE_DELETE_HIT_RADIUS - 2;
     expect(w1.containsPoint(at.x, offY, canvas.nodes, 8)).toBe(false);
     canvas.input.onMove(mouse(at.x, offY));
+    canvas.input.flushHover();
 
     expect(canvas.hoveredConn).toBe(w1);
     expect(canvas.deleteHandleHot).toBe(true);
@@ -104,6 +109,7 @@ describe("wire hover", () => {
     canvas.connectors.set("w1", w1);
     const at = anchorOf(canvas, w1);
     canvas.input.onMove(mouse(at.x, at.y));
+    canvas.input.flushHover();
 
     canvas.input.onLeave();
 
