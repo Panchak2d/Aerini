@@ -621,3 +621,36 @@ describe("field-renderer — tool builder", () => {
     expect(parseTools([{ name: "a" }])).toHaveLength(1);
   });
 });
+
+describe("field-renderer — data insertion and platform fields", () => {
+  const urgency: Array<[string, PropSchema]> = [
+    ["urgency", { type: "string", description: "Urgency level (Linux only)" }],
+    ["title", { type: "string", description: "Title" }],
+  ];
+
+  it("string_fields_get_a_labelled_insert_data_button", () => {
+    const ctx = makeCtx(makeNode("a"));
+    renderConfigFieldsLoop(ctx, [["title", { type: "string" }]], []);
+    expect(ctx.body.querySelector(".field-insert-data")?.textContent).toBe("Insert data");
+    expect(ctx.body.querySelector(".field-interp-hint--inline")).toBeNull();
+  });
+
+  it("linux_only_field_is_hidden_on_other_systems", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0)");
+    const ctx = makeCtx(makeNode("a"));
+    renderConfigFieldsLoop(ctx, urgency, []);
+    expect(ctx.body.textContent).not.toContain("Urgency");
+    expect(ctx.body.textContent).toContain("Title");
+    vi.restoreAllMocks();
+  });
+
+  it("linux_only_field_is_shown_on_linux", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    const ctx = makeCtx(makeNode("a"));
+    renderConfigFieldsLoop(ctx, urgency, []);
+    expect(ctx.body.textContent).toContain("Urgency");
+    vi.restoreAllMocks();
+  });
+});

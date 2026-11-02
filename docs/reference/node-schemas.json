@@ -403,7 +403,8 @@
           },
           "prompt": {
             "description": "User prompt",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "provider": {
             "description": "API provider. 'auto' detects from base_url.",
@@ -443,7 +444,8 @@
       "output_schema": {
         "properties": {
           "content": {
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-output": true
           },
           "input_tokens": {
             "type": "number"
@@ -848,7 +850,8 @@
           },
           "content": {
             "description": "Message content (max 2000 characters)",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "username": {
             "description": "Override the webhook's display name (optional)",
@@ -906,7 +909,8 @@
       "input_schema": {
         "properties": {
           "body": {
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "from": {
             "description": "Sender email address",
@@ -1069,7 +1073,8 @@
           },
           "digest": {
             "description": "Markdown bullet list of the returned items, one line each",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-output": true
           },
           "feed": {
             "description": "title, link, description, language, updated and type (rss2, rss1, rss0, atom or json)",
@@ -1491,7 +1496,9 @@
       "node_type": "action",
       "output_schema": {
         "properties": {
-          "body": {},
+          "body": {
+            "x-aerini-primary-output": true
+          },
           "headers": {
             "type": "object"
           },
@@ -2025,7 +2032,8 @@
         "properties": {
           "body": {
             "description": "Notification message body",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "title": {
             "description": "Notification title",
@@ -2797,7 +2805,8 @@
           },
           "text": {
             "description": "Message text",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           }
         },
         "required": [
@@ -3212,7 +3221,8 @@
           },
           "text": {
             "description": "Message text",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           }
         },
         "required": [
@@ -3367,7 +3377,8 @@
         "properties": {
           "content": {
             "description": "Text content to encode as a file",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "filename": {
             "description": "Output filename (default: output.<format>)",

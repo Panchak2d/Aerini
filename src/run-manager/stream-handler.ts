@@ -446,7 +446,7 @@ export class RunManager {
           void copyWithButtonFeedback(catchCopyBtn, errMsg);
         });
       }
-      this.onStatus(`Error: ${escapeHtml(errMsg)}`);
+      this.onStatus(`Error: ${errMsg}`);
       this.onToast("Workflow run failed — see output for details", "error");
     } finally {
       // Always runs — even if runWorkflow hangs and times out
@@ -607,7 +607,7 @@ export class RunManager {
       const errMsg = parsed.error_kind === "already_running"
         ? `"${currentName}" is already running from another action. Wait for it to finish, then try again.`
         : String(e);
-      this.onStatus(`Run failed: ${escapeHtml(errMsg)}`);
+      this.onStatus(`Run failed: ${errMsg}`);
       if (content) content.innerHTML = `<div class="run-error-msg">${escapeHtml(errMsg)}</div>`;
     } finally {
       // Always runs — even if runWorkflow hangs and times out.

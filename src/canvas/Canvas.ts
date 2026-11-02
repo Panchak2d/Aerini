@@ -17,6 +17,9 @@ import { visibleViewport, fitViewports } from "./viewport";
 import { markDirty, consumeDirty, watchMap, installRepaintNet } from "./render-state";
 import { moveCamera, stepCamera, cancelCamera, type CameraTarget } from "./camera";
 import { setIconScale } from "../icon-cache";
+import { declaredPrimaryInputKey, declaredPrimaryOutputKey, getRunOutput, formatSample } from "../data-sources";
+import { pointEligibleIds } from "../point-mode";
+import { validateNodeName, uniqueNodeName, renameReferences } from "../node-names";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -259,6 +262,8 @@ export class Canvas {
     for (const c of this.connectors.values()) {
       c.highlighted = ih.isCutting && this.edgeCrossesPath(c);
       if (!c.highlighted && !c.active && !this.wireOnScreen(c, vx0, vy0, vx1, vy1)) continue;
+      const refSlot = this.refHighlights && c.data.to_node === this.refTargetId ? this.refHighlights.get(c.data.from_node) : undefined;
+      c.refColor = refSlot === undefined ? null : getCanvasColors().ref[refSlot % 8];
       if (c === moving || movingGroup?.includes(c)) ctx.globalAlpha = 0.25;
       c.draw(ctx, this.nodes, dt);
       ctx.globalAlpha = 1;
@@ -340,6 +345,7 @@ export class Canvas {
       raised.draw(ctx, dt, connectedPorts, overfedPorts);
     }
 
+    this.drawReferenceOverlays();
     this.drawWireDeleteButton();
 
     // ── Output port connection-count badges ───────────────────────────
@@ -377,6 +383,7 @@ export class Canvas {
     // Hover tooltip for nodes with truncated names
     this.drawNodeTooltips(vp.width);
     this.drawWireDeleteTooltip(vp.width);
+    this.drawWireDataBubble(vp.width);
 
     // Draw ghost
     if (this.pendingInsert && this.insertGhost) {
@@ -680,6 +687,111 @@ export class Canvas {
     this.deleteHandleHot = false;
   }
 
+  /** Source nodes whose references are being edited (id to color slot) and the node that owns the field. */
+  private refHighlights: Map<string, number> | null = null;
+  private refTargetId: string | null = null;
+
+  setRefHighlights(sources: Map<string, number> | null, targetNodeId: string | null): void {
+    this.refHighlights = sources && sources.size > 0 ? sources : null;
+    this.refTargetId = targetNodeId;
+    markDirty();
+  }
+
+  /** Id of the node body under a mouse event; null on a port or empty space. */
+  nodeIdAtEvent(e: MouseEvent): string | null {
+    const { sx, sy } = this.evSX(e);
+    const { x, y } = this.s2w(sx, sy);
+    const arr = Array.from(this.nodes.values());
+    for (const n of arr) if (n.portAtPoint(x, y)) return null;
+    for (let i = arr.length - 1; i >= 0; i--) if (arr[i].containsPoint(x, y)) return arr[i].data.id;
+    return null;
+  }
+
+  /** Outlines for point mode (pickable nodes) and for nodes referenced by the focused field. */
+  private drawReferenceOverlays(): void {
+    const eligible = pointEligibleIds();
+    if (!eligible && !this.refHighlights) return;
+    const ctx = this.ctx;
+    const colors = getCanvasColors();
+    const z = this.zoom;
+    const pad = 5 / z;
+    ctx.save();
+    if (eligible) {
+      ctx.font = `600 ${11 / z}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      ctx.textBaseline = "middle";
+      for (const id of eligible) {
+        const n = this.nodes.get(id);
+        if (!n) continue;
+        const { x, y } = n.data.position;
+        roundedRect(ctx, x - pad, y - pad, NODE_WIDTH + pad * 2, n.height + pad * 2, 10);
+        ctx.shadowColor = colors.actionNav;
+        ctx.shadowBlur = 14;
+        ctx.strokeStyle = colors.actionNav;
+        ctx.lineWidth = 2 / z;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        const label = "Click to use";
+        const tw = ctx.measureText(label).width + 12 / z;
+        const th = 18 / z;
+        const lx = x, ly = y - pad - th - 3 / z;
+        roundedRect(ctx, lx, ly, tw, th, 4 / z);
+        ctx.fillStyle = colors.actionNav;
+        ctx.fill();
+        ctx.fillStyle = colors.surface1;
+        ctx.textAlign = "left";
+        ctx.fillText(label, lx + 6 / z, ly + th / 2);
+      }
+    }
+    if (this.refHighlights) {
+      for (const [id, slot] of this.refHighlights) {
+        const n = this.nodes.get(id);
+        if (!n) continue;
+        const { x, y } = n.data.position;
+        roundedRect(ctx, x - pad, y - pad, NODE_WIDTH + pad * 2, n.height + pad * 2, 10);
+        ctx.strokeStyle = colors.ref[slot % colors.ref.length];
+        ctx.lineWidth = 3 / z;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  /** What flowed through the hovered or selected wire, from the last run. Screen space. */
+  private drawWireDataBubble(W: number): void {
+    const target = this.deleteHandleTarget();
+    if (!target) return;
+    const raw = getRunOutput(target.conn.data.from_node);
+    if (raw === undefined) return;
+    const text = formatSample(raw, 120);
+    if (!text) return;
+    const ctx = this.ctx;
+    const colors = getCanvasColors();
+    const sx = target.x * this.zoom + this.panX;
+    const sy = target.y * this.zoom + this.panY;
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+    const padX = 8, padY = 5;
+    const boxW = Math.min(ctx.measureText(text).width + padX * 2, 280);
+    const boxH = 11 + padY * 2;
+    const bx = Math.max(4, Math.min(sx - boxW / 2, W - boxW - 4));
+    const by = sy + WIRE_DELETE_RADIUS + 6;
+    roundedRect(ctx, bx, by, boxW, boxH, 4);
+    ctx.fillStyle = colors.surface3;
+    ctx.fill();
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.rect(bx + 1, by, boxW - 2, boxH);
+    ctx.clip();
+    ctx.fillStyle = colors.textPrimary;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, bx + padX, by + boxH / 2);
+    ctx.restore();
+  }
+
   /**
    * The wire that currently shows a delete button and where the button sits,
    * or null. The hovered wire wins over the selected one. No button shows
@@ -752,8 +864,8 @@ export class Canvas {
       const e1 = new Connector({ id: newConnectorId(), from_node: conn.data.from_node, from_port: conn.data.from_port, to_node: node.data.id, to_port: inP.id, condition: null, on_success: null, on_failure: null });
       const e2 = new Connector({ id: newConnectorId(), from_node: node.data.id, from_port: outP.id, to_node: conn.data.to_node, to_port: conn.data.to_port, condition: null, on_success: null, on_failure: null });
       this.connectors.set(e1.data.id, e1); this.connectors.set(e2.data.id, e2);
-      this.applyConnectionDefaults(e1.data.from_node, e1.data.to_node, e1.data.to_port);
-      this.applyConnectionDefaults(e2.data.from_node, e2.data.to_node, e2.data.to_port);
+      this.applyConnectionDefaults(e1.data.from_node, e1.data.from_port, e1.data.to_node, e1.data.to_port);
+      this.applyConnectionDefaults(e2.data.from_node, e2.data.from_port, e2.data.to_node, e2.data.to_port);
       const configs = this.diffConfigKeys(before, this.configKeys(touched));
       this.pushUndo({ type: "split_edge", removed: conn, added1: e1, added2: e2, node, configs });
       this.onCanvasChanged?.(); return true;
@@ -929,7 +1041,7 @@ export class Canvas {
     this.connectors.set(conn.data.id, conn);
     steps.push({ type: "add_edge", connector: conn });
     if (displaced.length) this.onWarn?.(this.replacedNotice(displaced, toNode, toPort));
-    this.applyConnectionDefaults(srcNode, toNode, toPort);
+    this.applyConnectionDefaults(srcNode, srcPort, toNode, toPort);
     const configs = this.diffConfigKeys(before, this.configKeys([toNode]));
     if (configs.length) steps.push({ type: "config_patch", configs });
     this.pushUndo(steps.length === 1 ? steps[0] : { type: "batch", actions: steps }, "Connect nodes");
@@ -983,7 +1095,7 @@ export class Canvas {
     conn.data.to_node = nodeId;
     conn.data.to_port = portId;
     if (displaced.length) this.onWarn?.(this.replacedNotice(displaced, nodeId, portId));
-    this.applyConnectionDefaults(conn.data.from_node, nodeId, portId);
+    this.applyConnectionDefaults(conn.data.from_node, conn.data.from_port, nodeId, portId);
     this.pushUndo({
       type: "reroute_edge", connector: conn,
       from: prev, to: { node: nodeId, port: portId },
@@ -1020,7 +1132,7 @@ export class Canvas {
       this.clearDynamicPortExpr(w);
       w.data.from_node = to.nodeId;
       w.data.from_port = to.portId;
-      this.applyConnectionDefaults(to.nodeId, w.data.to_node, w.data.to_port);
+      this.applyConnectionDefaults(to.nodeId, to.portId, w.data.to_node, w.data.to_port);
     }
     this.pushUndo({
       type: "move_sources", connectors: wires,
@@ -1097,11 +1209,11 @@ export class Canvas {
     }
   }
 
-  private applyConnectionDefaults(srcId: string, nodeId: string, portId: string) {
+  private applyConnectionDefaults(srcId: string, srcPort: string, nodeId: string, portId: string) {
     const target = this.nodes.get(nodeId);
     if (target?.data.node_type_id === "text_to_file") {
       const fromNode = this.nodes.get(srcId);
-      if (fromNode) {
+      if (fromNode && declaredPrimaryOutputKey(fromNode.data.output_schema) === null) {
         const cfg = target.data.config as Record<string, unknown>;
         if (!cfg.content) {
           cfg.content = `{{${fromNode.data.name}.output.content}}`;
@@ -1125,6 +1237,17 @@ export class Canvas {
       if (reply && isBlank(cfg.field) && isBlank(cfg.source_node)) {
         cfg.field = reply;
         this.onWarn?.(`"${target.data.name}" shows only the reply text (Field: ${reply}). Clear the Field to see the whole result.`);
+      }
+    }
+
+    if (target && portId === "input" && srcPort !== "on_error") {
+      const fromNode = this.nodes.get(srcId);
+      const field = declaredPrimaryInputKey(target.data.input_schema);
+      const outKey = fromNode ? declaredPrimaryOutputKey(fromNode.data.output_schema) : null;
+      const cfg = target.data.config as Record<string, unknown>;
+      if (fromNode && field !== null && outKey !== null && fromNode.data.name.trim() && isBlank(cfg[field])) {
+        cfg[field] = `{{${fromNode.data.name}.output.${outKey}}}`;
+        this.onWarn?.(`"${target.data.name}" will use the main result of "${fromNode.data.name}" in its ${field.replace(/_/g, " ")} field. Edit it if you want something else.`);
       }
     }
 
@@ -1274,6 +1397,49 @@ export class Canvas {
   /** Applies `mutate` to one node as a single, non-merging undo step. */
   editNode(n: CanvasNode, mutate: () => void) { markDirty(); this.undoMgr.editNode(n, mutate); this.onCanvasChanged?.(); }
 
+  private freshName(name: string): string {
+    return uniqueNodeName(name, Array.from(this.nodes.values(), n => n.data.name));
+  }
+
+  /**
+   * Renames `n` and rewrites every `{{OldName.…}}` reference in the other nodes' configs,
+   * as one undo step. An invalid name is refused, a taken name gets a numeric suffix;
+   * `message` explains either, or reports how many nodes were updated.
+   */
+  renameNode(n: CanvasNode, raw: string): { name: string; message?: string } {
+    const old = n.data.name;
+    const wanted = raw.trim();
+    if (!wanted || wanted === old) return { name: old };
+    const invalid = validateNodeName(wanted);
+    if (invalid) return { name: old, message: invalid };
+
+    const next = uniqueNodeName(wanted, Array.from(this.nodes.values(), o => o.data.name).filter(nm => nm !== old));
+    if (next === old) return { name: old };
+
+    let updated = 0;
+    this.transact(`Rename "${old}"`, () => {
+      this.undoMgr.editNode(n, () => { n.data.name = next; });
+      for (const other of this.nodes.values()) {
+        if (other === n) continue;
+        const changes: Array<[string, unknown]> = [];
+        for (const [k, v] of Object.entries(other.data.config)) {
+          const r = renameReferences(v, old, next);
+          if (r !== v) changes.push([k, r]);
+        }
+        if (!changes.length) continue;
+        updated++;
+        this.undoMgr.editNode(other, () => { for (const [k, v] of changes) other.data.config[k] = v; });
+      }
+    });
+    markDirty();
+    this.onCanvasChanged?.();
+
+    const notes: string[] = [];
+    if (next !== wanted) notes.push(`"${wanted}" is already used by another node, so this one is now "${next}".`);
+    if (updated) notes.push(`Updated references in ${updated} other node${updated === 1 ? "" : "s"}.`);
+    return { name: next, message: notes.join(" ") || undefined };
+  }
+
   /** True while a drag, wire pull, box-select or cut is in flight; undo would corrupt its start state. */
   isGestureActive(): boolean { return this.input?.isGestureActive?.() ?? false; }
 
@@ -1315,7 +1481,7 @@ export class Canvas {
     this.transact(ids.length === 1 ? "Duplicate node" : `Duplicate ${ids.length} nodes`, () => {
       for (const id of ids) {
         const orig = this.nodes.get(id); if (!orig) continue;
-        const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
+        const copy = new CanvasNode({ ...JSON.parse(JSON.stringify(orig.data)), id: `node_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name: this.freshName(orig.data.name), position: { x: orig.data.position.x + 30, y: orig.data.position.y + 30 } });
         this.snap.avoidOverlap(copy);
         this.nodes.set(copy.data.id, copy); this.pushUndo({ type: "add_node", node: copy }); news.push(copy);
       }
@@ -1355,6 +1521,7 @@ export class Canvas {
       node.data.name = this._pendingPresetName;
       this._pendingPresetName = undefined;
     }
+    node.data.name = this.freshName(node.data.name);
     const askedX = node.data.position.x, askedY = node.data.position.y;
     this.snap.avoidOverlap(node);
     const shoved = node.data.position.x !== askedX || node.data.position.y !== askedY;
@@ -1449,6 +1616,7 @@ export class Canvas {
 
     if (this._pendingPresetConfig) { Object.assign(node.data.config, this._pendingPresetConfig); this._pendingPresetConfig = undefined; }
     if (this._pendingPresetName)   { node.data.name = this._pendingPresetName; this._pendingPresetName = undefined; }
+    node.data.name = this.freshName(node.data.name);
 
     this.snap.avoidOverlap(node);
     this.transact(`Add "${node.data.name}"`, () => {
@@ -1469,6 +1637,7 @@ export class Canvas {
     const px = drop.wx - NODE_WIDTH * 1.5;
     const py = drop.wy - 20;
     const node = createNodeFromDescriptor(desc, px, py);
+    node.data.name = this.freshName(node.data.name);
 
     this.snap.avoidOverlap(node);
     this.transact(`Add "${node.data.name}"`, () => {

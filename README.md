@@ -86,7 +86,7 @@ Fetch the top Hacker News story each morning, summarise it with a model, and fil
 
 Read an RSS or Atom feed each morning, summarize the newest unseen item with a local model, and keep it in a text file.
 
-- **Flow:** Schedule → HTTP Request → Feed Parser (Only New) → If / Condition → AI Prompt (local) → File → Desktop Notification.
+- **Flow:** Schedule → HTTP Request → Feed Parser (Only New) → If / Condition → AI Prompt (local) → File → Desktop Notification. False logs a quiet day; the HTTP Request and AI Prompt Error ports raise an alert.
 - **Needs:** Ollama and a pulled model. No API key, no Code node.
 - **Walkthrough:** [Private Daily Briefing](examples/Private_Daily_Briefing___Feed_Parser___AI.md).
 

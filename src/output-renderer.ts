@@ -3,6 +3,8 @@ import { NODE_IDS } from "./node-ids";
 import type { WorkflowResult } from "./ipc/workflow";
 import type { CanvasNode } from "./canvas/Node";
 import { escapeHtml, copyWithButtonFeedback } from "./utils";
+import { buildJsonTree } from "./json-tree";
+import { validateNodeName } from "./node-names";
 
 type NodeMap = Map<string, CanvasNode>;
 
@@ -140,6 +142,19 @@ export function renderResultsTab(result: WorkflowResult, nodes: NodeMap): HTMLEl
     }
 
     display.innerHTML = renderTypedOutput(typeId, out, name);
+    if (typeof out === "object" && out !== null && validateNodeName(name) === null) {
+      const details = document.createElement("details");
+      details.className = "res-details json-tree-details";
+      const sum = document.createElement("summary");
+      sum.textContent = "Use values in a field";
+      details.appendChild(sum);
+      const hint = document.createElement("div");
+      hint.className = "json-tree-hint";
+      hint.textContent = "Click into a text field in a later node's settings, then click a value here to insert it.";
+      details.appendChild(hint);
+      details.appendChild(buildJsonTree(out, { nodeId: id, nodeName: name }));
+      display.appendChild(details);
+    }
   };
 
   select.addEventListener("change", () => { void renderSelected(); });

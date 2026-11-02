@@ -23,6 +23,8 @@ export interface CanvasThemeColors {
   catAction: string; catAI: string; catLogic: string; catUtility: string; catTrigger: string;
   wire: string; wireHover: string;
   brandGithub: string; brandNotion: string;
+  /** Reference link colors, indexed by sourceColorIndex(). */
+  ref: string[];
 }
 
 const FALLBACK: CanvasThemeColors = {
@@ -33,6 +35,7 @@ const FALLBACK: CanvasThemeColors = {
   catAction: "#4d9eff", catAI: "#a78bfa", catLogic: "#34d399", catUtility: "#f59e0b", catTrigger: "#8aa9c9",
   wire: "#686f78", wireHover: "#858d97",
   brandGithub: "#ffffff", brandNotion: "#ffffff",
+  ref: ["#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#22d3ee", "#fb923c", "#a3e635"],
 };
 
 /** Pure token → literal mapping. `getVar` is whatever resolves a custom
@@ -62,6 +65,7 @@ export function resolveCanvasColors(getVar: (name: string) => string): CanvasThe
     wireHover:     v("--color-wire-hover", FALLBACK.wireHover),
     brandGithub:   v("--brand-github", FALLBACK.brandGithub),
     brandNotion:   v("--brand-notion", FALLBACK.brandNotion),
+    ref:           FALLBACK.ref.map((fb, i) => v(`--ref-color-${i}`, fb)),
   };
 }
 
@@ -98,7 +102,7 @@ function ensureObserver(): void {
 export function getCanvasColors(): CanvasThemeColors {
   if (_cache) return _cache;
   if (typeof document === "undefined") {
-    _cache = { ...FALLBACK };
+    _cache = { ...FALLBACK, ref: [...FALLBACK.ref] };
     return _cache;
   }
   ensureObserver();

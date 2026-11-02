@@ -60,7 +60,11 @@ function makeNode(config: Record<string, unknown>, credentials: Record<string, s
 }
 
 const canvasEl = document.createElement("canvas");
-const fakeCanvas = { beginNodeEdit: () => {}, commitNodeEdit: () => {} } as unknown as Canvas;
+const fakeCanvas = {
+  beginNodeEdit: () => {},
+  commitNodeEdit: () => {},
+  renameNode: (n: CanvasNode, name: string) => { n.data.name = name; return { name }; },
+} as unknown as Canvas;
 
 async function openPopover(node: CanvasNode): Promise<void> {
   const p = showPopover(node, canvasEl, () => {}, fakeCanvas);

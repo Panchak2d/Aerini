@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { NODE_IDS } from "../node-ids";
 import type { CanvasNode } from "../canvas/Node";
-import { showExpressionPicker } from "../expression-picker";
+import { mountExpressionUi } from "./expression-field";
 import { describeModelFetchError, type OllamaTarget } from "../ipc/providers";
 import { mountOllamaModelControl } from "../ollama-model-control";
 import { renderToolBuilderField } from "./tool-builder";
@@ -125,6 +125,11 @@ function formatProviderLabel(provider: string): string {
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
+/** True when the schema marks this property as the node's main input (`x-aerini-primary-input`). */
+function isPrimaryInput(prop: PropSchema): boolean {
+  return (prop as unknown as Record<string, unknown>)["x-aerini-primary-input"] === true;
+}
+
 // ── Per-field sub-renderers ───────────────────────────────────────────────────
 // These are the named functions for each field type. Each is also the target
 // of the FIELD_RENDERERS dispatch table below (where applicable).
@@ -144,23 +149,12 @@ function renderTextField(
   if (prop.maxLength !== undefined) inp.maxLength = prop.maxLength;
   inp.addEventListener("input", () => { node.data.config[key] = inp.value; onChange(); syncRequired(); });
 
-  // Only add the expression button for string-typed fields.
   // Number and enum fields don't accept {{}} expressions.
   if (!prop.enum && prop.type !== "number") {
     const wrap = document.createElement("div");
-    wrap.className = "field-string-wrap";
-    const exprBtn = document.createElement("button");
-    exprBtn.type = "button";
-    exprBtn.className = "field-interp-hint field-interp-hint--inline";
-    exprBtn.title = "Insert expression from a previous node\nExample: {{HTTP Request.output.body.name}}";
-    exprBtn.setAttribute("data-tooltip", "Insert expression from a previous node");
-    exprBtn.textContent = "{{ }}";
-    exprBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showExpressionPicker(exprBtn, inp, node.data.id, canvasEl);
-    });
+    wrap.className = "field-expr-wrap";
     wrap.appendChild(inp);
-    wrap.appendChild(exprBtn);
+    mountExpressionUi(inp, wrap, node, canvasEl, isPrimaryInput(prop));
     return wrap;
   }
   return inp;
@@ -669,19 +663,9 @@ function renderMultilineField(
   });
   wrap.appendChild(ta);
 
-  // Skip expression button on code fields — code uses raw JS, not {{}} syntax.
+  // Code fields use raw JS, not {{}} syntax, so they get only a typing hint.
   if (key !== "code") {
-    const exprBtn = document.createElement("button");
-    exprBtn.type = "button";
-    exprBtn.className = "field-interp-hint";
-    exprBtn.title = "Insert expression from a previous node\nExample: {{HTTP Request.output.body.name}}";
-    exprBtn.setAttribute("data-tooltip", "Insert expression from a previous node");
-    exprBtn.textContent = "{{ }}";
-    exprBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showExpressionPicker(exprBtn, ta, node.data.id, canvasEl);
-    });
-    wrap.appendChild(exprBtn);
+    mountExpressionUi(ta, wrap, node, canvasEl, isPrimaryInput(prop));
   } else {
     const hint = document.createElement("div");
     hint.className = "field-interp-hint";
@@ -798,6 +782,10 @@ function renderField(
 
 /** Renders the generic "Configuration" field loop for a node's config schema.
  *  Appends one field-group element per key, in order, to ctx.body. */
+function isLinuxPlatform(): boolean {
+  return typeof navigator !== "undefined" && /linux/i.test(`${navigator.platform} ${navigator.userAgent}`) && !/android/i.test(navigator.userAgent);
+}
+
 export function renderConfigFieldsLoop(
   ctx: ExtensionContext,
   cfgKeys: Array<[string, PropSchema]>,
@@ -806,6 +794,8 @@ export function renderConfigFieldsLoop(
   const { node, body, canvasEl, onChange, fetchModels, rerender } = ctx;
 
   for (const [key, prop] of cfgKeys) {
+    // "(Linux only)" fields do nothing on other systems, so they are hidden there.
+    if (/\(Linux only\)/.test(prop.description ?? "") && !isLinuxPlatform()) continue;
     const cur = String(node.data.config[key] ?? "");
     const isRequired = requiredKeys.includes(key);
     let fieldEl: HTMLElement;

@@ -26,7 +26,7 @@ impl Node for EmailNode {
                 "from":      { "type": "string", "description": "Sender email address" },
                 "to":        { "type": "string", "description": "Recipient(s): comma-separated, or an array of addresses from an upstream node. A comma inside quotes or <angle brackets>, as in \"Doe, John\" <a@b.c>, does not split. Maximum 50 recipients." },
                 "subject":   { "type": "string" },
-                "body":      { "type": "string" },
+                "body":      { "type": "string", "x-aerini-primary-input": true },
                 "html":      { "type": "boolean", "description": "Send as HTML email (default: false)", "default": false },
                 "username":  { "type": "string", "description": "SMTP username (usually your email address)" },
                 "password":  { "type": "string" }

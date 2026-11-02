@@ -27,7 +27,7 @@ async function openRetryInput(node: CanvasNode): Promise<HTMLInputElement> {
   await vi.advanceTimersByTimeAsync(200);
   await p;
   const field = [...document.querySelectorAll(".pop-field, .popover-field, label")]
-    .find(el => el.textContent?.includes("Retry attempts"));
+    .find(el => el.textContent?.includes("Tries"));
   const inp = (field?.closest("div") ?? document).querySelector<HTMLInputElement>('input[type="number"][max="10"]');
   if (!inp) throw new Error("retry input not found");
   return inp;

@@ -55,7 +55,7 @@ impl Node for AiPromptNode {
             "type": "object",
             "required": ["prompt"],
             "properties": {
-                "prompt":         { "type": "string",  "description": "User prompt" },
+                "prompt":         { "type": "string",  "description": "User prompt", "x-aerini-primary-input": true },
                 "system":         { "type": "string",  "description": "System / persona instructions" },
                 "model":          { "type": "string",  "description": "Model name — e.g. gpt-5.6, claude-sonnet-5-5, gemini-3.8-flash, llama3", "x-aerini-model-picker": true },
                 "provider":       { "type": "string",  "enum": ["auto", "openai", "anthropic", "gemini", "local"], "description": "API provider. 'auto' detects from base_url." },
@@ -73,7 +73,7 @@ impl Node for AiPromptNode {
         json!({
             "type": "object",
             "properties": {
-                "content":      { "type": "string" },
+                "content":      { "type": "string", "x-aerini-primary-output": true },
                 "model":        { "type": "string" },
                 "provider":     { "type": "string" },
                 "input_tokens": { "type": "number" },

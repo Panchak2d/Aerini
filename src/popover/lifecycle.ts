@@ -1,3 +1,4 @@
+import { disarmPointMode, exitPointModeOnEscape, pointModeOwns } from "../point-mode";
 import { NODE_IDS } from "../node-ids";
 import { REQUIRED_FIELDS, checkDangerousNodes } from "../validation";
 import { showConfirm } from "../confirm";
@@ -256,6 +257,7 @@ export async function showPopover(
 
   const pop = document.createElement("div");
   pop.className = "node-popover"; pop.id = "node-popover";
+  pop.dataset.nodeId = node.data.id;
   pop.setAttribute("role", "dialog");
   pop.setAttribute("aria-modal", "true");
   pop.setAttribute("aria-labelledby", "popover-title-label");
@@ -350,7 +352,18 @@ export async function showPopover(
   body.appendChild(mkField("Name", () => {
     const inp = mk<HTMLInputElement>("input");
     inp.type = "text"; inp.value = node.data.name; inp.autocomplete = "off"; inp.spellcheck = false;
-    inp.addEventListener("input", () => { node.data.name = inp.value; titleEl.textContent = inp.value; titleEl.title = inp.value; onChange(); });
+    const showName = (v: string) => { titleEl.textContent = v; titleEl.title = v; };
+    const commitName = () => {
+      if (inp.value.trim() === node.data.name) { inp.value = node.data.name; showName(node.data.name); return; }
+      const res = canvas.renameNode(node, inp.value);
+      inp.value = res.name;
+      showName(res.name);
+      if (res.message) canvas.onWarn?.(res.message);
+      onChange();
+    };
+    inp.addEventListener("input", () => showName(inp.value));
+    inp.addEventListener("change", commitName);
+    closeHooks.push(commitName);
     return inp;
   }));
 
@@ -382,9 +395,14 @@ export async function showPopover(
   // Credentials
   renderCredentialSection(ctx, props, ext, autoFillFromCredentialMetadata, credentialProviderMap);
 
-  // Reliability
-  body.appendChild(mkSection("Reliability"));
-  body.appendChild(mkField("Retry attempts", () => {
+  // Retry lives under a collapsed "Advanced" section so beginners see only the main fields.
+  const advanced = document.createElement("details");
+  advanced.className = "popover-advanced";
+  const advancedTitle = document.createElement("summary");
+  advancedTitle.className = "popover-section-title popover-advanced-title";
+  advancedTitle.textContent = "Advanced";
+  advanced.appendChild(advancedTitle);
+  advanced.appendChild(mkField("Tries", () => {
     const inp = mk<HTMLInputElement>("input");
     inp.type = "number"; inp.min = "1"; inp.max = String(MAX_RETRY_ATTEMPTS); inp.autocomplete = "off";
     inp.value = String(node.data.retry.max_attempts);
@@ -397,7 +415,8 @@ export async function showPopover(
       onChange();
     });
     return inp;
-  }, "1 = no retry"));
+  }, "How many times to try if this step fails. 1 = don't retry."));
+  body.appendChild(advanced);
 
   ext?.afterReliability?.(ctx);
 
@@ -442,12 +461,15 @@ export async function showPopover(
 
   // Close on outside click.
   const onOutside = (e: MouseEvent) => {
-    if (!pop.contains(e.target as Node) && !isConfirmOpen()) closePopover();
+    if (!pop.contains(e.target as Node) && !isConfirmOpen() && !pointModeOwns(e)) closePopover();
   };
 
   // Close on Esc
   const onEsc = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && !isConfirmOpen()) closePopover();
+    if (e.key === "Escape" && !isConfirmOpen()) {
+      if (exitPointModeOnEscape()) return;
+      closePopover();
+    }
   };
   document.addEventListener("keydown", onEsc, true);
 
@@ -458,6 +480,8 @@ export async function showPopover(
     document.removeEventListener("keydown", onFocusTrap, true);
     document.removeEventListener("keydown", onEsc, true);
     document.removeEventListener("mousedown", onOutside, true);
+    disarmPointMode();
+    (canvasEl as unknown as { __canvas?: { setRefHighlights?: (m: null, id: null) => void } }).__canvas?.setRefHighlights?.(null, null);
     for (const hook of closeHooks) hook();
   };
 

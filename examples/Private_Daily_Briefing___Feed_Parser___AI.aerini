@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "id": "private-daily-briefing-feed-parser-ai-2611011101",
   "name": "Private Daily Briefing (Feed Parser + AI)",
-  "description": "Every morning: fetch an RSS or Atom feed, keep only the newest item not seen before, have a local model summarize it in two sentences, and append the summary to a text file and show a notification. Quiet when there is nothing new. No Code node, no cloud AI.",
+  "description": "Every morning: fetch an RSS or Atom feed, keep only the newest item not seen before, have a local model summarize it in two sentences, append the summary to a text file and show a notification. A day with nothing new adds a one-line log entry and no notification. If the fetch or the model fails, you get an alert, and a failed summary is saved without text so the item is not lost. No Code node, no cloud AI.",
   "nodes": [
     {
       "id": "daily",
@@ -40,8 +40,8 @@
       "input_schema": {},
       "output_schema": {},
       "retry": {
-        "max_attempts": 1,
-        "backoff_ms": 500
+        "max_attempts": 3,
+        "backoff_ms": 2000
       },
       "fallback_node": null,
       "disabled": false,
@@ -107,7 +107,10 @@
         "provider": "local",
         "base_url": "http://localhost:11434/v1",
         "model": "llama3",
-        "prompt": "Summarize this in two sentences:\n\nTitle: {{Newest Item.output.latest.title}}\nLink: {{Newest Item.output.latest.link}}\n\n{{Newest Item.output.latest.summary}}"
+        "prompt": "Summarize this in two sentences:\n\nTitle: {{Newest Item.output.latest.title}}\nLink: {{Newest Item.output.latest.link}}\n\n{{Newest Item.output.latest.summary}}",
+        "system": "You write one-item news briefings. Reply with exactly two plain sentences. No preamble, no quotes, no markdown, no commentary.",
+        "temperature": 0.3,
+        "timeout_secs": 600
       },
       "credentials": {},
       "input_schema": {},
@@ -168,6 +171,146 @@
       "position": {
         "x": 2040.0,
         "y": 120.0
+      }
+    },
+    {
+      "id": "quiet_log",
+      "node_type_id": "file",
+      "node_type": "action",
+      "name": "Log Nothing New",
+      "config": {
+        "operation": "append",
+        "path": "daily-briefing.txt",
+        "content": "{{format_date($run.timestamp, \"YYYY-MM-DD\")}}: nothing new\n"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1360.0,
+        "y": 420.0
+      }
+    },
+    {
+      "id": "quiet_out",
+      "node_type_id": "output",
+      "node_type": "utility",
+      "name": "Nothing New",
+      "config": {
+        "label": "Result"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1700.0,
+        "y": 420.0
+      }
+    },
+    {
+      "id": "done_out",
+      "node_type_id": "output",
+      "node_type": "utility",
+      "name": "Briefing Done",
+      "config": {
+        "label": "Result"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 2380.0,
+        "y": 120.0
+      }
+    },
+    {
+      "id": "fetch_alert",
+      "node_type_id": "notification",
+      "node_type": "action",
+      "name": "Alert Fetch Failed",
+      "config": {
+        "title": "Briefing: could not fetch the feed",
+        "body": "Today's briefing was skipped. Open the History tab for the error.",
+        "urgency": "normal"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 340.0,
+        "y": 420.0
+      }
+    },
+    {
+      "id": "fail_save",
+      "node_type_id": "file",
+      "node_type": "action",
+      "name": "Save Unsummarized",
+      "config": {
+        "operation": "append",
+        "path": "daily-briefing.txt",
+        "content": "{{Newest Item.output.latest.title}}\n(summary failed, read it at the link)\n{{Newest Item.output.latest.link}}\n\n"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1360.0,
+        "y": -200.0
+      }
+    },
+    {
+      "id": "fail_alert",
+      "node_type_id": "notification",
+      "node_type": "action",
+      "name": "Alert Summary Failed",
+      "config": {
+        "title": "Briefing: summary failed",
+        "body": "{{Newest Item.output.latest.title}} was saved to daily-briefing.txt without a summary. Is the local model running?",
+        "urgency": "normal"
+      },
+      "credentials": {},
+      "input_schema": {},
+      "output_schema": {},
+      "retry": {
+        "max_attempts": 1,
+        "backoff_ms": 500
+      },
+      "fallback_node": null,
+      "disabled": false,
+      "position": {
+        "x": 1700.0,
+        "y": -200.0
       }
     }
   ],
@@ -231,13 +374,73 @@
       "condition": null,
       "on_success": null,
       "on_failure": null
+    },
+    {
+      "id": "e7",
+      "from_node": "any",
+      "from_port": "on_false",
+      "to_node": "quiet_log",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e8",
+      "from_node": "quiet_log",
+      "from_port": "output",
+      "to_node": "quiet_out",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e9",
+      "from_node": "note",
+      "from_port": "output",
+      "to_node": "done_out",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e10",
+      "from_node": "fetch",
+      "from_port": "on_error",
+      "to_node": "fetch_alert",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e11",
+      "from_node": "sum",
+      "from_port": "on_error",
+      "to_node": "fail_save",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
+    },
+    {
+      "id": "e12",
+      "from_node": "fail_save",
+      "from_port": "output",
+      "to_node": "fail_alert",
+      "to_port": "input",
+      "condition": null,
+      "on_success": null,
+      "on_failure": null
     }
   ],
   "metadata": {
     "author": "user",
     "created_at": "2026-11-01T11:01:56.000Z",
-    "updated_at": "2026-11-01T11:01:56.000Z",
-    "version": "1.0.0",
+    "updated_at": "2026-11-01T12:40:00.000Z",
+    "version": "1.1.0",
     "tags": [
       "schedule",
       "ai",

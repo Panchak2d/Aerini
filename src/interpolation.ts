@@ -1,8 +1,9 @@
 import type { Canvas } from "./canvas/Canvas";
 import { escapeHtml as escHtml } from "./utils";
+import { getUpstreamNodes, getRunOutput, listPaths } from "./data-sources";
 
 // Fires when the user types {{ in any input/textarea inside the popover.
-// Shows a dropdown of available node output paths from the current canvas.
+// Shows a dropdown of output paths from the nodes upstream of the node being edited.
 
 let _interpCanvas: Canvas | null = null;
 
@@ -54,7 +55,8 @@ function handleInterpolationInput(el: HTMLInputElement | HTMLTextAreaElement): v
   }
 
   const query   = before.slice(triggerIdx + 2).toLowerCase();
-  const paths   = buildInterpolationPaths();
+  const nodeId  = el.closest<HTMLElement>(".node-popover")?.dataset.nodeId;
+  const paths   = nodeId ? buildInterpolationPaths(nodeId) : [];
   const matches = paths.filter(p => p.toLowerCase().includes(query));
 
   showInterpolationDropdown(el, matches, (chosen) => {
@@ -68,15 +70,14 @@ function handleInterpolationInput(el: HTMLInputElement | HTMLTextAreaElement): v
   });
 }
 
-function buildInterpolationPaths(): string[] {
+function buildInterpolationPaths(nodeId: string): string[] {
   if (!_interpCanvas) return [];
   const paths: string[] = [];
-  for (const node of _interpCanvas.nodes.values()) {
-    const name = node.data.name;
-    paths.push(`${name}.output`);
-    paths.push(`${name}.output.result`);
-    paths.push(`${name}.output.content`);
-    paths.push(`${name}.output.value`);
+  for (const up of getUpstreamNodes(_interpCanvas, nodeId)) {
+    paths.push(`${up.name}.output`);
+    for (const p of listPaths(up.schema, getRunOutput(up.id))) {
+      paths.push(`${up.name}.output.${p.path}`);
+    }
   }
   return paths;
 }
@@ -104,11 +105,8 @@ function showInterpolationDropdown(
   for (const p of paths.slice(0, 12)) {
     const item   = document.createElement("div");
     item.className = "interp-item";
-    const isAlias    = p.includes(" (");
-    const insertValue = isAlias ? p.slice(0, p.indexOf(" (")) : p;
-    const hint       = isAlias ? p.slice(p.indexOf(" (")) : "";
-    item.innerHTML = `<span class="interp-path" title="${escHtml(insertValue)}">${escHtml(insertValue)}</span>${hint ? `<span class="interp-hint">${escHtml(hint)}</span>` : ""}`;
-    item.addEventListener("mousedown", (e) => { e.preventDefault(); onSelect(insertValue); });
+    item.innerHTML = `<span class="interp-path" title="${escHtml(p)}">${escHtml(p)}</span>`;
+    item.addEventListener("mousedown", (e) => { e.preventDefault(); onSelect(p); });
     dd.appendChild(item);
   }
   dd.classList.remove("hidden");
