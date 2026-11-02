@@ -1,6 +1,6 @@
 # Example — Private Daily Briefing (Feed Parser → AI)
 
-Reads an RSS or Atom feed every morning, takes the newest item you have not seen yet, has a local model summarize it in two sentences, and appends the result to a text file and shows a notification. No Code node, no cloud AI, no API key.
+Reads an RSS or Atom feed every morning, takes the newest item you have not seen yet, has a local model summarize it in two sentences, and appends the result to a text file and shows a notification. A day with nothing new adds a one-line log entry and no notification, and a failed fetch or summary raises an alert. No Code node, no cloud AI, no API key.
 
 ## Nodes used
 
@@ -9,17 +9,22 @@ Reads an RSS or Atom feed every morning, takes the newest item you have not seen
 | Schedule (Every Morning) | Cron `0 8 * * *` |
 | HTTP Request (Fetch Feed) | `GET` the feed. The URL in the file is a placeholder: replace it |
 | Feed Parser (Newest Item) | Text `{{Fetch Feed.output.body}}`, Base URL the feed's address, Only New on, On First Run `baseline`, Max Items `1` |
-| If / Condition (Anything New) | Condition `{{Newest Item.output.count}} > 0`; only the True port is wired |
-| AI Prompt (Summarize) | Provider `local`, Base URL `http://localhost:11434/v1`, Model `llama3` (edit to a model you have pulled) |
+| If / Condition (Anything New) | Condition `{{Newest Item.output.count}} > 0`; True goes to Summarize, False to Log Nothing New |
+| AI Prompt (Summarize) | Provider `local`, Base URL `http://localhost:11434/v1`, Model `llama3` (edit to a model you have pulled), a System message that asks for two plain sentences with no preamble, Temperature `0.3`, Timeout `600` |
 | File (Append to Briefing) | Operation `append`, Path `daily-briefing.txt` |
 | Desktop Notification (Notify Me) | Shows the title and the summary |
+| File (Log Nothing New) | On False: appends `<date>: nothing new` to the same file |
+| Output (Nothing New, Briefing Done) | Ends each branch the same way, so a run never stops mid-graph |
+| Desktop Notification (Alert Fetch Failed) | On Fetch Feed's Error port: says the feed could not be fetched |
+| File (Save Unsummarized) and Desktop Notification (Alert Summary Failed) | On Summarize's Error port: saves the title and link without a summary, then alerts you |
 
 ## How it behaves
 
 - **First run is silent.** With On First Run `baseline`, Feed Parser remembers every item currently in the feed and returns none, so `count` is `0`, the If sends nothing down True, and the run ends. From the next run, only items that appeared since then come through.
 - **One item per run.** Max Items `1` returns the newest unseen item. If two new items appear in one day, the second is returned on the next run, because only returned items are marked as seen.
-- **Quiet days stay quiet.** No new item means `count` is `0`, so the model is not called and nothing is written.
-- **Delivered at most once.** Feed Parser marks an item as seen when it runs. If the model is not running when the workflow fires, that item is not offered again.
+- **Quiet days stay quiet.** No new item means `count` is `0`, so the model is not called and no notification appears. The False port of Anything New appends one line, `<date>: nothing new`, to the briefing file, so the file shows the workflow ran. Without a node on that port, the run just ends, with a log entry saying the branch was dropped.
+- **Delivered at most once.** Feed Parser marks an item as seen when it runs, so a failed summary does not bring the item back. If the model fails or does not answer within its 600 second timeout, Save Unsummarized writes the title and link to the briefing file without a summary and Alert Summary Failed notifies you.
+- **Failures are not silent.** A failed fetch (after 3 attempts, 2 seconds apart) shows Alert Fetch Failed. A feed that fetches but is not a feed, such as an HTML error page, fails Feed Parser, which has no Error port: the run is recorded as failed in the **History** tab without an alert.
 
 ## How to build it
 
@@ -43,7 +48,9 @@ If you import `Private_Daily_Briefing___Feed_Parser___AI.aerini` you can skip to
    ```
 6. Add a **File** named **Append to Briefing**: Operation `append`, Path `daily-briefing.txt`, Content `{{Newest Item.output.latest.title}}` then `{{Summarize.output.content}}` and `{{Newest Item.output.latest.link}}`, one per line.
 7. Add a **Desktop Notification** named **Notify Me**: Title `{{Newest Item.output.latest.title}}`, Body `{{Summarize.output.content}}`.
-8. Connect: Every Morning → Fetch Feed → Newest Item → Anything New, then True → Summarize → Append to Briefing → Notify Me.
+8. Connect: Every Morning → Fetch Feed → Newest Item → Anything New, then True → Summarize → Append to Briefing → Notify Me → an **Output** named **Briefing Done**.
+9. Connect Anything New's False port to a **File** named **Log Nothing New** (Operation `append`, Path `daily-briefing.txt`, Content `{{format_date($run.timestamp, "YYYY-MM-DD")}}: nothing new` and a newline), then to an **Output** named **Nothing New**.
+10. Connect Fetch Feed's Error port to a **Desktop Notification** named **Alert Fetch Failed**, and Summarize's Error port to a **File** named **Save Unsummarized** (append the title, a note and the link) and then a **Desktop Notification** named **Alert Summary Failed**.
 
 ## Edit before running
 

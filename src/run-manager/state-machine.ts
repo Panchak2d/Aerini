@@ -1,4 +1,5 @@
 import type { WorkflowResult } from "../ipc/workflow";
+import { setRunOutputs } from "../data-sources";
 
 // Pure run-state container — isolates "what is the run doing / what did it
 // last produce" state from DOM, Canvas, and Tauri orchestration, which lives
@@ -66,5 +67,8 @@ export class RunStateMachine {
     return this._cancelledRuns.delete(runId);
   }
 
-  setLastResult(result: WorkflowResult | null): void { this._lastResult = result; }
+  setLastResult(result: WorkflowResult | null): void {
+    this._lastResult = result;
+    setRunOutputs(result?.node_outputs);
+  }
 }

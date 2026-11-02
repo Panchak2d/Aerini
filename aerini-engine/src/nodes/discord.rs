@@ -79,7 +79,7 @@ impl Node for DiscordNode {
             "required": ["webhook_url", "content"],
             "properties": {
                 "webhook_url": { "type": "string", "description": "Discord webhook URL (https://discord.com/api/webhooks/...)" },
-                "content":     { "type": "string", "description": "Message content (max 2000 characters)" },
+                "content":     { "type": "string", "description": "Message content (max 2000 characters)", "x-aerini-primary-input": true },
                 "username":    { "type": "string", "description": "Override the webhook's display name (optional)" },
                 "allow_everyone_mentions": { "type": "boolean", "description": "Let @everyone and @here in the content ping the channel (default false). The webhook's channel permissions can still block it." }
             }

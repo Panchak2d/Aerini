@@ -25,7 +25,7 @@ The general shape is:
 {{Node Name.output.array_field[0]}}
 ```
 
-**Node Name** is the name you gave the node on the canvas (its display label), not any internal ID. If you rename a node, update anything referencing it by its old name.
+**Node Name** is the name you gave the node on the canvas (its display label), not any internal ID. Renaming a node in the desktop app rewrites the `{{Old Name.…}}` references in your other nodes for you, as one undo step. References written outside the app (a hand-edited file, the API or MCP) aren't rewritten.
 
 - `{{Node Name.output}}` on its own returns the node's entire output, stringified. For a simple value that's just the value; for an object or array, you get its JSON text.
 - Add a dot-path after `.output` to reach one field: `{{Fetch Data.output.body.name}}`.
@@ -33,7 +33,8 @@ The general shape is:
 
 A few things worth knowing about node references specifically:
 
-- **If two nodes share the same name**, the expression resolves against whichever one comes first and logs a warning about the ambiguity. Give nodes distinct names rather than relying on this.
+- **If two nodes share the same name**, the expression resolves against whichever one comes first and logs a warning about the ambiguity. The desktop app numbers a repeated name (`Notify Me 2`) when you add, duplicate or rename a node, but a workflow file written elsewhere can still contain duplicates, so give nodes distinct names.
+- **A node name can't contain `.`, `{`, `}`, `,`, `'` or `"`, can't start with `$`, and can't have a `(` straight after a plain word (`Code(JS)`; `Code (JS)` is fine).** The expression is split on `.` and read as a function call or a quoted value in those cases, so the node could never be referenced. The desktop app refuses these names when you rename a node.
 - **A node that hasn't produced output yet** (it's later in the chain, or on a branch that hasn't run) resolves to empty string with a warning, it's not an error you need to catch.
 - **A two-segment expression only works if the second segment is literally `output`.** `{{Fetch Data.output}}` is valid; `{{Fetch Data.result}}` is not, since that's read as a too-short path missing the `.output.` middle segment, and resolves to empty with a warning rather than guessing what you meant.
 

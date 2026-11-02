@@ -39,7 +39,8 @@ impl Node for TextToFileNode {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Text content to encode as a file"
+                    "description": "Text content to encode as a file",
+                    "x-aerini-primary-input": true
                 },
                 "filename": {
                     "type": "string",

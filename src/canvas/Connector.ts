@@ -26,6 +26,8 @@ export class Connector {
   private _hovered     = false;
   private _highlighted = false; // cut preview
   private _active      = false; // execution flow
+  /** Set per frame by Canvas while a field references this wire's source node. */
+  refColor: string | null = null;
 
   get selected(): boolean { return this._selected; }
   set selected(v: boolean) { if (v !== this._selected) { this._selected = v; markDirty(); } }
@@ -135,6 +137,7 @@ export class Connector {
     if (overrideColor)         color = overrideColor;
     else if (this.highlighted) color = colors.error;
     else if (this.selected)    color = colors.actionNav;
+    else if (this.refColor)    color = this.refColor;
     else if (this.active)      color = colors.actionRun;
     else if (this.hovered)     color = colors.wireHover;
     else                       color = colors.wire;
@@ -144,14 +147,14 @@ export class Connector {
     ctx.moveTo(x1, y1);
     ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
     ctx.strokeStyle = color;
-    ctx.lineWidth   = this.selected || this.active ? 2 : 1.5;
+    ctx.lineWidth   = this.selected || this.active || this.refColor ? 2 : 1.5;
     ctx.lineCap     = "round";
     // Resting-state wires read as schematic/blueprint (dashed), matching the
     // canvas's own dot-grid background. Active flow (moving glow-dot) and an
     // explicit selection/cut-highlight already carry their own strong solid
     // signal, so those stay solid rather than competing with the dash.
     // A conditional edge is dashed by the same rule as any other resting edge.
-    if (!this.active && !this.selected && !this.highlighted) ctx.setLineDash([5, 4]);
+    if (!this.active && !this.selected && !this.highlighted && !this.refColor) ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
 

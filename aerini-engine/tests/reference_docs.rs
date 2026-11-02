@@ -223,3 +223,21 @@ fn node_catalog_text_is_safe_for_vitepress() {
         assert!(!piece.contains('<'), "unescaped < outside a code span: {piece}");
     }
 }
+
+#[test]
+fn primary_flags_are_declared_at_most_once_per_schema() {
+    for node in builtin_descriptors() {
+        let sides = [
+            ("input_schema", &node.input_schema, "x-aerini-primary-input"),
+            ("output_schema", &node.output_schema, "x-aerini-primary-output"),
+        ];
+        for (side, schema, flag) in sides {
+            let flagged = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|props| props.values().filter(|p| p.get(flag) == Some(&Value::Bool(true))).count())
+                .unwrap_or(0);
+            assert!(flagged <= 1, "{} declares {flag} on {flagged} {side} properties", node.type_id);
+        }
+    }
+}

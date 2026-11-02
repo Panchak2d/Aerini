@@ -143,7 +143,7 @@ Show a desktop notification on the machine running the workflow, while it runs.
 |---|---|---|
 | `title` | Title | Required text; a title that is not text fails with `INVALID_TITLE`. On Linux `<`, `>` and `&` are escaped, as in the body. |
 | `body` | Body | Optional notification text; a body that is not text fails with `INVALID_BODY`. On Linux Aerini asks the notification daemon whether it reads markup in the body; if it does, or if it cannot be asked, `<`, `>` and `&` are escaped so they show as typed, and if it does not, the text is sent as it is. |
-| `urgency` | Urgency | `low`, `normal`, or `critical`. Applied on Linux only, but any other value fails with `INVALID_URGENCY` on every platform. Default `normal`. |
+| `urgency` | Urgency | `low`, `normal`, or `critical`. Applied on Linux only (the desktop app hides this field on other systems), but any other value fails with `INVALID_URGENCY` on every platform. Default `normal`. |
 
 **Ports:** default (In → Out).
 

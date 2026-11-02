@@ -75,7 +75,7 @@ This is a living document. Items move as priorities and capacity change.
 - [x] The bundled JetBrains Mono font loads in installed builds
 - [x] Minimap repaints only when it changes and zooms in proportion to the wheel
 - [x] Notifications stack instead of overlapping
-- [ ] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
+- [x] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
 
 ---
 

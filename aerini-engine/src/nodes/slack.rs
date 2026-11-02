@@ -48,7 +48,7 @@ impl Node for SlackNode {
             "required": ["channel", "text"],
             "properties": {
                 "channel": { "type": "string", "description": "Channel ID or name (e.g. C1234567890 or #general)" },
-                "text":    { "type": "string", "description": "Message text" },
+                "text":    { "type": "string", "description": "Message text", "x-aerini-primary-input": true },
                 "api_key": { "type": "string", "description": "Slack Bot Token (xoxb-...)" }
             }
         })

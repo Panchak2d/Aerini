@@ -872,7 +872,7 @@ impl Node for FeedParserNode {
                 "count":     { "type": "number", "description": "Number of items returned" },
                 "total":     { "type": "number", "description": "Number of items in the feed before filtering" },
                 "new_count": { "type": "number", "description": "Only with only_new: items not seen before, ahead of the max_items limit" },
-                "digest":    { "type": "string", "description": "Markdown bullet list of the returned items, one line each" }
+                "digest":    { "type": "string", "description": "Markdown bullet list of the returned items, one line each", "x-aerini-primary-output": true }
             }
         })
     }

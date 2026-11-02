@@ -138,7 +138,7 @@ impl Node for HttpRequestNode {
             "type": "object",
             "properties": {
                 "status":  { "type": "number" },
-                "body":    {},
+                "body":    { "x-aerini-primary-output": true },
                 "headers": { "type": "object" }
             }
         })

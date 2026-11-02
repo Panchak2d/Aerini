@@ -1,3 +1,4 @@
+import { consumePointClick, pointModeOwns } from "../point-mode";
 import type { Canvas } from "./Canvas";
 import { CanvasNode, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
@@ -201,6 +202,7 @@ export class InputHandler {
     if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; this.setCursor("crosshair"); return; }
     if (e.button === 1) { this.startPan(sx, sy); return; }
     if (e.button !== 0) return;
+    if (consumePointClick(e)) return;
 
     const deleteTarget = c.deleteHandleAt(wx, wy);
     if (deleteTarget) { this.wireDeletePress = deleteTarget; return; }
@@ -575,6 +577,7 @@ export class InputHandler {
 
   onDbl(e: MouseEvent): void {
     markDirty();
+    if (pointModeOwns(e)) return;
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);

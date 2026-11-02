@@ -41,7 +41,7 @@ function makeCanvas(onCanvasChanged = vi.fn()): Canvas {
     panY: 0,
     selectedNodes: new Set(),
     onCanvasChanged,
-    editNode: (_n: CanvasNode, mutate: () => void) => { mutate(); onCanvasChanged(); },
+    renameNode: (n: CanvasNode, name: string) => { n.data.name = name; onCanvasChanged(); return { name }; },
   } as unknown as Canvas;
 }
 

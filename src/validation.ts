@@ -1,7 +1,7 @@
 import type { Canvas } from "./canvas/Canvas";
 import type { CanvasNode } from "./canvas/Node";
 import { NODE_IDS } from "./node-ids";
-import { getNodeDescriptor, isDangerousNodeType, isTriggerNodeType } from "./canvas/node-registry";
+import { getNodeDescriptor, isDangerousNodeType, isTriggerNodeType, isUnregisteredNodeType } from "./canvas/node-registry";
 import { canonicalJson } from "./canonical-json";
 
 // `database` is deliberately absent here — its required fields depend on
@@ -38,6 +38,10 @@ export function validateWorkflow(canvas: Canvas): string[] {
 
   for (const node of nodes.values()) {
     if (node.disabled) continue;
+    if (isUnregisteredNodeType(node.data.node_type_id as string)) {
+      errors.push(`"${node.data.name}" (${node.data.node_type_id}) isn't available in this version of Aerini. Update the app, or remove the node.`);
+      continue;
+    }
     if (node.data.node_type_id === NODE_IDS.DATABASE) {
       const dbType = String(node.data.config["db_type"] ?? "sqlite");
       const dbRequired =

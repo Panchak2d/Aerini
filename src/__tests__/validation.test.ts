@@ -153,3 +153,26 @@ describe("validateWorkflow — plugin trigger as entry", () => {
     expect(msg).toContain("trigger plugin");
   });
 });
+
+describe("validateWorkflow — unregistered node types", () => {
+  const desc = (type_id: string) => ({
+    type_id, display_name: type_id, node_type: "action", version: "1",
+    input_schema: {}, output_schema: {}, ports: { inputs: [], outputs: [] },
+  });
+
+  it("blocks a node whose type this build lacks, naming it in plain language", async () => {
+    const { registerNodeDescriptors } = await import("../canvas/node-registry");
+    registerNodeDescriptors([desc("manual_trigger"), desc("http_request")] as never);
+    try {
+      const errors = validateWorkflow(canvasOf(makeNode("n1", "feed_parser")));
+      expect(errors).toEqual([`"Node n1" (feed_parser) isn't available in this version of Aerini. Update the app, or remove the node.`]);
+    } finally {
+      registerNodeDescriptors([]);
+    }
+  });
+
+  it("does not flag anything while the registry has not loaded", () => {
+    const errors = validateWorkflow(canvasOf(makeNode("n1", "feed_parser")));
+    expect(errors.some(e => e.includes("isn't available"))).toBe(false);
+  });
+});

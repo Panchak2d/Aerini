@@ -25,7 +25,7 @@ impl Node for NotificationNode {
             "required": ["title"],
             "properties": {
                 "title":   { "type": "string", "description": "Notification title" },
-                "body":    { "type": "string", "description": "Notification message body" },
+                "body":    { "type": "string", "description": "Notification message body", "x-aerini-primary-input": true },
                 "urgency": {
                     "type": "string",
                     "enum": ["low", "normal", "critical"],

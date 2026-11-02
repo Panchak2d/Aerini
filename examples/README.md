@@ -52,9 +52,11 @@ Needs an API key for your AI provider on the AI Agent. The pattern was tested on
 A private daily briefing, importable as described in "How to import" above. Its walkthrough is `Private_Daily_Briefing___Feed_Parser___AI.md`. It demonstrates:
 - **Schedule**, **HTTP Request** — fetch an RSS or Atom feed every morning
 - **Feed Parser** — turns the feed into items and, with **Only New**, returns only an item not seen in an earlier run (the first run just remembers the feed)
-- **If / Condition** — stops the run quietly when there is nothing new
+- **If / Condition** — sends a day with nothing new down False to a one-line log entry, with no notification
 - **AI Prompt** — a local Ollama model summarizes the item in two sentences
 - **File** (append), **Desktop Notification** — keep the summary and show it
+- **Error ports** on HTTP Request and AI Prompt — alert you when the fetch or the model fails, and save the item without a summary so it is not lost
+- **Output** — ends each branch
 
 Needs Ollama and a pulled model; no API key and no Code node. Replace the placeholder feed URL before running.
 

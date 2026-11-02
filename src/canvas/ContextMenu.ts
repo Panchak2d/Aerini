@@ -134,7 +134,10 @@ export class ContextMenu {
       settled = true;
       document.removeEventListener("mousedown", dismiss, true);
       const v = inp.value.trim();
-      if (v && v !== node.data.name) c.editNode(node, () => { node.data.name = v; });
+      if (v && v !== node.data.name) {
+        const res = c.renameNode(node, v);
+        if (res.message) c.onWarn?.(res.message);
+      }
       inp.remove();
     };
     dismiss = (ev: MouseEvent) => { if (ev.target !== inp) commit(); };

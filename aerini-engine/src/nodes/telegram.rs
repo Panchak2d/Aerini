@@ -21,7 +21,7 @@ impl Node for TelegramNode {
             "required": ["chat_id", "text"],
             "properties": {
                 "chat_id":    { "type": "string", "description": "Telegram chat ID or username (e.g. 123456789 or @channelname)" },
-                "text":       { "type": "string", "description": "Message text" },
+                "text":       { "type": "string", "description": "Message text", "x-aerini-primary-input": true },
                 "parse_mode": { "type": "string", "enum": ["", "Markdown", "HTML"], "description": "Optional text formatting mode" },
                 "api_key":    { "type": "string", "description": "Telegram Bot Token (from @BotFather)" }
             }

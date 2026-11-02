@@ -1,20 +1,40 @@
 /**
- * Expression picker — floating panel that shows predecessor nodes and their
- * output schema fields. Clicking a field inserts {{node_name.output.field}}
- * at the cursor position of the target input or textarea.
+ * Data picker: floating panel with a Data tab (upstream nodes, their fields and
+ * sample values from the last run) and a Functions tab. Choosing an item inserts
+ * a `{{...}}` reference or function at the caret of the target field.
  *
- * Usage:
- *   showExpressionPicker(anchorEl, targetInput, currentNodeId, canvasEl)
+ *   showExpressionPicker(anchorEl, targetInput, currentNodeId, canvasEl, opts?)
  *   closeExpressionPicker()
  */
+
+import {
+  formatSample,
+  getRunOutput,
+  getUpstreamNodes,
+  listPaths,
+  primaryOutputKey,
+  valueAt,
+  type SourceGraph,
+} from "./data-sources";
+import { EXPRESSION_FUNCTIONS } from "./expression-functions";
+import { getIconSvg } from "./icon-cache";
+
+type Field = HTMLInputElement | HTMLTextAreaElement;
+type Tab = "data" | "functions";
+
+export interface PickerOptions {
+  /** Opened because the field gained focus: keep focus in the field and close on typing. */
+  auto?: boolean;
+  /** Node to show expanded first (used when a canvas node is picked twice). */
+  expandNodeId?: string;
+}
 
 let _pickerEl: HTMLElement | null = null;
 let _pickerId = 0;
 
-interface CanvasInternal {
-  connectors: Map<string, { data: { to_node: string; from_node: string } }>;
-  nodes: Map<string, { data: { id: string; name: string; output_schema?: Record<string, unknown> } }>;
-}
+const SVG_ATTRS = `width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`;
+const CHEVRON_SVG = `<svg ${SVG_ATTRS} class="expr-picker-chev"><polyline points="9 6 15 12 9 18"/></svg>`;
+const CHECK_SVG = `<svg ${SVG_ATTRS}><polyline points="5 13 10 18 19 7"/></svg>`;
 
 export function closeExpressionPicker(): void {
   if (_pickerEl) {
@@ -23,223 +43,295 @@ export function closeExpressionPicker(): void {
   }
 }
 
+export function isExpressionPickerOpen(): boolean {
+  return _pickerEl !== null;
+}
+
 export function showExpressionPicker(
   anchorEl: HTMLElement,
-  targetInput: HTMLInputElement | HTMLTextAreaElement,
+  targetInput: Field,
   currentNodeId: string,
   canvasEl: HTMLCanvasElement,
+  opts: PickerOptions = {},
 ): void {
   closeExpressionPicker();
   const myId = ++_pickerId;
 
-  const canvas = (canvasEl as unknown as { __canvas: CanvasInternal }).__canvas;
-
+  const canvas = (canvasEl as unknown as { __canvas: SourceGraph }).__canvas;
   if (!canvas) return;
 
-  // BFS walk backwards through connector graph to collect all ancestors
-  const predecessorIds = new Set<string>();
-  const queue: string[] = [currentNodeId];
-  while (queue.length) {
-    const current = queue.shift()!;
-    for (const conn of canvas.connectors.values()) {
-      if (conn.data.to_node === current && !predecessorIds.has(conn.data.from_node)) {
-        predecessorIds.add(conn.data.from_node);
-        queue.push(conn.data.from_node);
-      }
-    }
-  }
-
-  const predecessors: Array<{ id: string; name: string; schema: Record<string, unknown> }> = [];
-  for (const id of predecessorIds) {
-    const node = canvas.nodes.get(id);
-    if (node) {
-      predecessors.push({
-        id: node.data.id,
-        name: node.data.name,
-        schema: node.data.output_schema ?? {},
-      });
-    }
-  }
+  const upstream = getUpstreamNodes(canvas, currentNodeId);
+  const expanded = new Set<string>(
+    opts.expandNodeId && upstream.some((u) => u.id === opts.expandNodeId) ? [opts.expandNodeId] : upstream[0] ? [upstream[0].id] : [],
+  );
+  const allFields = new Set<string>();
+  let tab: Tab = "data";
+  let query = "";
 
   const picker = document.createElement("div");
   picker.className = "expr-picker";
   picker.setAttribute("role", "dialog");
-  picker.setAttribute("aria-label", "Expression picker");
+  picker.setAttribute("aria-label", "Insert data");
 
-  const header = document.createElement("div");
-  header.className = "expr-picker-header";
-  header.textContent = "Insert expression";
-  picker.appendChild(header);
+  const tabs = document.createElement("div");
+  tabs.className = "expr-picker-tabs";
+  tabs.setAttribute("role", "tablist");
+  const tabBtns = new Map<Tab, HTMLButtonElement>();
+  for (const [id, label] of [["data", "Data"], ["functions", "Functions"]] as const) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "expr-picker-tab";
+    b.setAttribute("role", "tab");
+    b.textContent = label;
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", () => { tab = id; render(); });
+    tabs.appendChild(b);
+    tabBtns.set(id, b);
+  }
+  picker.appendChild(tabs);
+
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "expr-picker-search";
+  search.placeholder = "Search";
+  search.setAttribute("aria-label", "Search data and functions");
+  search.autocomplete = "off";
+  search.spellcheck = false;
+  search.addEventListener("input", () => { query = search.value.trim().toLowerCase(); renderBody(); });
+  picker.appendChild(search);
 
   const body = document.createElement("div");
   body.className = "expr-picker-body";
-
-  const runSection = mkSection("Run variables");
-  body.appendChild(runSection);
-
-  const runVars = [
-    { expr: "$run.id",            desc: "Execution ID" },
-    { expr: "$run.timestamp",     desc: "ISO timestamp of this run" },
-    { expr: "$run.workflow_name", desc: "Workflow name" },
-  ];
-  for (const v of runVars) {
-    body.appendChild(mkItem(`{{${v.expr}}}`, v.desc, () => {
-      insertAtCursor(targetInput, `{{${v.expr}}}`);
-      closeExpressionPicker();
-    }));
-  }
-
-  body.appendChild(mkSection("Functions"));
-
-  const FUNCTIONS: Array<{ sig: string; desc: string; template: string }> = [
-    // String
-    { sig: "upper(string)",               desc: "Uppercase a string",                         template: "{{upper(|)}}" },
-    { sig: "lower(string)",               desc: "Lowercase a string",                         template: "{{lower(|)}}" },
-    { sig: "trim(string)",                desc: "Strip leading and trailing whitespace",        template: "{{trim(|)}}" },
-    { sig: "trim_start(string)",          desc: "Strip leading whitespace",                    template: "{{trim_start(|)}}" },
-    { sig: "trim_end(string)",            desc: "Strip trailing whitespace",                   template: "{{trim_end(|)}}" },
-    { sig: "len(string|array)",           desc: "Character or element count",                  template: "{{len(|)}}" },
-    { sig: "slice(string, start, end)",   desc: "Substring by character index (0-based)",      template: "{{slice(|, 0, 10)}}" },
-    { sig: "replace(string, from, to)",   desc: "Replace first occurrence of a substring",     template: "{{replace(|, \"old\", \"new\")}}" },
-    { sig: "replace_all(string, from, to)", desc: "Replace all occurrences of a substring",   template: "{{replace_all(|, \"old\", \"new\")}}" },
-    { sig: "contains(string, substr)",    desc: "True if string contains substr",              template: "{{contains(|, \"text\")}}" },
-    { sig: "starts_with(string, prefix)", desc: "True if string starts with prefix",           template: "{{starts_with(|, \"prefix\")}}" },
-    { sig: "ends_with(string, suffix)",   desc: "True if string ends with suffix",             template: "{{ends_with(|, \"suffix\")}}" },
-    { sig: "split(string, delimiter)",    desc: "Split into an array",                         template: "{{split(|, \",\")}}" },
-    { sig: "join(array, delimiter)",      desc: "Join array elements into a string",           template: "{{join(|, \",\")}}" },
-    { sig: "pad_start(string, len, char)", desc: "Left-pad string to length",                 template: "{{pad_start(|, 10, \"0\")}}" },
-    { sig: "pad_end(string, len, char)",  desc: "Right-pad string to length",                  template: "{{pad_end(|, 10, \" \")}}" },
-    // Number
-    { sig: "round(number, decimals)",     desc: "Round to N decimal places",                  template: "{{round(|, 2)}}" },
-    { sig: "floor(number)",               desc: "Round down to nearest integer",               template: "{{floor(|)}}" },
-    { sig: "ceil(number)",                desc: "Round up to nearest integer",                 template: "{{ceil(|)}}" },
-    { sig: "abs(number)",                 desc: "Absolute value",                              template: "{{abs(|)}}" },
-    { sig: "min(a, b)",                   desc: "Smaller of two numbers",                      template: "{{min(|, 0)}}" },
-    { sig: "max(a, b)",                   desc: "Larger of two numbers",                       template: "{{max(|, 0)}}" },
-    { sig: "to_int(string)",              desc: "Parse string to integer",                     template: "{{to_int(|)}}" },
-    { sig: "to_float(string)",            desc: "Parse string to decimal number",              template: "{{to_float(|)}}" },
-    // Date
-    { sig: "now()",                       desc: "Current UTC time as ISO 8601 string",         template: "{{now()}}" },
-    { sig: "format_date(timestamp, fmt)", desc: "Format ISO timestamp — tokens: YYYY MM DD HH mm ss", template: "{{format_date(|, \"YYYY-MM-DD\")}}" },
-    { sig: "parse_date(string)",          desc: "Parse a date string to ISO 8601",             template: "{{parse_date(|)}}" },
-    { sig: "add_days(timestamp, n)",      desc: "Add N days to a timestamp",                   template: "{{add_days(|, 1)}}" },
-    { sig: "add_hours(timestamp, n)",     desc: "Add N hours to a timestamp",                  template: "{{add_hours(|, 1)}}" },
-    { sig: "add_minutes(timestamp, n)",   desc: "Add N minutes to a timestamp",                template: "{{add_minutes(|, 30)}}" },
-    { sig: "date_diff(ts1, ts2, unit)",   desc: "Difference between timestamps — unit: days hours minutes seconds", template: "{{date_diff(|, \"\", \"days\")}}" },
-    // Array / Object
-    { sig: "first(array)",                desc: "First element of an array",                   template: "{{first(|)}}" },
-    { sig: "last(array)",                 desc: "Last element of an array",                    template: "{{last(|)}}" },
-    { sig: "nth(array, index)",           desc: "Element at 0-based index",                    template: "{{nth(|, 0)}}" },
-    { sig: "keys(object)",                desc: "Array of object keys",                        template: "{{keys(|)}}" },
-    { sig: "values(object)",              desc: "Array of object values",                      template: "{{values(|)}}" },
-    // Conditional
-    { sig: "if(condition, then, else)",   desc: "Return then if condition is truthy, else otherwise", template: "{{if(|, \"\", \"\")}}" },
-  ];
-
-  for (const func of FUNCTIONS) {
-    body.appendChild(mkFunctionItem(func.sig, func.desc, func.template, targetInput));
-  }
-
-  if (predecessors.length === 0 && predecessorIds.size === 0) {
-    const hint = document.createElement("div");
-    hint.className = "expr-picker-hint";
-    hint.textContent = "No connected predecessor nodes. Connect a node to this one to reference its output fields here.";
-    body.appendChild(hint);
-  }
-
-  for (const pred of predecessors) {
-    body.appendChild(mkSection(pred.name));
-
-    // Always offer the full output reference
-    body.appendChild(mkItem(
-      `{{${pred.name}.output}}`,
-      "Entire output (JSON)",
-      () => { insertAtCursor(targetInput, `{{${pred.name}.output}}`); closeExpressionPicker(); }
-    ));
-
-    // Enumerate top-level output schema properties
-    const props = getSchemaProperties(pred.schema);
-    if (props.length === 0) {
-      const hint = document.createElement("div");
-      hint.className = "expr-picker-hint";
-      hint.textContent = "No output schema fields defined for this node.";
-      body.appendChild(hint);
-    }
-    for (const { key, type: propType, description } of props) {
-      const expr = `{{${pred.name}.output.${key}}}`;
-      const label = description ? `${key} — ${description}` : `${key} (${propType})`;
-      body.appendChild(mkItem(expr, label, () => {
-        insertAtCursor(targetInput, expr);
-        closeExpressionPicker();
-      }));
-    }
-  }
-
   picker.appendChild(body);
+
+  const pick = (text: string) => { insertAtCursor(targetInput, text); closeExpressionPicker(); };
+  const matches = (...parts: string[]) => query === "" || parts.some((p) => p.toLowerCase().includes(query));
+
+  function render(): void {
+    for (const [id, b] of tabBtns) {
+      b.setAttribute("aria-selected", String(id === tab));
+      b.classList.toggle("expr-picker-tab--on", id === tab);
+    }
+    renderBody();
+  }
+
+  function renderBody(): void {
+    body.replaceChildren();
+    if (tab === "functions") renderFunctions(); else renderData();
+  }
+
+  function renderFunctions(): void {
+    let shown = 0;
+    for (const f of EXPRESSION_FUNCTIONS) {
+      if (!matches(f.sig, f.desc)) continue;
+      shown++;
+      const d = mkRow("expr-picker-item expr-picker-item--fn", () => {
+        insertFunction(targetInput, f.template);
+        closeExpressionPicker();
+      });
+      d.appendChild(mkSpan("expr-picker-expr", f.sig));
+      d.appendChild(mkSpan("expr-picker-label", f.desc));
+      body.appendChild(d);
+    }
+    if (shown === 0) body.appendChild(mkHint("No functions match."));
+  }
+
+  function renderData(): void {
+    if (upstream.length === 0) {
+      body.appendChild(mkHint("Connect a node to this one first, then its data appears here."));
+    }
+    for (const up of upstream) {
+      const group = document.createElement("div");
+      group.className = "expr-picker-group";
+      const open = query !== "" || expanded.has(up.id);
+      const sample = getRunOutput(up.id);
+      const hasRun = sample !== undefined;
+      const primary = primaryOutputKey(up.schema);
+      const paths = listPaths(up.schema, sample);
+
+      const visible = paths.filter((p) => p.path !== primary && matches(up.name, p.path, p.description, formatSample(valueAt(sample, p.path))));
+      const showPrimary = primary !== null && matches(up.name, "main result", primary, formatSample(valueAt(sample, primary)));
+      if (query !== "" && !showPrimary && visible.length === 0 && !matches(up.name)) continue;
+
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "expr-picker-node";
+      head.setAttribute("aria-expanded", String(open));
+      head.addEventListener("mousedown", (e) => e.preventDefault());
+      head.addEventListener("click", () => {
+        if (expanded.has(up.id)) expanded.delete(up.id); else expanded.add(up.id);
+        renderBody();
+      });
+      const typeId = (canvas.nodes.get(up.id)?.data as { node_type_id?: string } | undefined)?.node_type_id;
+      const icon = mkSpan("expr-picker-node-icon", "");
+      if (typeId) icon.innerHTML = getIconSvg(typeId);
+      head.appendChild(icon);
+      head.appendChild(mkSpan("expr-picker-node-name", up.name));
+      if (hasRun) {
+        const ran = mkSpan("expr-picker-node-ran", "");
+        ran.innerHTML = CHECK_SVG;
+        ran.title = "Has run";
+        head.appendChild(ran);
+      }
+      const chev = mkSpan("expr-picker-node-chev", "");
+      chev.innerHTML = CHEVRON_SVG;
+      head.appendChild(chev);
+      group.appendChild(head);
+
+      if (open) {
+        const content = document.createElement("div");
+        content.className = "expr-picker-node-body";
+        if (!hasRun) {
+          content.appendChild(mkHint(paths.length > 0 || primary !== null
+            ? `Run once to see values: run the workflow, or use Test on ${up.name}.`
+            : `Run the workflow once, or use Test on ${up.name}, to see its data here.`));
+        }
+        if (showPrimary && primary !== null) {
+          const expr = `{{${up.name}.output.${primary}}}`;
+          const desc = paths.find((p) => p.path === primary)?.description ?? "";
+          content.appendChild(mkDataItem(expr, "Main result", formatSample(valueAt(sample, primary)), desc, () => pick(expr), true));
+        }
+        const collapse = showPrimary && query === "" && visible.length > 0 && !allFields.has(up.id);
+        if (!collapse) {
+          for (const p of visible) {
+            const expr = `{{${up.name}.output.${p.path}}}`;
+            content.appendChild(mkDataItem(expr, p.path, formatSample(valueAt(sample, p.path)), p.description, () => pick(expr), false));
+          }
+        }
+        if (showPrimary && query === "" && visible.length > 0) {
+          const more = mkRow("expr-picker-more", () => {
+            if (allFields.has(up.id)) allFields.delete(up.id); else allFields.add(up.id);
+            renderBody();
+          });
+          more.textContent = allFields.has(up.id) ? "Show fewer fields" : `Show all fields (${visible.length})`;
+          content.appendChild(more);
+        }
+        if (paths.length === 0 && primary === null && hasRun) {
+          content.appendChild(mkHint(`${up.name} returned no named fields. Use Entire output below.`));
+        }
+        if (query === "") {
+          const whole = `{{${up.name}.output}}`;
+          const w = mkRow("expr-picker-item expr-picker-item--whole", () => pick(whole));
+          w.dataset.expr = whole;
+          w.title = whole;
+          w.appendChild(mkSpan("expr-picker-label", "Entire output (JSON)"));
+          content.appendChild(w);
+        }
+        group.appendChild(content);
+      }
+      body.appendChild(group);
+    }
+
+    if (query === "" || matches("run variables", "$run")) {
+      body.appendChild(mkSection("Run variables"));
+      for (const v of [
+        { expr: "$run.id", desc: "Execution ID" },
+        { expr: "$run.timestamp", desc: "ISO timestamp of this run" },
+        { expr: "$run.workflow_name", desc: "Workflow name" },
+      ]) {
+        if (!matches(v.expr, v.desc)) continue;
+        body.appendChild(mkDataItem(`{{${v.expr}}}`, v.expr, "", v.desc, () => pick(`{{${v.expr}}}`), false));
+      }
+    }
+  }
+
+  render();
   document.body.appendChild(picker);
   _pickerEl = picker;
-
-  // Position below the anchor element
   positionPicker(picker, anchorEl);
+  if (!opts.auto) search.focus({ preventScroll: true });
 
-  // Close on outside click
+  const cleanups: Array<() => void> = [];
+  const stillMine = () => myId === _pickerId;
+  const detach = () => { for (const c of cleanups.splice(0)) c(); };
+
   const onOutside = (e: MouseEvent) => {
-    if (myId !== _pickerId) { document.removeEventListener("mousedown", onOutside, true); return; }
-    if (!picker.contains(e.target as Node) && e.target !== anchorEl) {
-      document.removeEventListener("mousedown", onOutside, true);
+    if (!stillMine()) { detach(); return; }
+    const t = e.target as Node;
+    if (!picker.contains(t) && t !== anchorEl && !anchorEl.contains(t) && !(opts.auto && t === targetInput)) {
+      detach();
       closeExpressionPicker();
     }
   };
-  setTimeout(() => {
-    if (myId === _pickerId) document.addEventListener("mousedown", onOutside, true);
+  const armTimer = setTimeout(() => {
+    if (!stillMine()) return;
+    document.addEventListener("mousedown", onOutside, true);
+    cleanups.push(() => document.removeEventListener("mousedown", onOutside, true));
   }, 80);
+  cleanups.push(() => clearTimeout(armTimer));
 
-  // Close on Escape
-  const onEsc = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && myId === _pickerId) {
-      document.removeEventListener("keydown", onEsc, true);
+  const onKey = (e: KeyboardEvent) => {
+    if (!stillMine()) { detach(); return; }
+    if (e.key === "Escape") {
+      detach();
       closeExpressionPicker();
       targetInput.focus();
+    } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && picker.contains(document.activeElement)) {
+      const items = [...picker.querySelectorAll<HTMLElement>('input, [tabindex="0"]')];
+      const i = items.indexOf(document.activeElement as HTMLElement);
+      const next = items[i + (e.key === "ArrowDown" ? 1 : -1)];
+      if (next) { e.preventDefault(); next.focus(); }
     }
   };
-  document.addEventListener("keydown", onEsc, true);
+  document.addEventListener("keydown", onKey, true);
+  cleanups.push(() => document.removeEventListener("keydown", onKey, true));
+
+  if (opts.auto) {
+    const onType = () => { if (stillMine()) { detach(); closeExpressionPicker(); } };
+    const onBlur = (e: Event) => {
+      if (stillMine() && !picker.contains((e as FocusEvent).relatedTarget as Node | null)) { detach(); closeExpressionPicker(); }
+    };
+    targetInput.addEventListener("input", onType, { once: true });
+    targetInput.addEventListener("focusout", onBlur);
+    cleanups.push(() => {
+      targetInput.removeEventListener("input", onType);
+      targetInput.removeEventListener("focusout", onBlur);
+    });
+  }
 }
 
-function insertAtCursor(
-  el: HTMLInputElement | HTMLTextAreaElement,
-  text: string,
-): void {
+/** Insert `text` at the caret of the field and notify the field's input handler. */
+export function insertAtCursor(el: Field, text: string): void {
   const start = el.selectionStart ?? el.value.length;
-  const end   = el.selectionEnd   ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
   el.value = el.value.slice(0, start) + text + el.value.slice(end);
-  const newCursor = start + text.length;
-  el.selectionStart = newCursor;
-  el.selectionEnd   = newCursor;
-  // Fire input event so popover/field-renderer.ts onChange handler picks up the new value
+  el.selectionStart = el.selectionEnd = start + text.length;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.focus();
+}
+
+/** Insert a function template and place the caret at its `|` marker. */
+function insertFunction(el: Field, template: string): void {
+  const marker = template.indexOf("|");
+  const text = marker >= 0 ? template.slice(0, marker) + template.slice(marker + 1) : template;
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, start) + text + el.value.slice(end);
+  el.selectionStart = el.selectionEnd = start + (marker >= 0 ? marker : text.length);
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.focus();
 }
 
 function positionPicker(picker: HTMLElement, anchor: HTMLElement): void {
   const r = anchor.getBoundingClientRect();
-  const PICKER_W = 300;
-  const PICKER_MAX_H = 340;
-  const MARGIN = 8;
-
+  const W = 320;
+  const H = 380;
+  const M = 8;
   let left = r.left;
-  let top  = r.bottom + 4;
-
-  if (left + PICKER_W > window.innerWidth - MARGIN) {
-    left = window.innerWidth - PICKER_W - MARGIN;
-  }
-  if (left < MARGIN) left = MARGIN;
-  if (top + PICKER_MAX_H > window.innerHeight - MARGIN) {
-    top = r.top - PICKER_MAX_H - 4;
-  }
-  if (top < MARGIN) top = MARGIN;
-
+  let top = r.bottom + 4;
+  if (left + W > window.innerWidth - M) left = window.innerWidth - W - M;
+  if (left < M) left = M;
+  if (top + H > window.innerHeight - M) top = r.top - H - 4;
+  if (top < M) top = M;
   picker.style.left = `${left}px`;
-  picker.style.top  = `${top}px`;
+  picker.style.top = `${top}px`;
+}
+
+function mkSpan(cls: string, text: string): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = cls;
+  if (text) s.textContent = text;
+  return s;
 }
 
 function mkSection(title: string): HTMLElement {
@@ -249,94 +341,40 @@ function mkSection(title: string): HTMLElement {
   return d;
 }
 
-function mkItem(expr: string, label: string, onClick: () => void): HTMLElement {
+function mkHint(text: string): HTMLElement {
   const d = document.createElement("div");
-  d.className = "expr-picker-item";
+  d.className = "expr-picker-hint";
+  d.textContent = text;
+  return d;
+}
+
+function mkRow(cls: string, onClick: () => void): HTMLElement {
+  const d = document.createElement("div");
+  d.className = cls;
   d.setAttribute("role", "button");
   d.setAttribute("tabindex", "0");
-
-  const exprEl = document.createElement("span");
-  exprEl.className = "expr-picker-expr";
-  exprEl.textContent = expr;
-
-  const labelEl = document.createElement("span");
-  labelEl.className = "expr-picker-label";
-  labelEl.textContent = label;
-
-  d.appendChild(exprEl);
-  d.appendChild(labelEl);
-
   d.addEventListener("mousedown", (e) => { e.preventDefault(); onClick(); });
   d.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
   });
-
   return d;
 }
 
-interface SchemaProp { key: string; type: string; description: string }
-
-/** Insert `text` at cursor and position the caret at the `|` placeholder position. */
-function insertFunction(
-  el: HTMLInputElement | HTMLTextAreaElement,
-  template: string,
-): void {
-  const markerIdx = template.indexOf("|");
-  const text = markerIdx >= 0 ? template.slice(0, markerIdx) + template.slice(markerIdx + 1) : template;
-  const start = el.selectionStart ?? el.value.length;
-  const end   = el.selectionEnd   ?? el.value.length;
-  el.value = el.value.slice(0, start) + text + el.value.slice(end);
-  const cursorPos = start + (markerIdx >= 0 ? markerIdx : text.length);
-  el.selectionStart = cursorPos;
-  el.selectionEnd   = cursorPos;
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.focus();
-}
-
-function mkFunctionItem(
-  sig: string,
-  desc: string,
-  template: string,
-  targetInput: HTMLInputElement | HTMLTextAreaElement,
+/** A pickable data item: readable name (path segments joined by a drawn chevron), sample, description. */
+function mkDataItem(
+  expr: string, name: string, sample: string, desc: string, onClick: () => void, pinned: boolean,
 ): HTMLElement {
-  const d = document.createElement("div");
-  d.className = "expr-picker-item expr-picker-item--fn";
-  d.setAttribute("role", "button");
-  d.setAttribute("tabindex", "0");
-
-  const sigEl = document.createElement("span");
-  sigEl.className = "expr-picker-expr";
-  sigEl.textContent = sig;
-
-  const descEl = document.createElement("span");
-  descEl.className = "expr-picker-label";
-  descEl.textContent = desc;
-
-  d.appendChild(sigEl);
-  d.appendChild(descEl);
-
-  const onClick = () => {
-    insertFunction(targetInput, template);
-    closeExpressionPicker();
-  };
-  d.addEventListener("mousedown", (e) => { e.preventDefault(); onClick(); });
-  d.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+  const d = mkRow(`expr-picker-item${pinned ? " expr-picker-item--main" : ""}`, onClick);
+  d.dataset.expr = expr;
+  d.title = expr;
+  const label = mkSpan("expr-picker-name", "");
+  const segs = name.startsWith("$") ? [name] : name.split(".");
+  segs.forEach((seg, i) => {
+    if (i > 0) { const sep = mkSpan("expr-picker-sep", ""); sep.setAttribute("aria-hidden", "true"); label.appendChild(sep); }
+    label.appendChild(document.createTextNode(seg));
   });
-
+  d.appendChild(label);
+  if (sample) d.appendChild(mkSpan("expr-picker-sample", sample));
+  if (desc) d.appendChild(mkSpan("expr-picker-label", desc));
   return d;
-}
-
-function getSchemaProperties(schema: Record<string, unknown>): SchemaProp[] {
-  const props = (schema as Record<string, unknown>)?.properties as Record<string, unknown> | undefined;
-  if (!props || typeof props !== "object") return [];
-
-  return Object.entries(props).map(([key, val]) => {
-    const v = val as Record<string, unknown>;
-    return {
-      key,
-      type:        String(v?.type ?? "any"),
-      description: String(v?.description ?? ""),
-    };
-  });
 }

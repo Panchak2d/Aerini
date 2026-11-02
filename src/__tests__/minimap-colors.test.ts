@@ -12,6 +12,7 @@ const MIDNIGHT: CanvasThemeColors = {
   catAction: "#4d9eff", catAI: "#a78bfa", catLogic: "#34d399", catUtility: "#f59e0b", catTrigger: "#8aa9c9",
   wire: "#686f78", wireHover: "#858d97",
   brandGithub: "#ffffff", brandNotion: "#ffffff",
+  ref: ["#60a5fa", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#22d3ee", "#fb923c", "#a3e635"],
 };
 
 const PAPER: CanvasThemeColors = {
@@ -22,6 +23,7 @@ const PAPER: CanvasThemeColors = {
   catAction: "#4c6558", catAI: "#7a508c", catLogic: "#6d5e1d", catUtility: "#7c5a27", catTrigger: "#436382",
   wire: "#7f7764", wireHover: "#6e6651",
   brandGithub: "#181717", brandNotion: "#181717",
+  ref: ["#1d63c9", "#a85d00", "#0f7a55", "#b3236b", "#6d3fc0", "#0b7285", "#b4470c", "#4d7c0f"],
 };
 
 const BASE: MinimapNodeInput = {

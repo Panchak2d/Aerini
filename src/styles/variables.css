@@ -61,6 +61,15 @@
 
   --color-wire:       #686f78;
   --color-wire-hover: #858d97;
+  /* Colors that link a reference in a field to its source node on the canvas. */
+  --ref-color-0: #60a5fa;
+  --ref-color-1: #f59e0b;
+  --ref-color-2: #34d399;
+  --ref-color-3: #f472b6;
+  --ref-color-4: #a78bfa;
+  --ref-color-5: #22d3ee;
+  --ref-color-6: #fb923c;
+  --ref-color-7: #a3e635;
 
   /* Layout */
   --sidebar-w: clamp(260px, 28vw, 400px); --chat-w: 360px;
@@ -134,6 +143,14 @@ html[data-theme="paper"] {
 
   --color-wire:       #7f7764;
   --color-wire-hover: #6e6651;
+  --ref-color-0: #1d63c9;
+  --ref-color-1: #a85d00;
+  --ref-color-2: #0f7a55;
+  --ref-color-3: #b3236b;
+  --ref-color-4: #6d3fc0;
+  --ref-color-5: #0b7285;
+  --ref-color-6: #b4470c;
+  --ref-color-7: #4d7c0f;
 
   --cat-trigger: #436382;
 
