@@ -21,7 +21,7 @@ export interface FieldPreview {
 }
 
 const REF_RE = /\{\{([\s\S]*?)\}\}/g;
-const SIMPLE_RE = /^(.+?)\.output((?:\.[^.\s]+|\[\d+\])*)$/;
+const SIMPLE_RE = /^(.+?)\.output((?:\.(?:[^\s.[\]]+)|\[\d+\])*)$/;
 
 export function hasReference(text: string): boolean {
   return /\{\{[\s\S]*?\}\}/.test(text);
