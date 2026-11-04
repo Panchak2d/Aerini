@@ -401,9 +401,10 @@
 .onboarding-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 20px;
 }
+.onboarding-close { margin-left: auto; margin-right: -8px; }
 
 .onboarding-logo {
   font-size: 16px;
@@ -505,23 +506,18 @@
   align-items: center;
 }
 
-.onboarding-btn-example {
-  flex: 1;
-  padding: 10px 20px;
-  font-size: 13px;
-}
-
 .onboarding-btn-skip {
-  background: none;
-  border: none;
-  color: var(--t2);
+  background: var(--bg3);
+  border: 1px solid var(--bd);
+  color: var(--t1);
   font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  padding: 8px 12px;
+  padding: 8px 16px;
   border-radius: 6px;
-  transition: color 80ms, background 80ms;
+  transition: color 80ms, background 80ms, border-color 80ms;
 }
-.onboarding-btn-skip:hover { color: var(--t1); background: var(--bg3); }
+.onboarding-btn-skip:hover { background: var(--bg4); border-color: var(--t3); }
 
 /* popover-test-btn/result → panels.css */
 
@@ -654,23 +650,6 @@
 /* bg-jobs-empty → panels.css | field-interp-hint → panels.css | onboarding overrides merged into base defs above */
 
 
-.onboarding-btn-example {
-  position: relative;
-  overflow: hidden;
-}
-.onboarding-btn-example::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.08) 50%, transparent 100%);
-  transform: translateX(-100%);
-  animation: shimmer 2.5s ease-in-out 1s infinite;
-}
-@keyframes shimmer {
-  0%   { transform: translateX(-100%); }
-  60%  { transform: translateX(100%); }
-  100% { transform: translateX(100%); }
-}
 
 #btn-bg-run {
   display: inline-flex;

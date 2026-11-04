@@ -37,6 +37,8 @@ export interface WorkflowLogEntry {
   node_id?: string;
   level: "info" | "warn" | "error";
   message: string;
+  /** Engine error code of a failed node (for example MISSING_KEY). Absent on other entries and on older saved runs. */
+  code?: string;
 }
 
 export interface WorkflowResult {
@@ -71,6 +73,12 @@ export const getNodeTypes   = () => invoke<NodeDescriptor[]>("get_node_types");
 // matched against `node_id` at the executor's single execute_with_retry
 // call site — see that constant's doc comment for the full mechanism.
 export const REPLAY_NODE_OUTPUT_KEY = "__aerini_replay_node_output";
+
+// Reserved `initialVariables` key that supplies recorded outputs for several
+// nodes at once so they are not executed — mirrors
+// `aerini_engine::executor::PRESET_NODE_OUTPUTS_KEY` (Rust); the strings must
+// stay identical. Value shape: `{ [nodeId]: output }`.
+export const PRESET_NODE_OUTPUTS_KEY = "__aerini_preset_node_outputs";
 
 // runId: pass the id you'll later hand to cancelRun() if this run needs to
 // be independently stoppable (main run / single-node run both do — see

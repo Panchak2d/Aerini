@@ -171,6 +171,86 @@ pub(super) fn resolve_value_recursive(
     }
 }
 
+/// Config keys that switch off a safety check; never filled from data.
+fn is_safety_switch(key: &str) -> bool {
+    key.starts_with("allow_")
+}
+
+fn is_single_expression(raw: &str) -> bool {
+    let t = raw.trim();
+    t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1 && t.matches("}}").count() == 1
+}
+
+fn schema_type_names(prop: &Value) -> Vec<&str> {
+    match prop.get("type") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
+    }
+}
+
+/// After resolution a whole-value `{{...}}` in a number, integer or boolean
+/// field is still a string. Convert it when the schema says the field is not
+/// a string. Text that does not parse is left unchanged and a warning is added.
+pub fn coerce_scalar_expressions(raw: &Value, resolved: &mut Value, schema: &Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let (Some(raw_obj), Some(out_obj), Some(props)) = (
+        raw.as_object(),
+        resolved.as_object_mut(),
+        schema.get("properties").and_then(Value::as_object),
+    ) else {
+        return warnings;
+    };
+    for (key, prop) in props {
+        let types = schema_type_names(prop);
+        if types.contains(&"string") || is_safety_switch(key) {
+            continue;
+        }
+        let wants_bool = types.contains(&"boolean");
+        let wants_int = types.contains(&"integer");
+        let wants_num = types.contains(&"number");
+        if !(wants_bool || wants_int || wants_num) {
+            continue;
+        }
+        let (Some(Value::String(raw_s)), Some(Value::String(text))) = (raw_obj.get(key), out_obj.get(key)) else {
+            continue;
+        };
+        if !is_single_expression(raw_s) {
+            continue;
+        }
+        let t = text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let converted = if wants_bool && t.eq_ignore_ascii_case("true") {
+            Some(Value::Bool(true))
+        } else if wants_bool && t.eq_ignore_ascii_case("false") {
+            Some(Value::Bool(false))
+        } else if wants_int || wants_num {
+            match t.parse::<i64>() {
+                Ok(n) => Some(Value::from(n)),
+                Err(_) => match t.parse::<f64>() {
+                    Ok(f) if f.is_finite() && wants_int && f.fract() == 0.0 && f.abs() < 9.0e15 => Some(Value::from(f as i64)),
+                    Ok(f) if f.is_finite() && wants_num => serde_json::Number::from_f64(f).map(Value::Number),
+                    _ => None,
+                },
+            }
+        } else {
+            None
+        };
+        match converted {
+            Some(v) => { out_obj.insert(key.clone(), v); }
+            None => warnings.push(format!(
+                "Field '{}': the value from {} is not a valid {}. The node's default is used.",
+                key,
+                raw_s.trim(),
+                if wants_bool { "true or false" } else if wants_int { "whole number" } else { "number" },
+            )),
+        }
+    }
+    warnings
+}
+
 pub(super) fn build_name_map(workflow: &Workflow) -> HashMap<String, String> {
     let mut map = HashMap::with_capacity(workflow.nodes.len());
     for node in &workflow.nodes {
@@ -1141,5 +1221,30 @@ mod tests {
         let ctx = make_ctx(vec![], vec![]);
         let (out, _) = resolve_string(r#"{{upper("hello")}}"#, &wf, &ctx, None);
         assert_eq!(out, "HELLO");
+    }
+
+    #[test]
+    fn whole_expression_in_number_and_boolean_fields_becomes_typed() {
+        let schema = json!({"properties": {
+            "n": {"type": "integer"}, "f": {"type": "number"}, "b": {"type": "boolean"}, "s": {"type": "string"}
+        }});
+        let raw = json!({"n": "{{A.output.n}}", "f": " {{A.output.f}} ", "b": "{{A.output.b}}", "s": "{{A.output.n}}"});
+        let mut out = json!({"n": "5", "f": "2.5", "b": "TRUE", "s": "5"});
+        let w = coerce_scalar_expressions(&raw, &mut out, &schema);
+        assert!(w.is_empty());
+        assert_eq!(out, json!({"n": 5, "f": 2.5, "b": true, "s": "5"}));
+    }
+
+    #[test]
+    fn coercion_leaves_mixed_text_bad_values_and_safety_switches_alone() {
+        let schema = json!({"properties": {
+            "n": {"type": "integer"}, "m": {"type": "integer"}, "allow_local": {"type": "boolean"}
+        }});
+        let raw = json!({"n": "{{A.output.n}}", "m": "x{{A.output.n}}", "allow_local": "{{A.output.b}}"});
+        let mut out = json!({"n": "abc", "m": "x5", "allow_local": "true"});
+        let w = coerce_scalar_expressions(&raw, &mut out, &schema);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("'n'") && w[0].contains("whole number"));
+        assert_eq!(out, json!({"n": "abc", "m": "x5", "allow_local": "true"}));
     }
 }

@@ -1,14 +1,20 @@
 import { disarmPointMode, exitPointModeOnEscape, pointModeOwns } from "../point-mode";
+import { cancelFieldWireDrag, fieldDropOwnsPress } from "../field-wire-drop";
 import { NODE_IDS } from "../node-ids";
-import { REQUIRED_FIELDS, checkDangerousNodes } from "../validation";
+import { blankRequiredFields, checkDangerousNodes, requiredFieldsFor } from "../validation";
 import { showConfirm } from "../confirm";
+import { serialize } from "../canvas/CanvasSerializer";
+import { prepareNodeTest, recordFinishedRun } from "../node-test";
+import { describeTestPlan } from "../preset-cache";
+import { mountTestScope } from "./test-scope";
 import type { CanvasNode } from "../canvas/Node";
 import type { Canvas } from "../canvas/Canvas";
 import { visibleViewport } from "../canvas/viewport";
 import { listCredentials, getCredentialMetadata, listCredentialModels } from "../ipc/credentials";
 import { listProviderModels } from "../ipc/providers";
-import { runWorkflow } from "../ipc/workflow";
+import { runWorkflow, cancelRun } from "../ipc/workflow";
 import type { WorkflowLogEntry } from "../ipc/workflow";
+import { codeForLog, friendlyHint } from "../error-map";
 import { escapeHtml } from "../utils";
 import { getNodeDescriptor, isUnregisteredNodeType } from "../canvas/node-registry";
 import { closeExpressionPicker } from "../expression-picker";
@@ -92,11 +98,7 @@ let _activePopoverCleanup: (() => void) | null = null;
 
 function _doValidateMissingFields(): void {
   if (!_activePopoverNode) return;
-  const required = REQUIRED_FIELDS[_activePopoverNode.data.node_type_id] ?? [];
-  _activePopoverNode.missingRequired = required.some((f) => {
-    const v = _activePopoverNode!.data.config[f];
-    return v === undefined || String(v).trim() === "";
-  });
+  _activePopoverNode.missingRequired = blankRequiredFields(_activePopoverNode.data).length > 0;
 }
 
 export function closePopover(animated = true): void {
@@ -303,14 +305,14 @@ export async function showPopover(
 
   const testBtn = document.createElement("button");
   testBtn.className = "popover-test-btn";
-  testBtn.title = "Test this node in isolation";
-  testBtn.setAttribute("data-tooltip", "Test this node in isolation");
+  testBtn.title = "Test this node with the data from the steps before it";
+  testBtn.setAttribute("data-tooltip", "Test this node with the data from the steps before it");
   testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
   testBtn.addEventListener("click", async () => {
     testBtn.disabled = true;
     testBtn.textContent = "Running…";
     try {
-      await testSingleNode(node, onChange);
+      await testSingleNode(node, canvas, onChange);
     } finally {
       testBtn.disabled = false;
       testBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Test`;
@@ -325,6 +327,7 @@ export async function showPopover(
   // Body
   const body = document.createElement("div");
   body.className = "popover-body";
+  mountTestScope(body, canvas, node.data.id);
 
   if (isUnregisteredNodeType(node.data.node_type_id)) {
     renderUnregisteredNodeNotice(body, node.data.node_type_id);
@@ -384,7 +387,7 @@ export async function showPopover(
     ext?.beforeFields?.(ctx);
 
     if (!ext?.replaceGenericFields) {
-      const requiredKeys = REQUIRED_FIELDS[node.data.node_type_id] ?? [];
+      const requiredKeys = requiredFieldsFor(node.data);
       renderConfigFieldsLoop(ctx, cfgKeys, requiredKeys);
     }
   }
@@ -461,13 +464,13 @@ export async function showPopover(
 
   // Close on outside click.
   const onOutside = (e: MouseEvent) => {
-    if (!pop.contains(e.target as Node) && !isConfirmOpen() && !pointModeOwns(e)) closePopover();
+    if (!pop.contains(e.target as Node) && !isConfirmOpen() && !pointModeOwns(e) && !fieldDropOwnsPress(e)) closePopover();
   };
 
   // Close on Esc
   const onEsc = (e: KeyboardEvent) => {
     if (e.key === "Escape" && !isConfirmOpen()) {
-      if (exitPointModeOnEscape()) return;
+      if (exitPointModeOnEscape() || cancelFieldWireDrag()) return;
       closePopover();
     }
   };
@@ -519,14 +522,26 @@ function positionPopover(pop: HTMLElement, node: CanvasNode, canvasEl: HTMLCanva
 
 // ── Single-node test ──────────────────────────────────────────────────────────
 
-async function testSingleNode(node: CanvasNode, onChange: () => void): Promise<void> {
-  // Same confirmation a canvas Run gives for nodes that execute code.
-  if (!await checkDangerousNodes(`test_${node.data.id}`, [node], _testApproved, showConfirm)) return;
+const NODE_TEST_TIMEOUT_MS = 60_000;
 
-  // Wrap the node in a minimal workflow: trigger → node
+async function testSingleNode(node: CanvasNode, canvas: Canvas | undefined, onChange: () => void): Promise<void> {
+  const testWorkflowId = `test_${node.data.id}`;
+  const prep = canvas
+    ? await prepareNodeTest({
+        graph: canvas, targetId: node.data.id, workflowId: testWorkflowId,
+        approved: _testApproved, confirm: showConfirm,
+      })
+    : null;
+  if (prep && !prep.ok) return;
+  if (!prep && !await checkDangerousNodes(testWorkflowId, [node], _testApproved, showConfirm)) return;
+
+  const hasEarlierSteps = prep?.ok === true && prep.plan.ancestors.length > 0;
+
+  // Without earlier steps the node runs behind a manual trigger so it
+  // behaves as it does when started from one.
   const triggerId = "test_trigger";
   const minimalWorkflow = {
-    id: `test_${node.data.id}`,
+    id: testWorkflowId,
     name: `Test: ${node.data.name}`,
     nodes: [
       {
@@ -560,7 +575,9 @@ async function testSingleNode(node: CanvasNode, onChange: () => void): Promise<v
     ],
   };
 
-  const workflowJson = JSON.stringify(minimalWorkflow);
+  const workflowJson = hasEarlierSteps && prep?.ok
+    ? serialize(testWorkflowId, `Test: ${node.data.name}`, prep.nodes, prep.connectors, false, 8)
+    : JSON.stringify(minimalWorkflow);
   const pop = document.getElementById("node-popover");
   if (!pop) return;
   const body = pop.querySelector(".popover-body") as HTMLElement | null;
@@ -570,23 +587,37 @@ async function testSingleNode(node: CanvasNode, onChange: () => void): Promise<v
   container.querySelector(".popover-test-result")?.remove();
 
   try {
-    const result = await runWorkflow(workflowJson, {});
+    const runId = `test_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        cancelRun(runId).catch(() => {});
+        reject(new Error(`Test timed out after ${NODE_TEST_TIMEOUT_MS / 1000}s. An earlier step that waits for a trigger, such as a Webhook or Schedule, never started.`));
+      }, NODE_TEST_TIMEOUT_MS);
+    });
+    const result = await Promise.race([runWorkflow(workflowJson, prep?.ok ? prep.vars : {}, runId), timeout])
+      .finally(() => clearTimeout(timer));
+    if (prep?.ok) recordFinishedRun(prep.hashes, result.node_outputs, Object.keys(prep.plan.presets));
     const nodeOutput = result.node_outputs?.[node.data.id];
     const success   = result.success && nodeOutput !== undefined;
     const errors    = (result.logs ?? []).filter((l: WorkflowLogEntry) => l.level === "error");
 
     const panel = document.createElement("div");
     panel.className = `popover-test-result ${success ? "test-ok" : "test-fail"}`;
+    const scopeNote = prep?.ok ? describeTestPlan(prep.plan) : "";
 
     if (success) {
       panel.innerHTML = `
         <div class="test-result-header">Node ran successfully</div>
+        ${scopeNote ? `<div class="test-result-note">${escapeHtml(scopeNote)}</div>` : ""}
         <pre class="test-result-json">${escapeHtml(JSON.stringify(nodeOutput, null, 2))}</pre>`;
     } else {
       const errMsg = errors.map((l: WorkflowLogEntry) => l.message).join("\n") || result.error || "Unknown error";
+      const hint = errors.map((l: WorkflowLogEntry) => friendlyHint(codeForLog(l, result.logs), l.message)).find(Boolean) ?? "";
       panel.innerHTML = `
         <div class="test-result-header">Node failed</div>
-        <pre class="test-result-json test-result-err">${escapeHtml(errMsg)}</pre>`;
+        <pre class="test-result-json test-result-err">${escapeHtml(errMsg)}</pre>
+        ${hint ? `<div class="err-hint">${escapeHtml(hint)}</div>` : ""}`;
     }
 
     container.appendChild(panel);

@@ -2596,7 +2596,8 @@
           },
           "body": {
             "description": "Email body (plain text)",
-            "type": "string"
+            "type": "string",
+            "x-aerini-primary-input": true
           },
           "from_email": {
             "description": "Sender email address (must be verified in SendGrid). Write the bare address; use from_name for a display name.",

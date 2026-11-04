@@ -1702,33 +1702,6 @@ export class WorkflowManager {
     }
   }
 
-  // Load an in-memory workflow object directly (used by onboarding example)
-  async loadFromObject(obj: { id: string; name: string; nodes: unknown[]; edges: unknown[] }): Promise<void> {
-    const json = JSON.stringify({ id: obj.id, name: obj.name, nodes: obj.nodes, edges: obj.edges });
-    try {
-      const { id: wfId, name, nodes, connectors, parallelExecution, maxConcurrentNodes, unlimitedDuration, chatSettings, tags, collectionId, maxDurationSecs } = deserialize(json);
-      this.parallelExecution = parallelExecution;
-      this.maxConcurrentNodes = maxConcurrentNodes;
-      this.unlimitedDuration = unlimitedDuration;
-      this.maxDurationSecs = maxDurationSecs;
-      this.chatSettings = chatSettings;
-      this.currentTags = tags;
-      this.currentCollectionId = collectionId;
-      this.canvas.nodes = nodes; this.canvas.connectors = connectors;
-      this.canvas.clearSelection();
-      this.canvas.warnArityViolations();
-      this.currentId = wfId; this.currentName = name;
-      this.markUnsaved(true); this.onTitleChange(name);
-      this.onPanelClose?.();
-      document.getElementById("output-drawer")!.classList.add("hidden");
-      this.canvas.fitToScreen();
-      this.onStatusChange(`Loaded "${name}"`);
-      this.onNavigate?.();
-    } catch (e) {
-      this.onToast(`Could not load example: ${e}`, "error");
-    }
-  }
-
   async handleSave(): Promise<void> {
     if (this.currentName === "Untitled") {
       const titleEl = document.getElementById("workflow-name-label");

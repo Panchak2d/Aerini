@@ -256,6 +256,14 @@ pub async fn delete_workflow(
 #[derive(Deserialize)]
 pub struct RunBody { #[serde(default)] pub initial_variables: HashMap<String, Value> }
 
+/// Keys that make the executor skip a node and return a recorded output.
+/// Only the desktop app's own Test and Replay use them; an API caller must not
+/// be able to skip a node (for example a guard) by sending one.
+fn strip_node_skipping_variables(variables: &mut HashMap<String, Value>) {
+    variables.remove(aerini_engine::executor::REPLAY_NODE_OUTPUT_KEY);
+    variables.remove(aerini_engine::executor::PRESET_NODE_OUTPUTS_KEY);
+}
+
 pub async fn run_workflow(
     State(s):          State<ApiState>,
     Extension(caller): Extension<TokenRecord>,
@@ -337,7 +345,9 @@ pub async fn run_workflow(
         .with_caller_is_admin(caller.has_scope("admin"))
         .with_cancel_token(cancel);
 
-    let run_result = executor.run(Arc::new(wf), b.initial_variables).await;
+    let mut initial_variables = b.initial_variables;
+    strip_node_skipping_variables(&mut initial_variables);
+    let run_result = executor.run(Arc::new(wf), initial_variables).await;
 
     {
         let id_check = id.clone();
@@ -722,5 +732,23 @@ mod workflow_filter_tests {
         let ready = json!({"event": "scheduler-ready", "payload": {"job_count": 7}});
         assert!(!event_passes_workflow_filter(Some(&ready), &filter));
         assert!(!event_passes_workflow_filter(None, &filter));
+    }
+}
+
+#[cfg(test)]
+mod reserved_variable_tests {
+    use super::strip_node_skipping_variables;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn run_variables_cannot_make_the_executor_skip_a_node() {
+        let mut vars = HashMap::from([
+            ("__aerini_replay_node_output".to_string(), json!({ "node_id": "n1", "output": {} })),
+            ("__aerini_preset_node_outputs".to_string(), json!({ "n1": {} })),
+            ("topic".to_string(), json!("rust")),
+        ]);
+        strip_node_skipping_variables(&mut vars);
+        assert_eq!(vars, HashMap::from([("topic".to_string(), json!("rust"))]));
     }
 }

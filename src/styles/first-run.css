@@ -1,0 +1,104 @@
+.onboarding-gallery-title, .empty-state-templates-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+.onboarding-gallery-title { margin: 14px 0 8px; }
+.empty-state-templates-title { margin-top: 10px; }
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  pointer-events: all;
+}
+#onboarding-templates { max-height: 240px; overflow-y: auto; margin-bottom: 14px; }
+.template-grid--compact { grid-template-columns: repeat(2, minmax(150px, 1fr)); max-width: 420px; }
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 10px 11px;
+  text-align: left;
+  font: inherit;
+  color: var(--t1);
+  background: var(--bg3);
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.template-card:hover { background: var(--bg4); border-color: var(--t3); }
+.template-card:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.template-card--compact { padding: 7px 9px; gap: 3px; }
+.template-card-title { font-size: 12px; font-weight: 600; color: var(--t1); }
+.template-card-summary {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--t2);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.template-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: auto; }
+.template-needs { font-size: 10.5px; color: var(--t3); }
+.template-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--bd);
+  color: var(--t2);
+}
+.template-badge--beginner { color: var(--green); border-color: var(--green); }
+.template-badge--intermediate { color: var(--amber); border-color: var(--amber); }
+.template-badge--advanced { color: var(--t2); }
+
+#first-run-checklist {
+  position: absolute;
+  left: 12px;
+  bottom: calc(var(--status-h) + var(--canvas-stat-h) + var(--drawer-inset, 0px) + 12px);
+  z-index: 6;
+  width: 232px;
+  padding: 10px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+}
+#first-run-checklist.hidden { display: none; }
+.checklist-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.checklist-title { font-size: 12px; font-weight: 600; color: var(--t1); }
+.checklist-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--t3);
+  background: none;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.checklist-dismiss:hover { color: var(--t1); background: var(--bg4); }
+.checklist-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.checklist-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--t2); }
+.checklist-step--done { color: var(--t3); text-decoration: line-through; }
+.checklist-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--t3);
+  border-radius: 50%;
+  color: transparent;
+}
+.checklist-step--done .checklist-mark { border-color: var(--green); background: var(--green); color: var(--bg3); }

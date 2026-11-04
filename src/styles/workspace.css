@@ -496,3 +496,35 @@ body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }
   .workflow-rename-hint, .toolbar-zoom-readout { display: none; }
   .workflow-title { min-width: 40px; }
 }
+
+.problems-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; cursor: pointer;
+  font-size: 10px; letter-spacing: .02em; color: var(--amber); background: none;
+  border: 1px solid var(--amber); border-radius: 4px; padding: 1px 6px;
+}
+.problems-chip[data-level="error"] { color: var(--red); border-color: var(--red); }
+.problems-chip:hover, .problems-chip[aria-expanded="true"] { background: var(--bg3); }
+.problems-popover {
+  position: fixed; z-index: 60; width: 360px; max-width: calc(100vw - 16px); max-height: 50vh; overflow-y: auto;
+  background: var(--bg2); border: 1px solid var(--bd); border-radius: 8px; padding: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+.problems-popover[hidden] { display: none; }
+.problems-title { font-size: 11px; font-weight: 600; color: var(--t2); padding: 4px 8px 6px; }
+.problems-list { list-style: none; margin: 0; padding: 0; }
+.problem-row { display: flex; align-items: center; gap: 6px; border-radius: 6px; }
+.problem-row:hover { background: var(--bg3); }
+.problem-open {
+  display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; text-align: left;
+  background: none; border: none; color: var(--t1); font: inherit; font-size: 12px; padding: 6px 8px; cursor: pointer;
+}
+.problem-icon { flex-shrink: 0; margin-top: 2px; }
+.problem-icon-error { color: var(--red); }
+.problem-icon-warning { color: var(--amber); }
+.problem-text { display: flex; flex-direction: column; min-width: 0; }
+.problem-node { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.problem-message { color: var(--t2); overflow-wrap: anywhere; }
+.problem-fix {
+  flex-shrink: 0; margin-right: 6px; font-size: 11px; color: var(--t1); background: var(--bg3);
+  border: 1px solid var(--bd); border-radius: 4px; padding: 2px 8px; cursor: pointer;
+}
+.problem-fix:hover { border-color: var(--t2); }

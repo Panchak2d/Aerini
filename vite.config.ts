@@ -15,6 +15,18 @@ export default defineConfig({
     // loaded via a static <link> at build time avoids runtime style
     // injection entirely, with zero CSP loosening.
     cssCodeSplit: false,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "vendor",
+              test: /node_modules[\\/](@tauri-apps|dompurify)[\\/]/,
+            },
+          ],
+        },
+      },
+    },
   },
   server: {
     port: 1420,

@@ -148,7 +148,7 @@ impl Node for SendGridNode {
                 "from_email": { "type": "string", "description": "Sender email address (must be verified in SendGrid). Write the bare address; use from_name for a display name." },
                 "from_name":  { "type": "string", "description": "Sender display name (optional, max 200 characters)" },
                 "subject":    { "type": "string", "description": "Email subject line" },
-                "body":       { "type": "string", "description": "Email body (plain text)" },
+                "body":       { "type": "string", "description": "Email body (plain text)", "x-aerini-primary-input": true },
                 "api_key":    { "type": "string", "description": "SendGrid API key (SG....)" }
             }
         })

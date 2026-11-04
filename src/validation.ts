@@ -1,15 +1,16 @@
 import type { Canvas } from "./canvas/Canvas";
-import type { CanvasNode } from "./canvas/Node";
+import type { CanvasNode, CanvasNodeData } from "./canvas/Node";
 import { NODE_IDS } from "./node-ids";
 import { getNodeDescriptor, isDangerousNodeType, isTriggerNodeType, isUnregisteredNodeType } from "./canvas/node-registry";
 import { canonicalJson } from "./canonical-json";
+import { collectReferenceProblems, collectRuntimeProblems } from "./problems";
+import type { Problem, ProblemGraph } from "./problems";
 
-// `database` is deliberately absent here — its required fields depend on
-// `db_type` (sqlite needs db_path+query; postgres/mysql need
-// connection_url+query; redis needs connection_url+operation+key) and can't
-// be expressed as one flat list. See the NODE_IDS.DATABASE branch in
-// validateWorkflow below, which mirrors sqlite.rs/postgres.rs/redis.rs's own
-// MISSING_PATH/MISSING_URL/MISSING_QUERY/MISSING_OPERATION/MISSING_KEY checks.
+// Fallback for nodes whose schema declares no `required` list. `database` is
+// deliberately absent: its required fields depend on `db_type` (sqlite needs
+// db_path+query; postgres/mysql need connection_url+query; redis needs
+// connection_url+operation+key), so requiredFieldsFor special-cases it to
+// mirror sqlite.rs/postgres.rs/redis.rs's own MISSING_* checks.
 export const REQUIRED_FIELDS: Record<string, string[]> = {
   [NODE_IDS.HTTP_REQUEST]: ["url", "method"],
   email_send:              ["smtp_host", "from", "to", "subject", "body"],
@@ -20,12 +21,47 @@ export const REQUIRED_FIELDS: Record<string, string[]> = {
   [NODE_IDS.SCHEDULE]:     ["mode"],
 };
 
+function isBlankValue(v: unknown): boolean {
+  return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+}
+
+/** Config keys a node must have filled in before it can run: the node's own schema `required` list, or the fallback list when the schema declares none. */
+export function requiredFieldsFor(data: CanvasNodeData): string[] {
+  if (data.node_type_id === NODE_IDS.DATABASE) {
+    const dbType = String(data.config["db_type"] ?? "sqlite");
+    return dbType === "postgres" || dbType === "mysql" ? ["connection_url", "query"]
+      : dbType === "redis"                              ? ["connection_url", "operation", "key"]
+      :                                                    ["db_path", "query"];
+  }
+  const declared = (data.input_schema as { required?: unknown } | undefined)?.required;
+  if (Array.isArray(declared)) {
+    const keys = declared.filter((k): k is string => typeof k === "string");
+    if (keys.length) return keys;
+  }
+  return REQUIRED_FIELDS[data.node_type_id] ?? [];
+}
+
+// A required key that the node also accepts from another config key.
+const ALTERNATIVE_FIELD: Record<string, Record<string, string>> = {
+  text_splitter: { text: "source_field" },
+};
+
+/** Required config keys that are blank and not supplied by a saved credential or an accepted alternative key. */
+export function blankRequiredFields(data: CanvasNodeData): string[] {
+  const creds = data.credentials ?? {};
+  const alternatives = ALTERNATIVE_FIELD[data.node_type_id] ?? {};
+  return requiredFieldsFor(data).filter(f =>
+    !(f in creds)
+    && isBlankValue(data.config[f])
+    && !(alternatives[f] && !isBlankValue(data.config[alternatives[f]])));
+}
+
 export function validateWorkflow(canvas: Canvas): string[] {
   const errors: string[] = [];
   const nodes = canvas.nodes;
 
   if (nodes.size === 0) {
-    errors.push("Canvas is empty — add some nodes first.");
+    errors.push("Canvas is empty \u2014 add some nodes first.");
     return errors;
   }
 
@@ -42,32 +78,34 @@ export function validateWorkflow(canvas: Canvas): string[] {
       errors.push(`"${node.data.name}" (${node.data.node_type_id}) isn't available in this version of Aerini. Update the app, or remove the node.`);
       continue;
     }
-    if (node.data.node_type_id === NODE_IDS.DATABASE) {
-      const dbType = String(node.data.config["db_type"] ?? "sqlite");
-      const dbRequired =
-        dbType === "postgres" || dbType === "mysql" ? ["connection_url", "query"]
-        : dbType === "redis"                        ? ["connection_url", "operation", "key"]
-        :                                              ["db_path", "query"]; // sqlite (default)
-      for (const field of dbRequired) {
-        const val = node.data.config[field];
-        if (!val || String(val).trim() === "") {
-          errors.push(`"${node.data.name}" — ${field.replace(/_/g, " ")} is required.`);
-        }
-      }
-      continue;
-    }
-
-    const required = REQUIRED_FIELDS[node.data.node_type_id];
-    if (!required) continue;
-    for (const field of required) {
-      const val = node.data.config[field];
-      if (!val || String(val).trim() === "") {
-        errors.push(`"${node.data.name}" — ${field.replace(/_/g, " ")} is required.`);
-      }
+    for (const field of blankRequiredFields(node.data)) {
+      errors.push(requiredMessage(node.data.name, field));
     }
   }
 
   return errors;
+}
+
+function requiredMessage(nodeName: string, field: string): string {
+  return `"${nodeName}" \u2014 ${field.replace(/_/g, " ")} is required.`;
+}
+
+/** Every problem the canvas shows before a run: blank required fields (errors), then reference and name problems and last-run warnings (warnings). */
+export function collectProblems(canvas: Canvas): Problem[] {
+  const graph: ProblemGraph = { nodes: canvas.nodes, connectors: canvas.connectors };
+  const required: Problem[] = [];
+  for (const node of canvas.nodes.values()) {
+    if (node.disabled || node.data.node_type_id === NODE_IDS.NOTE) continue;
+    if (isUnregisteredNodeType(node.data.node_type_id as string)) continue;
+    for (const field of blankRequiredFields(node.data)) {
+      required.push({
+        key: `req:${node.data.id}:${field}`, nodeId: node.data.id, nodeName: node.data.name,
+        severity: "error", kind: "required", field,
+        message: `${field.replace(/_/g, " ")} is required.`,
+      });
+    }
+  }
+  return [...required, ...collectReferenceProblems(graph), ...collectRuntimeProblems(graph)];
 }
 
 async function sha256Hex(text: string): Promise<string> {

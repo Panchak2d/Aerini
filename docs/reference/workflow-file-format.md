@@ -77,6 +77,8 @@ Aerini has no separate top-level list for triggers. Manual Trigger, Schedule, an
 
 The desktop app also writes `ports` and `dynamic_ports` into every saved node object, canvas metadata it uses to draw connection points. Neither is read by the engine; a file that leaves them out loads fine.
 
+A number, integer or true-or-false config field may hold a string that is a single `{{...}}` reference. The engine converts the resolved text to the field's type before the node runs. Older builds keep the string as is, so the node falls back to that field's default.
+
 ### Retry
 
 | Field | Type | Default |

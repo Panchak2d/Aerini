@@ -10,7 +10,7 @@ Aerini resolves every `{{...}}` in a node's config right before that node runs, 
 
 Only text fields carry expressions. A number field or a dropdown just has nowhere to type `{{`, so those always take a fixed value.
 
-**An expression that can't be resolved never crashes the workflow.** It resolves to an empty string, and a warning explaining why lands in that run's log, things like "no node named 'X' in this workflow" or "field path not found." Check the run's log first if a field came out blank when you expected a value.
+**An expression that can't be resolved never crashes the workflow.** It resolves to an empty string, and a warning explaining why lands in that run's log, things like "no node named 'X' in this workflow" or "field path not found." Check the run's log first if a field came out blank when you expected a value. In the desktop app, a reference to a missing node, a node that isn't connected before this one, or a field that node doesn't have is also flagged under **Problems** in the status bar before you run, with a one-click fix for a likely typo, and a field that came out empty in the last run is flagged there too.
 
 You can mix expressions with plain text in the same field: `Order {{HTTP Request.output.order_id}} shipped` resolves to `Order 4521 shipped`. A field can also contain several expressions at once.
 
@@ -30,6 +30,10 @@ The general shape is:
 - `{{Node Name.output}}` on its own returns the node's entire output, stringified. For a simple value that's just the value; for an object or array, you get its JSON text.
 - Add a dot-path after `.output` to reach one field: `{{Fetch Data.output.body.name}}`.
 - Add `[N]` to index into an array at any point in the path: `{{List Items.output.items[0]}}`, or `{{List Items.output.items[0].tags[1]}}` for a nested one.
+
+In the desktop app you don't have to type a reference by hand. Press **Insert data** under a text field, or type `@` at the start of a word, and pick a field from the nodes connected before this one; typing after the `@` searches node names, field names and the values from the last run. An `@` straight after another character, as in an email address, is left alone. If you type or paste text that is exactly one value from the last run, a small prompt offers to turn it into a live reference (**Convert**) or leave it as text (**Dismiss**). It never converts without your click, and Convert is one undo step.
+
+The picker also lists nodes that are not connected to this one yet, under **Not connected**. Choose one and Aerini draws the wire from its output into this node and inserts its main result, as one undo step. Only wires that are safe are offered: never the node itself, never a node that comes after this one (that would loop), and nothing when this node's input already has a wire that a new one would replace.
 
 A few things worth knowing about node references specifically:
 
@@ -133,6 +137,22 @@ That comparison step understands:
 - A bare value with no operator: `true`, `yes`, and `1` count as true; `false`, `no`, `0`, `null`, and an empty string count as false; anything else (including the literal text `undefined`) counts as true.
 
 So `{{HTTP Request.output.status}} == 200` first resolves to something like `200 == 200`, and only then gets compared. Write the condition as if you're describing the comparison in plain terms; you don't need `if()` or any of the functions above inside this field.
+
+## Testing a node
+
+The **Test** button in a node's settings, and **Run this node** in the node's menu, run the node together with the steps connected before it, so references like `{{Fetch.output.body}}` have real data. If those steps were already run and nothing before them has changed, their last results are reused instead of running them again; the settings panel says which ones and how old they are, and **Run everything** forces a fresh run. If a step that has to run again would send an email or message, change data elsewhere or use your AI account, Test lists it and asks first. Loops always run again. Reused results are kept in memory only and are dropped when you switch workflows.
+
+Number, true-or-false and dropdown fields in a node's settings have a **Use data** switch. Turn it on to fill the field from an earlier step (type `{{` or use **Insert data**); turn it off to return to your fixed value. When the whole field is one reference, the engine converts the result to a number or true/false before the node runs (`true` and `false` in any case; a whole number for integer fields). If the text can't be converted, the node's default is used and the run log warns. Mixed text such as `x{{...}}` stays text. Safety switches (names starting `allow_`) and fields that change a node's ports or layout don't have the switch.
+
+Every plain reference in a text field (`{{Node.output.field}}`) also shows as a chip under the field, with the node icon, the node name and the field path. Click a chip to find the node and open its field list; press Backspace or Delete on a focused chip, or use its remove button, to delete that reference from the text. The field still holds the plain `{{...}}` text, so you can edit it by hand at any time.
+
+You can also drag a wire from an earlier node's result dot onto a text field while the node's settings are open. Fields that can take that node's data are outlined; letting go inserts its main result at the end of the field, or opens the field list for that node if you hold Shift or the node has no single main result. Esc or letting go elsewhere cancels and does not create a wire.
+
+### Describe it
+
+Text fields have a **Describe it** button next to **Insert data**. Type what the field should contain, for example "the summary, then the article title in brackets", and press **Propose**. The panel shows exactly what will be sent before anything is sent. By default that is only the names and types of the fields in earlier nodes, never their values; tick **Include sample values** to add values from the last run. If the model is on the internet the panel says so and says which values would be sent; a model on your own computer (such as Ollama) keeps everything local. Secrets and saved keys are never part of the request.
+
+The proposal is checked before you see it: every `{{...}}` reference must be a field that exists in an earlier node, and any other reference is left out and listed. You see the proposed text and, after a run, what it would resolve to. **Use** puts it in the field (Undo reverts it); **Cancel** changes nothing. Describe it uses an AI Prompt or AI Agent node on the canvas that has a saved connection, or that points at a local model; with none, the button's panel explains this and links to Credentials.
 
 ## Gotchas
 
