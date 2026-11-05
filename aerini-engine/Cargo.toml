@@ -233,7 +233,7 @@ libc = "0.2"
 # Session-bus queries (session_bus.rs). zbus 5, the same copy tauri-plugin-opener
 # uses on desktop; keyring has its own zbus 4. The tokio feature is the one it enables.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+zbus = { version = "6.1", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
