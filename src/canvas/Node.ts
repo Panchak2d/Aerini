@@ -4,6 +4,7 @@ import { getIconBitmap } from "../icon-cache";
 import { getCanvasColors, tileTint, resolveNoteColors, withAlpha } from "./theme-colors";
 import { markDirty } from "./render-state";
 import { isPluginNodeType, isUnregisteredNodeType, isTriggerNodeType } from "./node-registry";
+import { displayPortLabel } from "../port-labels";
 
 export interface CanvasNodeData {
   id: string;
@@ -88,8 +89,13 @@ export class CanvasNode {
   private _hovered = false;
   private _status: "idle" | "running" | "success" | "error" = "idle";
   private _missingRequired = false;
+  private _hasProblem = false;
   private _outputPreview: string | null = null;
   private _showOutput = false;
+  private _cached = false;
+
+  get cached(): boolean { return this._cached; }
+  set cached(v: boolean) { if (v !== this._cached) { this._cached = v; markDirty(); } }
 
   get selected(): boolean { return this._selected; }
   set selected(v: boolean) { if (v !== this._selected) { this._selected = v; markDirty(); } }
@@ -104,6 +110,10 @@ export class CanvasNode {
   // popover was closed. Cleared on a successful run.
   get missingRequired(): boolean { return this._missingRequired; }
   set missingRequired(v: boolean) { if (v !== this._missingRequired) { this._missingRequired = v; markDirty(); } }
+
+  // True when a reference or name in this node's config is known to be broken.
+  get hasProblem(): boolean { return this._hasProblem; }
+  set hasProblem(v: boolean) { if (v !== this._hasProblem) { this._hasProblem = v; markDirty(); } }
 
   // Output preview (set after execution)
   get outputPreview(): string | null { return this._outputPreview; }
@@ -203,7 +213,7 @@ export class CanvasNode {
     });
     this.data.ports.outputs.forEach((p, i) => {
       this.ports.push({
-        id: p.id, label: p.label, isInput: false,
+        id: p.id, label: displayPortLabel(this.data.node_type_id, p.id, p.label), isInput: false,
         x: x + NODE_WIDTH,
         y: y + NODE_HEADER + PORT_GAP * i + PORT_GAP / 2,
       });
@@ -333,7 +343,7 @@ export class CanvasNode {
     }
 
     // ── Incomplete-config badge (tile top-right, idle only) ─────────────────
-    if (this.missingRequired && this.status === "idle") {
+    if ((this.missingRequired || this.hasProblem) && this.status === "idle") {
       const bx = tileX + TILE_SIZE;
       const by = tileY;
       ctx.beginPath();
@@ -446,7 +456,13 @@ export class CanvasNode {
       ctx.fillStyle    = withAlpha(colors.actionRun, "88");
       ctx.textBaseline = "middle";
       ctx.textAlign    = "left";
-      ctx.fillText(trunc(this.outputPreview, 28), x + 10, previewY + 17);
+      ctx.fillText(trunc(this.outputPreview, this._cached ? 18 : 28), x + 10, previewY + 17);
+      if (this._cached) {
+        ctx.font      = "10px system-ui, sans-serif";
+        ctx.fillStyle = withAlpha(colors.border, "cc");
+        ctx.textAlign = "right";
+        ctx.fillText("cached", x + w - 10, previewY + 17);
+      }
     }
 
     ctx.restore();

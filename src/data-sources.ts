@@ -146,11 +146,33 @@ export function listPaths(schema: Obj | undefined, sample?: unknown): PathInfo[]
 
 let _runOutputs: Readonly<Record<string, unknown>> | null = null;
 let _indexMemo = new Map<string, IndexEntry[]>();
+const _runListeners = new Set<() => void>();
+
+/** Calls `fn` after the run-output cache changes (a run ends, a node is tested, the cache is cleared). Returns the unsubscribe function. */
+export function onRunOutputsChange(fn: () => void): () => void {
+  _runListeners.add(fn);
+  return () => { _runListeners.delete(fn); };
+}
+
+function notifyRunOutputs(): void {
+  for (const fn of [..._runListeners]) {
+    try { fn(); } catch { /* one failing listener must not block the others */ }
+  }
+}
 
 /** Replace the cache with a run's outputs, or pass null to clear it. */
 export function setRunOutputs(outputs: Record<string, unknown> | null | undefined): void {
   _runOutputs = outputs ? Object.freeze({ ...outputs }) : null;
   _indexMemo = new Map();
+  notifyRunOutputs();
+}
+
+/** Add or replace the outputs of some nodes without dropping the rest of the cache. */
+export function mergeRunOutputs(outputs: Record<string, unknown> | null | undefined): void {
+  if (!outputs) return;
+  _runOutputs = Object.freeze({ ...(_runOutputs ?? {}), ...outputs });
+  _indexMemo = new Map();
+  notifyRunOutputs();
 }
 
 /** Last-run output of a node, or undefined if it has none. Callers must not mutate it. */

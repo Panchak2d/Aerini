@@ -1,3 +1,4 @@
+import { deferStatusHint } from "./point-mode";
 import { Canvas } from "./canvas/Canvas";
 import { NODE_IDS } from "./node-ids";
 import { getNodeDescriptor, isTriggerNodeType } from "./canvas/node-registry";
@@ -9,6 +10,7 @@ import { getNodeTypes, checkBundledNode, loadWorkflow } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import { initStatusBarFields } from "./statusbar-fields";
+import { initProblemsPanel } from "./problems-panel";
 import { initPerformancePanel } from "./panels/PerformancePanel";
 import {
   buildSidebarPalette, bindSidebarSearch, filterByCategory,
@@ -33,6 +35,9 @@ import { showConfirm } from "./confirm";
 import { initInterpolationAutocomplete } from "./interpolation";
 import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
+import { getTemplates } from "./templates";
+import { initChecklist } from "./checklist";
+import { renderTemplateCards } from "./template-gallery";
 import { updateAlwaysOnBtn } from "./always-on";
 import { bindSchedulerEvents } from "./scheduler-events";
 import { RunningSync } from "./running-sync";
@@ -95,6 +100,7 @@ async function init() {
       : canvas.selectedNode
       ? "Del to delete · Ctrl+D to duplicate · Double-click to configure"
       : "Double-click node to configure · Ctrl+S to save · Ctrl+Enter to run";
+    if (deferStatusHint(hint)) return;
     el.textContent = hint; el.title = hint;
   }
 
@@ -131,9 +137,14 @@ async function init() {
   // user can immediately start placing nodes without an extra click.
   // Guard: only switch when the user is already in the Workflows zone —
   // navigating from Background Runs must not clobber the user's zone choice.
+  let refreshProblems: () => void = () => {};
+  let refreshChecklist: () => void = () => {};
+
   wfManager.onNavigate = () => {
     if (getCurrentZone() === "workflows") activateZone("nodes");
     updateAlwaysOnBtn(canvas, wfManager);
+    refreshProblems();
+    refreshChecklist();
     getBgPanelIfLoaded()?.updateBgRunButton(wfManager.currentId);
     refreshRunBtn();
     chatPanel.onWorkflowSwitched();
@@ -151,6 +162,8 @@ async function init() {
   wfManager.onAutoSaveStateChange = () => runningSync.notify();
 
   canvas.onCanvasChanged = () => {
+    refreshProblems();
+    refreshChecklist();
     wfManager.markUnsaved(true);
     wfManager.scheduleAutoSave();
     runningSync.notify();
@@ -258,6 +271,7 @@ async function init() {
 
   const perfPanel = initPerformancePanel(wfManager);
   const statusBarFields = initStatusBarFields(canvas, wfManager, perfPanel.refresh);
+  refreshProblems = initProblemsPanel(canvas).refresh;
 
   // Wire-drop: connector released on empty space → open node picker at drop point
   canvas.onWireDropRequest = (_fromNode, _fromPort, _wx, _wy) => {
@@ -326,6 +340,10 @@ async function init() {
     if (!workflow) { toast("The node list hasn't loaded yet. Try again in a moment.", "error"); return; }
     if (await importWorkflowObject(workflow)) toast(CHAT_BOT_NEXT_STEPS, "info");
   });
+  const emptyTemplates = document.getElementById("empty-state-templates");
+  if (emptyTemplates) {
+    renderTemplateCards(emptyTemplates, getTemplates(), (t) => { void importWorkflowObject(t.workflow); }, true);
+  }
   bindDropImport(toast);
   bindFileInput(toast);
 
@@ -384,7 +402,8 @@ async function init() {
     listenCloseRequested(() => wfManager.hasUnsaved, showConfirm).catch(console.error);
   }
 
-  initOnboarding(canvas, wfManager);
+  initOnboarding(importWorkflowObject);
+  refreshChecklist = initChecklist(canvas, () => runManager.hasResult).refresh;
 
   if (isTauri()) {
     checkBundledNode().catch((msg: string) => toast(msg, "warning"));

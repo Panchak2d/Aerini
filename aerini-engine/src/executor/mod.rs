@@ -154,6 +154,14 @@ pub(crate) const CANCEL_ERROR_CODE: &str = "CANCELLED";
 /// node, executes normally.
 pub const REPLAY_NODE_OUTPUT_KEY: &str = "__aerini_replay_node_output";
 
+/// Reserved `ExecutionContext::variables` key that supplies recorded outputs
+/// for any number of nodes at once, so they are not executed. Value shape:
+/// `{ "<node_id>": <output>, ... }`. A listed node returns its recorded output
+/// verbatim, which also fixes the branch or port it leaves through; every
+/// other node executes normally. The caller must never list a node that has
+/// no recorded output, a Loop node, or a node inside a loop body.
+pub const PRESET_NODE_OUTPUTS_KEY: &str = "__aerini_preset_node_outputs";
+
 impl WorkflowExecutor {
     /// Create an executor with the minimum required components.
     ///
@@ -700,6 +708,9 @@ impl WorkflowExecutor {
 
         let (mut resolved_input, mut expr_warnings) =
             crate::expression::resolve_all_strings(&raw_input, workflow, &ctx, self.config.env_allowlist.as_deref());
+        if let Some(node) = self.registry.get(&node_def.node_type_id) {
+            expr_warnings.extend(crate::expression::coerce_scalar_expressions(&raw_input, &mut resolved_input, &node.input_schema()));
+        }
 
         let mut resolved_credentials: HashMap<String, SecretString> = HashMap::new();
         let mut credential_failure: Option<NodeOutput> = None;
@@ -914,6 +925,20 @@ impl WorkflowExecutor {
                     );
                 }
             }
+        }
+
+        if let Some(output) = input.context.variables
+            .get(PRESET_NODE_OUTPUTS_KEY)
+            .and_then(Value::as_object)
+            .and_then(|outputs| outputs.get(node_id.as_str()))
+        {
+            return (
+                NodeOutput::success_with_logs(
+                    output.clone(),
+                    vec!["Used the output recorded by an earlier run; this node was not executed.".to_string()],
+                ),
+                1,
+            );
         }
 
         // One node-level memory-tracking group
@@ -1754,6 +1779,36 @@ mod tests {
             "__direct_input was {:?} — expected {{\"ping\":\"pong\"}}. \
              This means the executor's find_map fix is not working.",
             val
+        );
+    }
+
+    #[tokio::test]
+    async fn preset_outputs_skip_listed_nodes_and_feed_the_ones_that_run() {
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+
+        let mut registry = NodeRegistry::new();
+        registry.register(Arc::new(EchoNode));
+        registry.register(Arc::new(InspectorNode { captured: Arc::clone(&captured) }));
+
+        let executor = WorkflowExecutor::new(Arc::new(registry), Arc::new(NoopCredentials));
+        let mut vars = HashMap::new();
+        vars.insert(
+            PRESET_NODE_OUTPUTS_KEY.to_string(),
+            serde_json::json!({ "n_upstream": { "ping": "cached" }, "unrelated": { "x": 1 } }),
+        );
+
+        let result = executor.run(Arc::new(two_node_workflow()), vars).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(
+            result.node_outputs.get("n_upstream"),
+            Some(&serde_json::json!({ "ping": "cached" })),
+            "a listed node must return the recorded output, not EchoNode's real one"
+        );
+        assert_eq!(
+            captured.lock().unwrap().as_ref().and_then(|v| v.get("ping")).and_then(|v| v.as_str()),
+            Some("cached"),
+            "the node that really ran must receive the recorded output as its direct input"
         );
     }
 

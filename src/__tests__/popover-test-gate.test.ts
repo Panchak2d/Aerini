@@ -32,9 +32,16 @@ function makeNode(id: string, typeId: string): CanvasNode {
 }
 
 const canvasEl = document.createElement("canvas");
-const fakeCanvas = { beginNodeEdit: () => {}, commitNodeEdit: () => {} } as unknown as Canvas;
 
-async function openPopover(node: CanvasNode): Promise<void> {
+async function openPopover(node: CanvasNode, upstream: CanvasNode[] = []): Promise<void> {
+  const fakeCanvas = {
+    beginNodeEdit: () => {}, commitNodeEdit: () => {},
+    nodes: new Map([node, ...upstream].map(n => [n.data.id, n] as const)),
+    connectors: new Map(upstream.map(u => {
+      const data = { from_node: u.data.id, from_port: "output", to_node: node.data.id, to_port: "input" };
+      return [`e_${u.data.id}`, { data, toWorkflowEdge: () => ({ id: `e_${u.data.id}`, ...data }) }] as const;
+    })),
+  } as unknown as Canvas;
   const p = showPopover(node, canvasEl, () => {}, fakeCanvas);
   await vi.advanceTimersByTimeAsync(200);
   await p;
@@ -89,6 +96,18 @@ describe("popover Test button -- dangerous-node confirmation", () => {
     await clickTest();
     expect(showConfirm).toHaveBeenCalledTimes(1);
     expect(runCalls()).toBe(3);
+  });
+
+  it("an earlier step that sends email is confirmed before Test runs it, and declining stops the test", async () => {
+    vi.mocked(showConfirm).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await openPopover(makeNode("target", "transform"), [makeNode("mail", "email_send")]);
+
+    await clickTest();
+    expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain("Node mail: sends an email");
+    expect(runCalls()).toBe(0);
+
+    await clickTest();
+    expect(runCalls()).toBe(1);
   });
 
   it("clicking, Esc, or Tab while the confirm dialog is showing leaves the popover alone", async () => {

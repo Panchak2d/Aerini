@@ -4,6 +4,9 @@ import { serialize } from "../canvas/CanvasSerializer";
 import type { Canvas } from "../canvas/Canvas";
 import { checkDangerousNodes } from "../validation";
 import { showConfirm } from "../confirm";
+import { prepareNodeTest, recordFinishedRun } from "../node-test";
+import { hashGraph } from "../preset-cache";
+import { canonicalJson } from "../canonical-json";
 import {
   renderSummaryTab, renderResultsTab, renderErrorsTab,
   renderLogsView, renderDebugView,
@@ -15,6 +18,7 @@ import { setWorkflowRunning } from "../workflow-manager";
 import { isTauri, escapeHtml, copyWithButtonFeedback } from "../utils";
 import { resolveNextRunAt, triggerTypeFromKindJson } from "../monitor-helpers";
 import { RunStateMachine } from "./state-machine";
+import { codeForLog, friendlyHint } from "../error-map";
 
 // Hard timeout for the entire workflow run. Prevents the UI from being
 // stuck forever if the backend hangs (e.g. Schedule node, hung child process).
@@ -56,6 +60,7 @@ export class RunManager {
   }
 
   get isRunning(): boolean { return this.state.isRunning; }
+  get hasResult(): boolean { return this.state.lastResult !== null; }
 
   // Called from app.ts whenever a workflow is loaded onto the canvas —
   // either via handleLoad, handleNew, or any other navigation event.
@@ -152,9 +157,11 @@ export class RunManager {
         </div>
         <div class="error-detail-section">
           <div class="error-detail-label">What went wrong</div>
-          ${errorLogs.map(l =>
-            `<div class="error-detail-msg">${escapeHtml(l.message)}</div>`
-          ).join("")}
+          ${errorLogs.map(l => {
+            const hint = friendlyHint(codeForLog(l, lastResult.logs), l.message);
+            return `<div class="error-detail-msg">${escapeHtml(l.message)}</div>`
+              + (hint ? `<div class="err-hint">${escapeHtml(hint)}</div>` : "");
+          }).join("")}
         </div>
         ${nodeOutput ? `
         <div class="error-detail-section">
@@ -341,6 +348,10 @@ export class RunManager {
 
     const json = serialize(currentId, currentName, this.canvas.nodes, this.canvas.connectors,
       this.state.currentParallelExecution, this.state.currentMaxConcurrentNodes);
+    const hashes = await hashGraph(this.canvas, canonicalJson(vars)).catch((e: unknown) => {
+      console.warn("Results of this run will not be reused by Test:", e);
+      return null;
+    });
 
     if (!isTauri()) {
       content.innerHTML = `<div class="run-notice">
@@ -408,6 +419,7 @@ export class RunManager {
       // Save to run history
       saveRunToHistory(runId, this.state.currentWorkflowId, this.state.currentWorkflowName, result);
       this.state.setLastResult(result);
+      if (hashes) recordFinishedRun(hashes, result.node_outputs);
       this.onRunResult?.(result.success);
 
       this.buildDrawerTabs(result);
@@ -516,48 +528,31 @@ export class RunManager {
     this.emitRunState(true);
     setWorkflowRunning(currentId, true);
 
-    // Walk connectors backwards to collect all ancestor nodes
-    const allNodes       = this.canvas.nodes;
-    const allConnectors  = this.canvas.connectors;
-    const includedIds    = new Set<string>();
-
-    const collect = (nodeId: string) => {
-      if (includedIds.has(nodeId)) return;
-      includedIds.add(nodeId);
-      for (const conn of allConnectors.values()) {
-        if (conn.data.to_node === nodeId) collect(conn.data.from_node);
-      }
-    };
-    collect(targetNodeId);
-
-    // Filter to subgraph
-    const subNodes = new Map([...allNodes].filter(([id]) => includedIds.has(id)));
-    const subConns = new Map([...allConnectors].filter(([, c]) =>
-      includedIds.has(c.data.from_node) && includedIds.has(c.data.to_node)
-    ));
-
-    if (subNodes.size === 0) {
+    if (!this.canvas.nodes.has(targetNodeId)) {
       this.onStatus("Node not found");
       this.resetBtns(null);
       return;
     }
 
-    // Gate on the actual subgraph about to run, not the whole canvas — a
-    // Shell/Code/Database node anywhere in the target's ancestor chain must
-    // not execute silently just because this path skips the main Run
-    // button's validateWorkflow/checkDangerousNodes gate. Deliberately
-    // NOT running validateWorkflow's whole-workflow checks (e.g. "has a
-    // trigger") here — testing one node in isolation, before a trigger is
-    // even wired, is this feature's normal, legitimate use.
-    if (!await checkDangerousNodes(currentId, subNodes.values(), this.approvedForExecution, showConfirm)) {
+    // Only the steps that will really execute are checked for code and
+    // side effects: a step answered from recorded results runs nothing.
+    // Deliberately NOT running validateWorkflow's whole-workflow checks (e.g.
+    // "has a trigger") here — testing one node in isolation, before a trigger
+    // is even wired, is this feature's normal, legitimate use.
+    const prep = await prepareNodeTest({
+      graph: this.canvas, targetId: targetNodeId, workflowId: currentId,
+      approved: this.approvedForExecution, confirm: showConfirm,
+    });
+    if (!prep.ok) {
       this.onStatus("Run cancelled");
       this.resetBtns(null);
       return;
     }
+    const { nodes: subNodes, connectors: subConns } = prep;
 
     const json = serialize(`${currentId}_sub`, `${currentName} (node test)`, subNodes, subConns,
       this.state.currentParallelExecution, this.state.currentMaxConcurrentNodes);
-    this.onStatus(`Running "${allNodes.get(targetNodeId)?.data.name ?? targetNodeId}"…`);
+    this.onStatus(`Running "${this.canvas.nodes.get(targetNodeId)?.data.name ?? targetNodeId}"…`);
 
     // Open drawer
     const drawer  = document.getElementById("output-drawer");
@@ -579,7 +574,7 @@ export class RunManager {
     );
 
     try {
-      const result = await Promise.race([runWorkflow(json, {}, runId), timeoutPromise]);
+      const result = await Promise.race([runWorkflow(json, prep.vars, runId), timeoutPromise]);
 
       // User clicked Stop while we were awaiting — forceReset() already
       // reset the UI; discard the result silently, matching handleRun().
@@ -589,13 +584,18 @@ export class RunManager {
         const preview = extractPreview(out);
         this.canvas.setNodeOutput(id, preview);
         const node = this.canvas.nodes.get(id);
-        if (node && node.status === "success") { node.showOutput = true; node.updatePortPositions(); }
+        if (node && node.status === "success") {
+          node.cached = id in prep.plan.presets;
+          node.showOutput = true;
+          node.updatePortPositions();
+        }
       }
       if (!result.success) {
         const f = result.logs.find((l) => l.level === "error" && l.node_id);
         if (f?.node_id) this.canvas.setNodeStatus(f.node_id, "error");
       }
       this.state.setLastResult(result);
+      recordFinishedRun(prep.hashes, result.node_outputs, Object.keys(prep.plan.presets));
       this.buildDrawerTabs(result);
       this.onStatus(result.success ? "Node run complete" : "Node run failed");
     } catch (e) {

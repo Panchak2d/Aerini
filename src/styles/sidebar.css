@@ -777,11 +777,8 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
   display: flex;
   gap: 5px;
   padding: 4px 6px 6px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: none;
+  flex-wrap: wrap;
 }
-.category-chips::-webkit-scrollbar { display: none; }
 .cat-chip {
   flex-shrink: 0;
   font-size: 11px;
@@ -866,3 +863,23 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
   margin-top: 2px;
 }
 .nit-ports:empty { display: none; }
+
+.palette-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.palette-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--t3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.palette-advanced-tag {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  color: var(--amber);
+}

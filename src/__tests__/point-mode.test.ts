@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountExpressionUi } from "../popover/expression-field";
 import { closeExpressionPicker } from "../expression-picker";
 import { setRunOutputs } from "../data-sources";
-import { consumePointClick, disarmPointMode, exitPointModeOnEscape, isPointModeArmed, pointModeOwns } from "../point-mode";
+import { armPointMode, consumePointClick, deferStatusHint, disarmPointMode, exitPointModeOnEscape, isPointModeArmed, pointModeOwns } from "../point-mode";
 import { buildJsonTree } from "../json-tree";
 import { referencedNames } from "../field-preview";
 import { Canvas } from "../canvas/Canvas";
@@ -120,8 +120,8 @@ describe("reference colors", () => {
     const { host, field, setRefHighlights } = setup(schema, { current: null });
     field.value = "{{Feed.output.digest}}";
     field.dispatchEvent(new Event("input", { bubbles: true }));
-    const pill = host.querySelector<HTMLButtonElement>(".ref-pill")!;
-    expect(pill.textContent).toBe("Feed");
+    const pill = host.querySelector<HTMLElement>(".ref-pill")!;
+    expect(pill.querySelector(".ref-pill-name")!.textContent).toBe("Feed");
     pill.dispatchEvent(new MouseEvent("mouseenter"));
     const arg = setRefHighlights.mock.calls[setRefHighlights.mock.calls.length - 1][0] as Map<string, number>;
     expect([...arg.keys()]).toEqual(["up"]);
@@ -202,5 +202,20 @@ describe("canvas input", () => {
     disarmPointMode();
     ih.onDbl(new MouseEvent("dblclick"));
     expect(openNodeConfig).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("status hint while armed", () => {
+  it("a_new_normal_hint_given_while_armed_is_shown_after_disarm_and_not_before", () => {
+    const el = document.createElement("div");
+    el.id = "status-hint";
+    el.textContent = "old";
+    document.body.appendChild(el);
+    armPointMode({ eligible: new Set(["a"]), hit: () => null, insert: () => {}, onPick: () => {} });
+    expect(deferStatusHint("new")).toBe(true);
+    expect(el.textContent).not.toBe("new");
+    disarmPointMode();
+    expect(el.textContent).toBe("new");
+    expect(deferStatusHint("again")).toBe(false);
   });
 });

@@ -183,6 +183,17 @@ describe("connect-time fill of a primary input", () => {
     expect(dst.data.config.content).toBe("{{Read File.output.content}}");
   });
 
+  it("text_to_file_content_is_not_filled_from_an_error_port", () => {
+    const c = makeCanvas();
+    const src = node("src", "file", { name: "Read File", outputs: ["output", "on_error"], outSchema: { properties: { content: { type: "string" } } } });
+    const dst = node("dst", "text_to_file", { x: 900, inSchema: { properties: { content: { type: "string", [PI]: true } } } });
+    add(c, src, dst);
+
+    c.connectOrReplace("src", "on_error", "dst", "input");
+
+    expect(dst.data.config.content).toBeUndefined();
+  });
+
   it("text_to_file_uses_the_declared_primary_output_of_the_source", () => {
     const c = makeCanvas();
     const src = node("src", "http_request", { name: "Fetch", outSchema: { properties: { status: { type: "number" }, body: { [PO]: true } } } });

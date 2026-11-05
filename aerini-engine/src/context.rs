@@ -70,6 +70,9 @@ pub struct ExecutionLogEntry {
     pub node_id: Option<String>,
     pub level: LogLevel,
     pub message: String,
+    /// Machine-readable error code of the failed node (`NodeError.code`). Set only on node-failure entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// Shortest secret the redactor masks. Shorter values would also mask ordinary words.
@@ -269,7 +272,8 @@ impl ExecutionState {
             r.attempts = attempts;
         }
         let msg = output.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
-        self.log(None, LogLevel::Error, format!("Node '{}' failed: {}", node_id, msg));
+        let code = output.error.as_ref().map(|e| e.code.clone());
+        self.log_coded(None, LogLevel::Error, format!("Node '{}' failed: {}", node_id, msg), code);
     }
 
     pub fn mark_skipped(&mut self, node_id: &str) {
@@ -327,8 +331,12 @@ impl ExecutionState {
         self.loop_results.remove(loop_id).unwrap_or_default()
     }
 
-    pub fn log(&mut self, node_id: Option<&str>, level: LogLevel, mut message: String) {
-        let (level, node_id, message) = match self.logs.len().cmp(&MAX_LOG_ENTRIES) {
+    pub fn log(&mut self, node_id: Option<&str>, level: LogLevel, message: String) {
+        self.log_coded(node_id, level, message, None);
+    }
+
+    pub fn log_coded(&mut self, node_id: Option<&str>, level: LogLevel, mut message: String, code: Option<String>) {
+        let (level, node_id, message, code) = match self.logs.len().cmp(&MAX_LOG_ENTRIES) {
             std::cmp::Ordering::Less => {
                 if message.len() > MAX_LOG_MESSAGE_BYTES {
                     let mut cut = MAX_LOG_MESSAGE_BYTES;
@@ -338,12 +346,13 @@ impl ExecutionState {
                     message.truncate(cut);
                     message.push('…');
                 }
-                (level, node_id, message)
+                (level, node_id, message, code)
             }
             std::cmp::Ordering::Equal => (
                 LogLevel::Warn,
                 None,
                 format!("Run log limit of {MAX_LOG_ENTRIES} entries reached; later entries are not kept"),
+                None,
             ),
             std::cmp::Ordering::Greater => return,
         };
@@ -352,6 +361,7 @@ impl ExecutionState {
             node_id: node_id.map(|s| s.to_string()),
             level,
             message,
+            code,
         });
     }
 
@@ -579,5 +589,17 @@ mod log_tests {
         assert!(kept.len() <= MAX_LOG_MESSAGE_BYTES + '…'.len_utf8());
         assert!(kept.ends_with('…') && kept.starts_with('é'));
         assert_eq!(state.logs[1].message, "short");
+    }
+
+    #[test]
+    fn failed_node_log_entry_carries_the_error_code() {
+        let mut state = ExecutionState::new("wf", HashMap::new());
+        let failure = crate::model::NodeOutput::failure(crate::error::NodeError::unrecoverable("MISSING_KEY", "key field is required"));
+        state.mark_failed("n1", failure, 1);
+        state.log(None, LogLevel::Info, "plain".to_string());
+        assert_eq!(state.logs[0].code.as_deref(), Some("MISSING_KEY"));
+        assert_eq!(state.logs[1].code, None);
+        let plain = serde_json::to_value(&state.logs[1]).unwrap();
+        assert!(plain.get("code").is_none());
     }
 }

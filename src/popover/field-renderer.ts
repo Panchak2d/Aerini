@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { NODE_IDS } from "../node-ids";
 import type { CanvasNode } from "../canvas/Node";
 import { mountExpressionUi } from "./expression-field";
+import { blankRequiredFields } from "../validation";
+import { dataSwitchEligible, isDataValue } from "../data-switch";
 import { describeModelFetchError, type OllamaTarget } from "../ipc/providers";
 import { mountOllamaModelControl } from "../ollama-model-control";
 import { renderToolBuilderField } from "./tool-builder";
@@ -154,7 +156,7 @@ function renderTextField(
     const wrap = document.createElement("div");
     wrap.className = "field-expr-wrap";
     wrap.appendChild(inp);
-    mountExpressionUi(inp, wrap, node, canvasEl, isPrimaryInput(prop));
+    mountExpressionUi(inp, wrap, node, canvasEl, isPrimaryInput(prop), key);
     return wrap;
   }
   return inp;
@@ -653,7 +655,8 @@ function renderMultilineField(
   if (key === "code") ta.className = "code-editor";
   ta.addEventListener("input", () => { node.data.config[key] = ta.value; onChange(); syncRequired(); });
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Tab") {
+    // Only the code editor traps Tab (indent); Shift+Tab leaves it. Other multiline fields keep normal keyboard focus movement.
+    if (e.key === "Tab" && key === "code" && !e.shiftKey) {
       e.preventDefault();
       const s = ta.selectionStart, en = ta.selectionEnd;
       ta.value = ta.value.slice(0, s) + "  " + ta.value.slice(en);
@@ -665,7 +668,7 @@ function renderMultilineField(
 
   // Code fields use raw JS, not {{}} syntax, so they get only a typing hint.
   if (key !== "code") {
-    mountExpressionUi(ta, wrap, node, canvasEl, isPrimaryInput(prop));
+    mountExpressionUi(ta, wrap, node, canvasEl, isPrimaryInput(prop), key);
   } else {
     const hint = document.createElement("div");
     hint.className = "field-interp-hint";
@@ -751,7 +754,7 @@ export function storedValueFitsField(prop: PropSchema, value: unknown): boolean 
  *  base_url → path-picker flag → tool-builder flag → enum → multiline flag or key → array (string/enum
  *  items) → type dispatch table → text fallback. Order is load-bearing — do
  *  not reorder. */
-function renderField(
+function renderFieldPlain(
   key: string, prop: PropSchema, cur: string,
   node: CanvasNode, canvasEl: HTMLCanvasElement,
   onChange: () => void, syncRequired: () => void,
@@ -780,6 +783,80 @@ function renderField(
   return renderTextField(key, prop, cur, node, canvasEl, onChange, syncRequired);
 }
 
+function renderDataInput(
+  key: string, node: CanvasNode, canvasEl: HTMLCanvasElement,
+  onChange: () => void, syncRequired: () => void,
+): HTMLElement {
+  const inp = mk<HTMLInputElement>("input");
+  inp.type = "text"; inp.autocomplete = "off"; inp.spellcheck = false;
+  inp.placeholder = "Pick data from an earlier step, or type {{";
+  const stored = node.data.config[key];
+  inp.value = typeof stored === "string" ? stored : "";
+  inp.addEventListener("input", () => {
+    if (inp.value.trim() === "") delete node.data.config[key];
+    else node.data.config[key] = inp.value;
+    onChange(); syncRequired();
+  });
+  const wrap = document.createElement("div");
+  wrap.className = "field-expr-wrap";
+  wrap.appendChild(inp);
+  mountExpressionUi(inp, wrap, node, canvasEl, false, key);
+  return wrap;
+}
+
+const DATA_SWITCH_ICON =
+  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M6.5 9.5l3-3"/><path d="M7 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1"/><path d="M9 11.5l-1 1A2.5 2.5 0 014.5 9l1-1"/></svg>';
+
+/** Number, true-or-false and dropdown fields: a labelled switch changes the fixed control into a data box. */
+function renderField(
+  key: string, prop: PropSchema, cur: string,
+  node: CanvasNode, canvasEl: HTMLCanvasElement,
+  onChange: () => void, syncRequired: () => void,
+  fetchModels: (() => Promise<string[]>) | undefined,
+  ctx?: ExtensionContext,
+): HTMLElement {
+  const plain = () => renderFieldPlain(key, prop, String(node.data.config[key] ?? ""), node, canvasEl, onChange, syncRequired, fetchModels, ctx);
+  if (!dataSwitchEligible(node.data.node_type_id, key, prop)) return renderFieldPlain(key, prop, cur, node, canvasEl, onChange, syncRequired, fetchModels, ctx);
+
+  const wrap = document.createElement("div");
+  wrap.className = "field-data-switch-wrap";
+  const slot = document.createElement("div");
+  slot.className = "field-data-switch-slot";
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "field-data-switch";
+  btn.innerHTML = DATA_SWITCH_ICON;
+  const label = document.createElement("span");
+  label.textContent = "Use data";
+  btn.appendChild(label);
+  btn.title = "Use a value from an earlier step instead of a fixed one";
+
+  let dataMode = isDataValue(node.data.config[key]);
+  let lastFixed: unknown = dataMode ? undefined : node.data.config[key];
+
+  const show = () => {
+    btn.setAttribute("aria-pressed", String(dataMode));
+    btn.classList.toggle("field-data-switch--on", dataMode);
+    slot.replaceChildren(dataMode ? renderDataInput(key, node, canvasEl, onChange, syncRequired) : plain());
+  };
+  btn.addEventListener("click", () => {
+    if (dataMode) {
+      delete node.data.config[key];
+      if (lastFixed !== undefined) node.data.config[key] = lastFixed;
+      dataMode = false;
+    } else {
+      lastFixed = node.data.config[key];
+      delete node.data.config[key];
+      dataMode = true;
+    }
+    show();
+    onChange(); syncRequired();
+  });
+  show();
+  wrap.append(slot, btn);
+  return wrap;
+}
+
 /** Renders the generic "Configuration" field loop for a node's config schema.
  *  Appends one field-group element per key, in order, to ctx.body. */
 function isLinuxPlatform(): boolean {
@@ -801,8 +878,7 @@ export function renderConfigFieldsLoop(
     let fieldEl: HTMLElement;
     const syncRequired = () => {
       if (!isRequired) return;
-      const v = node.data.config[key];
-      fieldEl.classList.toggle("field-required-empty", v === undefined || String(v).trim() === "");
+      fieldEl.classList.toggle("field-required-empty", blankRequiredFields(node.data).includes(key));
     };
 
     const hint = prop.maxLength !== undefined
@@ -824,7 +900,7 @@ export function renderConfigFieldsLoop(
       isRequired,
     );
 
-    if (isRequired && (!cur || cur.trim() === "")) fieldEl.classList.add("field-required-empty");
+    if (isRequired && blankRequiredFields(node.data).includes(key)) fieldEl.classList.add("field-required-empty");
     body.appendChild(fieldEl);
   }
 }

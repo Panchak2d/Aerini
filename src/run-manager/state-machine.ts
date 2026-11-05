@@ -1,5 +1,7 @@
 import type { WorkflowResult } from "../ipc/workflow";
 import { setRunOutputs } from "../data-sources";
+import { clearPresetCache } from "../preset-cache";
+import { setRunLogs } from "../problems";
 
 // Pure run-state container — isolates "what is the run doing / what did it
 // last produce" state from DOM, Canvas, and Tauri orchestration, which lives
@@ -70,5 +72,7 @@ export class RunStateMachine {
   setLastResult(result: WorkflowResult | null): void {
     this._lastResult = result;
     setRunOutputs(result?.node_outputs);
+    setRunLogs(result?.logs);
+    if (!result) clearPresetCache();
   }
 }

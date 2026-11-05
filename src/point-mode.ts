@@ -51,6 +51,13 @@ export function disarmPointMode(): void {
   markDirty();
 }
 
+/** While armed, the status line shows the pick-mode text; a caller with a new normal hint hands it here and it is shown on disarm. Returns true when it was taken. */
+export function deferStatusHint(text: string): boolean {
+  if (!cfg) return false;
+  savedHint = { text, title: text };
+  return true;
+}
+
 export function isPointModeArmed(): boolean {
   return cfg !== null;
 }

@@ -4,9 +4,11 @@ By the end of this page you'll have built a small **[workflow](../glossary.md#wo
 
 ## Open Aerini
 
-The first time you open Aerini, a welcome dialog appears with two options: load a working example, or start from nothing. Choose **Start with a blank canvas**. Building one yourself, even a simple one, teaches you the parts a lot faster than reading about a finished example would.
+The first time you open Aerini, a welcome dialog appears with a short list of working examples, each showing how hard it is and what it needs (nothing, Ollama, an API key), and a **Start with a blank canvas** button. Choose **Start with a blank canvas**. Building one yourself, even a simple one, teaches you the parts a lot faster than reading about a finished example would.
 
 You'll land on the main screen: a **[canvas](../glossary.md#canvas)** filling most of the window, and a sidebar on the left listing every available **[node](../glossary.md#node)**, grouped by category.
+
+Each sidebar entry has a one-line description under its name. The **Beginner** button above the list keeps only the simple, common nodes, and nodes that run code on your computer carry an **Advanced** tag. A small **Getting started** checklist at the bottom left of the canvas ticks itself off as you add a trigger, add a node, connect them, fill in a field, run, and see the result; close it with the **x** button whenever you like, and it stays closed.
 
 ## Step 1: Add a trigger
 

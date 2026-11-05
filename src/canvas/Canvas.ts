@@ -19,6 +19,7 @@ import { moveCamera, stepCamera, cancelCamera, type CameraTarget } from "./camer
 import { setIconScale } from "../icon-cache";
 import { declaredPrimaryInputKey, declaredPrimaryOutputKey, getRunOutput, formatSample } from "../data-sources";
 import { pointEligibleIds } from "../point-mode";
+import { CONNECT_FROM_PORT, CONNECT_TO_PORT, listConnectable, type ConnectCandidate } from "../connect-insert";
 import { validateNodeName, uniqueNodeName, renameReferences } from "../node-names";
 
 export class Canvas {
@@ -707,6 +708,17 @@ export class Canvas {
     return null;
   }
 
+  /** Id of the node whose `output` result dot is under a mouse event; null elsewhere. */
+  outputPortNodeAtEvent(e: MouseEvent): string | null {
+    const { sx, sy } = this.evSX(e);
+    const { x, y } = this.s2w(sx, sy);
+    for (const n of this.nodes.values()) {
+      const p = n.portAtPoint(x, y);
+      if (p && !p.isInput) return p.id === "output" ? n.data.id : null;
+    }
+    return null;
+  }
+
   /** Outlines for point mode (pickable nodes) and for nodes referenced by the focused field. */
   private drawReferenceOverlays(): void {
     const eligible = pointEligibleIds();
@@ -1065,6 +1077,29 @@ export class Canvas {
     return this.connectOrReplace(fromNode, fromPort, toNode, toPort);
   }
 
+  /** Nodes the data picker may wire into `nodeId`; empty when the input already holds a wire that a new one would replace. */
+  connectableTo(nodeId: string): ConnectCandidate[] {
+    return listConnectable(this, nodeId, (id, port) => this.isMultiInput(id, port) || this.wiresIntoPort(id, port).length === 0);
+  }
+
+  /**
+   * Wires `srcId` into `targetId` and runs `apply` (which writes the field the
+   * reference goes into) as one undoable step, then toasts what happened.
+   * Returns false, changing nothing, when the wire is not one connectableTo offers.
+   */
+  connectAndInsert(srcId: string, targetId: string, apply: () => void): boolean {
+    const src = this.nodes.get(srcId);
+    const target = this.nodes.get(targetId);
+    if (!src || !target || !this.connectableTo(targetId).some((c) => c.id === srcId)) return false;
+    const done = this.transact(`Connect "${src.data.name}" and use its result`, () => {
+      if (!this.connectOrReplace(srcId, CONNECT_FROM_PORT, targetId, CONNECT_TO_PORT)) return false;
+      this.editNode(target, apply);
+      return true;
+    });
+    if (done) this.onWarn?.(`Connected "${src.data.name}" to "${target.data.name}" and used its result.`);
+    return done;
+  }
+
   /**
    * Moves the target end of an existing wire to `target` as one undoable step.
    * On a single-arity target any other wire there is replaced (recorded on the
@@ -1211,7 +1246,7 @@ export class Canvas {
 
   private applyConnectionDefaults(srcId: string, srcPort: string, nodeId: string, portId: string) {
     const target = this.nodes.get(nodeId);
-    if (target?.data.node_type_id === "text_to_file") {
+    if (target?.data.node_type_id === "text_to_file" && srcPort !== "on_error") {
       const fromNode = this.nodes.get(srcId);
       if (fromNode && declaredPrimaryOutputKey(fromNode.data.output_schema) === null) {
         const cfg = target.data.config as Record<string, unknown>;
@@ -1553,7 +1588,7 @@ export class Canvas {
 
   setNodeStatus(id: string, s: "idle" | "running" | "success" | "error") { const n = this.nodes.get(id); if (n) { n.status = s; if (s === "success") n.missingRequired = false; } }
   setNodeOutput(id: string, p: string) { const n = this.nodes.get(id); if (n) { n.outputPreview = p; n.status = "success"; n.missingRequired = false; } }
-  resetAllStatus() { for (const n of this.nodes.values()) { n.status = "idle"; n.outputPreview = null; n.showOutput = false; n.updatePortPositions(); } }
+  resetAllStatus() { for (const n of this.nodes.values()) { n.status = "idle"; n.outputPreview = null; n.showOutput = false; n.cached = false; n.updatePortPositions(); } }
   clearConnectorActive() { for (const c of this.connectors.values()) c.active = false; }
   toWorkflowJson(id: string, name: string, parallelExecution = false, maxConcurrentNodes = 8) {
     return serialize(id, name, this.nodes, this.connectors, parallelExecution, maxConcurrentNodes);

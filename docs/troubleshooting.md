@@ -10,7 +10,7 @@ On macOS and Windows, the very first launch usually triggers a warning from the 
 
 ## A workflow won't run
 
-Before anything executes, Aerini checks the workflow and refuses to run it if something's missing. You'll see a toast listing up to three problems at once, each one naming the node and the field: a URL missing on an HTTP Request, a command missing on Shell Command, a script missing on Code, a prompt missing on AI Prompt, and so on. An empty canvas or a workflow with no trigger node gets caught the same way, before it ever tries to run anything.
+Before anything executes, Aerini checks the workflow and refuses to run it if something's missing. You'll see a toast listing up to three problems at once, each one naming the node and the field: a URL missing on an HTTP Request, a command missing on Shell Command, a script missing on Code, a prompt missing on AI Prompt, and so on, for any node whose settings mark a field as required. An empty canvas or a workflow with no trigger node gets caught the same way, before it ever tries to run anything. The same problems, plus any `{{...}}` reference that points at a missing node, a node that isn't connected before this one, or a field the node doesn't produce, are listed under **Problems** in the status bar as soon as they appear. Click one to open its node; a misspelled reference offers a one-click fix. A reference problem is a warning and never stops a run.
 
 If you clicked Run and it doesn't look like anything happened, check these in order:
 
@@ -21,6 +21,8 @@ If you clicked Run and it doesn't look like anything happened, check these in or
 If your trigger is a **Webhook**, pressing Run behaves differently than every other trigger: instead of running the rest of the workflow immediately, it waits for a real HTTP request to arrive before doing anything. If you're just trying to test the nodes after the trigger, that's expected; see [Background Runs](guide/background-runs.md#two-ways-to-run-a-workflow) for the two ways to run a webhook workflow and what each one waits for.
 
 If the run looks stuck on "Running..." for a long time, it isn't stuck forever: a full run times out after 2 minutes and a single-node test run times out after 1 minute, and either one ends with a clear timeout message rather than hanging silently. Most individual nodes are bounded well under that on their own (HTTP Request and Shell Command both give up after 30 seconds by default), so hitting the full 2-minute cap on an ordinary workflow is unusual. A Loop node working through a long list, or a workflow with a lot of sequential steps, is the most common way the total adds up even though no single step is actually hanging.
+
+When a node fails, the error card shows the engine's own message first. If Aerini recognises the error (a blank required setting, a missing or rejected API key, a model without tool support, a rate limit, and a few others), a one-line explanation and a fix follow it. An error Aerini does not recognise shows the message alone; the message is still the authoritative text to search for or report.
 
 ## A scheduled or webhook workflow stops firing, or keeps failing every time
 
@@ -71,7 +73,7 @@ The server checks every variable in `credential_env_vars` (see [the config file]
 [Background Runs](guide/background-runs.md#unattended-execution-and-dangerous-nodes) already covers the core rule: a manual Run shows this confirmation once per session, a scheduled or webhook-triggered background fire skips it and only logs a warning instead. Two things worth adding:
 
 - It isn't only Shell Command, Code, and Database that trigger it. Any node loaded from a `.wasm` plugin counts as well, since Aerini has no way to know what a plugin actually does on your machine.
-- The **Test** button in a node's config panel shows the same confirmation for these nodes. Its approval is remembered separately from a full Run's, for the current app session only, so you may see the dialog once from each.
+- The **Test** button in a node's config panel shows the same confirmation for these nodes. Its approval is remembered separately from a full Run's, for the current app session only, so you may see the dialog once from each. It covers only steps that will really run: a step answered from the last results runs nothing, so it is not asked about.
 - Approving it doesn't stick around forever. The approval is remembered only for the current app session, and only for that exact set of dangerous nodes on that exact workflow. Restart Aerini, or add or remove a dangerous node, and you'll see the dialog again the next time you run it.
 
 ## A webhook never receives a request

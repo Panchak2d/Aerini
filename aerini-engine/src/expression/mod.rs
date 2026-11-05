@@ -18,5 +18,5 @@ mod resolver;
 mod functions;
 mod parser;
 
-pub use resolver::{resolve_string, resolve_all_strings};
+pub use resolver::{resolve_string, resolve_all_strings, coerce_scalar_expressions};
 pub(crate) use functions::is_truthy;

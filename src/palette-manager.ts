@@ -5,7 +5,8 @@ import { NODE_IDS } from "./node-ids";
 import { escapeHtml } from "./utils";
 import { getIconSvg } from "./icon-cache";
 import { getPluginIconSvg } from "./plugin-icon";
-import { NODE_DESCRIPTION_FALLBACK } from "./node-descriptions";
+import { NODE_DESCRIPTION_FALLBACK, firstSentence, isAdvancedNode, isBeginnerNode } from "./node-descriptions";
+import { displayPortLabel } from "./port-labels";
 
 interface Category { label: string; nodes: NodeDescriptor[] }
 
@@ -254,7 +255,11 @@ export function buildSidebarPalette(
       // Persistent visible marker, not just the icon's hover tooltip above --
       // a plugin node otherwise looks identical to a built-in one at a glance.
       const pluginTagHtml = desc.is_plugin ? `<span class="palette-plugin-tag">Plugin</span>` : "";
-      item.innerHTML = `${iconHtml}<span class="palette-name">${escapeHtml(desc.display_name)}</span>${pluginTagHtml}`;
+      const oneLine = firstSentence(resolveDescription(desc));
+      const descHtml = oneLine ? `<span class="palette-desc">${escapeHtml(oneLine)}</span>` : "";
+      const advancedTagHtml = isAdvancedNode(desc.type_id) ? `<span class="palette-advanced-tag">Advanced</span>` : "";
+      if (isBeginnerNode(desc.type_id)) item.dataset.beginner = "1";
+      item.innerHTML = `${iconHtml}<span class="palette-text"><span class="palette-name">${escapeHtml(desc.display_name)}</span>${descHtml}</span>${advancedTagHtml}${pluginTagHtml}`;
 
       item.addEventListener("click", () => {
         blurSearch();
@@ -277,7 +282,9 @@ function applyFilters(): void {
     const cat = el.dataset.cat ?? "";
     const search = el.dataset.search ?? "";
     const isPreset = cat === "preset";
-    const catMatch = _activeCategory === "all" || isPreset || cat === _activeCategory;
+    const catMatch = _activeCategory === "beginner"
+      ? el.dataset.beginner === "1"
+      : _activeCategory === "all" || isPreset || cat === _activeCategory;
     const textMatch = !q || search.includes(q);
     el.classList.toggle("hidden", !(catMatch && textMatch));
   });
@@ -602,7 +609,7 @@ function showNodeInfoTooltip(e: MouseEvent, desc: NodeDescriptor): void {
     if (ports) {
       const labels = desc.ports.outputs
         .filter(p => p.id !== "on_error")
-        .map(p => p.label);
+        .map(p => displayPortLabel(desc.type_id, p.id, p.label));
       ports.textContent = labels.length ? `Outputs: ${labels.join(" · ")}` : "";
     }
     tip.classList.remove("hidden");

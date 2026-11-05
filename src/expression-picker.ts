@@ -8,6 +8,7 @@
  */
 
 import {
+  buildValueIndex,
   formatSample,
   getRunOutput,
   getUpstreamNodes,
@@ -18,6 +19,8 @@ import {
 } from "./data-sources";
 import { EXPRESSION_FUNCTIONS } from "./expression-functions";
 import { getIconSvg } from "./icon-cache";
+import { mentionQuery } from "./mention";
+import type { ConnectCandidate } from "./connect-insert";
 
 type Field = HTMLInputElement | HTMLTextAreaElement;
 type Tab = "data" | "functions";
@@ -27,10 +30,27 @@ export interface PickerOptions {
   auto?: boolean;
   /** Node to show expanded first (used when a canvas node is picked twice). */
   expandNodeId?: string;
+  /**
+   * Opened by typing `@` at `start` in the field: the text after it is the search,
+   * focus stays in the field, and picking replaces `@` and that text.
+   */
+  mention?: { start: number };
+  /**
+   * Config key of the field being edited. Needed to offer nodes that are not
+   * connected yet: choosing one wires it in and writes this key as one undo step.
+   */
+  fieldKey?: string;
+}
+
+interface ConnectingCanvas extends SourceGraph {
+  connectableTo?: (nodeId: string) => ConnectCandidate[];
+  connectAndInsert?: (srcId: string, targetId: string, apply: () => void) => boolean;
 }
 
 let _pickerEl: HTMLElement | null = null;
 let _pickerId = 0;
+
+const VALUE_MATCH_MAX = 20;
 
 const SVG_ATTRS = `width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`;
 const CHEVRON_SVG = `<svg ${SVG_ATTRS} class="expr-picker-chev"><polyline points="9 6 15 12 9 18"/></svg>`;
@@ -57,7 +77,7 @@ export function showExpressionPicker(
   closeExpressionPicker();
   const myId = ++_pickerId;
 
-  const canvas = (canvasEl as unknown as { __canvas: SourceGraph }).__canvas;
+  const canvas = (canvasEl as unknown as { __canvas: ConnectingCanvas }).__canvas;
   if (!canvas) return;
 
   const upstream = getUpstreamNodes(canvas, currentNodeId);
@@ -65,8 +85,14 @@ export function showExpressionPicker(
     opts.expandNodeId && upstream.some((u) => u.id === opts.expandNodeId) ? [opts.expandNodeId] : upstream[0] ? [upstream[0].id] : [],
   );
   const allFields = new Set<string>();
+  const connectable: ConnectCandidate[] =
+    opts.fieldKey && canvas.connectableTo && canvas.connectAndInsert ? canvas.connectableTo(currentNodeId) : [];
+  const mention = opts.mention ?? null;
+  const initialQuery = mention ? mentionQuery(targetInput.value, mention.start, targetInput.selectionStart ?? targetInput.value.length) : "";
+  if (initialQuery === null) return;
   let tab: Tab = "data";
-  let query = "";
+  let query = initialQuery.trim().toLowerCase();
+  let active = 0;
 
   const picker = document.createElement("div");
   picker.className = "expr-picker";
@@ -88,6 +114,7 @@ export function showExpressionPicker(
     tabs.appendChild(b);
     tabBtns.set(id, b);
   }
+  tabs.hidden = mention !== null;
   picker.appendChild(tabs);
 
   const search = document.createElement("input");
@@ -98,13 +125,33 @@ export function showExpressionPicker(
   search.autocomplete = "off";
   search.spellcheck = false;
   search.addEventListener("input", () => { query = search.value.trim().toLowerCase(); renderBody(); });
+  search.hidden = mention !== null;
   picker.appendChild(search);
 
   const body = document.createElement("div");
   body.className = "expr-picker-body";
   picker.appendChild(body);
 
-  const pick = (text: string) => { insertAtCursor(targetInput, text); closeExpressionPicker(); };
+  const pick = (text: string) => {
+    if (mention) targetInput.setSelectionRange(mention.start, targetInput.selectionStart ?? targetInput.value.length);
+    insertAtCursor(targetInput, text);
+    closeExpressionPicker();
+  };
+  const connectAndPick = (c: ConnectCandidate) => {
+    const target = canvas.nodes.get(currentNodeId)?.data as { config?: Record<string, unknown> } | undefined;
+    const key = opts.fieldKey;
+    if (!target?.config || !key || !canvas.connectAndInsert) { closeExpressionPicker(); return; }
+    if (mention) targetInput.setSelectionRange(mention.start, targetInput.selectionStart ?? targetInput.value.length);
+    const { next, caret } = spliceAtSelection(targetInput, c.expr);
+    const config = target.config;
+    const done = canvas.connectAndInsert(c.id, currentNodeId, () => { config[key] = next; });
+    closeExpressionPicker();
+    if (!done) return;
+    targetInput.value = next;
+    targetInput.selectionStart = targetInput.selectionEnd = caret;
+    targetInput.dispatchEvent(new Event("input", { bubbles: true }));
+    targetInput.focus();
+  };
   const matches = (...parts: string[]) => query === "" || parts.some((p) => p.toLowerCase().includes(query));
 
   function render(): void {
@@ -118,6 +165,14 @@ export function showExpressionPicker(
   function renderBody(): void {
     body.replaceChildren();
     if (tab === "functions") renderFunctions(); else renderData();
+    if (mention) markActive();
+  }
+
+  function markActive(): void {
+    const items = [...body.querySelectorAll<HTMLElement>(".expr-picker-item")];
+    active = Math.max(0, Math.min(active, items.length - 1));
+    items.forEach((el, i) => el.classList.toggle("expr-picker-item--active", i === active));
+    items[active]?.scrollIntoView?.({ block: "nearest" });
   }
 
   function renderFunctions(): void {
@@ -138,8 +193,11 @@ export function showExpressionPicker(
 
   function renderData(): void {
     if (upstream.length === 0) {
-      body.appendChild(mkHint("Connect a node to this one first, then its data appears here."));
+      body.appendChild(mkHint(connectable.length > 0
+        ? "No node feeds this one yet. Pick one below to connect it and use its data."
+        : "Connect a node to this one first, then its data appears here."));
     }
+    const shown = new Set<string>();
     for (const up of upstream) {
       const group = document.createElement("div");
       group.className = "expr-picker-group";
@@ -149,8 +207,8 @@ export function showExpressionPicker(
       const primary = primaryOutputKey(up.schema);
       const paths = listPaths(up.schema, sample);
 
-      const visible = paths.filter((p) => p.path !== primary && matches(up.name, p.path, p.description, formatSample(valueAt(sample, p.path))));
-      const showPrimary = primary !== null && matches(up.name, "main result", primary, formatSample(valueAt(sample, primary)));
+      const visible = paths.filter((p) => p.path !== primary && matches(up.name, p.path, p.description, scalarText(valueAt(sample, p.path))));
+      const showPrimary = primary !== null && matches(up.name, "main result", primary, scalarText(valueAt(sample, primary)));
       if (query !== "" && !showPrimary && visible.length === 0 && !matches(up.name)) continue;
 
       const head = document.createElement("button");
@@ -189,12 +247,14 @@ export function showExpressionPicker(
         if (showPrimary && primary !== null) {
           const expr = `{{${up.name}.output.${primary}}}`;
           const desc = paths.find((p) => p.path === primary)?.description ?? "";
+          shown.add(expr);
           content.appendChild(mkDataItem(expr, "Main result", formatSample(valueAt(sample, primary)), desc, () => pick(expr), true));
         }
         const collapse = showPrimary && query === "" && visible.length > 0 && !allFields.has(up.id);
         if (!collapse) {
           for (const p of visible) {
             const expr = `{{${up.name}.output.${p.path}}}`;
+            shown.add(expr);
             content.appendChild(mkDataItem(expr, p.path, formatSample(valueAt(sample, p.path)), p.description, () => pick(expr), false));
           }
         }
@@ -222,6 +282,9 @@ export function showExpressionPicker(
       body.appendChild(group);
     }
 
+    if (query !== "") appendValueMatches(shown);
+    appendConnectable();
+
     if (query === "" || matches("run variables", "$run")) {
       body.appendChild(mkSection("Run variables"));
       for (const v of [
@@ -235,11 +298,44 @@ export function showExpressionPicker(
     }
   }
 
+  /** Canvas nodes that are not wired to this one: choosing one connects it and inserts its main result. */
+  function appendConnectable(): void {
+    const rows = connectable.filter((c) => matches(c.name));
+    if (rows.length === 0) return;
+    body.appendChild(mkSection("Not connected"));
+    for (const c of rows) {
+      const row = mkRow("expr-picker-item expr-picker-item--unconnected", () => connectAndPick(c));
+      row.dataset.expr = c.expr;
+      row.dataset.connectNodeId = c.id;
+      row.title = `Connect ${c.name} to this node and use ${c.expr}`;
+      const typeId = (canvas.nodes.get(c.id)?.data as { node_type_id?: string } | undefined)?.node_type_id;
+      const icon = mkSpan("expr-picker-node-icon", "");
+      if (typeId) icon.innerHTML = getIconSvg(typeId);
+      row.appendChild(icon);
+      row.appendChild(mkSpan("expr-picker-name", c.name));
+      row.appendChild(mkSpan("expr-picker-label", "Connect and use"));
+      body.appendChild(row);
+    }
+  }
+
+  /** Last-run values or deep paths that match the search and are not already listed above. */
+  function appendValueMatches(shown: Set<string>): void {
+    const rows = buildValueIndex(upstream)
+      .filter((e) => !shown.has(`{{${e.ref}}}`) && (e.display.toLowerCase().includes(query) || e.path.toLowerCase().includes(query)))
+      .slice(0, VALUE_MATCH_MAX);
+    if (rows.length === 0) return;
+    body.appendChild(mkSection("Matching values"));
+    for (const e of rows) {
+      const expr = `{{${e.ref}}}`;
+      body.appendChild(mkDataItem(expr, e.path === "" ? e.nodeName : `${e.nodeName}.${e.path}`, formatSample(e.display), "", () => pick(expr), false));
+    }
+  }
+
   render();
   document.body.appendChild(picker);
   _pickerEl = picker;
   positionPicker(picker, anchorEl);
-  if (!opts.auto) search.focus({ preventScroll: true });
+  if (!opts.auto && !mention) search.focus({ preventScroll: true });
 
   const cleanups: Array<() => void> = [];
   const stillMine = () => myId === _pickerId;
@@ -248,7 +344,7 @@ export function showExpressionPicker(
   const onOutside = (e: MouseEvent) => {
     if (!stillMine()) { detach(); return; }
     const t = e.target as Node;
-    if (!picker.contains(t) && t !== anchorEl && !anchorEl.contains(t) && !(opts.auto && t === targetInput)) {
+    if (!picker.contains(t) && t !== anchorEl && !anchorEl.contains(t) && !((opts.auto || mention) && t === targetInput)) {
       detach();
       closeExpressionPicker();
     }
@@ -262,6 +358,19 @@ export function showExpressionPicker(
 
   const onKey = (e: KeyboardEvent) => {
     if (!stillMine()) { detach(); return; }
+    if (mention && e.target === targetInput && !e.isComposing && !e.shiftKey && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter" || e.key === "Tab")) {
+      const items = [...body.querySelectorAll<HTMLElement>(".expr-picker-item")];
+      if (items.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Enter" || e.key === "Tab") {
+        items[active]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      } else {
+        active += e.key === "ArrowDown" ? 1 : -1;
+        markActive();
+      }
+      return;
+    }
     if (e.key === "Escape") {
       detach();
       closeExpressionPicker();
@@ -275,6 +384,34 @@ export function showExpressionPicker(
   };
   document.addEventListener("keydown", onKey, true);
   cleanups.push(() => document.removeEventListener("keydown", onKey, true));
+
+  if (mention) {
+    const sync = () => {
+      if (!stillMine()) { detach(); return; }
+      const caret = targetInput.selectionStart ?? targetInput.value.length;
+      const q = mentionQuery(targetInput.value, mention.start, caret);
+      if (q === null) { detach(); closeExpressionPicker(); return; }
+      const next = q.trim().toLowerCase();
+      if (next === query) return;
+      query = next;
+      active = 0;
+      renderBody();
+      if (query !== "" && !body.querySelector(".expr-picker-item")) { detach(); closeExpressionPicker(); }
+    };
+    const onBlur = (e: Event) => {
+      if (stillMine() && !picker.contains((e as FocusEvent).relatedTarget as Node | null)) { detach(); closeExpressionPicker(); }
+    };
+    targetInput.addEventListener("input", sync);
+    targetInput.addEventListener("keyup", sync);
+    targetInput.addEventListener("click", sync);
+    targetInput.addEventListener("focusout", onBlur);
+    cleanups.push(() => {
+      targetInput.removeEventListener("input", sync);
+      targetInput.removeEventListener("keyup", sync);
+      targetInput.removeEventListener("click", sync);
+      targetInput.removeEventListener("focusout", onBlur);
+    });
+  }
 
   if (opts.auto) {
     const onType = () => { if (stillMine()) { detach(); closeExpressionPicker(); } };
@@ -292,12 +429,18 @@ export function showExpressionPicker(
 
 /** Insert `text` at the caret of the field and notify the field's input handler. */
 export function insertAtCursor(el: Field, text: string): void {
-  const start = el.selectionStart ?? el.value.length;
-  const end = el.selectionEnd ?? el.value.length;
-  el.value = el.value.slice(0, start) + text + el.value.slice(end);
-  el.selectionStart = el.selectionEnd = start + text.length;
+  const { next, caret } = spliceAtSelection(el, text);
+  el.value = next;
+  el.selectionStart = el.selectionEnd = caret;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.focus();
+}
+
+/** The field's value with `text` replacing the selection, and where the caret lands. */
+function spliceAtSelection(el: Field, text: string): { next: string; caret: number } {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  return { next: el.value.slice(0, start) + text + el.value.slice(end), caret: start + text.length };
 }
 
 /** Insert a function template and place the caret at its `|` marker. */
@@ -325,6 +468,11 @@ function positionPicker(picker: HTMLElement, anchor: HTMLElement): void {
   if (top < M) top = M;
   picker.style.left = `${left}px`;
   picker.style.top = `${top}px`;
+}
+
+/** Text of a string, number or boolean sample; objects and arrays are found through their own fields instead. */
+function scalarText(v: unknown): string {
+  return typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? formatSample(v) : "";
 }
 
 function mkSpan(cls: string, text: string): HTMLSpanElement {

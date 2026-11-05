@@ -1,4 +1,5 @@
 import { consumePointClick, pointModeOwns } from "../point-mode";
+import { beginFieldWireDrag, cancelFieldWireDrag, endFieldWireDrag } from "../field-wire-drop";
 import type { Canvas } from "./Canvas";
 import { CanvasNode, NODE_WIDTH } from "./Node";
 import { PendingConnector, Connector } from "./Connector";
@@ -135,6 +136,7 @@ export class InputHandler {
       this.pendingConn = null; this.isCutting = false; this.cutPath = [];
       c.pendingInsert = null; c.insertGhost = null;
       c._pendingInputWireDrop = null;
+      cancelFieldWireDrag();
       c.clearSelection(); this.setCursor("default");
     }
   }
@@ -301,6 +303,7 @@ export class InputHandler {
       const wires = press.moveAll ? c.wiresFromPort(press.node, press.port) : [];
       this.moveGroup = wires.length ? wires : null;
       this.pendingConn = new PendingConnector(press.node, press.port, port.x, port.y, this.moveGroup ? "move" : "forward");
+      if (!this.moveGroup) beginFieldWireDrag(press.node, press.port);
     }
     this.pendingConn.toX = wx; this.pendingConn.toY = wy;
     this.setCursor("crosshair");
@@ -474,6 +477,9 @@ export class InputHandler {
     }
 
     if (this.pendingConn) {
+      if (endFieldWireDrag(_e)) {
+        this.reconnEdge = null; this.pendingConn = null; this.moveGroup = null; this.setCursor("default"); return;
+      }
       const pending = this.pendingConn;
       const snap = c.snapTarget(pending, wx, wy);
       const { fromNode, fromPort } = pending;

@@ -5,6 +5,7 @@ import type { CanvasNode } from "./canvas/Node";
 import { escapeHtml, copyWithButtonFeedback } from "./utils";
 import { buildJsonTree } from "./json-tree";
 import { validateNodeName } from "./node-names";
+import { codeForLog, friendlyHint } from "./error-map";
 
 type NodeMap = Map<string, CanvasNode>;
 
@@ -71,7 +72,8 @@ export function renderSummaryTab(result: WorkflowResult, nodes: NodeMap): string
   if (!result.success) {
     const err = result.logs.find(l => l.level === "error");
     if (err) {
-      const suggestion = errorSuggestion(err.message, err.node_id ? (nodes.get(err.node_id)?.data.node_type_id ?? "") : "");
+      const typeId     = err.node_id ? (nodes.get(err.node_id)?.data.node_type_id ?? "") : "";
+      const suggestion = friendlyHint(codeForLog(err, result.logs), err.message) || errorSuggestion(err.message, typeId);
       html += `
         <div class="sum-error-card">
           <div class="sum-error-title">${ICON_CIRCLE_ALERT}What went wrong</div>
@@ -173,7 +175,7 @@ export function renderErrorsTab(result: WorkflowResult, nodes: NodeMap): string 
     const node       = err.node_id ? nodes.get(err.node_id) : null;
     const nodeName   = node?.data.name ?? (err.node_id ? cleanNodeId(err.node_id) : "Workflow");
     const typeId     = node?.data.node_type_id ?? "";
-    const suggestion = errorSuggestion(err.message, typeId);
+    const suggestion = friendlyHint(codeForLog(err, result.logs), err.message) || errorSuggestion(err.message, typeId);
     const t          = new Date(err.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
     return `

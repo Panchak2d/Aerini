@@ -5,12 +5,12 @@ import { openMenu } from "./menu";
 const LS_ZONE  = "aerini_active_zone_v2";
 const LS_WIDTH = "aerini_sidebar_w_v2";
 const MIN_W = 180;   // matches the mockup's own clamp
-const MAX_W = 420;
-const DEF_W_MIN = 260;
-const DEF_W_MAX = 400;
-const DEF_W_FRACTION = 0.28; // default tracks window width so a narrow window isn't left with a sliver of canvas
+const MAX_W = 560;
+const DEF_W_MIN = 320;
+const DEF_W_MAX = 420;
+const DEF_W_FRACTION = 0.24; // default tracks window width so a narrow window isn't left with a sliver of canvas
 
-/** First-launch / reset width: about 28% of the window, within 260–400px. Keep in step with --sidebar-w's CSS fallback in variables.css. */
+/** First-launch / reset width: about 24% of the window, within 320–420px (includes the 44px activity bar). Keep in step with --sidebar-w's CSS fallback in variables.css. */
 function defaultWidth(): number {
   return Math.min(DEF_W_MAX, Math.max(DEF_W_MIN, Math.round(window.innerWidth * DEF_W_FRACTION)));
 }

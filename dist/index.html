@@ -6,8 +6,10 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-CGwcdr-j.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/style-Dxu5aD2a.css">
+  <script type="module" crossorigin src="./assets/index-DrxOGLh3.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-BckSxLdu.js">
+  <link rel="modulepreload" crossorigin href="./assets/vendor-LS29-34v.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-BwY-3Gdt.css">
 </head>
 <body>
 
@@ -85,6 +87,7 @@
         </div>
         <div id="category-chips" class="category-chips">
           <button class="cat-chip active" data-cat="all">All</button>
+          <button class="cat-chip" data-cat="beginner">Beginner</button>
           <button class="cat-chip" data-cat="ai">AI</button>
           <button class="cat-chip" data-cat="action">Action</button>
           <button class="cat-chip" data-cat="logic">Logic</button>
@@ -304,6 +307,8 @@
 
     <canvas id="canvas" tabindex="0" role="application" aria-label="Workflow canvas"></canvas>
 
+  <div id="first-run-checklist" class="hidden" role="complementary" aria-label="Getting started checklist"></div>
+
   <div id="canvas-empty-state">
       <div class="empty-state-box">
         <svg class="empty-state-icon" width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -324,6 +329,8 @@
           <div class="empty-shortcut" id="empty-state-import-btn">Import .aerini</div>
           <div class="empty-shortcut" id="empty-state-chat-bot-btn">Chat bot template</div>
         </div>
+        <div class="empty-state-templates-title">Or start from an example</div>
+        <div id="empty-state-templates" class="template-grid template-grid--compact"></div>
       </div>
     </div>
 
@@ -349,6 +356,10 @@
     <div id="status-bar">
       <span id="status-text">Ready</span>
       <span class="status-hint" id="status-hint">Click a node to place it · Space to search · Ctrl+S to save</span>
+      <button type="button" class="problems-chip hidden" id="problems-chip" aria-haspopup="dialog" aria-expanded="false" data-tooltip="Show what needs fixing before you run">
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 2 14.25 13H1.75L8 2ZM8 6.5v3M8 11.25v.25" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="problems-chip-label"></span>
+      </button>
       <span class="sync-chip hidden" id="sync-chip" role="status" aria-live="polite"></span>
     </div>
   </main>
@@ -777,12 +788,15 @@
 
   <!-- ── Onboarding modal (shown on first launch) ── -->
   <div id="onboarding-modal" class="hidden">
-    <div class="onboarding-box">
+    <div class="onboarding-box" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
       <div class="onboarding-header">
         <span class="onboarding-logo">Aerini</span>
         <span class="onboarding-version"></span>
+        <button id="onboarding-close" class="panel-close onboarding-close" title="Close (Esc)" aria-label="Close welcome dialog">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
-      <h2 class="onboarding-title">Automate anything, locally.</h2>
+      <h2 class="onboarding-title" id="onboarding-title">Automate anything, locally.</h2>
       <p class="onboarding-desc">Aerini runs entirely on your machine — no accounts, no cloud, no limits. Build automations by connecting blocks together. Each block does one thing: fetch data, send a message, run a script, call an AI.</p>
       <div class="onboarding-steps">
         <div class="onboarding-step">
@@ -808,8 +822,9 @@
         </div>
       </div>
       <div class="onboarding-tip">Tip: Use <kbd>{{Node Name.output.field}}</kbd> in any config field to pass data between nodes.</div>
+      <div class="onboarding-gallery-title">Start from an example</div>
+      <div id="onboarding-templates" class="template-grid"></div>
       <div class="onboarding-actions">
-        <button id="onboarding-load-example" class="btn-primary btn-primary-action onboarding-btn-example">Try an example — Fetch &amp; Display</button>
         <button id="onboarding-dismiss" class="onboarding-btn-skip">Start with a blank canvas</button>
       </div>
     </div>
