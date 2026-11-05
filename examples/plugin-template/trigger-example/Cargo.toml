@@ -26,7 +26,7 @@ crate-type = ["cdylib"]
 # wasip3's own `^0.62.0` requirement under Cargo's 0.x semver rules, and
 # would produce two incompatible copies of those runtime-support types.
 # 0.9.0+wasi-0.3.0 is the final WASI 0.3.0 release (not an -rc build).
-wasip3 = { version = "0.9.0", features = ["wit-bindgen-macros", "async-spawn"] }
+wasip3 = { version = "0.10.0", features = ["wit-bindgen-macros", "async-spawn"] }
 # Parses the trigger's own JSON config string (wit/node.wit's `trigger.events`
 # doc comment). Pure-Rust, no OS-specific syscalls -- compiles cleanly to
 # wasm32-wasip2.
