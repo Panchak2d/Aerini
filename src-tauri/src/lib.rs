@@ -1112,6 +1112,7 @@ pub fn run() {
             cancel_run,
             get_autostart,
             set_autostart,
+            commands::note_link::open_note_link,
             commands::workflow::save_workflow,
             commands::workflow::load_workflow,
             commands::workflow::list_workflows,

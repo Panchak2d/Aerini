@@ -6,10 +6,11 @@
 
   <meta name="color-scheme" content="dark light" />
   <title>Aerini</title>
-  <script type="module" crossorigin src="./assets/index-DrxOGLh3.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-BckSxLdu.js">
+  <script type="module" crossorigin src="./assets/index-Bf9g79b6.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/note-geometry-Brdj5As-.js">
+  <link rel="modulepreload" crossorigin href="./assets/CanvasSerializer-Cc_iMOez.js">
   <link rel="modulepreload" crossorigin href="./assets/vendor-LS29-34v.js">
-  <link rel="stylesheet" crossorigin href="./assets/style-BwY-3Gdt.css">
+  <link rel="stylesheet" crossorigin href="./assets/style-C8Fzu9OD.css">
 </head>
 <body>
 
@@ -58,6 +59,11 @@
         <button id="tab-monitor" class="activity-btn" role="tab" aria-selected="false" aria-controls="zone-monitor" data-zone="monitor" title="Monitor" data-tooltip="Monitor" aria-label="Monitor">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="3 12 8 12 10 6 14 18 16 12 21 12"/>
+          </svg>
+        </button>
+        <button id="tab-notes" class="activity-btn" role="tab" aria-selected="false" aria-controls="zone-notes" data-zone="notes" title="Notes" data-tooltip="Notes" aria-label="Notes">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/>
           </svg>
         </button>
       </div>
@@ -205,6 +211,16 @@
       </div>
 
       <div class="sidebar-zone" id="zone-monitor" role="tabpanel" aria-labelledby="tab-monitor"></div>
+
+      <div class="sidebar-zone" id="zone-notes" role="tabpanel" aria-labelledby="tab-notes">
+        <div class="zone-header">
+          <span class="zone-title">Notes</span>
+        </div>
+        <div class="zone-body-scroll">
+          <div class="settings-desc" id="notes-hidden-hint" hidden>Notes are hidden on the canvas. Opening one shows them again.</div>
+          <div id="notes-list" class="notes-list"></div>
+        </div>
+      </div>
 
     </div>
 
@@ -360,6 +376,10 @@
         <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 2 14.25 13H1.75L8 2ZM8 6.5v3M8 11.25v.25" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="problems-chip-label"></span>
       </button>
+      <button type="button" class="notes-chip hidden" id="notes-chip" data-tooltip="Show the notes and frames on this canvas (Shift+N)">
+        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/></svg>
+        Notes hidden
+      </button>
       <span class="sync-chip hidden" id="sync-chip" role="status" aria-live="polite"></span>
     </div>
   </main>
@@ -513,11 +533,17 @@
       <div class="shortcuts-body">
         <div class="shortcuts-group">
           <div class="shortcuts-group-title">Canvas</div>
-          <div class="shortcut-row"><span>Search / Command palette</span><div class="shortcut-keys"><kbd>Space</kbd><kbd>Ctrl+K</kbd></div></div>
+          <div class="shortcut-row"><span>Search / Command palette <span class="shortcut-note">(with the pointer over the canvas, the node lands under it)</span></span><div class="shortcut-keys"><kbd>Space</kbd><kbd>Ctrl+K</kbd></div></div>
           <div class="shortcut-row"><span>Pan canvas</span><div class="shortcut-keys"><kbd>Middle-drag</kbd><kbd>Trackpad scroll</kbd><kbd>Shift+Scroll</kbd></div></div>
           <div class="shortcut-row"><span>Zoom</span><div class="shortcut-keys"><kbd>Scroll</kbd><kbd>Ctrl+Scroll</kbd><kbd>Pinch</kbd></div></div>
           <div class="shortcut-row"><span>Fit to screen</span><div class="shortcut-keys"><kbd>Ctrl+Shift+F</kbd></div></div>
           <div class="shortcut-row"><span>Toggle minimap <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>M</kbd></div></div>
+          <div class="shortcut-row"><span>Add a sticky note <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>N</kbd></div></div>
+          <div class="shortcut-row"><span>Frame the selected nodes in a group</span><div class="shortcut-keys"><kbd>Ctrl+G</kbd></div></div>
+          <div class="shortcut-row"><span>Show or hide notes <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>Shift+N</kbd></div></div>
+          <div class="shortcut-row"><span>Move a group frame without the nodes inside it</span><div class="shortcut-keys"><kbd>Alt+drag</kbd></div></div>
+          <div class="shortcut-row"><span>Follow a link in a note</span><div class="shortcut-keys"><kbd>Ctrl/Cmd+click</kbd></div></div>
+          <div class="shortcut-row"><span>Context menu <span class="shortcut-note">(the menu key opens it for the selection, or at the pointer when nothing is selected)</span></span><div class="shortcut-keys"><kbd>Right-click</kbd><kbd>Menu</kbd><kbd>Shift+F10</kbd></div></div>
           <div class="shortcut-row"><span>Focus mode <span class="shortcut-note">(not while editing a field)</span></span><div class="shortcut-keys"><kbd>F</kbd></div></div>
           <div class="shortcut-row">
             <div class="shortcut-row-text"><span>Close panel</span><span class="shortcut-desc">On an empty area of the canvas</span></div>
@@ -529,6 +555,9 @@
           <div class="shortcut-row"><span>Box select</span><div class="shortcut-keys"><kbd>Shift+drag</kbd></div></div>
           <div class="shortcut-row"><span>Select all</span><div class="shortcut-keys"><kbd>Ctrl+A</kbd></div></div>
           <div class="shortcut-row"><span>Duplicate</span><div class="shortcut-keys"><kbd>Ctrl+D</kbd></div></div>
+          <div class="shortcut-row"><span>Copy</span><div class="shortcut-keys"><kbd>Ctrl+C</kbd></div></div>
+          <div class="shortcut-row"><span>Cut</span><div class="shortcut-keys"><kbd>Ctrl+X</kbd></div></div>
+          <div class="shortcut-row"><span>Paste</span><div class="shortcut-keys"><kbd>Ctrl+V</kbd></div></div>
           <div class="shortcut-row"><span>Delete</span><div class="shortcut-keys"><kbd>Del</kbd></div></div>
           <div class="shortcut-row"><span>Undo</span><div class="shortcut-keys"><kbd>Ctrl+Z</kbd></div></div>
           <div class="shortcut-row"><span>Redo</span><div class="shortcut-keys"><kbd>Ctrl+Y</kbd><kbd>Ctrl+Shift+Z</kbd></div></div>
@@ -546,7 +575,7 @@
             <div class="shortcut-keys"><kbd>Ctrl/Cmd+drag</kbd></div>
           </div>
           <div class="shortcut-row">
-            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Hover the wire and click &times;, click it and press Delete, or right-click it</span></div>
+            <div class="shortcut-row-text"><span>Disconnect wire</span><span class="shortcut-desc">Hover the wire and click &times;, click it and press Delete, or right-click it and choose Delete connection</span></div>
             <div class="shortcut-keys"><kbd>Del</kbd></div>
           </div>
         </div>
@@ -600,35 +629,37 @@
 
   <!-- ── Settings modal ── -->
   <div id="settings-modal" class="hidden">
-    <div class="settings-box">
+    <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="settings-header">
-        Settings
+        <span class="settings-title" id="settings-title">Settings</span>
         <button id="btn-close-settings" class="panel-close" title="Close" data-tooltip="Close" aria-label="Close">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <div class="settings-body">
-        <div class="settings-group">
+      <div class="settings-layout">
+        <nav class="settings-rail" aria-label="Settings sections">
+          <button type="button" class="settings-rail-item" data-section="appearance">Appearance</button>
+          <button type="button" class="settings-rail-item" data-section="canvas">Canvas</button>
+          <button type="button" class="settings-rail-item" data-section="startup">Startup</button>
+          <button type="button" class="settings-rail-item" data-section="support">Support</button>
+          <button type="button" class="settings-rail-item" data-section="privacy">Privacy</button>
+          <button type="button" class="settings-rail-item" data-section="about">About</button>
+        </nav>
+        <div class="settings-body">
+        <div class="settings-group" data-section="appearance">
           <div class="settings-group-title">Appearance</div>
           <div class="settings-row">
             <div><div class="settings-label">Theme</div><div class="settings-desc">Color theme for the whole app</div></div>
             <!-- Options populated at runtime from theme.ts's THEMES
                  registry (modal-manager.ts) — adding a future theme never
                  needs an HTML edit here. -->
-            <select id="setting-theme" class="settings-select"></select>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">Startup</div>
-          <div class="settings-row">
-            <div>
-              <div class="settings-label">Launch at login</div>
-              <div class="settings-desc">Start Aerini in the system tray when you log in, without opening its window — workflows with Schedule, Webhook, or trigger-plugin triggers will run in the background immediately</div>
+            <div class="settings-control-group">
+              <span id="setting-theme-swatch" class="theme-swatch" aria-hidden="true"></span>
+              <select id="setting-theme" class="settings-select" aria-label="Theme"></select>
             </div>
-            <input type="checkbox" id="setting-autostart" class="settings-toggle" />
           </div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="canvas" hidden>
           <div class="settings-group-title">Canvas</div>
           <div class="settings-row">
             <div><div class="settings-label">Grid snap</div><div class="settings-desc">Snap nodes to grid while dragging</div></div>
@@ -636,7 +667,7 @@
           </div>
           <div class="settings-row">
             <div><div class="settings-label">Scroll wheel</div><div class="settings-desc">What scrolling over the canvas does. Auto pans with a trackpad and zooms with a mouse wheel; Ctrl+scroll and pinch always zoom, Shift+scroll pans sideways</div></div>
-            <select id="setting-scroll-wheel" class="settings-select">
+            <select id="setting-scroll-wheel" class="settings-select" data-segmented>
               <option value="auto">Auto</option>
               <option value="zoom">Zoom</option>
               <option value="pan">Pan</option>
@@ -647,7 +678,17 @@
             <input type="checkbox" id="setting-autofit" class="settings-toggle" checked />
           </div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="startup" hidden>
+          <div class="settings-group-title">Startup</div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">Launch at login</div>
+              <div class="settings-desc">Start Aerini in the system tray when you log in, without opening its window — workflows with Schedule, Webhook, or trigger-plugin triggers will run in the background immediately</div>
+            </div>
+            <input type="checkbox" id="setting-autostart" class="settings-toggle" />
+          </div>
+        </div>
+        <div class="settings-group" data-section="support" hidden>
           <div class="settings-group-title">Support development</div>
           <div class="settings-about-text">
             <strong class="settings-text-emphasis">Aerini will always be free and open source.</strong><br>
@@ -655,7 +696,7 @@
             <a href="https://www.patreon.com/14702118/join" target="_blank" rel="noopener noreferrer" class="settings-support-link">Support on Patreon</a>
           </div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="privacy" hidden>
           <div class="settings-group-title">Privacy</div>
           <div class="settings-about-text">
             <strong class="settings-text-emphasis">Aerini is 100% local-first.</strong><br>
@@ -664,7 +705,7 @@
             Credentials are encrypted at rest using a device-local key.
           </div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="about" hidden>
           <div class="settings-group-title">About</div>
           <div class="settings-about-text">
             <strong class="settings-text-emphasis">Aerini</strong> — local-first workflow automation<br>
@@ -695,25 +736,33 @@
             <input type="checkbox" id="setting-update-startup" class="settings-toggle" />
           </div>
         </div>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- ── Workflow Settings modal ── -->
   <div id="wf-settings-modal" class="hidden">
-    <div class="settings-box">
+    <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="wf-settings-title">
       <div class="settings-header">
-        <span class="settings-title">Workflow Settings</span>
+        <span class="settings-title" id="wf-settings-title">Workflow Settings</span>
         <button id="btn-close-wf-settings" class="panel-close" title="Close" data-tooltip="Close" aria-label="Close">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <div class="settings-body">
-        <div class="settings-group">
+      <div class="settings-layout">
+        <nav class="settings-rail" aria-label="Workflow settings sections">
+          <button type="button" class="settings-rail-item" data-section="tags">Tags</button>
+          <button type="button" class="settings-rail-item" data-section="execution">Execution</button>
+          <button type="button" class="settings-rail-item" data-section="duration">Duration</button>
+          <button type="button" class="settings-rail-item" data-section="chat">Chat</button>
+        </nav>
+        <div class="settings-body">
+        <div class="settings-group" data-section="tags">
           <div class="settings-group-title">Tags</div>
           <div class="wf-tags-editor" id="wf-setting-tags-editor"></div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="execution" hidden>
           <div class="settings-group-title">Execution</div>
           <div class="settings-row">
             <div>
@@ -729,6 +778,9 @@
             </div>
             <input type="number" id="wf-setting-max-concurrent" class="settings-number-input" min="1" max="64" value="8">
           </div>
+        </div>
+        <div class="settings-group" data-section="duration" hidden>
+          <div class="settings-group-title">Duration</div>
           <div class="settings-row">
             <div>
               <div class="settings-label">Allow runs longer than 24 hours</div>
@@ -744,7 +796,7 @@
             <input type="number" id="wf-setting-max-duration" class="settings-number-input" min="10" max="86400" placeholder="No limit">
           </div>
         </div>
-        <div class="settings-group">
+        <div class="settings-group" data-section="chat" hidden>
           <div class="settings-group-title">Chat</div>
           <div class="settings-row">
             <div>
@@ -781,6 +833,7 @@
             </div>
             <input type="checkbox" id="wf-setting-chat-branding" class="settings-toggle" checked>
           </div>
+        </div>
         </div>
       </div>
     </div>

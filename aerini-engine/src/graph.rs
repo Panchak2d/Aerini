@@ -302,6 +302,7 @@ mod tests {
 
     fn test_workflow(nodes: Vec<WorkflowNode>, edges: Vec<WorkflowEdge>) -> Workflow {
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_test".to_string(),
             name: "Test".to_string(),

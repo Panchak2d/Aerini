@@ -1134,6 +1134,7 @@ mod tests {
             position: Default::default(),
         };
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf1".to_string(),
             name: "Test Workflow".to_string(),
@@ -1191,6 +1192,7 @@ mod tests {
             position: Default::default(),
         };
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf1".to_string(),
             name: "Test Workflow".to_string(),
@@ -1736,6 +1738,7 @@ mod tests {
             on_failure: None,
         };
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_direct_input_test".to_string(),
             name: "Direct Input Test".to_string(),
@@ -1923,6 +1926,7 @@ mod tests {
             on_failure: None,
         };
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_two_typed".to_string(),
             name: "Two Node Typed".to_string(),
@@ -2271,6 +2275,7 @@ mod tests {
             },
         ];
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_switch_two_branch".to_string(),
             name: "Switch Two Branch".to_string(),
@@ -2388,6 +2393,7 @@ mod tests {
             vec![plain_edge, failing_edge]
         };
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_parallel_on_failure".to_string(),
             name: "Parallel On Failure".to_string(),
@@ -2473,6 +2479,7 @@ mod tests {
     #[tokio::test]
     async fn merge_upstream_ids_follow_taken_ports_and_current_status() {
         let workflow = Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_merge_ids".to_string(),
             name: "Merge ids".to_string(),

@@ -465,6 +465,20 @@ function insertFromPalette(desc: NodeDescriptor): void {
     closePalette();
     return;
   }
+  if (_canvas._pendingPlacement) {
+    const needsPorts = _canvas._pendingPlacement.onto !== null;
+    if (needsPorts && (!desc.ports.inputs.length || !desc.ports.outputs.length)) {
+      const activeEl = document.querySelector<HTMLElement>(".palette-result.active");
+      if (activeEl) {
+        activeEl.classList.add("palette-result--flash-error");
+        setTimeout(() => activeEl.classList.remove("palette-result--flash-error"), 600);
+      }
+      return; // Don't place or close
+    }
+    overlay.dispatchEvent(new CustomEvent("place-pick", { detail: desc }));
+    closePalette();
+    return;
+  }
   _canvas.placeNode(desc);
   _onStatus?.(`Placed ${desc.display_name} — double-click to configure`);
   closePalette();

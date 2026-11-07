@@ -83,6 +83,14 @@ describe("resolveNodeStyle", () => {
     const unknown = resolveNodeStyle({ ...BASE, isNote: true, noteColor: "no-such-color" }, MIDNIGHT, notes);
     expect(unknown.fill).toBe(notes["default"].bg);
   });
+
+  it("draws a frame translucent and beneath the notes it contains", () => {
+    const notes = resolveNoteColors(MIDNIGHT);
+    const note = resolveNodeStyle({ ...BASE, isNote: true }, MIDNIGHT, notes);
+    const frame = resolveNodeStyle({ ...BASE, isNote: true, isFrame: true }, MIDNIGHT, notes);
+    expect(frame.rank).toBeLessThan(note.rank);
+    expect(frame.fillAlpha).toBeLessThan(1);
+  });
 });
 
 describe("typeMeta", () => {

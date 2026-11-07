@@ -504,8 +504,15 @@ body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }
 }
 .problems-chip[data-level="error"] { color: var(--red); border-color: var(--red); }
 .problems-chip:hover, .problems-chip[aria-expanded="true"] { background: var(--bg3); }
+.notes-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; cursor: pointer;
+  font-size: 10px; letter-spacing: .02em; color: var(--t2); background: none;
+  border: 1px solid var(--bd); border-radius: 4px; padding: 1px 6px;
+}
+.notes-chip:hover { background: var(--bg3); color: var(--t1); }
+/* z-index 90 keeps the popover above the output drawer (80) and chat panel (75), and below modals and tooltips. */
 .problems-popover {
-  position: fixed; z-index: 60; width: 360px; max-width: calc(100vw - 16px); max-height: 50vh; overflow-y: auto;
+  position: fixed; z-index: 90; width: 360px; max-width: calc(100vw - 16px); max-height: 50vh; overflow-y: auto;
   background: var(--bg2); border: 1px solid var(--bd); border-radius: 8px; padding: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
 }
 .problems-popover[hidden] { display: none; }
@@ -528,3 +535,6 @@ body.chat-panel-open #canvas-empty-state { right: var(--chat-w); }
   border: 1px solid var(--bd); border-radius: 4px; padding: 2px 8px; cursor: pointer;
 }
 .problem-fix:hover { border-color: var(--t2); }
+
+#btn-toggle-notes[aria-pressed="false"] { opacity: 0.55; }
+#btn-toggle-notes[aria-pressed="false"] svg { stroke-dasharray: 3 2; }

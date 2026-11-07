@@ -29,6 +29,14 @@ describe("THEMES registry", () => {
       expect(t.label).toBeTruthy();
     }
   });
+
+  it("gives every theme three distinct hex swatch colours for the Settings preview", () => {
+    for (const t of THEMES) {
+      expect(t.swatch).toHaveLength(3);
+      for (const c of t.swatch) expect(c).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(new Set(t.swatch).size).toBe(3);
+    }
+  });
 });
 
 describe("applyTheme", () => {

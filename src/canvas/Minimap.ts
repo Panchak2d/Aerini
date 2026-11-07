@@ -1,5 +1,5 @@
 import type { Canvas } from "./Canvas";
-import { NODE_WIDTH, typeMeta, statusAccent, roundedRect, type CanvasNode, type CornerRadii } from "./Node";
+import { typeMeta, statusAccent, roundedRect, type CanvasNode, type CornerRadii } from "./Node";
 import { getIconBitmap } from "../icon-cache";
 import { markDirty } from "./render-state";
 import { cancelCamera } from "./camera";
@@ -44,6 +44,7 @@ export type NodeStatus = CanvasNode["status"];
 
 export interface MinimapNodeInput {
   isNote: boolean;
+  isFrame?: boolean;
   noteColor: string | undefined;
   status: NodeStatus;
   selected: boolean;
@@ -66,8 +67,8 @@ export interface MinimapNodeStyle {
   minH: number;
 }
 
-const SNAP_HEAD = 17;
-const SNAP_NODE_NUMS = 6;
+const SNAP_HEAD = 18;
+const SNAP_NODE_NUMS = 7;
 const SNAP_NODE_REFS = 3;
 const SNAP_CONN_NUMS = 2;
 const SNAP_CONN_REFS = 5;
@@ -114,6 +115,7 @@ const TRIGGER_MAX_RADIUS = 6;
 
 const STATUS_RANK: Record<NodeStatus, number> = { idle: 1, success: 2, running: 3, error: 4 };
 const NOTE_RANK = 0;
+const FRAME_ALPHA = 0.4;
 const MIN_SIZE: Record<NodeStatus, Size> = {
   idle:    { w: 12, h: 12 },
   success: { w: 13, h: 13 },
@@ -467,7 +469,7 @@ export function resolveNodeStyle(
   if (n.isNote) {
     const c = noteColors[n.noteColor ?? "default"] ?? noteColors["default"];
     return {
-      rank: NOTE_RANK, fill: c.bg, fillAlpha: 1, stroke: c.text, strokeWidth: 1,
+      rank: n.isFrame ? NOTE_RANK - 1 : NOTE_RANK, fill: c.bg, fillAlpha: n.isFrame ? FRAME_ALPHA : 1, stroke: c.text, strokeWidth: 1,
       selected: n.selected, trigger: false, glyphAccent: c.text, minW: MIN_SIZE.idle.w, minH: MIN_SIZE.idle.h,
     };
   }
@@ -599,9 +601,9 @@ export class Minimap {
     a[k++] = this._size.w; a[k++] = this._size.h;
     a[k++] = this._view.zoom; a[k++] = this._view.panX; a[k++] = this._view.panY;
     a[k++] = hover ? hover.x : -1e9; a[k++] = hover ? hover.y : -1e9;
-    a[k++] = this._errorIndex; a[k++] = this._reducedMotion ? 1 : 0;
+    a[k++] = this._errorIndex; a[k++] = this._reducedMotion ? 1 : 0; a[k++] = c.notesVisible ? 1 : 0;
     for (const n of nodes.values()) {
-      a[k++] = n.data.position.x; a[k++] = n.data.position.y; a[k++] = n.height;
+      a[k++] = n.data.position.x; a[k++] = n.data.position.y; a[k++] = n.height; a[k++] = n.width;
       a[k++] = STATUS_RANK[n.status];
       a[k++] = (n.selected ? 1 : 0) | (n.disabled ? 2 : 0);
       a[k++] = n.ports.length;
@@ -643,7 +645,7 @@ export class Minimap {
     mc.clearRect(0, 0, w, h);
 
     const c = this.canvas;
-    if (c.nodes.size === 0) {
+    if (!c.hasShownNodes()) {
       this._bounds = null;
       this._base = null;
       this._hits = [];
@@ -664,7 +666,8 @@ export class Minimap {
     const viewport: Rect = { x: -c.panX / c.zoom, y: -c.panY / c.zoom, w: vW / c.zoom, h: vH / c.zoom };
     const worldRects: Rect[] = [];
     for (const n of c.nodes.values()) {
-      worldRects.push({ x: n.data.position.x, y: n.data.position.y, w: NODE_WIDTH, h: n.height });
+      if (!c.isShown(n)) continue;
+      worldRects.push({ x: n.data.position.x, y: n.data.position.y, w: n.width, h: n.height });
     }
     // While magnified the fitted base is held still, so the view the user zoomed into doesn't shift as the canvas pans underneath it.
     const stale = !this._base || this._base.w !== this._size.w || this._base.h !== this._size.h;
@@ -737,11 +740,13 @@ export class Minimap {
     let errors = 0;
     let i = 0;
     for (const n of c.nodes.values()) {
+      if (!c.isShown(n)) continue;
       const world = worldRects[i++];
       const noteColor = n.data.config["color"];
       const style = resolveNodeStyle(
         {
           isNote: n.data.node_type_id === NODE_IDS.NOTE,
+          isFrame: n.noteStyle === "frame",
           noteColor: typeof noteColor === "string" ? noteColor : undefined,
           status: n.status,
           selected: n.selected,

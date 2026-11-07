@@ -585,6 +585,7 @@ mod tests {
 
     fn make_workflow(nodes: Vec<(&str, &str)>) -> Workflow {
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "test_wf".to_string(),
             name: "Test Workflow".to_string(),

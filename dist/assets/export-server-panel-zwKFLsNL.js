@@ -1,4 +1,4 @@
-import{s as e}from"./vendor-LS29-34v.js";import{S as t,x as n}from"./index-DrxOGLh3.js";var r=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function i(t,n){let i=document.getElementById(`export-server-panel-overlay`);i&&i.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),t?(l.innerHTML=`
+import{s as e}from"./vendor-LS29-34v.js";import{A as t,j as n}from"./index-Bf9g79b6.js";var r=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;function i(t,n){let i=document.getElementById(`export-server-panel-overlay`);i&&i.remove();let s=document.getElementById(`output-drawer`);s&&!s.classList.contains(`hidden`)&&s.classList.add(`hidden`);let c=document.createElement(`div`);c.id=`export-server-panel-overlay`,c.className=`panel-overlay`;let l=document.createElement(`div`);l.className=`panel-drawer export-server-panel`,l.setAttribute(`role`,`dialog`),l.setAttribute(`aria-modal`,`true`),l.setAttribute(`aria-label`,`Export for Server`),c.appendChild(l),document.body.appendChild(c);let u=()=>{document.removeEventListener(`keydown`,d,!0),c.remove()},d=e=>{e.key===`Escape`&&u()};document.addEventListener(`keydown`,d,!0),c.addEventListener(`click`,e=>{e.target===c&&u()}),t?(l.innerHTML=`
     <div class="panel-header">
       <h2 class="panel-title">Export for Server</h2>
       <button class="panel-close-btn" aria-label="Close">${r}</button>
@@ -15,15 +15,15 @@ import{s as e}from"./vendor-LS29-34v.js";import{S as t,x as n}from"./index-DrxOG
         <div class="esp-callout-warn">
           No workflow is open. Open a workflow on the canvas first, then export it.
         </div>
-      </div>`,l.querySelector(`.panel-close-btn`)?.addEventListener(`click`,u))}function a(e,n){let r=e.querySelector(`#esp-loading`),i=e.querySelector(`#esp-content`);r&&(r.hidden=!0),i&&(i.hidden=!1,i.innerHTML=`<div class="esp-callout-error">${t(n)}</div>`)}function o(n,r,i,a,o){let c=n.querySelector(`#esp-loading`),l=n.querySelector(`#esp-content`);if(c&&(c.hidden=!0),!l)return;l.hidden=!1;let u=i.credentials.some(e=>!a.has(e.credential_id)),d=i.credentials.length===0?`<p class="esp-note">This workflow uses no credentials.</p>`:`${u?`<p class="esp-cred-warning">⚠ Fill the credentials marked below before deploying.</p>`:``}
+      </div>`,l.querySelector(`.panel-close-btn`)?.addEventListener(`click`,u))}function a(e,t){let r=e.querySelector(`#esp-loading`),i=e.querySelector(`#esp-content`);r&&(r.hidden=!0),i&&(i.hidden=!1,i.innerHTML=`<div class="esp-callout-error">${n(t)}</div>`)}function o(t,r,i,a,o){let c=t.querySelector(`#esp-loading`),l=t.querySelector(`#esp-content`);if(c&&(c.hidden=!0),!l)return;l.hidden=!1;let u=i.credentials.some(e=>!a.has(e.credential_id)),d=i.credentials.length===0?`<p class="esp-note">This workflow uses no credentials.</p>`:`${u?`<p class="esp-cred-warning">⚠ Fill the credentials marked below before deploying.</p>`:``}
       <table class="esp-cred-table">
         <thead><tr><th>Status</th><th>Credential</th><th>Environment variable</th><th>Used by</th></tr></thead>
         <tbody>
-          ${i.credentials.map(e=>{let n=a.has(e.credential_id);return`<tr class="${n?``:`esp-cred-row--empty`}">
-              <td class="esp-cred-status">${n?`<span class="esp-cred-ok"  title="Credential is filled" data-tooltip="Credential is filled">✓</span>`:`<span class="esp-cred-warn" title="Credential is empty" data-tooltip="Credential is empty">⚠</span>`}</td>
-              <td>${t(e.credential_id)}</td>
-              <td><code>${t(e.env_var_name)}</code></td>
-              <td class="esp-muted">${t(e.node_name)}</td>
+          ${i.credentials.map(e=>{let t=a.has(e.credential_id);return`<tr class="${t?``:`esp-cred-row--empty`}">
+              <td class="esp-cred-status">${t?`<span class="esp-cred-ok"  title="Credential is filled" data-tooltip="Credential is filled">✓</span>`:`<span class="esp-cred-warn" title="Credential is empty" data-tooltip="Credential is empty">⚠</span>`}</td>
+              <td>${n(e.credential_id)}</td>
+              <td><code>${n(e.env_var_name)}</code></td>
+              <td class="esp-muted">${n(e.node_name)}</td>
             </tr>`}).join(``)}
         </tbody>
       </table>
@@ -36,8 +36,8 @@ import{s as e}from"./vendor-LS29-34v.js";import{S as t,x as n}from"./index-DrxOG
       <tbody>
         ${i.variables.map(e=>`
           <tr>
-            <td><code>$vars.${t(e)}</code></td>
-            <td><code>AERINI_VAR_${t(e.toUpperCase())}</code></td>
+            <td><code>$vars.${n(e)}</code></td>
+            <td><code>AERINI_VAR_${n(e.toUpperCase())}</code></td>
           </tr>
         `).join(``)}
       </tbody>
@@ -54,7 +54,7 @@ import{s as e}from"./vendor-LS29-34v.js";import{S as t,x as n}from"./index-DrxOG
     <div class="esp-field-row">
       <div class="esp-field">
         <span class="esp-field-label">Trigger</span>
-        <span class="esp-field-value">${t(i.trigger_desc)}</span>
+        <span class="esp-field-value">${n(i.trigger_desc)}</span>
       </div>
     </div>
 
@@ -153,6 +153,6 @@ import{s as e}from"./vendor-LS29-34v.js";import{S as t,x as n}from"./index-DrxOG
       It is <strong>not stored in the zip</strong> — only its hash is. Copy it now.
     </div>
     <div class="esp-run-secret-row">
-      <code class="esp-run-secret-value">${t(r)}</code>
+      <code class="esp-run-secret-value">${n(r)}</code>
       <button class="esp-run-secret-copy" type="button">Copy</button>
-    </div>`;let a=i.querySelector(`.esp-run-secret-copy`);a.addEventListener(`click`,()=>{n(a,r)}),e.appendChild(i)}export{i as showExportServerPanel};
+    </div>`;let a=i.querySelector(`.esp-run-secret-copy`);a.addEventListener(`click`,()=>{t(a,r)}),e.appendChild(i)}export{i as showExportServerPanel};

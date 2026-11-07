@@ -77,11 +77,19 @@ export function bindZoomControls(canvas: Canvas): void {
   const fitBtn = buildIconBtn("btn-fit-screen", "Fit to screen (Ctrl+Shift+F)",
     `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"/></svg>`);
 
+  const notesBtn = buildIconBtn("btn-toggle-notes", "Show or hide notes (Shift+N)",
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/></svg>`);
+  notesBtn.setAttribute("aria-pressed", String(canvas.notesVisible));
+  notesBtn.addEventListener("click", () => {
+    canvas.notesVisible = !canvas.notesVisible;
+    notesBtn.setAttribute("aria-pressed", String(canvas.notesVisible));
+  });
+
   zoomOutBtn.addEventListener("click", () => canvas.zoomOut());
   zoomInBtn.addEventListener("click",  () => canvas.zoomIn());
   fitBtn.addEventListener("click",     () => canvas.fitToScreen());
 
-  group.append(zoomOutBtn, readout, zoomInBtn, fitBtn);
+  group.append(zoomOutBtn, readout, zoomInBtn, fitBtn, notesBtn);
   divider.insertAdjacentElement("afterend", group);
   group.insertAdjacentElement("afterend", divider.cloneNode(true) as HTMLElement);
 
@@ -97,6 +105,7 @@ export function bindZoomControls(canvas: Canvas): void {
     if (pct !== lastPct) { readout.textContent = `${pct}%`; lastPct = pct; }
     zoomOutBtn.disabled = canvas.zoom <= canvas.MIN_ZOOM;
     zoomInBtn.disabled  = canvas.zoom >= canvas.MAX_ZOOM;
+    notesBtn.setAttribute("aria-pressed", String(canvas.notesVisible));
   }, 300);
 }
 

@@ -8,7 +8,7 @@ import type { CanvasNode } from "../canvas/Node";
 function fakeNode(x: number, y: number): CanvasNode {
   return {
     data: { id: `n${x}`, name: "N", position: { x, y }, config: {}, node_type_id: "http", node_type: "action" },
-    height: 80, status: "idle", selected: false, disabled: false, ports: [],
+    width: 220, height: 80, status: "idle", selected: false, disabled: false, ports: [],
   } as unknown as CanvasNode;
 }
 
@@ -16,6 +16,7 @@ function setup(nodes: CanvasNode[] = []) {
   const canvas = {
     zoomAtCenter: vi.fn(), fitToScreen: vi.fn(), revealNode: vi.fn(), centerOn: vi.fn(), onViewportChange: vi.fn(),
     nodes: new Map(nodes.map(n => [n.data.id, n])), connectors: new Map(),
+    notesVisible: true, isShown: () => true, hasShownNodes: () => true,
     panX: 0, panY: 0, zoom: 1,
   };
   const el = document.createElement("canvas");

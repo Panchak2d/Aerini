@@ -5,6 +5,11 @@ import { getCanvasColors, tileTint, resolveNoteColors, withAlpha } from "./theme
 import { markDirty } from "./render-state";
 import { isPluginNodeType, isUnregisteredNodeType, isTriggerNodeType } from "./node-registry";
 import { displayPortLabel } from "../port-labels";
+import { parseNote, layoutNote, type LaidLine } from "./note-format";
+import {
+  noteStyleOf, minSize, clampDim, frameHit, handleAt, NOTE_DEFAULT_W, NOTE_MAX_SIZE, FRAME_DEFAULT_W,
+  FRAME_DEFAULT_H, FRAME_HEADER, noteSizeOf, noteMetrics, type Handle, type NoteMetrics, type NoteStyle,
+} from "./note-geometry";
 
 export interface CanvasNodeData {
   id: string;
@@ -41,7 +46,9 @@ export const PORT_RADIUS = 6;
 export const PORT_GAP    = 28;
 const PADDING            = 14;
 const CORNER_R           = 10;
-const NOTE_MIN_HEIGHT    = 60;
+const NOTE_FAMILY        = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+const NOTE_PAD_X         = 12;
+const BOX_REF            = 12;
 const TILE_SIZE          = 26;
 const TILE_INSET         = 10;
 const TILE_CORNER_R      = 7;
@@ -100,6 +107,11 @@ export class CanvasNode {
   get selected(): boolean { return this._selected; }
   set selected(v: boolean) { if (v !== this._selected) { this._selected = v; markDirty(); } }
 
+  private _dropTarget = false;
+  /** True on a frame while a dragged set would land fully inside it. */
+  get dropTarget(): boolean { return this._dropTarget; }
+  set dropTarget(v: boolean) { if (v !== this._dropTarget) { this._dropTarget = v; markDirty(); } }
+
   get hovered(): boolean { return this._hovered; }
   set hovered(v: boolean) { if (v !== this._hovered) { this._hovered = v; markDirty(); } }
 
@@ -125,8 +137,7 @@ export class CanvasNode {
   // Running animation phase (0–1, loops)
   private _runPhase = 0;
 
-  // Height of a note as last drawn; notes size to their wrapped text.
-  private _noteHeight = NOTE_MIN_HEIGHT;
+  private _noteLayout: { key: string; lines: LaidLine[] } | null = null;
 
   // Backing field for `disabled`. The accessor below keeps `data.disabled`
   // in sync on every write, so ContextMenu's Disable/Enable toggle (which
@@ -141,8 +152,26 @@ export class CanvasNode {
     this.data.disabled = v;
   }
 
+  get isNote(): boolean { return this.data.node_type_id === NODE_IDS.NOTE; }
+  get noteStyle(): NoteStyle { return noteStyleOf(this.data.config); }
+
+  get width(): number {
+    if (!this.isNote) return NODE_WIDTH;
+    const frame = this.noteStyle === "frame";
+    return clampDim(this.data.config["width"], minSize(this.noteStyle).w, NOTE_MAX_SIZE, frame ? FRAME_DEFAULT_W : NOTE_DEFAULT_W);
+  }
+
+  get minHeight(): number {
+    if (this.noteStyle === "frame") return minSize("frame").h;
+    return Math.max(minSize("note").h, 28 + this.noteLayoutFor().lines.length * this.noteMetrics.line);
+  }
+
   get height(): number {
-    if (this.data.node_type_id === NODE_IDS.NOTE) return this._noteHeight;
+    if (this.isNote) {
+      const set = this.data.config["height"];
+      if (this.noteStyle === "frame") return clampDim(set, minSize("frame").h, NOTE_MAX_SIZE, FRAME_DEFAULT_H);
+      return Math.max(this.minHeight, clampDim(set, 0, NOTE_MAX_SIZE, 0));
+    }
     const maxPorts = Math.max(
       this.data.ports.inputs.length,
       this.data.ports.outputs.length
@@ -224,7 +253,45 @@ export class CanvasNode {
 
   containsPoint(wx: number, wy: number): boolean {
     const { x, y } = this.data.position;
-    return wx >= x && wx <= x + NODE_WIDTH && wy >= y && wy <= y + this.height;
+    if (this.isNote && this.noteStyle === "frame") return frameHit({ x, y, w: this.width, h: this.height }, wx, wy);
+    return wx >= x && wx <= x + this.width && wy >= y && wy <= y + this.height;
+  }
+
+  resizeHandleAt(wx: number, wy: number, zoom: number): Handle | null {
+    const { x, y } = this.data.position;
+    return handleAt({ x, y, w: this.width, h: this.height }, wx, wy, zoom);
+  }
+
+  get noteMetrics(): NoteMetrics {
+    return noteMetrics(noteSizeOf(this.data.config));
+  }
+
+  noteTargetAt(wx: number, wy: number): { kind: "link"; href: string } | { kind: "check"; src: number } | null {
+    if (!this.isNote || this.noteStyle !== "note") return null;
+    const { x, y } = this.data.position;
+    const lines = this.noteLayoutFor().lines;
+    const top = y + 12;
+    const m = this.noteMetrics;
+    const i = Math.floor((wy - top) / m.line);
+    if (i < 0 || i >= lines.length || wx < x) return null;
+    const line = lines[i];
+    const lx = x + NOTE_PAD_X + line.indent;
+    if (line.box && wx >= x + NOTE_PAD_X && wx <= x + NOTE_PAD_X + m.box + 4) return { kind: "check", src: line.src };
+    for (const run of line.runs) {
+      if (run.href && wx >= lx + run.x && wx <= lx + run.x + run.w) return { kind: "link", href: run.href };
+    }
+    return null;
+  }
+
+  private noteLayoutFor(): { lines: LaidLine[] } {
+    const text = String(this.data.config["text"] ?? "");
+    const w = this.width;
+    const m = this.noteMetrics;
+    const key = `${w}\u0000${m.body}\u0000${text}`;
+    if (this._noteLayout?.key === key) return this._noteLayout;
+    const lines = layoutNote(parseNote(text), (t, bold, heading) => measureNote(t, bold, heading, m), w - NOTE_PAD_X * 2, m.indent);
+    this._noteLayout = { key, lines };
+    return this._noteLayout;
   }
 
   portAtPoint(wx: number, wy: number): Port | null {
@@ -472,33 +539,28 @@ export class CanvasNode {
 
   private drawNote(ctx: CanvasRenderingContext2D): void {
     const { x, y } = this.data.position;
-    const w = NODE_WIDTH;
-    const text = String(this.data.config["text"] ?? "Double-click to edit");
+    const w = this.width;
+    const h = this.height;
     const color = String(this.data.config["color"] ?? "default");
-
-    const noteColors = resolveNoteColors(getCanvasColors());
+    const colors = getCanvasColors();
+    const noteColors = resolveNoteColors(colors);
     const c = noteColors[color] ?? noteColors.default;
 
-    ctx.font = "12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    const maxW = w - 24;
-    const lines = wrapText(ctx, text, maxW);
-    const lineH = 18;
-    const h = Math.max(NOTE_MIN_HEIGHT, 28 + lines.length * lineH);
-    this._noteHeight = h;
-
     ctx.save();
+    if (this.noteStyle === "frame") this.drawFrame(ctx, x, y, w, h, c, colors);
+    else this.drawSticky(ctx, x, y, w, h, c);
+    if (this.selected) drawResizeHandles(ctx, x, y, w, h, c.text, colors.surface1);
+    ctx.restore();
+  }
 
-    // Selection ring
+  private drawSticky(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, c: { bg: string; border: string; text: string }): void {
     if (this.selected) {
-      ctx.beginPath();
       roundedRect(ctx, x - 2, y - 2, w + 4, h + 4, CORNER_R + 2);
       ctx.strokeStyle = c.border;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
 
-    // Background
-    ctx.beginPath();
     roundedRect(ctx, x, y, w, h, CORNER_R);
     ctx.fillStyle = c.bg;
     ctx.fill();
@@ -506,23 +568,71 @@ export class CanvasNode {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Top accent strip
-    ctx.beginPath();
+    ctx.save();
     roundedRect(ctx, x, y, w, h, CORNER_R);
     ctx.clip();
     ctx.fillStyle = c.border;
     ctx.fillRect(x, y, w, 3);
     ctx.restore();
 
-    // Text
-    ctx.save();
-    ctx.font = "12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillStyle = c.text;
+    const m = this.noteMetrics;
+    const text = String(this.data.config["text"] ?? "");
+    if (!text) {
+      ctx.font = noteFont(m, false, false);
+      ctx.fillStyle = withAlpha(c.text, "99");
+      ctx.textBaseline = "top";
+      ctx.textAlign = "left";
+      ctx.fillText("Double-click to edit", x + NOTE_PAD_X, y + 12);
+      return;
+    }
+
     ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    const lines = this.noteLayoutFor().lines;
     lines.forEach((line, i) => {
-      ctx.fillText(line, x + 12, y + 12 + i * lineH);
+      const ly = y + 12 + i * m.line;
+      const lx = x + NOTE_PAD_X + line.indent;
+      const done = line.indent > 0 && line.checked;
+      if (line.box) drawCheckbox(ctx, x + NOTE_PAD_X, ly + 1, m.box, line.checked, c.text);
+      for (const run of line.runs) {
+        ctx.font = noteFont(m, run.bold, line.heading);
+        ctx.fillStyle = done ? withAlpha(c.text, "88") : c.text;
+        ctx.fillText(run.text, lx + run.x, ly);
+        if (run.href) {
+          ctx.fillRect(lx + run.x, ly + (line.heading ? m.heading : m.body) + 2, run.w, 1);
+        }
+        if (done) ctx.fillRect(lx + run.x, ly + Math.round(m.body * 0.58), run.w, 1);
+      }
     });
+  }
+
+  private drawFrame(
+    ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+    c: { bg: string; border: string; text: string }, colors: ReturnType<typeof getCanvasColors>,
+  ): void {
+    roundedRect(ctx, x, y, w, h, CORNER_R + 2);
+    ctx.fillStyle = withAlpha(c.text, this.dropTarget ? "1c" : "10");
+    ctx.fill();
+    const solid = this.selected || this.dropTarget;
+    ctx.setLineDash(solid ? [] : [6, 4]);
+    ctx.strokeStyle = solid ? c.text : withAlpha(c.text, "77");
+    ctx.lineWidth = this.dropTarget ? 2.5 : this.selected ? 1.5 : 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.save();
+    roundedRect(ctx, x, y, w, h, CORNER_R + 2);
+    ctx.clip();
+    ctx.fillStyle = withAlpha(c.text, "24");
+    ctx.fillRect(x, y, w, FRAME_HEADER);
     ctx.restore();
+
+    const title = String(this.data.config["text"] ?? "").replace(/\s*\n\s*/g, " ").trim();
+    ctx.font = `600 ${this.noteMetrics.title}px ${NOTE_FAMILY}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = title ? (c.text === colors.textSecondary ? colors.textPrimary : c.text) : withAlpha(c.text, "99");
+    ctx.fillText(fitText(ctx, title || "Group title", w - 24), x + 12, y + FRAME_HEADER / 2 + 1);
   }
 
   // ── Serialization ──────────────────────────────────────────────────────────
@@ -643,8 +753,8 @@ function drawCornerBrackets(
   x: number, y: number, w: number, h: number,
   color: string, lineWidth: number
 ): void {
-  const ARM = 10; // arm length, matches the 10px scale of the reference mockup's corner boxes
-  const OFF = 3;  // outward offset — matches the previous ring's -3 offset, for visual continuity
+  const ARM = 10; // length of each corner bracket arm
+  const OFF = 3;  // how far the brackets sit outside the node edge
 
   ctx.save();
   ctx.strokeStyle = color;
@@ -673,21 +783,58 @@ function drawCornerBrackets(
   ctx.restore();
 }
 
-export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  for (const paragraph of text.split("\n")) {
-    const words = paragraph.split(" ");
-    let line = "";
-    for (const word of words) {
-      const test = line ? `${line} ${word}` : word;
-      if (ctx.measureText(test).width > maxWidth && line) {
-        lines.push(line);
-        line = word;
-      } else {
-        line = test;
-      }
-    }
-    if (line) lines.push(line);
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+
+function noteFont(m: NoteMetrics, bold: boolean, heading: boolean): string {
+  if (heading) return `700 ${m.heading}px ${NOTE_FAMILY}`;
+  return `${bold ? "600 " : ""}${m.body}px ${NOTE_FAMILY}`;
+}
+
+function measureNote(text: string, bold: boolean, heading: boolean, m: NoteMetrics): number {
+  if (measureCtx === undefined) {
+    try { measureCtx = document.createElement("canvas").getContext("2d"); } catch { measureCtx = null; }
   }
-  return lines.length ? lines : [""];
+  if (!measureCtx) return text.length * (heading ? 8 : bold ? 7 : 6.5) * (m.body / 12);
+  measureCtx.font = noteFont(m, bold, heading);
+  return measureCtx.measureText(text).width;
+}
+
+function fitText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(t + "…").width > maxW) t = t.slice(0, -1);
+  return t + "…";
+}
+
+function drawCheckbox(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, checked: boolean, color: string): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(size / BOX_REF, size / BOX_REF);
+  roundedRect(ctx, 0, 0, BOX_REF, BOX_REF, 3);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.stroke();
+  if (checked) {
+    ctx.beginPath();
+    ctx.moveTo(2.5, 6.5);
+    ctx.lineTo(5, 9);
+    ctx.lineTo(9.5, 3.5);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawResizeHandles(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, stroke: string, fill: string): void {
+  const pts: Array<[number, number]> = [
+    [x, y], [x + w / 2, y], [x + w, y], [x, y + h / 2], [x + w, y + h / 2], [x, y + h], [x + w / 2, y + h], [x + w, y + h],
+  ];
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = stroke;
+  ctx.fillStyle = fill;
+  for (const [px, py] of pts) {
+    ctx.beginPath();
+    ctx.rect(px - 3.5, py - 3.5, 7, 7);
+    ctx.fill();
+    ctx.stroke();
+  }
 }

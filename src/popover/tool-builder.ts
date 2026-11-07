@@ -387,12 +387,12 @@ export function renderToolBuilderField(
       });
       typeSelect.querySelector("button")?.setAttribute("aria-label", "Parameter type");
 
-      const reqLabel = el("label", "tool-param-required");
-      const reqBox = el("input");
+      const reqLabel = el("label", "ui-check-row tool-param-required");
+      const reqBox = el("input", "ui-check");
       reqBox.type = "checkbox";
       reqBox.checked = param.required;
       reqBox.addEventListener("change", () => { param.required = reqBox.checked; commit(); });
-      reqLabel.append(reqBox, document.createTextNode(" Required"));
+      reqLabel.append(reqBox, document.createTextNode("Required"));
 
       const remove = button("×", "field-chip-remove", () => {
         tool.params.splice(index, 1);

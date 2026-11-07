@@ -193,7 +193,7 @@
 .confirm-icon { margin-bottom:12px; }
 .confirm-icon--danger  { color:var(--red); }
 .confirm-icon--neutral { color:var(--blue); }
-.confirm-message { font-size:13px; color:var(--t1); line-height:1.6; margin-bottom:20px; }
+.confirm-message { font-size:13px; color:var(--t1); line-height:1.6; margin-bottom:20px; white-space:pre-line; overflow-wrap:anywhere; }
 .confirm-actions { display:flex; gap:10px; justify-content:center; }
 .confirm-btn-cancel { flex:1; padding:var(--space-2) var(--space-4); background:var(--bg4); border:1px solid var(--bd); border-radius:var(--radius-lg); color:var(--t2); font-size:13px; cursor:pointer; transition:background var(--trans), color var(--trans); }
 .confirm-btn-cancel:hover { background:var(--bg3); color:var(--t1); }
@@ -610,10 +610,33 @@
 }
 .note-inline-textarea:focus { border-color: var(--color-focus); }
 
+.note-tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.note-tool-btn {
+  min-width: 26px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg1);
+  color: var(--t1);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.note-tool-btn:hover { border-color: var(--color-focus); }
+.note-tool-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.note-editor-hint { font-size: 10px; color: var(--t2); line-height: 1.4; }
+
 .note-color-row {
   display: flex;
   gap: 5px;
   padding: 2px 0;
+  margin-left: auto;
 }
 
 .note-color-btn {
@@ -625,6 +648,27 @@
   transition: transform 80ms, border-color 80ms;
   flex-shrink: 0;
 }
+.note-size-row {
+  display: flex;
+  gap: 2px;
+  padding: 2px 0;
+  margin-left: 8px;
+}
+
+.note-size-btn {
+  min-width: 22px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--bd);
+  background: transparent;
+  color: var(--t2);
+  font-size: 10px;
+  cursor: pointer;
+}
+.note-size-btn:hover { background: var(--bg3); color: var(--t1); }
+.note-size-btn.active { background: var(--bg3); color: var(--t1); border-color: var(--t2); }
+
 .note-color-btn:hover { transform: scale(1.2); }
 .note-color-btn.active { border-color: #fff; transform: scale(1.15); }
 
@@ -1985,17 +2029,97 @@ button.field-interp-hint:hover {
 }
 
 
-/* ── BOOLEAN CHECKBOX ─────────────────────────────────────────────────────── */
-/* field-bool-checkbox (field-renderer.ts's renderBoolField) had no styling
-   at all before this -- a bare unstyled browser checkbox. accent-color keeps
-   native keyboard/AT behavior and the platform's own checkmark rendering
-   rather than reinventing both with appearance:none + a custom SVG. */
-.field-bool-checkbox {
-  width: 15px;
-  height: 15px;
-  accent-color: var(--color-focus);
+/* ── CHECKBOX ─────────────────────────────────────────────────────────────── */
+/* Shared by every checkbox outside the Settings switches. The tick is a
+   rotated bordered ::after rather than an image mask, so it needs no CSP
+   allowance and keeps working under forced-colors. */
+.ui-check {
+  --ui-check-size: 16px;
+  --ui-check-tick-w: 4px;
+  --ui-check-tick-h: 8px;
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: var(--ui-check-size);
+  height: var(--ui-check-size);
+  margin: 0;
+  padding: 0;
+  background: var(--bg1);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--trans), border-color var(--trans);
+}
+.ui-check--sm {
+  --ui-check-size: 14px;
+  --ui-check-tick-w: 3px;
+  --ui-check-tick-h: 7px;
+}
+.ui-check::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  box-sizing: border-box;
+  width: var(--ui-check-tick-w);
+  height: var(--ui-check-tick-h);
+  border: solid var(--color-on-action);
+  border-width: 0 2px 2px 0;
+  transform: translate(-50%, -58%) rotate(45deg);
+  opacity: 0;
+}
+.ui-check:hover:not(:disabled) { border-color: var(--t3); }
+.ui-check:focus { box-shadow: none; border-color: var(--bd); }
+.ui-check:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.ui-check:checked,
+.ui-check:indeterminate,
+.ui-check:checked:focus,
+.ui-check:indeterminate:focus {
+  background: var(--color-focus);
+  border-color: var(--color-focus);
+}
+.ui-check:checked:hover:not(:disabled),
+.ui-check:indeterminate:hover:not(:disabled) {
+  border-color: var(--color-focus);
+  filter: brightness(1.1);
+}
+.ui-check:checked::after { opacity: 1; }
+.ui-check:indeterminate::after {
+  opacity: 1;
+  width: calc(var(--ui-check-size) * 0.5);
+  height: 0;
+  border-width: 0 0 2px 0;
+  transform: translate(-50%, -50%);
+}
+.ui-check:disabled { opacity: .45; cursor: not-allowed; }
+
+@media (forced-colors: active) {
+  .ui-check,
+  .ui-check:focus { forced-color-adjust: none; background: Canvas; border-color: ButtonText; }
+  .ui-check:hover:not(:disabled) { border-color: Highlight; }
+  .ui-check:checked,
+  .ui-check:indeterminate,
+  .ui-check:checked:focus,
+  .ui-check:indeterminate:focus,
+  .ui-check:checked:hover:not(:disabled),
+  .ui-check:indeterminate:hover:not(:disabled) { background: Highlight; border-color: Highlight; }
+  .ui-check::after { border-color: HighlightText; }
+  .ui-check:disabled { border-color: GrayText; opacity: 1; }
+  .ui-check:focus-visible { outline-color: Highlight; }
+}
+
+/* A label that wraps a checkbox and its text. */
+.ui-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--t2);
+  line-height: 1.4;
   cursor: pointer;
 }
+.ui-check-row > .ui-check { margin-top: 1px; }
 
 
 /* ── ARRAY FIELDS: CHECKBOX GROUP (fixed items.enum options) ────────────────── */
@@ -2037,13 +2161,7 @@ button.field-interp-hint:hover {
   outline: 2px solid var(--color-focus);
   outline-offset: 1px;
 }
-.field-checkbox-option input[type="checkbox"] {
-  margin: 0;
-  width: 14px;
-  height: 14px;
-  accent-color: var(--color-focus);
-  cursor: pointer;
-}
+.field-checkbox-option .ui-check:focus-visible { outline: none; }
 
 
 /* ── ARRAY FIELDS: CHIP LIST (free-form strings, e.g. ignore/extensions) ────── */
@@ -2218,15 +2336,13 @@ button.field-interp-hint:hover {
 .tool-param-name { flex: 1; min-width: 0; }
 .tool-param-top .csel-wrap { flex-shrink: 0; width: 104px; }
 .tool-param-required {
-  display: flex;
   align-items: center;
   flex-shrink: 0;
+  gap: 6px;
   font-size: 11px;
-  color: var(--t2);
   white-space: nowrap;
-  cursor: pointer;
 }
-.tool-param-required input { width: auto; margin-right: 4px; }
+.tool-param-required > .ui-check { margin-top: 0; }
 
 .tool-builder-error {
   font-size: 10px;
@@ -2300,7 +2416,6 @@ button.field-interp-hint:hover {
 .field-describe-title { font-weight: 600; }
 .field-describe-input, .field-describe-select { font: inherit; font-size: 12px; width: 100%; box-sizing: border-box; }
 .field-describe-note, .field-describe-status, .field-describe-sample { color: var(--t2); line-height: 1.4; }
-.field-describe-check { display: flex; gap: 6px; align-items: flex-start; color: var(--t2); line-height: 1.4; }
 .field-describe-pre { margin: 4px 0 0; padding: 6px; max-height: 140px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: rgba(127,127,127,.08); border-radius: 4px; font-size: 11px; }
 .field-describe-proposal { max-height: 120px; }
 .field-describe-label { font-weight: 600; }

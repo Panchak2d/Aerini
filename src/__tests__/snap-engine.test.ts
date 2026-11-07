@@ -39,7 +39,7 @@ function makeNode(id: string, x: number, y: number, outputCount = 1): CanvasNode
 
 function stubCanvas(nodes: CanvasNode[]): Canvas {
   const map = new Map(nodes.map(n => [n.data.id, n]));
-  return { nodes: map } as unknown as Canvas;
+  return { nodes: map, isShown: () => true } as unknown as Canvas;
 }
 
 describe("SnapEngine.computeSnap — y-axis alignment", () => {

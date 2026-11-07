@@ -1,5 +1,79 @@
 {
   "$defs": {
+    "Annotation": {
+      "description": "A sticky note or group frame drawn on the canvas. It is never executed.",
+      "properties": {
+        "color": {
+          "description": "One of default, yellow, blue, green or red. Anything else is shown as default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "h": {
+          "description": "Height in canvas units. Absent means a note grows to fit its text.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique ID within this workflow.",
+          "type": "string"
+        },
+        "kind": {
+          "default": "note",
+          "description": "`\"note\"` (a sticky note) or `\"frame\"` (a titled box that groups nodes).",
+          "type": "string"
+        },
+        "size": {
+          "description": "Text size: one of s, m, l or xl. Absent or anything else is shown as m. A note's size applies to its text; a frame's, to its title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "A note's text. Supports **bold**, [links](https://example.com), `- [ ]` checkboxes and a leading `# ` heading.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A frame's title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "w": {
+          "description": "Width in canvas units. Absent means the default for the kind.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "x": {
+          "description": "Left edge on the canvas.",
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "description": "Top edge on the canvas.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
     "CanvasPosition": {
       "properties": {
         "x": {
@@ -272,6 +346,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "A workflow document: nodes, the connections (edges) between them, and workflow-level settings. A file with an older schema_version is migrated when it is loaded.",
   "properties": {
+    "annotations": {
+      "description": "Sticky notes and group frames drawn on the canvas. The executor ignores them.",
+      "items": {
+        "$ref": "#/$defs/Annotation"
+      },
+      "type": "array"
+    },
     "description": {
       "default": "",
       "type": "string"

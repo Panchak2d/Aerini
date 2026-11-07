@@ -7,13 +7,13 @@ import type { CanvasNode } from "../canvas/Node";
 function fakeNode(id: string, x: number): CanvasNode {
   return {
     data: { id, name: id, position: { x, y: 0 }, config: {}, node_type_id: "http", node_type: "action" },
-    height: 80, status: "idle", selected: false, disabled: false, ports: [],
+    width: 220, height: 80, status: "idle", selected: false, disabled: false, ports: [],
   } as unknown as CanvasNode;
 }
 
 function setup() {
   const nodes = new Map([["a", fakeNode("a", 0)], ["b", fakeNode("b", 300)]]);
-  const canvas = { nodes, connectors: new Map(), panX: 0, panY: 0, zoom: 1, onViewportChange: vi.fn() };
+  const canvas = { nodes, notesVisible: true, isShown: () => true, hasShownNodes: () => true, connectors: new Map(), panX: 0, panY: 0, zoom: 1, onViewportChange: vi.fn() };
   const el = document.createElement("canvas");
   Object.defineProperty(el, "clientWidth", { value: 200 });
   Object.defineProperty(el, "clientHeight", { value: 120 });

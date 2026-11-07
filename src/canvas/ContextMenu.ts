@@ -1,109 +1,219 @@
 import type { Canvas } from "./Canvas";
+import type { Connector } from "./Connector";
 import { CanvasNode, NODE_WIDTH, NODE_HEADER } from "./Node";
+import { buildCanvasMenu, buildSelectionMenu, buildWireMenu, type MenuApi } from "./context-menu-items";
+
+interface MountOptions {
+  label: string;
+  /** Focus the first row on open (keyboard); otherwise the menu itself takes focus so the arrow keys work. */
+  focusFirst?: boolean;
+}
+
+/** Ignored for this long after opening, so trailing inertial scroll from the gesture that led here does not close the menu at once. */
+const WHEEL_GRACE_MS = 200;
+const EDGE_GAP = 8;
 
 export class ContextMenu {
   private canvas: Canvas;
+  private closeActive: ((restoreFocus: boolean) => void) | null = null;
 
   constructor(canvas: Canvas) {
     this.canvas = canvas;
   }
 
-  show(cx: number, cy: number, node: CanvasNode): void {
+  private mount(cx: number, cy: number, fill: (api: MenuApi) => void, opts: MountOptions): void {
+    this.closeActive?.(false);
     document.getElementById("canvas-ctx-menu")?.remove();
-
-    const c = this.canvas;
-    const isMultiSelect = c.selectedNodes.size > 1;
 
     const menu = document.createElement("div");
     menu.id = "canvas-ctx-menu";
     menu.className = "ctx-menu";
+    menu.tabIndex = -1;
     menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", opts.label);
 
-    let dismiss: (ev: MouseEvent) => void;
-    const closeMenu = () => {
+    const actions = new Map<HTMLElement, () => void>();
+    const stops: HTMLElement[] = [];
+    let closed = false;
+    let used = false;
+    const openedAt = performance.now();
+
+    const dismiss = (ev: MouseEvent) => { if (!menu.contains(ev.target as Node)) closeMenu(false); };
+    const onWheel = (ev: WheelEvent) => {
+      if (menu.contains(ev.target as Node) || performance.now() - openedAt < WHEEL_GRACE_MS) return;
+      closeMenu(false);
+    };
+    const onWindowChange = () => closeMenu(false);
+
+    const closeMenu = (restoreFocus: boolean) => {
+      if (closed) return;
+      closed = true;
       menu.remove();
       document.removeEventListener("mousedown", dismiss, true);
+      document.removeEventListener("wheel", onWheel, true);
+      window.removeEventListener("blur", onWindowChange);
+      window.removeEventListener("resize", onWindowChange);
+      if (this.closeActive === closeMenu) this.closeActive = null;
+      if (restoreFocus) this.canvas.el.focus({ preventScroll: true });
     };
 
-    const addItem = (label: string, icon: string, danger: boolean, action: () => void) => {
-      const item = document.createElement("button");
-      item.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
-      item.setAttribute("role", "menuitem");
-      item.innerHTML = `<span class="ctx-menu-icon">${icon}</span><span>${label}</span>`;
-      item.addEventListener("mousedown", (e) => { e.preventDefault(); closeMenu(); action(); });
-      menu.appendChild(item);
+    const register = (el: HTMLElement, action: () => void) => {
+      const run = () => {
+        if (used) return;
+        used = true;
+        closeMenu(true);
+        action();
+      };
+      actions.set(el, run);
+      stops.push(el);
+      el.tabIndex = -1;
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); run(); });
+      el.addEventListener("click", (e) => { if (e.detail === 0) run(); });
     };
 
-    const addSep = () => {
-      const s = document.createElement("div");
-      s.className = "ctx-menu-sep";
-      menu.appendChild(s);
-    };
+    fill({
+      item: (label, icon, danger, action) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "ctx-menu-item" + (danger ? " ctx-menu-item--danger" : "");
+        item.setAttribute("role", "menuitem");
+        const iconEl = document.createElement("span");
+        iconEl.className = "ctx-menu-icon";
+        iconEl.innerHTML = icon;
+        const text = document.createElement("span");
+        text.textContent = label;
+        item.append(iconEl, text);
+        register(item, action);
+        menu.appendChild(item);
+      },
+      sep: () => {
+        const sep = document.createElement("div");
+        sep.className = "ctx-menu-sep";
+        sep.setAttribute("role", "separator");
+        menu.appendChild(sep);
+      },
+      swatches: (label, options, current, pick) => {
+        const row = document.createElement("div");
+        row.className = "ctx-menu-swatches";
+        row.setAttribute("role", "group");
+        row.setAttribute("aria-label", label);
+        const title = document.createElement("span");
+        title.className = "ctx-menu-swatch-label";
+        title.textContent = label;
+        row.appendChild(title);
+        for (const o of options) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "ctx-menu-swatch" + (o.id === current ? " active" : "");
+          b.style.background = o.css;
+          b.title = o.label;
+          b.setAttribute("role", "menuitemradio");
+          b.setAttribute("aria-checked", String(o.id === current));
+          b.setAttribute("aria-label", `${o.label} ${label.toLowerCase()}`);
+          b.dataset.swatch = "1";
+          register(b, () => pick(o.id));
+          row.appendChild(b);
+        }
+        menu.appendChild(row);
+      },
+      choices: (label, options, current, pick) => {
+        const row = document.createElement("div");
+        row.className = "ctx-menu-swatches";
+        row.setAttribute("role", "group");
+        row.setAttribute("aria-label", label);
+        const title = document.createElement("span");
+        title.className = "ctx-menu-swatch-label";
+        title.textContent = label;
+        row.appendChild(title);
+        for (const o of options) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "ctx-menu-choice" + (o.id === current ? " active" : "");
+          b.textContent = o.label;
+          b.title = o.title;
+          b.setAttribute("role", "menuitemradio");
+          b.setAttribute("aria-checked", String(o.id === current));
+          b.setAttribute("aria-label", `${o.title} ${label.toLowerCase()}`);
+          b.dataset.swatch = "1";
+          register(b, () => pick(o.id));
+          row.appendChild(b);
+        }
+        menu.appendChild(row);
+      },
+    });
 
-    addItem(
-      isMultiSelect ? `Duplicate (${c.selectedNodes.size})` : "Duplicate",
-      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
-      false,
-      () => { c.dupSelected(); c.onCanvasChanged?.(); }
-    );
-
-    if (!isMultiSelect) {
-      addItem(
-        "Rename",
-        `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
-        false,
-        () => this.startInlineRename(node)
-      );
-    }
-
-    addItem(
-      node.disabled ? "Enable" : "Disable",
-      node.disabled
-        ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`
-        : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
-      false,
-      () => {
-        const ids = isMultiSelect ? [...c.selectedNodes] : [node.data.id];
-        const targets = ids.map(id => c.nodes.get(id)).filter((n): n is CanvasNode => !!n);
-        const verb = node.disabled ? "Enable" : "Disable";
-        c.transact(targets.length > 1 ? `${verb} ${targets.length} nodes` : `${verb} "${node.data.name}"`, () => {
-          for (const n of targets) c.editNode(n, () => { n.disabled = !n.disabled; });
-        });
+    menu.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      const at = stops.indexOf(document.activeElement as HTMLElement);
+      const focusAt = (i: number) => stops[(i + stops.length) % stops.length]?.focus();
+      switch (e.key) {
+        case "ArrowDown": e.preventDefault(); focusAt(at < 0 ? 0 : at + 1); break;
+        case "ArrowUp":   e.preventDefault(); focusAt(at < 0 ? stops.length - 1 : at - 1); break;
+        case "Home":      e.preventDefault(); focusAt(0); break;
+        case "End":       e.preventDefault(); focusAt(stops.length - 1); break;
+        case "ArrowRight":
+        case "ArrowLeft": {
+          const cur = stops[at];
+          if (!cur?.dataset["swatch"]) break;
+          e.preventDefault();
+          const next = stops[at + (e.key === "ArrowRight" ? 1 : -1)];
+          if (next?.dataset["swatch"]) next.focus();
+          break;
+        }
+        case "Enter":
+        case " ": {
+          const run = actions.get(document.activeElement as HTMLElement);
+          if (run) { e.preventDefault(); run(); }
+          break;
+        }
+        case "Escape":
+        case "Tab":
+          e.preventDefault();
+          closeMenu(true);
+          break;
+        default:
+          break;
       }
-    );
-
-    if (!isMultiSelect) {
-      addItem(
-        "Run from here",
-        `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
-        false,
-        () => { c.onRunNode?.(node.data.id); }
-      );
-    }
-
-    addSep();
-
-    addItem(
-      isMultiSelect ? `Delete (${c.selectedNodes.size})` : "Delete",
-      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
-      true,
-      () => { c.deleteSelected(); }
-    );
+    });
+    menu.addEventListener("focusout", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !menu.contains(to)) closeMenu(false);
+    });
 
     document.body.appendChild(menu);
     const mw = menu.offsetWidth || 180;
     const mh = menu.offsetHeight || 160;
-    const left = cx + mw > window.innerWidth  - 8 ? cx - mw : cx;
-    const top  = cy + mh > window.innerHeight - 8 ? cy - mh : cy;
-    menu.style.left = `${left}px`;
-    menu.style.top  = `${top}px`;
+    const left = cx + mw > window.innerWidth  - EDGE_GAP ? cx - mw : cx;
+    const top  = cy + mh > window.innerHeight - EDGE_GAP ? cy - mh : cy;
+    menu.style.left = `${Math.max(EDGE_GAP, Math.min(left, window.innerWidth  - mw - EDGE_GAP))}px`;
+    menu.style.top  = `${Math.max(EDGE_GAP, Math.min(top,  window.innerHeight - mh - EDGE_GAP))}px`;
 
-    dismiss = (ev: MouseEvent) => {
-      if (!menu.contains(ev.target as Node)) {
-        closeMenu();
-      }
-    };
-    setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+    this.closeActive = closeMenu;
+    setTimeout(() => {
+      if (closed) return;
+      document.addEventListener("mousedown", dismiss, true);
+      document.addEventListener("wheel", onWheel, { capture: true, passive: true });
+    }, 0);
+    window.addEventListener("blur", onWindowChange);
+    window.addEventListener("resize", onWindowChange);
+
+    (opts.focusFirst ? stops[0] ?? menu : menu).focus({ preventScroll: true });
+  }
+
+  showCanvas(cx: number, cy: number, world: { x: number; y: number }, focusFirst = false): void {
+    this.mount(cx, cy, (api) => buildCanvasMenu(api, this.canvas, world), { label: "Canvas actions", focusFirst });
+  }
+
+  showWire(cx: number, cy: number, conn: Connector, world: { x: number; y: number }, focusFirst = false): void {
+    this.mount(cx, cy, (api) => buildWireMenu(api, this.canvas, conn, world), { label: "Connection actions", focusFirst });
+  }
+
+  show(cx: number, cy: number, node: CanvasNode, focusFirst = false): void {
+    this.mount(
+      cx, cy,
+      (api) => buildSelectionMenu(api, this.canvas, node, { rename: (n) => this.startInlineRename(n) }),
+      { label: node.isNote ? (node.noteStyle === "frame" ? "Group frame actions" : "Note actions") : "Node actions", focusFirst },
+    );
   }
 
   startInlineRename(node: CanvasNode): void {
