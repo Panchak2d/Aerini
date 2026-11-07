@@ -171,6 +171,16 @@ describe("validateWorkflow — unregistered node types", () => {
     }
   });
 
+  it("ignores notes and frames, which are never in the registry", async () => {
+    const { registerNodeDescriptors } = await import("../canvas/node-registry");
+    registerNodeDescriptors([desc("manual_trigger")] as never);
+    try {
+      expect(validateWorkflow(canvasOf(makeNode("n1", "note")))).toEqual([]);
+    } finally {
+      registerNodeDescriptors([]);
+    }
+  });
+
   it("does not flag anything while the registry has not loaded", () => {
     const errors = validateWorkflow(canvasOf(makeNode("n1", "feed_parser")));
     expect(errors.some(e => e.includes("isn't available"))).toBe(false);

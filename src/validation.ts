@@ -73,7 +73,7 @@ export function validateWorkflow(canvas: Canvas): string[] {
   }
 
   for (const node of nodes.values()) {
-    if (node.disabled) continue;
+    if (node.disabled || node.data.node_type_id === NODE_IDS.NOTE) continue;
     if (isUnregisteredNodeType(node.data.node_type_id as string)) {
       errors.push(`"${node.data.name}" (${node.data.node_type_id}) isn't available in this version of Aerini. Update the app, or remove the node.`);
       continue;

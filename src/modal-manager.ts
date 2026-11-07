@@ -1,5 +1,6 @@
 import { getNodeDescriptor, isTriggerNodeType } from "./canvas/node-registry";
 import { NODE_IDS } from "./node-ids";
+import { MAX_NOTE_TEXT } from "./canvas/note-format";
 import { THEMES, getStoredTheme, applyTheme } from "./theme";
 import { bindSettingsModal } from "./settings-modal";
 
@@ -167,12 +168,23 @@ const N8N_STICKY_COLORS: Record<number, string> = { 1: "yellow", 2: "yellow", 3:
 
 const N8N_FETCHING_TAGS_RE = /<\/?(?:img|iframe|video|audio|source|embed|object|script|style)\b[^>]*>/gi;
 
+function stripFetchingTags(text: string): string {
+  let out = text;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(N8N_FETCHING_TAGS_RE, "");
+  } while (out !== prev);
+  return out;
+}
+
 /** n8n notes are CommonMark. Aerini draws bold, links, task lines and one heading level, so images and embeds become plain text, every heading becomes the one level, and the rest stays as typed. */
 function n8nMarkdownToNoteText(src: string): string {
-  return src
+  const flat = src
+    .slice(0, MAX_NOTE_TEXT)
     .replace(/\r\n?/g, "\n")
-    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
-    .replace(N8N_FETCHING_TAGS_RE, "")
+    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1");
+  return stripFetchingTags(flat)
     .replace(/^ {0,3}#{1,6} +/gm, "# ")
     .replace(/[ \t]+$/gm, "");
 }

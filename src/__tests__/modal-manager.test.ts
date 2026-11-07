@@ -273,6 +273,18 @@ describe("convertN8nWorkflow — sticky notes", () => {
     ]);
   });
 
+  it("leaves no fetching tag behind when tags are nested to survive one pass", () => {
+    registerNodeDescriptors([HTTP_DESCRIPTOR]);
+    initModals(() => {});
+
+    const out = convertN8nWorkflow({
+      name: "wf",
+      nodes: [sticky({ content: "a <scr<script>ipt>b <i<img>mg src=x>c" })],
+      connections: {},
+    }) as Converted;
+    expect(out.annotations?.[0]?.text).toBe("a b c");
+  });
+
   it("leaves out the colour for a custom hex colour and omits annotations when there are no sticky notes", () => {
     registerNodeDescriptors([HTTP_DESCRIPTOR]);
     initModals(() => {});
