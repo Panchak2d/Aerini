@@ -356,7 +356,7 @@ describe("buildSidebarPalette — collapsible categories", () => {
 
   // Locates the header immediately preceding a specific item, found via its
   // unique data-search substring — not by data-cat. The "action" node_type
-  // now renders as several independent subheaders (Core Actions/Files &
+  // renders as several independent subheaders (Core Actions/Files &
   // Storage/Integrations/Triggers), so two items can share data-cat="action"
   // while living under entirely different headers.
   function headerForItem(search: string): HTMLButtonElement {
@@ -500,8 +500,8 @@ describe("plugin icon", () => {
 
 // ---------------------------------------------------------------------------
 // Node info tooltip — plugin tag. Same badge the sidebar list and command
-// palette row already show (above); this is the third hover surface that
-// was missing it.
+// palette row show (above); the node tooltip is the third surface that
+// carries it.
 // ---------------------------------------------------------------------------
 
 describe("node info tooltip — plugin tag", () => {
@@ -648,5 +648,68 @@ describe("AI provider presets", () => {
 
     expect(placed.data.name).toBe(name);
     expect(placed.data.config).toMatchObject({ provider, model });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Place-at-point picker
+// ---------------------------------------------------------------------------
+
+describe("place-at-point picker", () => {
+  const PALETTE_DOM = `
+    <div id="command-palette-overlay" class="hidden">
+      <input id="palette-search" type="text" />
+      <span id="palette-hint"></span>
+      <div id="palette-results"></div>
+    </div>
+  `;
+
+  function stubCanvas() {
+    const canvas = {
+      ...mockCanvas,
+      placeNode: vi.fn(),
+      _pendingPlacement: null as { sx: number; sy: number; onto: unknown } | null,
+      completePlacement: vi.fn(),
+    };
+    return canvas;
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = PALETTE_DOM;
+    registerNodeDescriptors(ALL_NODES);
+  });
+
+  it("hands the picked node to the canvas and clears the hint", async () => {
+    const { openPlacePicker } = await import("../wire-drop");
+    const canvas = stubCanvas();
+    initCommandPalette(canvas as never, vi.fn());
+    openPlacePicker(canvas as never, { sx: 30, sy: 40 }, vi.fn());
+    expect(canvas._pendingPlacement).toEqual({ sx: 30, sy: 40, onto: null });
+
+    document.querySelector<HTMLElement>(".palette-result")!.click();
+    expect(canvas.completePlacement).toHaveBeenCalledTimes(1);
+    expect(canvas.placeNode).not.toHaveBeenCalled();
+    expect(document.getElementById("palette-hint")!.textContent).toContain("Enter place");
+  });
+
+  it("leaves no pending placement behind when the palette closes without a pick", async () => {
+    const { openPlacePicker } = await import("../wire-drop");
+    const canvas = stubCanvas();
+    initCommandPalette(canvas as never, vi.fn());
+    openPlacePicker(canvas as never, { sx: 1, sy: 2 }, vi.fn());
+    closePalette();
+    expect(canvas._pendingPlacement).toBeNull();
+  });
+
+  it("refuses a node without both ports when inserting into a wire and keeps the palette open", async () => {
+    const { openPlacePicker } = await import("../wire-drop");
+    registerNodeDescriptors([NO_INPUT_NODE]);
+    const canvas = stubCanvas();
+    initCommandPalette(canvas as never, vi.fn());
+    openPlacePicker(canvas as never, { sx: 1, sy: 2 }, vi.fn(), {} as never);
+
+    document.querySelector<HTMLElement>(".palette-result")!.click();
+    expect(canvas.completePlacement).not.toHaveBeenCalled();
+    expect(document.getElementById("command-palette-overlay")!.classList.contains("hidden")).toBe(false);
   });
 });

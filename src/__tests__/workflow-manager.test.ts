@@ -101,13 +101,21 @@ describe("serialize — 2-node + 1-connector canvas", () => {
     expect(doc.edges).toHaveLength(1);
   });
 
-  it("excludes NOTE nodes from serialized output", () => {
-    const noteNode = makeNode("note1", 50, 50, "note");
+  it("writes NOTE nodes to annotations and keeps them, and any wire to them, out of nodes and edges", () => {
+    const noteNode = makeNode("note1", 50, 60, "note");
+    noteNode.data.config = { style: "note", text: "remember" };
     const allNodes = new Map([["n1", n1], ["n2", n2], ["note1", noteNode]]);
-    const doc = JSON.parse(serialize("wf_test", "Test", allNodes, edges));
-    // note node must be excluded
+    const allEdges = new Map([["e1", c1], ["e_note", makeConnector("e_note", "n1", "note1")]]);
+    const doc = JSON.parse(serialize("wf_test", "Test", allNodes, allEdges));
     expect(doc.nodes.every((n: { node_type_id: string }) => n.node_type_id !== "note")).toBe(true);
     expect(doc.nodes).toHaveLength(2);
+    expect(doc.edges).toHaveLength(1);
+    expect(doc.annotations).toEqual([{ id: "note1", kind: "note", x: 50, y: 60, text: "remember" }]);
+  });
+
+  it("leaves annotations out of the file when the canvas has no notes", () => {
+    const doc = JSON.parse(serialize("wf_test", "Test", nodes, edges));
+    expect(doc).not.toHaveProperty("annotations");
   });
 });
 
@@ -330,7 +338,7 @@ describe("duplicateWorkflow — dangling-edge filter", () => {
     const validConn = makeConnector("e_valid", "n1", "n2");
     const goodJson = serialize("wf_src", "Source", new Map([["n1", n1], ["n2", n2]]), new Map([["e_valid", validConn]]));
 
-    // Simulate a pre-existing dangling edge (e.g. via the undo-sharing bug)
+    // Simulate a dangling edge already present in a saved workflow
     // by splicing one directly into the saved document —
     // serialize's own filter would otherwise never let one exist
     // in a freshly-serialized document.

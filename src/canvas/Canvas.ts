@@ -21,6 +21,13 @@ import { declaredPrimaryInputKey, declaredPrimaryOutputKey, getRunOutput, format
 import { pointEligibleIds } from "../point-mode";
 import { CONNECT_FROM_PORT, CONNECT_TO_PORT, listConnectable, type ConnectCandidate } from "../connect-insert";
 import { validateNodeName, uniqueNodeName, renameReferences } from "../node-names";
+import { storageGet, storageSet } from "../safe-storage";
+import type { NoteTemplate } from "./note-templates";
+import { rectContains, innermostContainingFrame, fitFrameRect, FRAME_DEFAULT_W, FRAME_DEFAULT_H, NOTE_DEFAULT_W, NOTE_SIZES, noteSizeOf, type NoteStyle, type Rect } from "./note-geometry";
+import { gridSnapEnabled, snapToGrid } from "./grid";
+import { heldClipboard, holdClipboard, pasteOrigin, planPaste, snapshotSelection } from "./node-clipboard";
+
+export const NOTES_HIDDEN_KEY = "aerini_notes_hidden";
 
 export class Canvas {
   // Internal canvas element and rendering context (accessed by sub-modules)
@@ -62,9 +69,12 @@ export class Canvas {
   set insertGhost(g: { x: number; y: number } | null) { this._insertGhost = g; markDirty(); }
 
   private focusMode = false;
+  private _notesVisible = storageGet(NOTES_HIDDEN_KEY) !== "true";
 
   _pendingWireDrop: { fromNode: string; fromPort: string; wx: number; wy: number } | null = null;
   _pendingInputWireDrop: { toNode: string; toPort: string; wx: number; wy: number } | null = null;
+  /** Where the next palette pick lands (canvas-relative pixels), and the wire it must be spliced into, if any. */
+  _pendingPlacement: { sx: number; sy: number; onto: Connector | null } | null = null;
   _pendingPresetConfig: Record<string, unknown> | undefined = undefined;
   _pendingPresetName:   string | undefined = undefined;
 
@@ -80,7 +90,10 @@ export class Canvas {
   private emptyEl: HTMLElement | null = null;
   private wasEmpty: boolean | null = null;
 
-  onPaletteRequest: (() => void) | null = null;
+  /** `at` is the pointer in canvas-relative pixels, or null when it is not over the canvas. */
+  onPaletteRequest: ((at: { sx: number; sy: number } | null) => void) | null = null;
+  /** Opens the node picker so the chosen node is spliced into `conn` at `at` (canvas-relative pixels). */
+  onInsertOnWireRequest: ((conn: Connector, at: { sx: number; sy: number }) => void) | null = null;
   onWireDropRequest: ((fromNode: string, fromPort: string, wx: number, wy: number) => void) | null = null;
   onInputWireDropRequest: ((toNode: string, toPort: string, wx: number, wy: number) => void) | null = null;
   onNodeSelected:   ((n: CanvasNode | null) => void) | null = null;
@@ -137,6 +150,150 @@ export class Canvas {
     this.ready = true;
     markDirty();
     requestAnimationFrame((t) => this.loop(t));
+  }
+
+
+  /** Whether sticky notes and group frames are drawn and can be picked. A display preference: it is never saved in the workflow. */
+  get notesVisible(): boolean { return this._notesVisible; }
+  set notesVisible(v: boolean) {
+    if (v === this._notesVisible) return;
+    this._notesVisible = v;
+    storageSet(NOTES_HIDDEN_KEY, String(!v));
+    if (!v) {
+      for (const id of [...this.selectedNodes]) {
+        const n = this._nodes.get(id);
+        if (n?.isNote) { n.selected = false; this.selectedNodes.delete(id); if (this.selectedNode === n) this.selectedNode = null; }
+      }
+      this.onNodeSelected?.(null);
+    }
+    markDirty();
+  }
+
+  isShown(n: CanvasNode): boolean { return this._notesVisible || !n.isNote; }
+
+  hasShownNodes(): boolean {
+    if (this._notesVisible) return this._nodes.size > 0;
+    for (const n of this._nodes.values()) if (!n.isNote) return true;
+    return false;
+  }
+
+  nodeAt(wx: number, wy: number): CanvasNode | null {
+    const arr = Array.from(this._nodes.values());
+    for (let i = arr.length - 1; i >= 0; i--) if (!arr[i].isNote && arr[i].containsPoint(wx, wy)) return arr[i];
+    return null;
+  }
+
+  noteAt(wx: number, wy: number): CanvasNode | null {
+    if (!this._notesVisible) return null;
+    const arr = Array.from(this._nodes.values());
+    for (let i = arr.length - 1; i >= 0; i--) if (arr[i].isNote && arr[i].noteStyle === "note" && arr[i].containsPoint(wx, wy)) return arr[i];
+    for (let i = arr.length - 1; i >= 0; i--) if (arr[i].isNote && arr[i].noteStyle === "frame" && arr[i].containsPoint(wx, wy)) return arr[i];
+    return null;
+  }
+
+  selectedNote(): CanvasNode | null {
+    if (this.selectedNodes.size !== 1) return null;
+    const n = this.selectedNode;
+    return n && n.isNote && this.isShown(n) ? n : null;
+  }
+
+  containedIds(frame: CanvasNode): string[] {
+    const p = frame.data.position;
+    const outer = { x: p.x, y: p.y, w: frame.width, h: frame.height };
+    const out: string[] = [];
+    for (const n of this._nodes.values()) {
+      if (n === frame) continue;
+      const q = n.data.position;
+      if (rectContains(outer, { x: q.x, y: q.y, w: n.width, h: n.height })) out.push(n.data.id);
+    }
+    return out;
+  }
+
+  /** Highlights the innermost frame that fully contains the nodes being dragged; null clears it. Frames in the dragged set are never targets. */
+  setFrameDropTarget(draggedIds: Iterable<string> | null): void {
+    let target: string | null = null;
+    if (draggedIds && this._notesVisible) {
+      const ids = new Set(draggedIds);
+      const dragged: Rect[] = [];
+      const frames: { id: string; rect: Rect }[] = [];
+      for (const n of this._nodes.values()) {
+        const p = n.data.position;
+        const rect = { x: p.x, y: p.y, w: n.width, h: n.height };
+        if (ids.has(n.data.id)) dragged.push(rect);
+        else if (n.isNote && n.noteStyle === "frame") frames.push({ id: n.data.id, rect });
+      }
+      target = innermostContainingFrame(frames, dragged);
+    }
+    for (const n of this._nodes.values()) if (n.isNote && n.noteStyle === "frame") n.dropTarget = n.data.id === target;
+  }
+
+  addNote(style: NoteStyle = "note", at?: { x: number; y: number }, template?: NoteTemplate): CanvasNode {
+    const vp = visibleViewport(this.cachedRect());
+    const c = at ?? this.s2w(vp.width / 2, vp.height / 2);
+    const w = style === "frame" ? FRAME_DEFAULT_W : NOTE_DEFAULT_W;
+    const h = style === "frame" ? FRAME_DEFAULT_H : 60;
+    return this.insertNote(style, { x: c.x - w / 2, y: c.y - h / 2 }, style === "frame" ? { width: w, height: h } : {}, template?.text);
+  }
+
+  frameSelection(): CanvasNode {
+    const sel = [...this.selectedNodes].map(id => this._nodes.get(id)).filter((n): n is CanvasNode => !!n && !n.isNote);
+    const rect = fitFrameRect(sel.map(n => ({ x: n.data.position.x, y: n.data.position.y, w: n.width, h: n.height })));
+    if (!rect) return this.addNote("frame");
+    return this.insertNote("frame", { x: rect.x, y: rect.y }, { width: rect.w, height: rect.h });
+  }
+
+  /** Resizes a frame to wrap everything it currently contains, as one undo step. Returns false when it contains nothing. */
+  fitFrameToContents(frame: CanvasNode): boolean {
+    if (!frame.isNote || frame.noteStyle !== "frame") return false;
+    const inside = this.containedIds(frame).map(id => this._nodes.get(id)).filter((n): n is CanvasNode => !!n);
+    const rect = fitFrameRect(inside.map(n => ({ x: n.data.position.x, y: n.data.position.y, w: n.width, h: n.height })));
+    if (!rect) return false;
+    const from = { ...frame.data.position };
+    this.transact("Fit group frame", () => {
+      this.beginNodeEdit(frame);
+      frame.data.position = { x: rect.x, y: rect.y };
+      frame.data.config["width"] = rect.w;
+      frame.data.config["height"] = rect.h;
+      if (rect.x !== from.x || rect.y !== from.y) this.pushUndo({ type: "move_node", nodeId: frame.data.id, from, to: { x: rect.x, y: rect.y } });
+      this.commitNodeEdit(frame);
+    });
+    this.onCanvasChanged?.();
+    return true;
+  }
+
+  selectAll(): void {
+    for (const n of this._nodes.values()) {
+      if (this.isShown(n)) { n.selected = true; this.selectedNodes.add(n.data.id); }
+    }
+    markDirty();
+  }
+
+  private insertNote(style: NoteStyle, position: { x: number; y: number }, size: { width?: number; height?: number }, text = ""): CanvasNode {
+    const node = new CanvasNode({
+      id: `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      node_type_id: NODE_IDS.NOTE,
+      node_type: "utility",
+      name: style === "frame" ? "Group" : "Note",
+      config: { style, text, color: "default", ...size },
+      credentials: {},
+      position,
+      ports: { inputs: [], outputs: [] },
+      input_schema: {},
+      output_schema: {},
+      retry: { max_attempts: 1, backoff_ms: 500 },
+      fallback_node: null,
+      dynamic_ports: false,
+    });
+    if (!this._notesVisible) this.notesVisible = true;
+    this.transact(style === "frame" ? "Add group frame" : "Add note", () => {
+      this._nodes.set(node.data.id, node);
+      this.pushUndo({ type: "add_node", node });
+    });
+    this.clearSelection();
+    this.selectNode(node);
+    this.onCanvasChanged?.();
+    this.openNodeConfig(node);
+    return node;
   }
 
   // ── Resize ────────────────────────────────────────────────────────────────
@@ -224,8 +381,9 @@ export class Canvas {
       const p = n.data.position;
       px += p.x * i; py += p.y * i; hh += n.height * i;
       nm += (n.data.name.length + (n.disabled ? 7 : 0)) * i;
-      if (n.data.node_type_id === NODE_IDS.NOTE) {
-        nt += String(n.data.config["text"] ?? "").length * i + String(n.data.config["color"] ?? "").length;
+      if (n.isNote) {
+        const cfg = n.data.config;
+        nt += String(cfg["text"] ?? "").length * i + String(cfg["color"] ?? "").length + (NOTE_SIZES.indexOf(noteSizeOf(cfg)) + 1) * 13 + n.width + (cfg["style"] === "frame" ? 1 : 0);
       }
     }
     let cs = this._connectors.size;
@@ -260,6 +418,14 @@ export class Canvas {
     const movingGroup = ih.moveGroup;
     const vx0 = -this.panX / this.zoom, vy0 = -this.panY / this.zoom;
     const vx1 = vx0 + W / this.zoom,    vy1 = vy0 + H / this.zoom;
+
+    if (this._notesVisible) {
+      for (const pass of ["frame", "note"] as const) {
+        for (const n of this._nodes.values()) {
+          if (n.isNote && n.noteStyle === pass && this.nodeOnScreen(n, vx0, vy0, vx1, vy1)) n.draw(ctx, dt);
+        }
+      }
+    }
     for (const c of this.connectors.values()) {
       c.highlighted = ih.isCutting && this.edgeCrossesPath(c);
       if (!c.highlighted && !c.active && !this.wireOnScreen(c, vx0, vy0, vx1, vy1)) continue;
@@ -335,14 +501,15 @@ export class Canvas {
 
     // Draw nodes; ones fully outside the view are skipped, and the node being dragged is drawn last so it passes over its neighbours.
     const overfedPorts = this.fillOverfed(inCount);
-    const raised = ih.draggingNode;
+    const raised = ih.draggingNode && !ih.draggingNode.isNote ? ih.draggingNode : null;
     const lifted = raised && this.selectedNodes.size > 1 && this.selectedNodes.has(raised.data.id);
     for (const n of this.nodes.values()) {
+      if (n.isNote) continue;
       if (raised && (n === raised || (lifted && n.selected))) continue;
       if (this.nodeOnScreen(n, vx0, vy0, vx1, vy1)) n.draw(ctx, dt, connectedPorts, overfedPorts);
     }
     if (raised) {
-      if (lifted) { for (const n of this.nodes.values()) if (n.selected && n !== raised) n.draw(ctx, dt, connectedPorts, overfedPorts); }
+      if (lifted) { for (const n of this.nodes.values()) if (n.selected && n !== raised && !n.isNote) n.draw(ctx, dt, connectedPorts, overfedPorts); }
       raised.draw(ctx, dt, connectedPorts, overfedPorts);
     }
 
@@ -453,7 +620,7 @@ export class Canvas {
 
   private nodeOnScreen(n: CanvasNode, x0: number, y0: number, x1: number, y1: number): boolean {
     const p = n.data.position, m = 48;
-    return p.x + NODE_WIDTH + m > x0 && p.x - m < x1 && p.y + n.height + m > y0 && p.y - m < y1;
+    return p.x + n.width + m > x0 && p.x - m < x1 && p.y + n.height + m > y0 && p.y - m < y1;
   }
 
   /** False only when the wire's whole span, control points included, lies outside the view. */
@@ -704,7 +871,7 @@ export class Canvas {
     const { x, y } = this.s2w(sx, sy);
     const arr = Array.from(this.nodes.values());
     for (const n of arr) if (n.portAtPoint(x, y)) return null;
-    for (let i = arr.length - 1; i >= 0; i--) if (arr[i].containsPoint(x, y)) return arr[i].data.id;
+    for (let i = arr.length - 1; i >= 0; i--) if (!arr[i].isNote && arr[i].containsPoint(x, y)) return arr[i].data.id;
     return null;
   }
 
@@ -850,20 +1017,23 @@ export class Canvas {
 
   // ── Wire-drop insert ──────────────────────────────────────────────────────
 
-  tryWireInsert(node: CanvasNode): boolean {
+  /** `only` forces the splice into that one wire and skips the proximity test. */
+  tryWireInsert(node: CanvasNode, only?: Connector): boolean {
+    if (node.isNote) return false;
     node.rebuildPorts();
     const nx = node.data.position.x + NODE_WIDTH / 2;
     const ny = node.data.position.y + node.height / 2;
 
     for (const [id, conn] of this.connectors) {
+      if (only && conn !== only) continue;
       if (conn.data.from_node === node.data.id || conn.data.to_node === node.data.id) continue;
       const fn = this.nodes.get(conn.data.from_node), tn = this.nodes.get(conn.data.to_node);
       if (!fn || !tn) continue;
       const fp = fn.ports.find(p => p.id === conn.data.from_port), tp = tn.ports.find(p => p.id === conn.data.to_port);
       if (!fp || !tp) continue;
       const cp = Math.max(Math.abs(tp.x - fp.x) * 0.55, 80);
-      let near = false;
-      for (let t = 0; t <= 1; t += 0.04) {
+      let near = !!only;
+      for (let t = 0; !near && t <= 1; t += 0.04) {
         if (Math.hypot(nx - bz(fp.x, fp.x + cp, tp.x - cp, tp.x, t), ny - bz(fp.y, fp.y, tp.y, tp.y, t)) < 52) { near = true; break; }
       }
       if (!near) continue;
@@ -1354,7 +1524,7 @@ export class Canvas {
   revealNode(n: CanvasNode) {
     this.clearSelection();
     this.selectNode(n);
-    this.centerOn(n.data.position.x + NODE_WIDTH / 2, n.data.position.y + n.height / 2);
+    this.centerOn(n.data.position.x + n.width / 2, n.data.position.y + n.height / 2);
     this.el.focus({ preventScroll: true });
     this.onViewportChange?.();
   }
@@ -1486,7 +1656,7 @@ export class Canvas {
   afterHistoryApplied(ids: string[]): void {
     this.clearSelection();
     const live: CanvasNode[] = [];
-    for (const id of ids) { const n = this.nodes.get(id); if (n) { this.selectNode(n); live.push(n); } }
+    for (const id of ids) { const n = this.nodes.get(id); if (n && this.isShown(n)) { this.selectNode(n); live.push(n); } }
     this.revealNodes(live);
   }
 
@@ -1499,11 +1669,11 @@ export class Canvas {
     const y0 = -this.panY / this.zoom, y1 = (vp.height - this.panY) / this.zoom;
     const visible = nodes.some(n => {
       const p = n.data.position;
-      return p.x + NODE_WIDTH > x0 && p.x < x1 && p.y + n.height > y0 && p.y < y1;
+      return p.x + n.width > x0 && p.x < x1 && p.y + n.height > y0 && p.y < y1;
     });
     if (visible) return;
     const n = nodes[0];
-    this.centerOn(n.data.position.x + NODE_WIDTH / 2, n.data.position.y + n.height / 2);
+    this.centerOn(n.data.position.x + n.width / 2, n.data.position.y + n.height / 2);
     this.onViewportChange?.();
   }
 
@@ -1524,6 +1694,53 @@ export class Canvas {
     this.clearSelection(); for (const n of news) this.selectNode(n); this.onCanvasChanged?.();
   }
 
+  /** Copies the selected nodes, notes and frames, with the wires between them, to the in-app clipboard. */
+  copySelected(): boolean {
+    const ids = new Set(this.selectedNodes.size > 0 ? this.selectedNodes : this.selectedNode ? [this.selectedNode.data.id] : []);
+    const picked = [...this.nodes.values()].filter(n => ids.has(n.data.id));
+    const payload = snapshotSelection(picked, this.connectors.values());
+    if (!payload) return false;
+    holdClipboard(payload);
+    return true;
+  }
+
+  /** Copies the selection, then deletes it as one undo step. */
+  cutSelected(): boolean {
+    if (!this.copySelected()) return false;
+    this.deleteSelected();
+    return true;
+  }
+
+  /** Pastes the clipboard as one undo step, centred on `at` (world units) or offset from where it was copied. */
+  pasteClipboard(at: { x: number; y: number } | null = null): boolean {
+    const payload = heldClipboard();
+    if (!payload) return false;
+    const issued = new Set<string>();
+    const newId = (isNote: boolean): string => {
+      let id: string;
+      do { id = `${isNote ? "note" : "node"}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`; }
+      while (issued.has(id) || this.nodes.has(id));
+      issued.add(id);
+      return id;
+    };
+    const plan = planPaste(payload, pasteOrigin(payload.bounds, at), Array.from(this.nodes.values(), n => n.data.name), newId, newConnectorId);
+    const created = plan.nodes.map(d => new CanvasNode(d));
+    if (created.some(n => n.isNote) && !this._notesVisible) this.notesVisible = true;
+    if (created.length === 1 && !created[0].isNote) this.snap.avoidOverlap(created[0]);
+    this.transact(created.length === 1 ? `Paste "${created[0].data.name}"` : `Paste ${created.length} nodes`, () => {
+      for (const n of created) { this.nodes.set(n.data.id, n); this.pushUndo({ type: "add_node", node: n }); }
+      for (const d of plan.edges) {
+        const conn = new Connector(d);
+        this.connectors.set(d.id, conn);
+        this.pushUndo({ type: "add_edge", connector: conn });
+      }
+    });
+    this.clearSelection();
+    for (const n of created) this.selectNode(n);
+    this.onCanvasChanged?.();
+    return true;
+  }
+
   toggleFocusMode() {
     this.focusMode = !this.focusMode;
     document.getElementById("sidebar")?.classList.toggle("focus-hidden", this.focusMode);
@@ -1532,19 +1749,20 @@ export class Canvas {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
-  /** Omitting sx/sy places at the center of the visible (unobstructed) canvas. */
-  placeNode(desc: NodeDescriptor, sx?: number, sy?: number): CanvasNode {
+  /** Omitting sx/sy places at the center of the visible (unobstructed) canvas. `onto` splices the node into that wire; `snap` aligns a pointer placement to the grid when grid snap is on. */
+  placeNode(desc: NodeDescriptor, sx?: number, sy?: number, opts: { onto?: Connector; snap?: boolean } = {}): CanvasNode {
     const vp = visibleViewport(this.el.getBoundingClientRect());
     const cx = vp.width / 2, cy = vp.height / 2;
     const screenX = sx ?? cx, screenY = sy ?? cy;
     const { x, y } = this.s2w(screenX, screenY);
     const atCenter = sx === undefined && sy === undefined;
     let px = x - NODE_WIDTH / 2, py = y - 20;
+    if (!atCenter && opts.snap && gridSnapEnabled()) { px = snapToGrid(px); py = snapToGrid(py); }
 
     if (atCenter && this.nodes.size > 0) {
       let maxX = -1e9, avgY = 0, cnt = 0;
-      for (const n of this.nodes.values()) { if (n.data.position.x > maxX) maxX = n.data.position.x; avgY += n.data.position.y; cnt++; }
-      px = maxX + NODE_WIDTH + 80; py = avgY / cnt - 20;
+      for (const n of this.nodes.values()) { if (n.isNote) continue; if (n.data.position.x > maxX) maxX = n.data.position.x; avgY += n.data.position.y; cnt++; }
+      if (cnt) { px = maxX + NODE_WIDTH + 80; py = avgY / cnt - 20; }
     }
 
     const node = createNodeFromDescriptor(desc, px, py);
@@ -1563,12 +1781,12 @@ export class Canvas {
     this.transact(`Add "${node.data.name}"`, () => {
       this.nodes.set(node.data.id, node);
       this.pushUndo({ type: "add_node", node });
-      this.tryWireInsert(node);
+      this.tryWireInsert(node, opts.onto);
     });
     this.onCanvasChanged?.();
     if (shoved) { this.clearSelection(); this.selectNode(node); }
     if ((sx === undefined || shoved) && !this.nodeFullyVisible(node)) {
-      this.centerOn(node.data.position.x + NODE_WIDTH / 2, node.data.position.y + node.height / 2);
+      this.centerOn(node.data.position.x + node.width / 2, node.data.position.y + node.height / 2);
     }
     return node;
   }
@@ -1577,7 +1795,7 @@ export class Canvas {
     const vp = visibleViewport(this.cachedRect());
     const p = n.data.position;
     const x0 = p.x * this.zoom + this.panX, y0 = p.y * this.zoom + this.panY;
-    return x0 >= 0 && y0 >= 0 && x0 + NODE_WIDTH * this.zoom <= vp.width && y0 + n.height * this.zoom <= vp.height;
+    return x0 >= 0 && y0 >= 0 && x0 + n.width * this.zoom <= vp.width && y0 + n.height * this.zoom <= vp.height;
   }
 
   /** Eased unless `instant`; a drag that must track the pointer passes `instant`. */
@@ -1595,9 +1813,13 @@ export class Canvas {
   }
 
   fitToScreen() {
-    if (!this.nodes.size) return;
     let mnX = 1e9, mnY = 1e9, mxX = -1e9, mxY = -1e9;
-    for (const n of this.nodes.values()) { mnX = Math.min(mnX, n.data.position.x); mnY = Math.min(mnY, n.data.position.y); mxX = Math.max(mxX, n.data.position.x + NODE_WIDTH); mxY = Math.max(mxY, n.data.position.y + n.height); }
+    for (const n of this.nodes.values()) {
+      if (!this.isShown(n)) continue;
+      mnX = Math.min(mnX, n.data.position.x); mnY = Math.min(mnY, n.data.position.y);
+      mxX = Math.max(mxX, n.data.position.x + n.width); mxY = Math.max(mxY, n.data.position.y + n.height);
+    }
+    if (mnX > mxX) return;
     const pad = 80;
     // Floor guards against the drawer or chat panel covering nearly the whole
     // canvas on a small viewport driving a term to zero/negative, which would
@@ -1660,6 +1882,13 @@ export class Canvas {
       this.onCanvasChanged?.();
       this.connectOrReplace(drop.fromNode, drop.fromPort, node.data.id, desc.ports.inputs[0].id);
     });
+  }
+
+  completePlacement(desc: NodeDescriptor): void {
+    const at = this._pendingPlacement;
+    if (!at) return;
+    this._pendingPlacement = null;
+    this.placeNode(desc, at.sx, at.sy, { onto: at.onto ?? undefined, snap: true });
   }
 
   completeInputWireDrop(desc: NodeDescriptor): void {

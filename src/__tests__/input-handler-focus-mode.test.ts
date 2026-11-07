@@ -7,6 +7,7 @@ function makeFakeCanvas() {
   return {
     el: { classList: { add: vi.fn(), remove: vi.fn() }, style: { cursor: "" } },
     toggleFocusMode: vi.fn(),
+    isGestureActive: () => false,
   };
 }
 

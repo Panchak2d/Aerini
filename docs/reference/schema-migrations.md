@@ -8,6 +8,8 @@ This page covers the mechanism behind a workflow's `schema_version` field and th
 |---|---|---|
 | `1.0` | Aerini's first release | Initial format. Every workflow file that exists today uses this version. |
 
+The optional top-level `annotations` list (sticky notes and group frames) was added without changing `schema_version`: it defaults to empty and is left out of a saved file when empty, so no migration is needed and every existing file still loads. A build from before the list existed ignores it when opening a file and drops it when the file is saved again, which is how such builds already treated notes.
+
 `migration.rs`'s `CURRENT_VERSION` is `"1.0"`, and its list of registered migrations is empty. This table has one row because the format hasn't changed since it was introduced, not because earlier rows were left out.
 
 ## The migration engine

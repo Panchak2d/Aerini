@@ -240,10 +240,10 @@ function renderModelPickerField(
     } catch (err) {
       if (seq !== fetchSeq) return;
       // The free-text field above is untouched and fully usable either way.
-      // The button's own label still gives brief feedback, but the reason
-      // (missing/bad key, SSRF block, network error, ...) is now shown
-      // underneath instead of discarded — "couldn't fetch" alone gave no
-      // way to tell a missing API key apart from an unreachable server.
+      // The button's own label gives brief feedback; the reason
+      // (missing/bad key, SSRF block, network error, ...) is shown
+      // underneath, because "couldn't fetch" alone does not tell a missing
+      // API key apart from an unreachable server.
       fetchBtn.textContent = "Couldn't fetch — try again";
       listSlot.innerHTML = "";
       const errHint = document.createElement("div");
@@ -369,7 +369,7 @@ function renderBoolField(
 
   const cb = mk<HTMLInputElement>("input");
   cb.type = "checkbox";
-  cb.className = "field-bool-checkbox";
+  cb.className = "ui-check";
   // Treat any truthy stored value as checked. Rust serializes booleans as
   // true/false; stored strings "true"/"1" are also accepted for robustness.
   const stored = node.data.config[key];
@@ -424,6 +424,7 @@ function renderArrayEnumField(
 
     const cb = mk<HTMLInputElement>("input");
     cb.type = "checkbox";
+    cb.className = "ui-check";
     cb.value = opt;
     cb.checked = currentStringArray(node, key).includes(opt);
     cb.addEventListener("change", () => {

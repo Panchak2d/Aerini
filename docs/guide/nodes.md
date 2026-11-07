@@ -928,6 +928,21 @@ Mark the final output of the workflow. Required for the Chat Panel and the [embe
 
 **Output:** `value`, `label`, `type` (detected type: string, number, boolean, object, array, or null), `output_type` (set to `media_batch` when Value is a media payload).
 
+## Notes and group frames
+
+Notes are not nodes. They have no ports, never run and never appear in a run's results, but they are saved with the workflow.
+
+- **Sticky note.** Press `N`, or right-click empty canvas and choose **Add sticky note here**. Double-click to type. A note's height never drops below its text. Drag any edge or corner of a selected note to resize it; the height grows with the text.
+- **Group frame.** A titled, translucent box for labelling a stage such as "Fetch → Parse → Summarize". Select some nodes and press `Ctrl+G` to draw one around them, or right-click empty canvas for an empty one. Drag its title bar to move the frame together with every node inside it (hold `Alt` to move only the frame); drag the edges to resize it. Only the title bar and border react to the mouse, so you can still pan and box-select across a frame. **Convert to group frame** and **Convert to sticky note** are in a note's right-click menu.
+- **Right-click menu.** Right-click a note or frame to edit its text or title, pick a colour and a text size (S, M, L or XL; a frame's size is its title's), duplicate or delete it, or convert it. A frame also has **Fit to contents**, which resizes it to wrap the nodes and notes inside it as one undo step. Select some nodes, right-click, and choose **Group in frame** to draw a frame around them; it does the same as `Ctrl+G`.
+- **Templates.** Right-click empty canvas and choose **Add section frame here** for a frame titled "Section", or **Add to-do note here** for a note with a heading and three checklist lines.
+- **Drop target.** While you drag nodes, the smallest frame that fully contains everything you are dragging gets a solid, thicker border, so you can see which frame they will sit in. It is only a highlight; frames do not store which nodes they hold.
+- **Notes list.** The **Notes** button in the sidebar lists every note and frame, frames first, each group from top to bottom. Click one to select it and bring it to the middle of the canvas; if notes are hidden, this shows them again.
+- **Layers.** Frames and notes are drawn under the wires and every node, so a note never covers a node.
+- **Formatting.** `**bold**`, `[text](https://example.com)` links, `- [ ]` / `- [x]` checklist lines and a heading when a line starts with `# `. Click a checkbox on the canvas to tick it. Nothing else is interpreted, and notes never run code or load anything. The editor has buttons for bold, link and checklist, plus `Ctrl+B` and `Ctrl+K`.
+- **Links.** Only `http` and `https` links without a user name or password are made clickable; anything else stays plain text. `Ctrl`/`Cmd`+click a link to follow it. A dialog first shows the real site and the full address, because the label can say anything, and nothing opens until you confirm. An international site name is shown in its `xn--` form. The desktop app opens the link in your default browser, and the browser version opens a new tab.
+- **Show or hide.** `Shift+N`, or the notes button next to the zoom controls, hides every note and frame, for a screenshot or a busy canvas. Hidden notes are kept, and a **Notes hidden** chip in the status bar (click it to show them again) appears while any are hidden. This setting is stored on your computer and not in the workflow, so it applies to every workflow and does not mark the workflow as changed.
+
 ## What's next
 
 - [Expressions](expressions.md): the `{{...}}` syntax referenced throughout this page, full syntax and available context.

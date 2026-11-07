@@ -26,6 +26,25 @@ A JSON Schema (draft 2020-12) for this shape is generated from the engine's own 
 | `parallel_execution` | boolean | No | Defaults to `false`. When `true`, independent branches run concurrently instead of one after another. |
 | `max_concurrent_nodes` | number | No | Caps simultaneous node tasks when `parallel_execution` is `true`. Falls back to 8 if unset. |
 | `settings` | object | No | Currently holds only `chat`, see [Chat settings](#chat-settings) below. |
+| `annotations` | array of [annotation objects](#annotations) | No | Defaults to `[]` and is left out of a saved file when empty. Sticky notes and group frames drawn on the canvas; the engine never runs them. At most 500 are kept. |
+
+### Annotations
+
+An annotation is a sticky note or a group frame drawn on the canvas. It has no ports, never runs and never appears in `nodes`. A workflow saved before annotations existed, or by an older build, simply has none.
+
+| Field | Type | Required | Default / notes |
+|---|---|---|---|
+| `id` | string | Yes | Unique ID within the workflow. |
+| `kind` | string | No | `"note"` (default) or `"frame"`, a titled box for labelling a group of nodes. An entry with any other `kind` is skipped when the file is opened. |
+| `x`, `y` | number | Yes | Top-left corner on the canvas. |
+| `w` | number | No | Width in canvas units. Absent means the default for the kind. |
+| `h` | number | No | Height in canvas units. Absent means a note grows to fit its text; a frame uses a default height. |
+| `text` | string | No | A note's text, up to 10 000 characters (longer text is cut). `**bold**`, `[label](https://…)` links, `- [ ]` / `- [x]` checkbox lines and a leading `# ` heading are drawn; nothing else is interpreted. |
+| `title` | string | No | A frame's title, up to 120 characters (longer text is cut). A frame has no `text`. |
+| `color` | string | No | `default`, `yellow`, `blue`, `green` or `red`. Any other value is shown as `default`. |
+| `size` | string | No | Text size: `s`, `m`, `l` or `xl`. Absent, or any other value, is shown as `m`. A note's size applies to its text, a frame's to its title. |
+
+Extra annotations beyond 500 are dropped and over-long text is cut rather than rejected, so saving never fails because of a note. A workflow whose `nodes` list still holds an old `note` entry is read as an annotation.
 
 ### Metadata
 

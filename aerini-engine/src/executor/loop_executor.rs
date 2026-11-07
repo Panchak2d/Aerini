@@ -755,6 +755,8 @@ mod tests {
         }
 
         Workflow {
+
+            annotations: vec![],
             schema_version:       CURRENT_VERSION.to_string(),
             id:                   "wf_loop_test".to_string(),
             name:                 "Loop Regression Test Workflow".to_string(),
@@ -1071,6 +1073,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_max_iterations_test".to_string(),
             name: "Loop Max Iterations Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, body],
@@ -1305,6 +1309,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_branch_test".to_string(),
             name: "Loop Branch Gating Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, cond, true_body, false_body],
@@ -1447,6 +1453,8 @@ mod tests {
         }
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_switch_branch_test".to_string(),
             name: "Loop Switch Gating Test".to_string(), description: String::new(),
             nodes, edges, metadata: Default::default(), max_duration_secs: None, unlimited_duration: false,
@@ -1574,6 +1582,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_on_error_test".to_string(),
             name: "Loop On-Error Routing Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, body, recovery],
@@ -1704,6 +1714,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_cancel_test".to_string(),
             name: "Loop Body Cancel Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, body, recovery],
@@ -1794,6 +1806,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_node_cancel_test".to_string(),
             name: "Loop Node Execute Cancel Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node],
@@ -1851,6 +1865,7 @@ mod tests {
             on_failure: on_failure.map(str::to_string),
         };
         let workflow = Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_loop_failure_target_body".to_string(),
             name: "t".to_string(),
@@ -1987,6 +2002,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_on_failure_test".to_string(),
             name: "Loop On-Failure Field Routing Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, body, recovery],
@@ -2212,6 +2229,8 @@ mod tests {
         ];
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_mixed_on_error_test".to_string(),
             name: "Loop Mixed On-Error Targets Test".to_string(), description: String::new(),
             nodes: vec![data_source, loop_node, body, recovery, after_loop],
@@ -2302,6 +2321,7 @@ mod tests {
             nodes.push(node);
         }
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(), id: "wf_loop_vars_test".to_string(),
             name: "Loop Variables Test".to_string(), description: String::new(),
             nodes, edges, metadata: Default::default(), max_duration_secs: None,

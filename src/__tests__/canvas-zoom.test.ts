@@ -13,6 +13,7 @@ function makeFakeCanvas(overrides: Partial<Record<string, unknown>> = {}) {
     MAX_ZOOM: 4,
     s2w: Canvas.prototype.s2w,
     centerOn: Canvas.prototype.centerOn,
+    isShown: () => true,
     zoomAtCenter: (Canvas.prototype as unknown as { zoomAtCenter: (factor: number) => void }).zoomAtCenter,
     onZoomChange: vi.fn(),
     onViewportChange: vi.fn(),
@@ -93,8 +94,8 @@ describe("Canvas.fitToScreen — callback wiring", () => {
 
   it("computes zoom/pan and fires onZoomChange + onViewportChange when nodes exist", () => {
     const nodes = new Map([
-      ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-      ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+      ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+      ["n2", { data: { position: { x: 400, y: 200 } }, width: 220, height: 100 }],
     ]);
     const fake = makeFakeCanvas({ nodes, zoom: 1 });
     Canvas.prototype.fitToScreen.call(fake);
@@ -107,8 +108,8 @@ describe("Canvas.fitToScreen — callback wiring", () => {
 
 describe("Canvas.fitToScreen — output drawer overlap", () => {
   const nodes = new Map([
-    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-    ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+    ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+    ["n2", { data: { position: { x: 400, y: 200 } }, width: 220, height: 100 }],
   ]);
 
   it("an open drawer isn't display:none, so #canvas's own rect doesn't shrink -- fitToScreen must measure the drawer separately and fit above it, not into the space the drawer already covers", () => {
@@ -142,12 +143,12 @@ describe("Canvas.fitToScreen — output drawer overlap", () => {
 
 describe("Canvas.fitToScreen — minimap overlap", () => {
   const wide = new Map([
-    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-    ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+    ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+    ["n2", { data: { position: { x: 400, y: 200 } }, width: 220, height: 100 }],
   ]);
   const tall = new Map([
-    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-    ["n2", { data: { position: { x: 0, y: 800 } }, height: 100 }],
+    ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+    ["n2", { data: { position: { x: 0, y: 800 } }, width: 220, height: 100 }],
   ]);
   const corner = { left: 600, right: 800, top: 400, bottom: 600, width: 200, height: 200 };
 
@@ -185,8 +186,8 @@ describe("Canvas.fitToScreen — minimap overlap", () => {
 
   it("zoom never drops below MIN_ZOOM, matching what wheel zoom allows", () => {
     const huge = new Map([
-      ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-      ["n2", { data: { position: { x: 100000, y: 0 } }, height: 100 }],
+      ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+      ["n2", { data: { position: { x: 100000, y: 0 } }, width: 220, height: 100 }],
     ]);
     const fake = makeFakeCanvas({ nodes: huge });
     Canvas.prototype.fitToScreen.call(fake);
@@ -236,8 +237,8 @@ describe("Canvas.zoomIn / zoomOut — output drawer overlap", () => {
 
 describe("Canvas fit/center/zoom — chat panel overlap", () => {
   const nodes = new Map([
-    ["n1", { data: { position: { x: 0, y: 0 } }, height: 100 }],
-    ["n2", { data: { position: { x: 400, y: 200 } }, height: 100 }],
+    ["n1", { data: { position: { x: 0, y: 0 } }, width: 220, height: 100 }],
+    ["n2", { data: { position: { x: 400, y: 200 } }, width: 220, height: 100 }],
   ]);
 
   function mountChat(offsetWidth: number): void {
@@ -272,7 +273,7 @@ describe("Canvas fit/center/zoom — chat panel overlap", () => {
 describe("Canvas.revealNode", () => {
   it("selects only that node, centres it, focuses the canvas and reports the viewport change", () => {
     const other = { data: { id: "a" }, selected: true } as never;
-    const node = { data: { id: "b", position: { x: 1000, y: 500 } }, height: 100, selected: false } as never;
+    const node = { data: { id: "b", position: { x: 1000, y: 500 } }, width: 220, height: 100, selected: false } as never;
     const focus = vi.fn();
     const rect = { width: 800, height: 600, left: 0, top: 0, right: 800, bottom: 600, x: 0, y: 0, toJSON() { return {}; } };
     const fake = makeFakeCanvas({

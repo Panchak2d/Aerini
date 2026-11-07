@@ -1,6 +1,8 @@
 import { getNodeDescriptor, isTriggerNodeType } from "./canvas/node-registry";
 import { NODE_IDS } from "./node-ids";
+import { MAX_NOTE_TEXT } from "./canvas/note-format";
 import { THEMES, getStoredTheme, applyTheme } from "./theme";
+import { bindSettingsModal } from "./settings-modal";
 
 type ImportCallback = (obj: Record<string, unknown>) => void;
 
@@ -53,7 +55,27 @@ export function initModals(
     themeSelect.appendChild(opt);
   }
   themeSelect.value = getStoredTheme();
-  themeSelect.addEventListener("change", () => applyTheme(themeSelect.value));
+
+  const swatchEl = document.getElementById("setting-theme-swatch");
+  const paintSwatch = (): void => {
+    if (!swatchEl) return;
+    swatchEl.textContent = "";
+    const theme = THEMES.find(t => t.id === themeSelect.value);
+    for (const color of theme?.swatch ?? []) {
+      const dot = document.createElement("span");
+      dot.className = "theme-swatch-dot";
+      dot.style.background = color;
+      swatchEl.appendChild(dot);
+    }
+  };
+  paintSwatch();
+  themeSelect.addEventListener("change", () => {
+    applyTheme(themeSelect.value);
+    paintSwatch();
+  });
+
+  bindSettingsModal("settings-modal", "btn-settings");
+  bindSettingsModal("wf-settings-modal", "btn-wf-settings");
 }
 
 export function showImportPreview(obj: Record<string, unknown>): void {
@@ -66,14 +88,14 @@ export function showImportPreview(obj: Record<string, unknown>): void {
   _pendingImport = converted;
   document.getElementById("import-name")!.textContent        = String(obj.name ?? "Untitled");
   document.getElementById("import-desc")!.textContent        = String(obj.description ?? "");
-  document.getElementById("import-node-count")!.textContent  = String((obj.nodes as unknown[])?.length ?? 0);
-  document.getElementById("import-edge-count")!.textContent  = String((obj.edges as unknown[])?.length ?? 0);
+  document.getElementById("import-node-count")!.textContent  = String((converted.nodes as unknown[])?.length ?? 0);
+  document.getElementById("import-edge-count")!.textContent  = String((converted.edges as unknown[])?.length ?? 0);
   document.getElementById("import-version")!.textContent     = String(obj.aerini_version ?? obj.schema_version ?? "?");
 
   const reqList = document.getElementById("import-req-list")!;
   reqList.innerHTML = "";
   const typeIds = [...new Set(
-    (obj.nodes as Array<{ node_type_id: string }>)?.map(n => n.node_type_id) ?? []
+    (converted.nodes as Array<{ node_type_id: string }>)?.map(n => n.node_type_id) ?? []
   )];
   for (const tid of typeIds) {
     const known = getNodeDescriptor(tid);
@@ -124,7 +146,6 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.set":                NODE_IDS.SET_VARIABLE,
   "n8n-nodes-base.wait":               NODE_IDS.WAIT,
   "n8n-nodes-base.noOp":               NODE_IDS.OUTPUT,
-  "n8n-nodes-base.stickyNote":         NODE_IDS.NOTE,
   "n8n-nodes-base.merge":              NODE_IDS.MERGE,
   "n8n-nodes-base.slack":              "slack",
   "n8n-nodes-base.gmail":              NODE_IDS.EMAIL_SEND,
@@ -139,6 +160,50 @@ const N8N_TYPE_MAP: Record<string, string> = {
   "n8n-nodes-base.telegram":           "telegram",
   "n8n-nodes-base.function":           NODE_IDS.CODE,
 };
+
+const N8N_STICKY_NOTE = "n8n-nodes-base.stickyNote";
+
+/** n8n colour indices (design-system sticky tokens): 1 yellow, 2 gold, 3 red, 4 green, 5 blue, 6 purple, 7 neutral. A custom hex colour has no index and falls back to default. */
+const N8N_STICKY_COLORS: Record<number, string> = { 1: "yellow", 2: "yellow", 3: "red", 4: "green", 5: "blue", 6: "blue", 7: "default" };
+
+const N8N_FETCHING_TAGS_RE = /<\/?(?:img|iframe|video|audio|source|embed|object|script|style)\b[^>]*>/gi;
+
+function stripFetchingTags(text: string): string {
+  let out = text;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(N8N_FETCHING_TAGS_RE, "");
+  } while (out !== prev);
+  return out;
+}
+
+/** n8n notes are CommonMark. Aerini draws bold, links, task lines and one heading level, so images and embeds become plain text, every heading becomes the one level, and the rest stays as typed. */
+function n8nMarkdownToNoteText(src: string): string {
+  const flat = src
+    .slice(0, MAX_NOTE_TEXT)
+    .replace(/\r\n?/g, "\n")
+    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1");
+  return stripFetchingTags(flat)
+    .replace(/^ {0,3}#{1,6} +/gm, "# ")
+    .replace(/[ \t]+$/gm, "");
+}
+
+function n8nPosition(pos: unknown): { x: number; y: number } {
+  const p = Array.isArray(pos) ? pos as number[] : null;
+  return { x: p ? (p[0] ?? 0) + 400 : 100, y: p ? (p[1] ?? 0) + 200 : 100 };
+}
+
+function n8nStickyToAnnotation(n: Record<string, unknown>, idx: number): Record<string, unknown> {
+  const params = (n.parameters as Record<string, unknown>) ?? {};
+  const note: Record<string, unknown> = { id: `note_imported_${idx}`, kind: "note", ...n8nPosition(n.position) };
+  if (typeof params.width === "number" && params.width > 0) note.w = params.width;
+  if (typeof params.height === "number" && params.height > 0) note.h = params.height;
+  if (typeof params.content === "string" && params.content) note.text = n8nMarkdownToNoteText(params.content);
+  const color = typeof params.color === "number" ? N8N_STICKY_COLORS[params.color] : undefined;
+  if (color && color !== "default") note.color = color;
+  return note;
+}
 
 export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string, unknown> {
   const MAX_IMPORT_NODES     = 200;
@@ -164,17 +229,18 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
 
   const nodeIdMap   = new Map<string, string>(); // n8n name → aerini id
   n8nNodes.forEach((n, idx) => {
+    if (n.type === N8N_STICKY_NOTE) return;
     nodeIdMap.set(String(n.name ?? `Node ${idx}`), `node_imported_${idx}`);
   });
   const nodeTypeMap = new Map<string, string>(); // aerini id → aerini node_type_id (for edge port resolution below)
 
-  const aeriniNodes = n8nNodes.map((n: Record<string, unknown>, idx: number) => {
+  const aeriniNodes = n8nNodes.flatMap((n: Record<string, unknown>, idx: number) => {
+    if (n.type === N8N_STICKY_NOTE) return [];
     const aeriniId = `node_imported_${idx}`;
     const n8nName = String(n.name ?? `Node ${idx}`);
 
     const typeId = N8N_TYPE_MAP[String(n.type ?? "")] ?? "unsupported";
     nodeTypeMap.set(aeriniId, typeId);
-    const pos = n.position as number[] | undefined;
     const rawParams = (n.parameters as Record<string, unknown>) ?? {};
 
     // translate n8n's decision-logic config
@@ -200,7 +266,7 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
       }
     }
 
-    return {
+    return [{
       id:           aeriniId,
       node_type_id: typeId,
       node_type:    getNodeCategory(typeId),
@@ -212,9 +278,10 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
       output_schema: { type: "object" },
       retry:        { max_attempts: 1, backoff_ms: 500 },
       fallback_node: null,
-      position:     { x: Array.isArray(pos) ? (pos[0] ?? 0) + 400 : 100, y: Array.isArray(pos) ? (pos[1] ?? 0) + 200 : 100 },
-    };
+      position:     n8nPosition(n.position),
+    }];
   });
+  const aeriniAnnotations = n8nNodes.flatMap((n, idx) => n.type === N8N_STICKY_NOTE ? [n8nStickyToAnnotation(n, idx)] : []);
 
   // Convert n8n connection format to Aerini edges
   const aeriniEdges: unknown[] = [];
@@ -249,6 +316,7 @@ export function convertN8nWorkflow(n8n: Record<string, unknown>): Record<string,
     description: "Imported from n8n workflow",
     nodes: aeriniNodes,
     edges: aeriniEdges,
+    ...(aeriniAnnotations.length ? { annotations: aeriniAnnotations } : {}),
     metadata: { author: "imported", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: "1.0.0", tags: ["n8n-import"] },
   };
   // Ephemeral, single-underscore-prefixed field (mirrors this codebase's own
@@ -376,7 +444,7 @@ function buildPredecessorMap(n8nConns: Record<string, unknown>): Map<string, Set
  * version). This is intentionally the ONLY expression shape recognized —
  * not a named-node reference (`$('Other Node').item.json...`), not a
  * function call, not string concatenation, not multiple `{{ }}` blocks.
- * Every real n8n-exported workflow JSON checked this fix used exactly
+ * Every real n8n-exported workflow JSON that was checked used exactly
  * this bare-`$json` shorthand for If/Switch field references; anything else
  * falls through to the "not translated" warning path rather than risking a
  * wrong guess at n8n's full expression grammar. Matches Aerini's own

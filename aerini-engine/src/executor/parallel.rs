@@ -774,6 +774,8 @@ mod tests {
                 .with_parallel_execution(parallel);
 
             let workflow = Workflow {
+
+                annotations: vec![],
                 schema_version: CURRENT_VERSION.to_string(),
                 id: "wf_arity".to_string(),
                 name: "Arity".to_string(),
@@ -815,6 +817,8 @@ mod tests {
             .with_max_concurrent_nodes(4);
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_parallel_all".to_string(),
             name: "Parallel All".to_string(),
@@ -856,6 +860,8 @@ mod tests {
             .with_parallel_execution(true);
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_parallel_fail".to_string(),
             name: "Parallel Fail".to_string(),
@@ -898,6 +904,7 @@ mod tests {
             let mut failing = make_node("n_fail", "parallel_failing_test");
             failing.name = "Fail Step".to_string();
             let workflow = Workflow {
+                annotations: vec![],
                 schema_version: CURRENT_VERSION.to_string(),
                 id: "wf_keep_outputs".to_string(),
                 name: "Keep Outputs".to_string(),
@@ -937,6 +944,8 @@ mod tests {
             .with_cancel_token(token.clone());
 
         let workflow = Workflow {
+
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf_parallel_cancel".to_string(),
             name: "Parallel Cancel".to_string(),
@@ -1052,6 +1061,7 @@ mod tests {
         parallel: bool,
     ) -> Workflow {
         Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: id.to_string(),
             name: id.to_string(),

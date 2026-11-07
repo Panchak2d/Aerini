@@ -6,11 +6,17 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 
 | Action | Shortcut |
 |---|---|
-| Search / command palette | `Space` or `Ctrl+K` |
+| Search / command palette — with the pointer over the canvas, the node you pick lands under it | `Space` or `Ctrl+K` |
 | Pan canvas | Middle-drag, trackpad scroll, or `Shift`+scroll |
 | Zoom | Scroll with a mouse wheel, `Ctrl`+scroll, or pinch |
 | Fit to screen | `Ctrl+Shift+F` |
 | Toggle minimap (not while editing a field) | `M` |
+| Add a sticky note (not while editing a field) | `N` |
+| Frame the selected nodes in a group | `Ctrl+G` |
+| Show or hide notes (not while editing a field) | `Shift+N` |
+| Move a group frame without the nodes inside it | Alt-drag its title |
+| Follow a link in a note | `Ctrl`/`Cmd`+click |
+| Context menu — add a node, note or frame, or act on a node, note, frame or wire; the menu key opens it for the selection, or at the pointer when nothing is selected | Right-click, `Menu` or `Shift+F10` |
 | Focus mode — hides the sidebar for a distraction-free canvas | `F` (not while editing a field) |
 | Close panel, from an empty area of the canvas | Double-click |
 
@@ -21,6 +27,7 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Box select — selects every node the box touches, not only those it fully covers | Shift-drag |
 | Select all | `Ctrl+A` |
 | Duplicate | `Ctrl+D` |
+| Copy, cut or paste the selected nodes, notes and frames. Wires between the selected items come along; wires to items you did not select, and saved-connection bindings, do not. Paste lands under the pointer when it is over the canvas, otherwise slightly offset from the original. The clipboard stays inside Aerini and is shared between open workflows. One `Ctrl+Z` undoes a paste or a cut. Right-click empty canvas and choose **Paste** to place it there | `Ctrl+C`, `Ctrl+X`, `Ctrl+V` |
 | Delete | `Del` or `Backspace` |
 | Undo — the toolbar's **Undo** button does the same, and its tooltip names the step. Covers adding, deleting, moving, and wiring nodes, plus renaming, disabling, choosing a saved credential, and changing a node's settings. History is per open workflow and is cleared when you switch to another | `Ctrl+Z` |
 | Redo — also a toolbar button | `Ctrl+Y` or `Ctrl+Shift+Z` |
@@ -28,7 +35,7 @@ Every shortcut below appears in the app itself: click **Shortcuts** in the toolb
 | Move where a wire ends — drag from the wired input, or click the wire and drag the ring on its input end; dropping anywhere else cancels, and `Esc` cancels mid-drag. On an input that takes many wires, such as Merge's, click the wire first | Drag |
 | Wire backwards — drag from an empty input to an output, or release over empty canvas to pick a node to connect into it | Drag |
 | Move every wire leaving an output to another output — drag from the output, then drop on a different output; one `Ctrl+Z` undoes it | `Ctrl`/`Cmd`-drag |
-| Disconnect a wire — hover it and click **×**, click it and press `Del`, or right-click it | `Del` |
+| Disconnect a wire — hover it and click **×**, click it and press `Del`, or right-click it and choose **Delete connection** | `Del` |
 
 ## Workflow
 

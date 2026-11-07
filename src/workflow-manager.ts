@@ -1012,7 +1012,7 @@ export class WorkflowManager {
 
     const check = document.createElement("input");
     check.type = "checkbox";
-    check.className = "workflow-item-check";
+    check.className = "workflow-item-check ui-check ui-check--sm";
     check.checked = selected;
     check.setAttribute("aria-label", `Select ${wf.name}`);
     check.addEventListener("click", e => { e.stopPropagation(); this.toggleSelected(wf.id); });

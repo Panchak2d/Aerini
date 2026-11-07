@@ -486,14 +486,7 @@
 .workflow-item-del:focus-visible { color: var(--t3); outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 /* -- Multi-select: checkbox + drag handle -- */
-.workflow-item-check {
-  flex-shrink: 0;
-  width: 13px;
-  height: 13px;
-  accent-color: var(--blue);
-  cursor: pointer;
-  display: none;
-}
+.workflow-item-check { display: none; }
 #workflow-list.select-mode .workflow-item-check,
 .workflow-item.selected .workflow-item-check,
 .workflow-item:hover .workflow-item-check { display: inline-block; }
@@ -883,3 +876,35 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
   border-radius: 999px;
   color: var(--amber);
 }
+
+.notes-list { display: flex; flex-direction: column; gap: 2px; }
+.notes-list-group {
+  margin: 8px 0 4px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.notes-list-group:first-child { margin-top: 0; }
+.notes-list-item {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.notes-list-item:hover { background: var(--bg4); color: var(--t1); }
+.notes-list-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }

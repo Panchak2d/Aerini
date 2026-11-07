@@ -13,4 +13,28 @@
 @import './chat.css';
 @import './monitor.css';
 
+/* Stacking order of fixed and floating layers, lowest to highest. A new layer
+   takes the tier it belongs to rather than a new number.
+
+      1-10  in-canvas chrome: #canvas-empty-state 5, #first-run-checklist 6,
+            #minimap-wrap 10, #sidebar-resize-handle 10
+        75  #chat-panel
+        80  #output-drawer
+        90  .problems-popover (sits above the drawer it opens over)
+       200  workspace panels and drop targets: .panel-overlay, .cred-panel,
+            .drop-overlay, .mem-popover
+   400-450  .node-popover 400, #note-inline-editor 450
+   500-600  modals: #command-palette-overlay, #shortcuts-modal,
+            #import-preview-modal, #settings-modal, #wf-settings-modal and
+            .version-overlay 500; .diff-overlay 550; .ssg-overlay and
+            .interp-dropdown 600
+      1000  .toast-stack
+      2100  .expr-picker
+      3000  #confirm-modal
+      9000  .chat-lightbox
+      9999  menus, dropdowns and tooltips: .ctx-menu, .canvas-rename-input,
+            .wf-tag-popover, .aria-tooltip, .csel-dropdown, .filter-dropdown,
+            .template-preview-tooltip, .node-info-tooltip,
+            .toolbar-dropdown-menu
+     10000  #onboarding-modal */
 

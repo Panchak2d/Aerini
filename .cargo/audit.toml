@@ -46,4 +46,8 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # RUSTSEC-2026-0441: pin-utils unmaintained (repo archived 2026-10-01), no vulnerability.
+    # Transitive via futures-util and the tauri/wry stack; no direct use. Remove once
+    # futures-util drops it.
+    "RUSTSEC-2026-0441",
 ]

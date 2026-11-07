@@ -1,18 +1,39 @@
 import { consumePointClick, pointModeOwns } from "../point-mode";
 import { beginFieldWireDrag, cancelFieldWireDrag, endFieldWireDrag } from "../field-wire-drop";
 import type { Canvas } from "./Canvas";
-import { CanvasNode, NODE_WIDTH } from "./Node";
+import { CanvasNode } from "./Node";
+import { resizeRect, minSize, HANDLE_CURSOR, type Handle, type Rect } from "./note-geometry";
+import { toggleCheckbox } from "./note-format";
+import { openNoteLink } from "../note-links";
 import { PendingConnector, Connector } from "./Connector";
 import { historyShortcut } from "./UndoManager";
 import type { MoveEntry, UndoAction } from "./UndoManager";
 import { isMonitorModeActive } from "../monitor-mode";
-import { storageGet } from "../safe-storage";
+import { gridSnapEnabled, snapToGrid } from "./grid";
+import { visibleViewport } from "./viewport";
 import { markDirty } from "./render-state";
 import { cancelCamera } from "./camera";
 import { WheelInterpreter, type ScrollMode } from "./wheel";
 
 /** Screen pixels a pressed port must travel before the press becomes a drag. */
 const PORT_DRAG_THRESHOLD = 4;
+
+/** Screen pixels the pointer may move between right-button press and release and still count as a click. */
+const RIGHT_CLICK_SLOP = 4;
+
+/** A contextmenu event this soon after a Menu/Shift+F10 key event is the browser echoing that key, which already opened the menu. */
+const MENU_KEY_ECHO_MS = 400;
+
+type NoteResize = {
+  node: CanvasNode;
+  handle: Handle;
+  start: Rect;
+  startWx: number;
+  startWy: number;
+  moved: boolean;
+};
+
+type NotePress = { node: CanvasNode; target: NonNullable<ReturnType<CanvasNode["noteTargetAt"]>> };
 
 type PortPress = {
   kind: "out" | "in" | "wire";
@@ -41,6 +62,8 @@ export class InputHandler {
   pendingConn: PendingConnector | null = null;
   reconnEdge:  { conn: Connector } | null = null;
   portPress:   PortPress | null = null;
+  noteResize:  NoteResize | null = null;
+  private notePress: NotePress | null = null;
   moveGroup:   Connector[] | null = null;
   /** The wire whose delete button is pressed and awaiting release. */
   wireDeletePress: Connector | null = null;
@@ -55,7 +78,12 @@ export class InputHandler {
 
   private readonly wheel = new WheelInterpreter();
   private hoverPending: { sx: number; sy: number } | null = null;
-  private snapToGrid = false;
+  private pointerIn = false;
+  private pointerSX = 0;
+  private pointerSY = 0;
+  private rightPress: { x: number; y: number } | null = null;
+  private menuKeyAt = -Infinity;
+  private gridSnap = false;
 
   _multiDragFrom: Map<string, { x: number; y: number }> | null = null;
 
@@ -67,6 +95,7 @@ export class InputHandler {
   readonly _keyH     = (e: KeyboardEvent) => this.onKey(e);
   readonly _keyUpH   = (e: KeyboardEvent) => {
     if (e.key === "Shift") { this.shiftHeld = false; this.canvas.el.classList.remove("shift-held"); }
+    if (e.key === "ContextMenu" || e.key === "F10") this.menuKeyAt = performance.now();
   };
 
   constructor(canvas: Canvas) {
@@ -109,12 +138,34 @@ export class InputHandler {
     }
     // ── End canvas navigation ───────────────────────────────────────────────
 
+    const menuKey = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+    if (menuKey && (canvasFocused || activeEl === document.body || !activeEl)) {
+      e.preventDefault();
+      this.menuKeyAt = performance.now();
+      if (!e.repeat) this.openMenuFromKeyboard();
+      return;
+    }
+
     const history = historyShortcut(e);
     if (history) { e.preventDefault(); if (history === "undo") c.undo(); else c.redo(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === "d") { e.preventDefault(); c.dupSelected(); }
-    if ((e.metaKey || e.ctrlKey) && e.key === "a") {
-      e.preventDefault();
-      for (const n of c.nodes.values()) { n.selected = true; c.selectedNodes.add(n.data.id); }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && !e.repeat && !c.isGestureActive()) {
+      const key = e.key.toLowerCase();
+      const textSelected = (window.getSelection()?.toString() ?? "") !== "";
+      if (key === "c" && !textSelected && c.copySelected()) e.preventDefault();
+      else if (key === "x" && !textSelected && c.cutSelected()) e.preventDefault();
+      else if (key === "v" && c.pasteClipboard(this.pointerIn ? c.s2w(this.pointerSX, this.pointerSY) : null)) e.preventDefault();
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "a") { e.preventDefault(); c.selectAll(); }
+    const plainKey = !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat;
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "g") { e.preventDefault(); c.frameSelection(); }
+    if (plainKey && e.key.toLowerCase() === "n") {
+      if (e.shiftKey) {
+        c.notesVisible = !c.notesVisible;
+        c.onWarn?.(c.notesVisible ? "Notes shown" : "Notes hidden. Press Shift+N to show them again.");
+      } else {
+        c.addNote("note");
+      }
     }
     if (e.key === "Delete" || e.key === "Backspace") c.deleteSelected();
     const isFitToScreenChord = (e.ctrlKey || e.metaKey) && e.shiftKey;
@@ -127,9 +178,10 @@ export class InputHandler {
     const focusOwnsSpace = spaceKey && activeEl instanceof HTMLElement && activeEl !== c.el &&
       (activeEl instanceof HTMLButtonElement || activeEl.getAttribute("role") === "button");
     if ((spaceKey && !focusOwnsSpace) || ((e.metaKey || e.ctrlKey) && e.key === "k")) {
-      e.preventDefault(); c.onPaletteRequest?.();
+      e.preventDefault(); c.onPaletteRequest?.(this.pointerIn ? { sx: this.pointerSX, sy: this.pointerSY } : null);
     }
     if (e.key === "Escape") {
+      if (this.noteResize) this.cancelGestures();
       this.portPress = null; this.moveGroup = null;
       this.wireDeletePress = null; c.deleteHandleHot = false;
       this.reconnEdge = null;
@@ -144,7 +196,7 @@ export class InputHandler {
   /** Navigate to the nearest node in the given arrow direction. */
   private _navigateNodes(key: string): void {
     const c = this.canvas;
-    const nodes = Array.from(c.nodes.values());
+    const nodes = Array.from(c.nodes.values()).filter(n => !n.isNote);
     if (!nodes.length) return;
 
     if (!c.selectedNode) {
@@ -152,12 +204,12 @@ export class InputHandler {
       const first = nodes[0];
       c.clearSelection();
       c.selectNode(first);
-      c.centerOn(first.data.position.x + NODE_WIDTH / 2, first.data.position.y + first.height / 2);
+      c.centerOn(first.data.position.x + first.width / 2, first.data.position.y + first.height / 2);
       return;
     }
 
     const cur = c.selectedNode;
-    const cx = cur.data.position.x + NODE_WIDTH / 2;
+    const cx = cur.data.position.x + cur.width / 2;
     const cy = cur.data.position.y + cur.height / 2;
 
     let best: CanvasNode | null = null;
@@ -165,7 +217,7 @@ export class InputHandler {
 
     for (const n of nodes) {
       if (n === cur) continue;
-      const nx = n.data.position.x + NODE_WIDTH / 2;
+      const nx = n.data.position.x + n.width / 2;
       const ny = n.data.position.y + n.height / 2;
       const dx = nx - cx;
       const dy = ny - cy;
@@ -187,7 +239,7 @@ export class InputHandler {
     if (best) {
       c.clearSelection();
       c.selectNode(best);
-      c.centerOn(best.data.position.x + NODE_WIDTH / 2, best.data.position.y + best.height / 2);
+      c.centerOn(best.data.position.x + best.width / 2, best.data.position.y + best.height / 2);
     }
   }
 
@@ -201,8 +253,10 @@ export class InputHandler {
     const { x: wx, y: wy } = c.s2w(sx, sy);
 
     this.wireDeletePress = null;
-    if (e.button === 0 && e.altKey) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; this.setCursor("crosshair"); return; }
+    const altOnFrame = e.altKey && !c.nodeAt(wx, wy) && c.noteAt(wx, wy)?.noteStyle === "frame";
+    if (e.button === 0 && e.altKey && !altOnFrame) { this.isCutting = true; this.cutPath = [{ x: wx, y: wy }]; this.setCursor("crosshair"); return; }
     if (e.button === 1) { this.startPan(sx, sy); return; }
+    this.rightPress = e.button === 2 ? { x: e.clientX, y: e.clientY } : null;
     if (e.button !== 0) return;
     if (consumePointClick(e)) return;
 
@@ -226,33 +280,30 @@ export class InputHandler {
       return;
     }
 
-    // Node drag
-    const arr = Array.from(c.nodes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const n = arr[i];
-      if (!n.containsPoint(wx, wy)) continue;
-      if (!e.shiftKey && !c.selectedNodes.has(n.data.id)) c.clearSelection();
-      c.selectNode(n);
-      c.onNodeClicked?.(n);
-      this.draggingNode = n;
-      this.dragOffX = wx - n.data.position.x; this.dragOffY = wy - n.data.position.y;
-      this.dragFromX = n.data.position.x; this.dragFromY = n.data.position.y;
-      this.snapToGrid = storageGet("aerini_grid_snap") === "true";
-      if (c.selectedNodes.size > 1) {
-        this._multiDragFrom = new Map();
-        for (const id of c.selectedNodes) {
-          const mn = c.nodes.get(id);
-          if (mn) this._multiDragFrom.set(id, { ...mn.data.position });
-        }
-      } else {
-        this._multiDragFrom = null;
-      }
-      this.didDrag = false; this.setCursor("grab"); return;
+    const selNote = c.selectedNote();
+    const grip = selNote?.resizeHandleAt(wx, wy, c.zoom);
+    if (selNote && grip) {
+      const p = selNote.data.position;
+      this.noteResize = { node: selNote, handle: grip, start: { x: p.x, y: p.y, w: selNote.width, h: selNote.height }, startWx: wx, startWy: wy, moved: false };
+      c.beginNodeEdit(selNote);
+      this.setCursor(HANDLE_CURSOR[grip]);
+      return;
     }
 
-    // Wire click
+    const hit = c.nodeAt(wx, wy);
+    if (hit) { this.beginNodeDrag(hit, e, wx, wy); return; }
+
     for (const conn of c.connectors.values()) {
       if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) { c.selectConn(conn); return; }
+    }
+
+    const note = c.noteAt(wx, wy);
+    if (note) {
+      const target = note.noteTargetAt(wx, wy);
+      const live = target && (target.kind === "check" || e.ctrlKey || e.metaKey) ? target : null;
+      this.notePress = live ? { node: note, target: live } : null;
+      this.beginNodeDrag(note, e, wx, wy);
+      return;
     }
 
     // Empty space: Shift = box-select, plain = pan + deselect
@@ -269,6 +320,32 @@ export class InputHandler {
     this.isPanning = true; this.panStartX = sx; this.panStartY = sy;
     this.panOriginX = this.canvas.panX; this.panOriginY = this.canvas.panY;
     this.setCursor("grabbing");
+  }
+
+  private beginNodeDrag(n: CanvasNode, e: MouseEvent, wx: number, wy: number): void {
+    const c = this.canvas;
+    if (!e.shiftKey && !c.selectedNodes.has(n.data.id)) c.clearSelection();
+    c.selectNode(n);
+    c.onNodeClicked?.(n);
+    this.draggingNode = n;
+    this.dragOffX = wx - n.data.position.x; this.dragOffY = wy - n.data.position.y;
+    this.dragFromX = n.data.position.x; this.dragFromY = n.data.position.y;
+    this.gridSnap = gridSnapEnabled();
+    const moving = new Set<string>(c.selectedNodes.size > 1 ? c.selectedNodes : [n.data.id]);
+    for (const id of [...moving]) {
+      const f = c.nodes.get(id);
+      if (f?.isNote && f.noteStyle === "frame" && !e.altKey) for (const inner of c.containedIds(f)) moving.add(inner);
+    }
+    if (moving.size > 1) {
+      this._multiDragFrom = new Map();
+      for (const id of moving) {
+        const mn = c.nodes.get(id);
+        if (mn) this._multiDragFrom.set(id, { ...mn.data.position });
+      }
+    } else {
+      this._multiDragFrom = null;
+    }
+    this.didDrag = false; this.setCursor("grab");
   }
 
   /** The wire a drag from this input would pick up: the sole wire on a single-arity input. */
@@ -319,9 +396,7 @@ export class InputHandler {
     const c = this.canvas;
     if (c.deleteHandleAt(wx, wy)) return;
     let next: Connector | null = null;
-    let overNode = false;
-    for (const n of c.nodes.values()) if (n.containsPoint(wx, wy)) { overNode = true; break; }
-    if (!overNode) {
+    if (!c.nodeAt(wx, wy)) {
       for (const conn of c.connectors.values()) {
         if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) { next = conn; break; }
       }
@@ -334,10 +409,14 @@ export class InputHandler {
     this.canvas.deleteHandleHot = false;
   }
 
-  onMove(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._move(e, sx, sy); }
+  onMove(e: MouseEvent): void {
+    const { sx, sy } = this.canvas.evSX(e);
+    this.pointerIn = true; this.pointerSX = sx; this.pointerSY = sy;
+    this._move(e, sx, sy);
+  }
 
   onWinMove(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.noteResize && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.cachedRect();
     this._move(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -364,21 +443,23 @@ export class InputHandler {
 
     if (this.portPress && !this.promotePortPress(sx, sy, wx, wy)) return;
 
+    if (this.noteResize) {
+      this.resizeNoteTo(this.noteResize, wx, wy);
+      this.setCursor(HANDLE_CURSOR[this.noteResize.handle]); return;
+    }
+
     if (this.draggingNode) {
       if (!this.didDrag) { this.didDrag = true; c.onCanvasChanged?.(); }
       let nx = wx - this.dragOffX, ny = wy - this.dragOffY;
-      if (this.snapToGrid) {
-        const G = 20;
-        nx = Math.round(nx / G) * G;
-        ny = Math.round(ny / G) * G;
-      }
-      if (c.selectedNodes.size > 1 && c.selectedNodes.has(this.draggingNode.data.id)) {
+      if (this.gridSnap) { nx = snapToGrid(nx); ny = snapToGrid(ny); }
+      if (this._multiDragFrom) {
         const dx = nx - this.draggingNode.data.position.x, dy = ny - this.draggingNode.data.position.y;
-        for (const id of c.selectedNodes) { const n = c.nodes.get(id); if (n) { n.data.position.x += dx; n.data.position.y += dy; n.updatePortPositions(); } }
+        for (const id of this._multiDragFrom.keys()) { const n = c.nodes.get(id); if (n) { n.data.position.x += dx; n.data.position.y += dy; n.updatePortPositions(); } }
       } else {
         this.draggingNode.data.position.x = nx; this.draggingNode.data.position.y = ny;
         this.draggingNode.updatePortPositions(); c.snap.computeSnap(this.draggingNode);
       }
+      c.setFrameDropTarget(this._multiDragFrom ? this._multiDragFrom.keys() : [this.draggingNode.data.id]);
       this.setCursor("grabbing"); return;
     }
 
@@ -391,8 +472,11 @@ export class InputHandler {
       this.bx1 = wx; this.by1 = wy;
       const x1 = Math.min(this.bx0, wx), y1 = Math.min(this.by0, wy), x2 = Math.max(this.bx0, wx), y2 = Math.max(this.by0, wy);
       for (const n of c.nodes.values()) {
+        if (!c.isShown(n)) continue;
         const p = n.data.position;
-        const ins = p.x + NODE_WIDTH >= x1 && p.x <= x2 && p.y + n.height >= y1 && p.y <= y2;
+        const ins = n.isNote && n.noteStyle === "frame"
+          ? p.x >= x1 && p.y >= y1 && p.x + n.width <= x2 && p.y + n.height <= y2
+          : p.x + n.width >= x1 && p.x <= x2 && p.y + n.height >= y1 && p.y <= y2;
         n.selected = ins; if (ins) c.selectedNodes.add(n.data.id); else c.selectedNodes.delete(n.data.id);
       }
       return;
@@ -419,14 +503,16 @@ export class InputHandler {
 
     if (c.wireHandleAt(wx, wy)) { this.setCursor("grab"); return; }
 
-    let any = false;
-    for (const n of c.nodes.values()) {
-      n.hovered = n.containsPoint(wx, wy);
-      if (n.hovered) {
-        any = true;
-        const port = n.portAtPoint(wx, wy);
-        this.setCursor(!port ? "grab" : port.isInput && this.pickupWire(n.data.id, port.id) ? "grab" : "crosshair");
-      }
+    const sel = c.selectedNote();
+    const grip = sel?.resizeHandleAt(wx, wy, c.zoom);
+    if (sel && grip) { this.setCursor(HANDLE_CURSOR[grip]); return; }
+
+    const top = c.nodeAt(wx, wy) ?? c.noteAt(wx, wy);
+    for (const n of c.nodes.values()) n.hovered = n === top;
+    const any = !!top;
+    if (top) {
+      const port = top.portAtPoint(wx, wy);
+      this.setCursor(top.noteTargetAt(wx, wy)?.kind === "check" ? "pointer" : !port ? "grab" : port.isInput && this.pickupWire(top.data.id, port.id) ? "grab" : "crosshair");
     }
     if (!any) this.setCursor(this.shiftHeld ? "crosshair" : "default");
   }
@@ -434,7 +520,7 @@ export class InputHandler {
   onUp(e: MouseEvent): void { const { sx, sy } = this.canvas.evSX(e); this._up(e, sx, sy); }
 
   onWinUp(e: MouseEvent): void {
-    if (!this.isPanning && !this.draggingNode && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
+    if (!this.isPanning && !this.draggingNode && !this.noteResize && !this.pendingConn && !this.portPress && !this.wireDeletePress && !this.isCutting && !this.isBoxSel) return;
     const r = this.canvas.cachedRect();
     this._up(e, e.clientX - r.left, e.clientY - r.top);
   }
@@ -503,10 +589,19 @@ export class InputHandler {
       this.reconnEdge = null; this.pendingConn = null; this.moveGroup = null; this.setCursor("default"); return;
     }
 
+    if (this.noteResize) {
+      this.finishNoteResize(this.noteResize);
+      this.noteResize = null; this.setCursor("default"); return;
+    }
+
     if (this.draggingNode) {
       c.snap.snapGuides = [];
+      c.setFrameDropTarget(null);
+      const press = this.notePress;
+      this.notePress = null;
+      if (!this.didDrag && press) this.activateNoteTarget(press);
       if (this.didDrag) {
-        if (c.selectedNodes.size > 1 && this._multiDragFrom) {
+        if (this._multiDragFrom) {
           const moves: MoveEntry[] = [];
           for (const [id, from] of this._multiDragFrom) {
             const mn = c.nodes.get(id);
@@ -520,7 +615,7 @@ export class InputHandler {
           if (p.x !== this.dragFromX || p.y !== this.dragFromY) {
             c.transact(`Move "${dragged.data.name}"`, () => {
               c.pushUndo({ type: "move_node", nodeId: dragged.data.id, from: { x: this.dragFromX, y: this.dragFromY }, to: { ...p } });
-              c.tryWireInsert(dragged);
+              if (!dragged.isNote) c.tryWireInsert(dragged);
             });
           }
         }
@@ -533,9 +628,54 @@ export class InputHandler {
     if (this.isBoxSel) { this.isBoxSel = false; this.setCursor(this.shiftHeld ? "crosshair" : "default"); }
   }
 
+  private resizeNoteTo(r: NoteResize, wx: number, wy: number): void {
+    const c = this.canvas;
+    const n = r.node;
+    const min = minSize(n.noteStyle);
+    const next = resizeRect(r.start, r.handle, wx - r.startWx, wy - r.startWy, min);
+    const cfg = n.data.config;
+    cfg["width"] = next.w;
+    if (n.noteStyle === "frame" || r.handle.includes("n") || r.handle.includes("s")) cfg["height"] = next.h;
+    const floor = n.minHeight;
+    if (next.h < floor) {
+      if (r.handle.includes("n")) next.y = r.start.y + r.start.h - floor;
+      next.h = floor;
+      if (cfg["height"] !== undefined) cfg["height"] = floor;
+    }
+    n.data.position.x = next.x; n.data.position.y = next.y;
+    if (!r.moved) { r.moved = true; c.onCanvasChanged?.(); }
+    markDirty();
+  }
+
+  private finishNoteResize(r: NoteResize): void {
+    const c = this.canvas;
+    const n = r.node;
+    const from = { x: r.start.x, y: r.start.y };
+    const to = { ...n.data.position };
+    c.transact(n.noteStyle === "frame" ? "Resize group frame" : "Resize note", () => {
+      if (to.x !== from.x || to.y !== from.y) c.pushUndo({ type: "move_node", nodeId: n.data.id, from, to });
+      c.commitNodeEdit(n);
+    });
+    if (r.moved) c.onCanvasChanged?.();
+  }
+
+  private activateNoteTarget(press: NotePress): void {
+    const c = this.canvas;
+    const t = press.target;
+    if (t.kind === "check") {
+      const n = press.node;
+      const text = String(n.data.config["text"] ?? "");
+      const next = toggleCheckbox(text, t.src);
+      if (next === text) return;
+      c.editNode(n, () => { n.data.config["text"] = next; });
+    } else {
+      void openNoteLink(t.href);
+    }
+  }
+
   /** True while a drag, wire pull, box-select, pan or cut is in progress. */
   isDragActive(): boolean {
-    return !!(this.draggingNode || this.pendingConn || this.reconnEdge || this.portPress || this.moveGroup
+    return !!(this.draggingNode || this.noteResize || this.pendingConn || this.reconnEdge || this.portPress || this.moveGroup
       || this.isCutting || this.isBoxSel || this.isPanning);
   }
 
@@ -546,6 +686,7 @@ export class InputHandler {
 
   onLeave(): void {
     markDirty();
+    this.pointerIn = false;
     this.hoverPending = null;
     this.clearWireHover();
     if (!this.isPanning && !this.draggingNode && !this.isCutting)
@@ -554,31 +695,62 @@ export class InputHandler {
 
   onRightClick(e: MouseEvent): void {
     markDirty();
+    const press = this.rightPress;
+    this.rightPress = null;
+    if (performance.now() - this.menuKeyAt < MENU_KEY_ECHO_MS) return;
+    if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > RIGHT_CLICK_SLOP) return;
     if (this.portPress || this.pendingConn) return;
-    const c = this.canvas;
-    const { sx, sy } = c.evSX(e);
-    const { x: wx, y: wy } = c.s2w(sx, sy);
+    if (!press && e.ctrlKey) this.cancelGestures();
+    this.openMenuAt(e.clientX, e.clientY, false);
+  }
 
-    const arr = Array.from(c.nodes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const n = arr[i];
-      if (n.containsPoint(wx, wy)) {
-        if (!c.selectedNodes.has(n.data.id)) {
-          c.clearSelection();
-          c.selectNode(n);
-        }
-        c.ctxMenu.show(e.clientX, e.clientY, n);
+  /** Opens whichever menu fits what is under the client point: node, note or frame, wire, or empty canvas. */
+  private openMenuAt(cx: number, cy: number, focusFirst: boolean): void {
+    const c = this.canvas;
+    const r = c.cachedRect();
+    const { x: wx, y: wy } = c.s2w(cx - r.left, cy - r.top);
+
+    const showSelectionMenu = (n: CanvasNode): void => {
+      if (!c.selectedNodes.has(n.data.id)) {
+        c.clearSelection();
+        c.selectNode(n);
+      }
+      c.ctxMenu.show(cx, cy, n, focusFirst);
+    };
+    const hit = c.nodeAt(wx, wy);
+    if (hit) { showSelectionMenu(hit); return; }
+
+    for (const conn of c.connectors.values()) {
+      if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) {
+        c.selectConn(conn);
+        c.ctxMenu.showWire(cx, cy, conn, { x: wx, y: wy }, focusFirst);
         return;
       }
     }
 
-    for (const conn of c.connectors.values()) {
-      if (conn.containsPoint(wx, wy, c.nodes, 8 / c.zoom)) {
-        c.deleteConnector(conn); return;
-      }
-    }
+    const note = c.noteAt(wx, wy);
+    if (note) { showSelectionMenu(note); return; }
 
     c.clearSelection();
+    c.ctxMenu.showCanvas(cx, cy, { x: wx, y: wy }, focusFirst);
+  }
+
+  /** Menu key / Shift+F10: the selection's menu beside the selection, else the menu at the pointer, else at the middle of the visible canvas. */
+  private openMenuFromKeyboard(): void {
+    if (this.portPress || this.pendingConn) return;
+    const c = this.canvas;
+    const r = c.cachedRect();
+    const sel = c.selectedNode;
+    if (sel && c.selectedNodes.has(sel.data.id) && c.isShown(sel)) {
+      const sx = sel.data.position.x * c.zoom + c.panX + 12;
+      const sy = sel.data.position.y * c.zoom + c.panY + 12;
+      c.ctxMenu.show(r.left + sx, r.top + sy, sel, true);
+      return;
+    }
+    const vp = visibleViewport(r);
+    const sx = this.pointerIn ? this.pointerSX : vp.width / 2;
+    const sy = this.pointerIn ? this.pointerSY : vp.height / 2;
+    this.openMenuAt(r.left + sx, r.top + sy, true);
   }
 
   onDbl(e: MouseEvent): void {
@@ -587,14 +759,11 @@ export class InputHandler {
     const c = this.canvas;
     const { sx, sy } = c.evSX(e);
     const { x: wx, y: wy } = c.s2w(sx, sy);
-    for (const n of c.nodes.values()) {
-      if (n.containsPoint(wx, wy)) {
-        c.selectNode(n);
-        c.openNodeConfig(n);
-        return;
-      }
+    const target = c.nodeAt(wx, wy) ?? c.noteAt(wx, wy);
+    if (target && !(target.isNote && target.noteTargetAt(wx, wy)?.kind === "check")) {
+      c.selectNode(target);
+      c.openNodeConfig(target);
     }
-
   }
 
   onWheel(e: WheelEvent): void {
@@ -622,6 +791,7 @@ export class InputHandler {
   /** Ends every gesture in flight when the window loses focus or is hidden, because the matching mouseup will never arrive. A node drag goes back to where it started. */
   cancelGestures(): void {
     const c = this.canvas;
+    c.setFrameDropTarget(null);
     if (this.draggingNode) {
       if (this._multiDragFrom) {
         for (const [id, from] of this._multiDragFrom) {
@@ -634,6 +804,15 @@ export class InputHandler {
         this.draggingNode.updatePortPositions();
       }
     }
+    if (this.noteResize) {
+      const r = this.noteResize;
+      Object.assign(r.node.data.position, { x: r.start.x, y: r.start.y });
+      r.node.data.config["width"] = r.start.w;
+      if (r.node.data.config["height"] !== undefined || r.node.noteStyle === "frame") r.node.data.config["height"] = r.start.h;
+      c.beginNodeEdit(r.node);
+      this.noteResize = null;
+    }
+    this.notePress = null;
     this.draggingNode = null; this.didDrag = false; this._multiDragFrom = null;
     this.isPanning = false; this.isPinching = false;
     this.pendingConn = null; this.reconnEdge = null; this.portPress = null; this.moveGroup = null;

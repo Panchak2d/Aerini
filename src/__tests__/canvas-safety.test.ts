@@ -361,6 +361,7 @@ describe("InputHandler — Space palette shortcut vs. focused role=\"button\" co
     return {
       el,
       onPaletteRequest: vi.fn(),
+      isGestureActive: () => false,
     };
   }
 

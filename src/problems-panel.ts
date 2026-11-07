@@ -26,7 +26,6 @@ export function summarizeProblems(problems: Problem[]): ProblemsSummary {
   return { errors, warnings, label: n === 0 ? "" : `${n} ${n === 1 ? "problem" : "problems"}` };
 }
 
-/** Rewrites the broken reference in place as one undo step. Returns false when the text is no longer there. */
 /** Index to focus after an arrow, Home or End key in a list of `count` rows, or null when the key is not for navigation. */
 export function nextProblemFocus(count: number, index: number, key: string): number | null {
   if (count <= 0) return null;
@@ -37,6 +36,38 @@ export function nextProblemFocus(count: number, index: number, key: string): num
   return null;
 }
 
+const POPOVER_MARGIN = 8;
+const POPOVER_GAP = 6;
+const POPOVER_MIN_HEIGHT = 96;
+
+export interface PopoverViewport { width: number; height: number }
+export interface PopoverAnchor { left: number; top: number }
+/** Space the popover must stay clear of, measured from the viewport's bottom and right edges. */
+export interface PopoverInsets { bottom: number; right: number }
+export interface PopoverPlacement { left: number; bottom: number; maxHeight: number }
+
+/**
+ * Where the Problems popover goes: its bottom edge sits above the output drawer (when there is room
+ * for a usable list there), its left edge follows the chip without running under the chat panel,
+ * and its height is capped to half the viewport or the space above its anchor, whichever is smaller.
+ * When the drawer leaves too little room, the popover anchors to the chip and overlaps the drawer.
+ */
+export function problemsPopoverPlacement(
+  viewport: PopoverViewport,
+  chip: PopoverAnchor,
+  insets: PopoverInsets,
+  popoverWidth: number,
+): PopoverPlacement {
+  const chipBottom = Math.max(POPOVER_MARGIN, viewport.height - chip.top + POPOVER_GAP);
+  let bottom = Math.max(chipBottom, insets.bottom + POPOVER_GAP);
+  if (viewport.height - bottom - POPOVER_MARGIN < POPOVER_MIN_HEIGHT) bottom = chipBottom;
+  const rightEdge = viewport.width - insets.right - POPOVER_MARGIN;
+  const left = Math.max(POPOVER_MARGIN, Math.min(chip.left, rightEdge - popoverWidth));
+  const available = Math.max(0, viewport.height - bottom - POPOVER_MARGIN);
+  return { left, bottom, maxHeight: Math.min(viewport.height / 2, available) };
+}
+
+/** Rewrites the broken reference in place as one undo step. Returns false when the text is no longer there. */
 export function applyProblemFix(canvas: Canvas, problem: Problem): boolean {
   const node = canvas.nodes.get(problem.nodeId);
   if (!node || !problem.fix || !problem.field) return false;
@@ -93,14 +124,30 @@ export function initProblemsPanel(canvas: Canvas): { refresh: () => void } {
 
   const isOpen = () => !panel.hidden;
 
+  function place(): void {
+    const r = chip!.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) { setOpen(false); return; }
+    const drawer = document.getElementById("output-drawer");
+    const drawerRect = drawer && drawer.offsetHeight > 0 ? drawer.getBoundingClientRect() : null;
+    const chat = document.getElementById("chat-panel");
+    const chatWidth = chat && chat.classList.contains("chat-open") ? chat.offsetWidth : 0;
+    const at = problemsPopoverPlacement(
+      { width: window.innerWidth, height: window.innerHeight },
+      { left: r.left, top: r.top },
+      { bottom: drawerRect ? window.innerHeight - drawerRect.top : 0, right: chatWidth },
+      panel.offsetWidth,
+    );
+    panel.style.left = `${at.left}px`;
+    panel.style.bottom = `${at.bottom}px`;
+    panel.style.maxHeight = `${at.maxHeight}px`;
+  }
+
   function setOpen(open: boolean): void {
     panel.hidden = !open;
     chip!.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) {
       render();
-      const r = chip!.getBoundingClientRect();
-      panel.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - panel.offsetWidth - 8))}px`;
-      panel.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
+      place();
     }
   }
 
@@ -194,6 +241,15 @@ export function initProblemsPanel(canvas: Canvas): { refresh: () => void } {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && isOpen()) { setOpen(false); chip.focus(); }
   });
+  const reflow = (): void => { if (isOpen()) place(); };
+  window.addEventListener("resize", reflow);
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(reflow);
+    for (const id of ["output-drawer", "chat-panel"]) {
+      const el = document.getElementById(id);
+      if (el) observer.observe(el);
+    }
+  }
   onProblemsInvalidated(schedule);
 
   refresh();

@@ -52,6 +52,7 @@ export function renderSaveToFolderFields(ctx: ExtensionContext): void {
   body.appendChild(mkField("Overwrite existing files", () => {
     const chk = mk<HTMLInputElement>("input");
     chk.type = "checkbox";
+    chk.className = "ui-check";
     chk.checked = (node.data.config["overwrite"] as boolean) !== false;
     chk.addEventListener("change", () => { node.data.config["overwrite"] = chk.checked; onChange(); });
     return chk;

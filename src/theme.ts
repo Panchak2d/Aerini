@@ -10,11 +10,14 @@ export interface ThemeDef {
    * option instead of needing a "no selection" special case in the UI. */
   id: string;
   label: string;
+  /** Three colours shown as the preview in Settings: page surface, raised
+   * surface, accent. Keep in step with the theme's block in variables.css. */
+  swatch: readonly [string, string, string];
 }
 
 export const THEMES: ThemeDef[] = [
-  { id: "midnight", label: "Midnight (default)" },
-  { id: "paper", label: "Paper" },
+  { id: "midnight", label: "Midnight (default)", swatch: ["#0d1117", "#21262d", "#4d9eff"] },
+  { id: "paper", label: "Paper", swatch: ["#fbf7ee", "#e4dac3", "#4c6558"] },
 ];
 
 const DEFAULT_THEME = "midnight";
@@ -67,8 +70,7 @@ export function applyTheme(id: string): void {
  *
  * DISCLOSED TRADEOFF: index.html has one script entry point, a deferred
  * `type="module"` (app.ts) — no inline script precedes it. tauri.conf.json's
- * CSP is `script-src 'self'` with no `unsafe-inline` (Aerini_AI_UI_Refactor_Rules.md
- * §3 forbids relaxing CSP), which
+ * CSP is `script-src 'self'` with no `unsafe-inline`, which
  * rules out the usual inline-head-script FOUC fix. In this Tauri webview
  * `index.html`/`main.css` are local files with effectively-zero fetch
  * latency, so the residual risk (default theme paints for one frame before

@@ -82,6 +82,11 @@ function isConfirmOpen(): boolean {
   return !!modal && !modal.classList.contains("hidden");
 }
 
+// The data picker is appended to document.body, outside the popover, so a press on it is not an outside click.
+function isInsideExpressionPicker(e: MouseEvent): boolean {
+  return e.target instanceof Element && e.target.closest(".expr-picker") !== null;
+}
+
 let _activePopover: HTMLElement | null = null;
 // Unique ID per popover instance — prevents old onOutside handlers from
 // closing a newly-opened popover when rapidly switching between nodes.
@@ -464,7 +469,7 @@ export async function showPopover(
 
   // Close on outside click.
   const onOutside = (e: MouseEvent) => {
-    if (!pop.contains(e.target as Node) && !isConfirmOpen() && !pointModeOwns(e) && !fieldDropOwnsPress(e)) closePopover();
+    if (!pop.contains(e.target as Node) && !isInsideExpressionPicker(e) && !isConfirmOpen() && !pointModeOwns(e) && !fieldDropOwnsPress(e)) closePopover();
   };
 
   // Close on Esc

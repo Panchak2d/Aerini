@@ -133,9 +133,10 @@ export function mountDescribeIt(
     const notice = el("div", "field-describe-note");
     panel.appendChild(notice);
 
-    const samplesLabel = el("label", "field-describe-check");
+    const samplesLabel = el("label", "ui-check-row");
     const samples = document.createElement("input");
     samples.type = "checkbox";
+    samples.className = "ui-check";
     samplesLabel.appendChild(samples);
     const samplesText = el("span", "");
     samplesLabel.appendChild(samplesText);

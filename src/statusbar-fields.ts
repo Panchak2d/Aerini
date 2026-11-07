@@ -181,7 +181,10 @@ export function initStatusBarFields(
   const stateWrap = document.getElementById("statusbar-state")!;
   const stateEl   = document.getElementById("stat-run-state")!;
 
-  let lastNodes = -1, lastConn = -1, lastSel = -1, lastZoom = -1, lastState = "";
+  const notesChip = document.getElementById("notes-chip");
+  notesChip?.addEventListener("click", () => { canvas.notesVisible = true; });
+
+  let lastNodes = -1, lastConn = -1, lastSel = -1, lastZoom = -1, lastState = "", lastNotesHidden = false;
 
   // 150ms, not 300ms: #run-dropdown-wrap's success/error data-run-state also
   // only holds for 300ms (toolbar.ts's onRunResult) before reverting to
@@ -189,7 +192,8 @@ export function initStatusBarFields(
   // alignment missing it entirely. Half the window guarantees at least one
   // tick lands inside it every time.
   setInterval(() => {
-    const nNodes  = canvas.nodes.size;
+    let nNodes = 0, nNotes = 0;
+    for (const n of canvas.nodes.values()) { if (n.isNote) nNotes++; else nNodes++; }
     const nConn   = canvas.connectors.size;
     const nSel    = canvas.selectedNodes.size;
     const zoomPct = Math.round(canvas.zoom * 100);
@@ -198,6 +202,9 @@ export function initStatusBarFields(
     if (nConn   !== lastConn)  { connEl.textContent  = String(nConn);  lastConn  = nConn; }
     if (nSel    !== lastSel)   { selEl.textContent   = String(nSel);   lastSel   = nSel; }
     if (zoomPct !== lastZoom)  { zoomEl.textContent  = `${zoomPct}%`;  lastZoom  = zoomPct; }
+
+    const notesHidden = !canvas.notesVisible && nNotes > 0;
+    if (notesHidden !== lastNotesHidden) { notesChip?.classList.toggle("hidden", !notesHidden); lastNotesHidden = notesHidden; }
 
     const raw = document.getElementById("run-dropdown-wrap")?.getAttribute("data-run-state") ?? "idle";
     if (raw !== lastState) {

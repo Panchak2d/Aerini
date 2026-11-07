@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { describe, it, expect, beforeEach } from "vitest";
 import { initModals, convertN8nWorkflow, showImportPreview } from "../modal-manager";
+import { THEMES } from "../theme";
 import { registerNodeDescriptors } from "../canvas/CanvasSerializer";
 import type { NodeDescriptor } from "../ipc/workflow";
 
@@ -52,6 +53,9 @@ function mkModalDom(): void {
   const themeSelect = document.createElement("select");
   themeSelect.id = "setting-theme";
   document.body.appendChild(themeSelect);
+  const swatch = document.createElement("span");
+  swatch.id = "setting-theme-swatch";
+  document.body.appendChild(swatch);
 }
 
 function port(id: string, label = id) {
@@ -112,6 +116,24 @@ describe("initModals — theme select wiring", () => {
   });
 });
 
+describe("initModals — theme swatch preview", () => {
+  it("paints one dot per registry colour and repaints when the theme changes", () => {
+    registerNodeDescriptors([]);
+    initModals(() => {});
+
+    const swatch = document.getElementById("setting-theme-swatch")!;
+    const dotColors = () => Array.from(swatch.querySelectorAll<HTMLElement>(".theme-swatch-dot")).map(d => d.style.background);
+    expect(dotColors()).toHaveLength(THEMES[0].swatch.length);
+
+    const select = document.getElementById("setting-theme") as HTMLSelectElement;
+    const before = dotColors();
+    select.value = "paper";
+    select.dispatchEvent(new Event("change"));
+    expect(dotColors()).toHaveLength(THEMES[1].swatch.length);
+    expect(dotColors()).not.toEqual(before);
+  });
+});
+
 describe("initModals — shortcuts button opens the shortcuts modal", () => {
   it("removes 'hidden' from shortcuts-modal when btn-shortcuts is clicked", () => {
     const modal = document.getElementById("shortcuts-modal")!;
@@ -145,7 +167,7 @@ describe("convertN8nWorkflow — If node branch port mapping", () => {
     const out = convertN8nWorkflow(n8n) as { nodes: ConvertedNode[]; edges: ConvertedEdge[] };
     const ifNode = out.nodes.find(n => n.name === "Check")!;
     expect(ifNode.node_type_id).toBe("if_condition");
-    // Node's own ports now come from the real descriptor, not a generic guess.
+    // Node's own ports come from the real descriptor, not a generic guess.
     expect(ifNode.ports.outputs.map(p => p.id)).toEqual(["on_true", "on_false"]);
 
     const trueEdge = out.edges.find(e => e.to_node === out.nodes.find(n => n.name === "True Branch")!.id)!;
@@ -224,6 +246,54 @@ describe("convertN8nWorkflow — Gmail node type", () => {
     }) as { nodes: ConvertedNode[] };
 
     expect(out.nodes.map(n => n.node_type_id)).toEqual(["email_send", "email_send"]);
+  });
+});
+
+describe("convertN8nWorkflow — sticky notes", () => {
+  const sticky = (parameters: Record<string, unknown>, position: [number, number] = [0, 0]) =>
+    ({ name: "Sticky Note", type: "n8n-nodes-base.stickyNote", position, parameters });
+  type Converted = { nodes: ConvertedNode[]; annotations?: Array<Record<string, unknown>> };
+
+  it("becomes an annotation with size, colour and flattened Markdown instead of a node", () => {
+    registerNodeDescriptors([HTTP_DESCRIPTOR]);
+    initModals(() => {});
+
+    const out = convertN8nWorkflow({
+      name: "wf",
+      nodes: [
+        n8nNode("A", "n8n-nodes-base.httpRequest", [10, 20]),
+        sticky({ content: "## Fetch\r\n![logo](https://x.test/a.png) **hi** <iframe src=\"https://x.test\"></iframe>", width: 300, height: 120, color: 3 }, [100, 50]),
+      ],
+      connections: {},
+    }) as Converted;
+
+    expect(out.nodes.map(n => n.name)).toEqual(["A"]);
+    expect(out.annotations).toEqual([
+      { id: "note_imported_1", kind: "note", x: 500, y: 250, w: 300, h: 120, text: "# Fetch\nlogo **hi**", color: "red" },
+    ]);
+  });
+
+  it("leaves no fetching tag behind when tags are nested to survive one pass", () => {
+    registerNodeDescriptors([HTTP_DESCRIPTOR]);
+    initModals(() => {});
+
+    const out = convertN8nWorkflow({
+      name: "wf",
+      nodes: [sticky({ content: "a <scr<script>ipt>b <i<img>mg src=x>c" })],
+      connections: {},
+    }) as Converted;
+    expect(out.annotations?.[0]?.text).toBe("a b c");
+  });
+
+  it("leaves out the colour for a custom hex colour and omits annotations when there are no sticky notes", () => {
+    registerNodeDescriptors([HTTP_DESCRIPTOR]);
+    initModals(() => {});
+
+    const custom = convertN8nWorkflow({ name: "wf", nodes: [sticky({ content: "x", color: "#ff00ff" })], connections: {} }) as Converted;
+    expect(custom.annotations?.[0]).not.toHaveProperty("color");
+
+    const none = convertN8nWorkflow({ name: "wf", nodes: [n8nNode("A", "n8n-nodes-base.httpRequest")], connections: {} }) as Converted;
+    expect(none.annotations).toBeUndefined();
   });
 });
 

@@ -15,6 +15,8 @@ export default defineConfig({
     // loaded via a static <link> at build time avoids runtime style
     // injection entirely, with zero CSP loosening.
     cssCodeSplit: false,
+    // The app loads its bundle from disk inside Tauri, so chunk size has no network cost.
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
         codeSplitting: {

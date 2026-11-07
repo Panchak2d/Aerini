@@ -1129,6 +1129,7 @@ mod tests {
             position: Default::default(),
         };
         let wf = Workflow {
+            annotations: vec![],
             schema_version: CURRENT_VERSION.to_string(),
             id: "wf".to_string(),
             name: "wf".to_string(),

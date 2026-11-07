@@ -44,7 +44,7 @@ Chat keeps any number of named conversations per workflow, stored locally so the
 
 ## Configuring Chat
 
-Open **Workflow Settings** in the toolbar and scroll to the **Chat** group. Each setting is per-workflow and saved in the workflow file.
+Open **Workflow Settings** in the toolbar and choose **Chat** in the section list. Each setting is per-workflow and saved in the workflow file.
 
 | Setting | What it does |
 |---|---|

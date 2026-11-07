@@ -10,6 +10,7 @@ import { getNodeTypes, checkBundledNode, loadWorkflow } from "./ipc/workflow";
 import { WorkflowManager } from "./workflow-manager";
 import { RunManager, onBgJobsChanged } from "./run-manager";
 import { initStatusBarFields } from "./statusbar-fields";
+import { initNotesPanel } from "./notes-panel";
 import { initProblemsPanel } from "./problems-panel";
 import { initPerformancePanel } from "./panels/PerformancePanel";
 import {
@@ -33,7 +34,7 @@ import { showToast } from "./toast";
 
 import { showConfirm } from "./confirm";
 import { initInterpolationAutocomplete } from "./interpolation";
-import { openWireDropPicker, openInputWireDropPicker } from "./wire-drop";
+import { openWireDropPicker, openInputWireDropPicker, openPlacePicker } from "./wire-drop";
 import { initOnboarding } from "./onboarding";
 import { getTemplates } from "./templates";
 import { initChecklist } from "./checklist";
@@ -266,11 +267,13 @@ async function init() {
     }
   };
   // canvas.onCanvasChanged is set above in the Always On block
-  canvas.onPaletteRequest = openPalette;
+  canvas.onPaletteRequest = (at) => { if (at) openPlacePicker(canvas, at, setStatus); else openPalette(); };
+  canvas.onInsertOnWireRequest = (conn, at) => openPlacePicker(canvas, at, setStatus, conn);
   canvas.onRunNode        = (nodeId) => runManager.handleRunSingleNode(nodeId, wfManager.currentId, wfManager.currentName);
 
   const perfPanel = initPerformancePanel(wfManager);
   const statusBarFields = initStatusBarFields(canvas, wfManager, perfPanel.refresh);
+  initNotesPanel(canvas);
   refreshProblems = initProblemsPanel(canvas).refresh;
 
   // Wire-drop: connector released on empty space → open node picker at drop point

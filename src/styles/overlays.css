@@ -111,6 +111,7 @@
 @media (prefers-reduced-motion: reduce) {
   #shortcuts-modal, #settings-modal, #wf-settings-modal,
   .shortcuts-box, .settings-box { animation: none; }
+  .settings-rail-item, .settings-segmented-item { transition: none; }
 }
 
 /* ── SHORTCUTS MODAL ────────────────────────────────────────────────────────── */
@@ -165,36 +166,81 @@
 #wf-settings-modal.hidden { display: none; }
 .settings-toggle { width: 38px; height: 22px; appearance: none; background: var(--color-surface-3); border-radius: 11px; cursor: pointer; position: relative; flex-shrink: 0; transition: background .15s, border-color .15s; border: 1px solid var(--bd); }
 .settings-toggle:hover { border-color: var(--t3); }
-.settings-toggle:checked { background: var(--accent); border-color: var(--accent); }
+.settings-toggle:focus { box-shadow: none; }
+.settings-toggle:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.settings-toggle:checked { background: var(--color-focus); border-color: var(--color-focus); }
+.settings-toggle:disabled { opacity: .45; cursor: not-allowed; }
 .settings-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 .settings-toggle:checked::after { transform: translateX(16px); }
-.settings-number-input { flex: 0 0 68px; width: 68px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 7px; text-align: center; }
+.settings-number-input { flex: 0 0 88px; width: 88px; height: 30px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 13px; padding: 3px 8px; text-align: center; }
 /* overrides base.css's global `select { width: 100% }` (higher
    specificity, one class vs. one type selector, wins regardless of source
    order) so the theme picker sizes to its content like the row's other
    controls (.settings-toggle/.settings-number-input) instead of stretching
    across the remaining flex space. */
-.settings-select { flex: 0 0 auto; width: auto; min-width: 140px; }
-.settings-box { background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: 460px; max-height: 80vh; overflow-y: auto; box-shadow: 0 36px 72px rgba(0,0,0,.6); animation: modal-box-in 140ms cubic-bezier(.16,1,.3,1); }
-.settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; color: var(--t1); position: sticky; top: 0; background: var(--bg2); z-index: 1; }
-.settings-body { padding: 14px 20px 18px; display: flex; flex-direction: column; gap: 16px; }
+/* appearance:none because WebKitGTK's native GTK-drawn menulist clips the
+   selected text when a fixed height is combined with the global select
+   padding; the chevron is two themed gradients, so it follows --t2 and needs
+   no image. forced-colors restores the native control, where author
+   backgrounds are dropped. */
+.settings-select {
+  flex: 0 0 auto; width: auto; min-width: 140px; height: 30px; box-sizing: border-box;
+  padding: 0 28px 0 10px; font-size: 13px; line-height: normal; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--t2) 50%), linear-gradient(135deg, var(--t2) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.settings-select option { background: var(--bg2); color: var(--t1); }
+.settings-select[hidden] { display: none; }
+.settings-box { display: flex; flex-direction: column; overflow: hidden; background: var(--bg2); border: 1px solid var(--bd); border-radius: 13px; width: min(720px, calc(100vw - 32px)); height: min(560px, calc(100vh - 32px)); box-shadow: 0 36px 72px rgba(0,0,0,.6); animation: modal-box-in 140ms cubic-bezier(.16,1,.3,1); }
+.settings-box:focus { outline: none; }
+.settings-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--bd); font-size: 15px; font-weight: 600; color: var(--t1); }
+.settings-layout { flex: 1; min-height: 0; display: flex; }
+.settings-rail { flex: 0 0 176px; display: flex; flex-direction: column; gap: 2px; padding: 12px; border-right: 1px solid var(--bd); overflow-y: auto; }
+.settings-rail-item { text-align: left; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--t2); font: inherit; font-size: 13px; padding: 7px 10px; cursor: pointer; transition: background var(--trans), color var(--trans); }
+.settings-rail-item:hover { background: var(--bg3); color: var(--t1); }
+.settings-rail-item[aria-current="true"] { background: var(--bg4); color: var(--t1); font-weight: 500; }
+.settings-rail-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.settings-rail-select { display: none; }
+.settings-body { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px 24px; }
 .settings-group { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; }
 .settings-group:first-child { padding-top: 0; }
 .settings-group + .settings-group { border-top: 1px solid var(--bd); }
 .settings-group-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--t2); }
+.settings-body .settings-group { gap: 0; padding-top: 0; }
+.settings-body .settings-group + .settings-group { border-top: 0; }
+.settings-body .settings-group[hidden] { display: none; }
+.settings-body .settings-group-title { font-size: 15px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--t1); margin-bottom: 8px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; flex-wrap: wrap; }
 .settings-row[hidden] { display: none; }
-#settings-modal .settings-row,
-#wf-settings-modal .settings-row {
-  border-radius: 6px;
-  padding: 6px 8px;
-  margin: 0 -8px;
-  transition: background var(--trans);
+.settings-body .settings-row { min-height: 56px; padding: 10px 0; gap: 8px 16px; border-top: 1px solid var(--bd); }
+.settings-body .settings-group-title + .settings-row { border-top: 0; }
+.settings-body .settings-row > :first-child { flex: 1 1 240px; min-width: 0; }
+.settings-body .settings-row > .settings-row-actions { flex: 0 0 auto; }
+.settings-body .settings-about-text + .settings-row { margin-top: 12px; }
+.settings-control-group { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.theme-swatch { display: inline-flex; border: 1px solid var(--bd); border-radius: 6px; overflow: hidden; }
+.theme-swatch-dot { width: 14px; height: 22px; }
+.settings-segmented { display: inline-flex; flex: 0 0 auto; gap: 2px; padding: 2px; background: var(--bg1); border: 1px solid var(--bd); border-radius: 8px; }
+.settings-segmented-item { background: none; border: 0; border-radius: 6px; color: var(--t2); font: inherit; font-size: 12px; padding: 4px 12px; cursor: pointer; transition: background var(--trans), color var(--trans); }
+.settings-segmented-item:hover { color: var(--t1); }
+.settings-segmented-item[aria-checked="true"] { background: var(--color-focus); color: var(--color-on-action); font-weight: 600; }
+.settings-segmented-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+@media (max-width: 639px) {
+  .settings-layout { flex-direction: column; }
+  .settings-rail { display: none; }
+  .settings-rail-select { display: block; flex: none; width: auto; height: 34px; margin: 12px 16px 0; font-size: 13px; }
+  .settings-body { padding: 16px; }
 }
-#settings-modal .settings-row:hover,
-#wf-settings-modal .settings-row:hover { background: var(--bg3); }
-#wf-settings-modal .settings-row { align-items: flex-start; }
-#wf-settings-modal .settings-row > div { flex: 1; min-width: 0; }
+@media (forced-colors: active) {
+  .settings-select { -webkit-appearance: auto; appearance: auto; }
+  .settings-rail-item[aria-current="true"] { border-color: Highlight; }
+  .settings-segmented-item { forced-color-adjust: none; color: ButtonText; }
+  .settings-segmented-item[aria-checked="true"] { background: Highlight; color: HighlightText; }
+  .settings-segmented-item:focus-visible { outline-color: Highlight; }
+}
 .settings-label { font-size: 13px; color: var(--t1); font-weight: 400; }
 #settings-modal .settings-label,
 #wf-settings-modal .settings-label { font-weight: 500; }
@@ -364,6 +410,53 @@
   background: var(--bd);
   margin: 3px 4px;
 }
+
+.ctx-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+.ctx-menu:focus { outline: none; }
+.ctx-menu-item:focus-visible { background: var(--bg3); color: var(--t1); }
+.ctx-menu-item--danger:focus-visible { background: rgba(248,113,113,.1); color: var(--red); }
+
+.ctx-menu-swatches {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+.ctx-menu-swatch-label {
+  flex: 1;
+  font-size: 12px;
+  color: var(--t2);
+}
+.ctx-menu-swatch {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--bd);
+  cursor: pointer;
+}
+.ctx-menu-swatch:hover { transform: scale(1.15); }
+.ctx-menu-swatch.active { box-shadow: 0 0 0 2px var(--bg2), 0 0 0 3.5px var(--t2); }
+.ctx-menu-swatch:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.ctx-menu-choice {
+  min-width: 24px;
+  height: 20px;
+  padding: 0 5px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1px solid var(--bd);
+  background: transparent;
+  color: var(--t2);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ctx-menu-choice:hover { background: var(--bg3); color: var(--t1); }
+.ctx-menu-choice.active { background: var(--bg3); color: var(--t1); border-color: var(--t2); }
+.ctx-menu-choice:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 
 .canvas-rename-input {

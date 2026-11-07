@@ -4,6 +4,8 @@ import type { CanvasNodeData } from "./Node";
 import { NODE_IDS } from "../node-ids";
 import { getNodeDescriptor } from "./node-registry";
 import { normalizeTags } from "../workflow-tags";
+import { MAX_NOTE_TEXT, MAX_FRAME_TITLE } from "./note-format";
+import { NOTE_MAX_SIZE, noteSizeOf, type NoteStyle } from "./note-geometry";
 
 // Populated by app.ts after ALL_NODES is defined
 export { registerNodeDescriptors } from "./node-registry";
@@ -37,6 +39,86 @@ function chatSettingsEqualDefault(s: ChatSettings): boolean {
       && s.show_branding === DEFAULT_CHAT_SETTINGS.show_branding;
 }
 
+export interface AnnotationDocument {
+  id: string;
+  kind: NoteStyle;
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+  text?: string;
+  title?: string;
+  color?: string;
+  size?: string;
+}
+
+const ANNOTATION_COLORS = new Set(["default", "yellow", "blue", "green", "red"]);
+export const MAX_ANNOTATIONS = 500;
+
+function finiteOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function positiveSize(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(v, NOTE_MAX_SIZE) : null;
+}
+
+function annotationToDocument(n: CanvasNode): AnnotationDocument {
+  const c = n.data.config;
+  const kind = n.noteStyle;
+  const text = String(c["text"] ?? "");
+  const doc: AnnotationDocument = { id: n.data.id, kind, x: n.data.position.x, y: n.data.position.y };
+  const w = positiveSize(c["width"]), h = positiveSize(c["height"]);
+  if (w !== null) doc.w = w;
+  if (h !== null) doc.h = h;
+  if (kind === "frame") {
+    if (text) doc.title = text.slice(0, MAX_FRAME_TITLE);
+  } else if (text) {
+    doc.text = text.slice(0, MAX_NOTE_TEXT);
+  }
+  const color = String(c["color"] ?? "default");
+  if (color !== "default" && ANNOTATION_COLORS.has(color)) doc.color = color;
+  const size = noteSizeOf(c);
+  if (size !== "m") doc.size = size;
+  return doc;
+}
+
+/** Returns null for an unknown `kind`, so a file from a newer build never turns an unrecognised annotation into a note. */
+function annotationFromDocument(raw: Record<string, unknown>, used: Set<string>): { node: CanvasNode; replaced: boolean } | null {
+  if (raw.kind !== undefined && raw.kind !== "note" && raw.kind !== "frame") return null;
+  const style: NoteStyle = raw.kind === "frame" ? "frame" : "note";
+  const id = resolveImportedId(raw.id, "note", used);
+  const text = style === "frame"
+    ? (typeof raw.title === "string" ? raw.title : typeof raw.text === "string" ? raw.text : "").slice(0, MAX_FRAME_TITLE)
+    : (typeof raw.text === "string" ? raw.text : "").slice(0, MAX_NOTE_TEXT);
+  const config: Record<string, unknown> = {
+    style,
+    text,
+    color: typeof raw.color === "string" && ANNOTATION_COLORS.has(raw.color) ? raw.color : "default",
+  };
+  const size = noteSizeOf({ size: raw.size });
+  if (size !== "m") config.size = size;
+  const w = positiveSize(raw.w), h = positiveSize(raw.h);
+  if (w !== null) config.width = w;
+  if (h !== null) config.height = h;
+  const node = new CanvasNode({
+    id: id.id,
+    node_type_id: NODE_IDS.NOTE,
+    node_type: "utility",
+    name: style === "frame" ? "Group" : "Note",
+    config,
+    credentials: {},
+    position: { x: finiteOr(raw.x, 0), y: finiteOr(raw.y, 0) },
+    ports: { inputs: [], outputs: [] },
+    input_schema: {},
+    output_schema: {},
+    retry: { max_attempts: 1, backoff_ms: 500 },
+    fallback_node: null,
+    dynamic_ports: false,
+  });
+  return { node, replaced: id.replaced };
+}
+
 export interface WorkflowDocument {
   schema_version: string;
   id: string;
@@ -44,6 +126,7 @@ export interface WorkflowDocument {
   description: string;
   nodes: object[];
   edges: object[];
+  annotations?: AnnotationDocument[];
   metadata: {
     author: string;
     created_at: string;
@@ -83,9 +166,9 @@ export function serialize(
     id,
     name,
     description: "",
-    // Note nodes are canvas annotations — they have no Rust implementation
-    // and must not appear in the JSON sent to run_workflow. Any connector
-    // attached to a note is also excluded.
+    // Notes and frames are canvas annotations with no Rust implementation, so
+    // they are written to `annotations` and never to `nodes`. Any connector
+    // attached to one is excluded too.
     nodes: Array.from(nodes.values())
       .filter(n => n.data.node_type_id !== NODE_IDS.NOTE)
       .map(n => n.toWorkflowNode()),
@@ -109,6 +192,8 @@ export function serialize(
       collection_id: collectionId ?? null,
     },
   };
+  const annotations = Array.from(nodes.values()).filter(n => n.data.node_type_id === NODE_IDS.NOTE);
+  if (annotations.length) doc.annotations = annotations.map(annotationToDocument);
   if (parallelExecution) {
     doc.parallel_execution = true;
     if (maxConcurrentNodes !== undefined && maxConcurrentNodes !== 8) {
@@ -164,7 +249,7 @@ export function deserialize(json: string): {
 } {
   const doc = JSON.parse(json) as {
     id?: string; name?: string;
-    nodes?: unknown[]; edges?: unknown[];
+    nodes?: unknown[]; edges?: unknown[]; annotations?: unknown[];
     parallel_execution?: boolean;
     max_concurrent_nodes?: number;
     unlimited_duration?: boolean;
@@ -182,8 +267,29 @@ export function deserialize(json: string): {
   let fixedNodeIds = 0;
   let fixedEdgeIds = 0;
   let droppedEdges = 0;
+  let skippedAnnotations = 0;
+  let keptAnnotations = 0;
+  const annotationIds = new Set<string>();
+
+  const addAnnotation = (rawAnnotation: Record<string, unknown>): void => {
+    if (keptAnnotations >= MAX_ANNOTATIONS) { skippedAnnotations++; return; }
+    try {
+      const made = annotationFromDocument(rawAnnotation, usedNodeIds);
+      if (!made) { skippedAnnotations++; return; }
+      if (made.replaced) fixedNodeIds++;
+      nodes.set(made.node.data.id, made.node);
+      annotationIds.add(made.node.data.id);
+      keptAnnotations++;
+    } catch { skippedAnnotations++; }
+  };
 
   for (const raw of (doc.nodes ?? []) as Array<Record<string, unknown>>) {
+    if (raw.node_type_id === NODE_IDS.NOTE) {
+      const cfg = (raw.config as Record<string, unknown> | undefined) ?? {};
+      const pos = (raw.position as { x?: unknown; y?: unknown } | undefined) ?? {};
+      addAnnotation({ id: raw.id, kind: cfg["style"] === "frame" ? "frame" : "note", x: pos.x, y: pos.y, w: cfg["width"], h: cfg["height"], text: cfg["text"], color: cfg["color"] });
+      continue;
+    }
     try {
       const nodeId = resolveImportedId(raw.id, "node", usedNodeIds);
       if (nodeId.replaced) fixedNodeIds++;
@@ -211,6 +317,13 @@ export function deserialize(json: string): {
     } catch { /* skip malformed node */ }
   }
 
+  if (Array.isArray(doc.annotations)) {
+    for (const raw of doc.annotations as unknown[]) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) { skippedAnnotations++; continue; }
+      addAnnotation(raw as Record<string, unknown>);
+    }
+  }
+
   for (const raw of (doc.edges ?? []) as Array<Record<string, unknown>>) {
     try {
       const edgeId = resolveImportedId(raw.id, "e", usedEdgeIds);
@@ -225,7 +338,8 @@ export function deserialize(json: string): {
         on_success: (raw.on_success as string | null) ?? null,
         on_failure: (raw.on_failure as string | null) ?? null,
       });
-      if (nodes.has(c.data.from_node) && nodes.has(c.data.to_node)) {
+      const ends = [c.data.from_node, c.data.to_node];
+      if (ends.every(id => nodes.has(id) && !annotationIds.has(id))) {
         connectors.set(c.data.id, c);
       } else {
         droppedEdges++;
@@ -237,6 +351,8 @@ export function deserialize(json: string): {
   if (fixedNodeIds) importWarnings.push(`${fixedNodeIds} node id${fixedNodeIds === 1 ? "" : "s"} had an invalid or duplicate format and ${fixedNodeIds === 1 ? "was" : "were"} replaced.`);
   if (fixedEdgeIds) importWarnings.push(`${fixedEdgeIds} edge id${fixedEdgeIds === 1 ? "" : "s"} had an invalid or duplicate format and ${fixedEdgeIds === 1 ? "was" : "were"} replaced.`);
   if (droppedEdges) importWarnings.push(`${droppedEdges} edge${droppedEdges === 1 ? "" : "s"} referencing a missing node ${droppedEdges === 1 ? "was" : "were"} dropped.`);
+
+  if (skippedAnnotations) importWarnings.push(`${skippedAnnotations} note${skippedAnnotations === 1 ? "" : "s"} or frame${skippedAnnotations === 1 ? "" : "s"} could not be read and ${skippedAnnotations === 1 ? "was" : "were"} skipped.`);
 
   return {
     id,

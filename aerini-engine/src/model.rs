@@ -77,6 +77,56 @@ pub struct CanvasPosition {
     pub y: f64,
 }
 
+// ── Canvas annotations (stored with the workflow, ignored by executor) ───────
+
+/// Most annotations a workflow keeps; extras are dropped on load.
+pub const MAX_ANNOTATIONS: usize = 500;
+/// Longest annotation `text`, in characters; longer text is cut on load.
+pub const MAX_ANNOTATION_TEXT: usize = 10_000;
+/// Longest annotation `title`, in characters; a longer title is cut on load.
+pub const MAX_ANNOTATION_TITLE: usize = 120;
+
+fn default_annotation_kind() -> String { "note".to_string() }
+
+/// A sticky note or group frame drawn on the canvas. It is never executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Annotation {
+    /// Unique ID within this workflow.
+    pub id: String,
+    /// `"note"` (a sticky note) or `"frame"` (a titled box that groups nodes).
+    #[serde(default = "default_annotation_kind")]
+    pub kind: String,
+    /// Left edge on the canvas.
+    pub x: f64,
+    /// Top edge on the canvas.
+    pub y: f64,
+    /// Width in canvas units. Absent means the default for the kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    /// Height in canvas units. Absent means a note grows to fit its text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+    /// A note's text. Supports **bold**, [links](https://example.com), `- [ ]` checkboxes and a leading `# ` heading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// A frame's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// One of default, yellow, blue, green or red. Anything else is shown as default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Text size: one of s, m, l or xl. Absent or anything else is shown as m. A note's size applies to its text; a frame's, to its title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+}
+
+fn truncate_chars(s: &mut String, max: usize) {
+    if let Some((idx, _)) = s.char_indices().nth(max) {
+        s.truncate(idx);
+    }
+}
+
 // ── Workflow-level Chat Panel settings ────────────────────────────────────────
 
 /// Per-workflow Chat Panel feature toggles, configured in the Workflow Settings
@@ -312,6 +362,9 @@ pub struct Workflow {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(description = "Workflow-scoped feature settings. Currently only the Chat panel toggles. Omitted fields use their defaults."))]
     pub settings: WorkflowSettings,
+    /// Sticky notes and group frames drawn on the canvas. The executor ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<Annotation>,
 }
 
 impl Workflow {
@@ -330,6 +383,7 @@ impl Workflow {
             parallel_execution: false,
             max_concurrent_nodes: None,
             settings: WorkflowSettings::default(),
+            annotations: vec![],
         }
     }
 
@@ -347,8 +401,20 @@ impl Workflow {
         crate::migration::MigrationEngine::new()
             .apply(&mut raw)
             .map_err(|e| format!("Schema migration error: {}", e))?;
-        serde_json::from_value(raw)
-            .map_err(|e| format!("Workflow deserialization error: {}", e))
+        let mut wf: Workflow = serde_json::from_value(raw)
+            .map_err(|e| format!("Workflow deserialization error: {}", e))?;
+        wf.limit_annotations();
+        Ok(wf)
+    }
+
+    /// Cuts annotations to the documented caps. A save never fails over a note,
+    /// so oversized input is trimmed instead of rejected.
+    fn limit_annotations(&mut self) {
+        self.annotations.truncate(MAX_ANNOTATIONS);
+        for a in &mut self.annotations {
+            if let Some(t) = a.text.as_mut() { truncate_chars(t, MAX_ANNOTATION_TEXT); }
+            if let Some(t) = a.title.as_mut() { truncate_chars(t, MAX_ANNOTATION_TITLE); }
+        }
     }
 
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
@@ -518,6 +584,43 @@ mod settings_tests {
         // Untouched fields must still carry their defaults through the round trip.
         assert!(back.settings.chat.allow_image_responses);
         assert!(back.settings.chat.session_persistence);
+    }
+
+    #[test]
+    fn annotations_round_trip_and_are_omitted_when_empty() {
+        let json_str = r#"{"schema_version":"1.0","id":"wf-4","name":"N","nodes":[],"edges":[],
+            "annotations":[{"id":"a1","x":10.0,"y":20.0,"w":300.0,"text":"**hi**","color":"blue","size":"xl"},
+                           {"id":"a2","kind":"frame","x":0.0,"y":0.0,"w":400.0,"h":250.0,"title":"Fetch"}]}"#;
+        let wf = Workflow::from_json(json_str).expect("workflow with annotations must load");
+        assert_eq!(wf.annotations.len(), 2);
+        assert_eq!(wf.annotations[0].kind, "note");
+        assert_eq!(wf.annotations[0].h, None);
+        assert_eq!(wf.annotations[0].size.as_deref(), Some("xl"));
+        assert_eq!(wf.annotations[1].size, None);
+        assert_eq!(wf.annotations[1].kind, "frame");
+
+        let saved = serde_json::to_string(&wf).unwrap();
+        assert!(saved.contains("\"annotations\""));
+        let back: Workflow = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.annotations[1].h, Some(250.0));
+        assert_eq!(back.annotations[1].title.as_deref(), Some("Fetch"));
+        assert_eq!(back.annotations[0].size.as_deref(), Some("xl"));
+        assert!(!serde_json::to_string(&back.annotations[1]).unwrap().contains("size"));
+
+        let bare = Workflow::from_json(r#"{"schema_version":"1.0","id":"wf-5","name":"B","nodes":[],"edges":[]}"#).unwrap();
+        assert!(!serde_json::to_string(&bare).unwrap().contains("annotations"));
+    }
+
+    #[test]
+    fn annotation_caps_trim_instead_of_rejecting() {
+        let many: Vec<String> = (0..MAX_ANNOTATIONS + 5)
+            .map(|i| format!(r#"{{"id":"a{i}","x":0,"y":0,"text":"{}","title":"{}"}}"#, "é".repeat(MAX_ANNOTATION_TEXT + 1), "t".repeat(MAX_ANNOTATION_TITLE + 1)))
+            .collect();
+        let json_str = format!(r#"{{"schema_version":"1.0","id":"wf-6","name":"C","nodes":[],"edges":[],"annotations":[{}]}}"#, many.join(","));
+        let wf = Workflow::from_json(&json_str).expect("oversized annotations must still load");
+        assert_eq!(wf.annotations.len(), MAX_ANNOTATIONS);
+        assert_eq!(wf.annotations[0].text.as_ref().unwrap().chars().count(), MAX_ANNOTATION_TEXT);
+        assert_eq!(wf.annotations[0].title.as_ref().unwrap().chars().count(), MAX_ANNOTATION_TITLE);
     }
 
     #[test]

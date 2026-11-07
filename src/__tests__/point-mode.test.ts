@@ -194,7 +194,7 @@ describe("canvas input", () => {
     const { field } = setup(schema, hit);
     field.focus();
     const openNodeConfig = vi.fn();
-    const canvas = { evSX: () => ({ sx: 0, sy: 0 }), s2w: () => ({ x: 0, y: 0 }), nodes: new Map([["up", { containsPoint: () => true }]]), selectNode: vi.fn(), openNodeConfig };
+    const canvas = { evSX: () => ({ sx: 0, sy: 0 }), s2w: () => ({ x: 0, y: 0 }), nodeAt: () => ({ containsPoint: () => true }), noteAt: () => null, selectNode: vi.fn(), openNodeConfig };
     const ih = Object.create(InputHandler.prototype) as { canvas: unknown; onDbl(e: MouseEvent): void };
     ih.canvas = canvas;
     ih.onDbl(new MouseEvent("dblclick"));

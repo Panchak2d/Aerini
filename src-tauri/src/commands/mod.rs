@@ -2,6 +2,7 @@ pub mod chat;
 pub mod credentials;
 pub mod export;
 pub mod memory;
+pub mod note_link;
 pub mod oauth;
 pub mod performance;
 pub mod plugins;
