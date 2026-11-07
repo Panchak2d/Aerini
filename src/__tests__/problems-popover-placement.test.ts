@@ -14,7 +14,7 @@ const chip = { left: 1200, top: 746 };
 const WIDTH = 360;
 
 function zIndexOf(css: string, selector: string): number {
-  const rule = css.match(new RegExp(`${selector.replace(/[#.]/g, "\\$&")}\\s*\\{[^}]*\\}`));
+  const rule = css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`));
   const z = rule?.[0].match(/z-index:\s*(\d+)/);
   if (!z) throw new Error(`no z-index on ${selector}`);
   return Number(z[1]);
