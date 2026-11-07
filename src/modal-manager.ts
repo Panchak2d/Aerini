@@ -165,7 +165,7 @@ const N8N_STICKY_NOTE = "n8n-nodes-base.stickyNote";
 /** n8n colour indices (design-system sticky tokens): 1 yellow, 2 gold, 3 red, 4 green, 5 blue, 6 purple, 7 neutral. A custom hex colour has no index and falls back to default. */
 const N8N_STICKY_COLORS: Record<number, string> = { 1: "yellow", 2: "yellow", 3: "red", 4: "green", 5: "blue", 6: "blue", 7: "default" };
 
-const N8N_FETCHING_TAGS_RE = /<\/?(?:img|iframe|video|audio|source|embed|object|script|style)\b[^>\n]*>/gi;
+const N8N_FETCHING_TAGS_RE = /<\/?(?:img|iframe|video|audio|source|embed|object|script|style)\b[^>]*>/gi;
 
 /** n8n notes are CommonMark. Aerini draws bold, links, task lines and one heading level, so images and embeds become plain text, every heading becomes the one level, and the rest stays as typed. */
 function n8nMarkdownToNoteText(src: string): string {
