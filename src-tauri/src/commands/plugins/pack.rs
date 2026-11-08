@@ -23,28 +23,44 @@ pub(super) struct PackManifest {
     pub(super) files: Vec<String>,
 }
 
-/// `pack_id` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` — same discipline as
-/// a plugin `type_id`, reverse-domain recommended. Hand-rolled rather than
+pub(super) const PACK_ID_MAX_LEN: usize = 64;
+
+/// Windows resolves these names to devices whatever follows them: `CON`,
+/// `CON.txt` and `CON.example.aerini-pack.json` all open the console, not a
+/// file. The match is on the text before the first dot, ignoring case and
+/// trailing spaces. Superscript digits are reserved on current Windows
+/// versions alongside ASCII ones.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name).trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|prefix| {
+        base.strip_prefix(*prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_digit() || matches!(c, '\u{b9}' | '\u{b2}' | '\u{b3}'))
+        })
+    })
+}
+
+/// `pack_id` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`, be at most
+/// `PACK_ID_MAX_LEN` characters, and not be a Windows device name. It becomes
+/// part of a filename (`<pack_id>.aerini-pack.json`) on every platform, so the
+/// same string has to be a safe filename everywhere. Hand-rolled rather than
 /// pulling in a `regex` dependency for one fixed, simple charset check.
 pub(super) fn is_valid_pack_id(id: &str) -> bool {
+    if id.len() > PACK_ID_MAX_LEN {
+        return false;
+    }
     let mut chars = id.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) && !is_windows_reserved_name(id)
 }
 
-/// Parses and validates `raw` as a `pack.json` manifest. Fails closed on
-/// anything structurally wrong — unsupported schema version, an invalid
-/// `pack_id`, an empty/oversized/duplicate member list, or a member
-/// filename that isn't a bare `.wasm` name — rather than sanitizing or
-/// mangling any of it.
 fn is_portable_filename(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
     if name.chars().any(|c| c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
         return false;
     }
@@ -52,10 +68,14 @@ fn is_portable_filename(name: &str) -> bool {
     if stem.is_empty() || stem.ends_with([' ', '.']) {
         return false;
     }
-    let device = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
-    !RESERVED.contains(&device.as_str())
+    !is_windows_reserved_name(name)
 }
 
+/// Parses and validates `raw` as a `pack.json` manifest. Fails closed on
+/// anything structurally wrong — unsupported schema version, an invalid
+/// `pack_id`, an empty/oversized/duplicate member list, or a member
+/// filename that isn't a bare `.wasm` name — rather than sanitizing or
+/// mangling any of it.
 pub(super) fn parse_pack_manifest(raw: &[u8]) -> Result<PackManifest, String> {
     if raw.len() as u64 > PACK_MANIFEST_MAX_BYTES {
         return Err(format!("pack_invalid: {PACK_MANIFEST_ENTRY_NAME} exceeds the maximum manifest size"));
@@ -71,7 +91,7 @@ pub(super) fn parse_pack_manifest(raw: &[u8]) -> Result<PackManifest, String> {
     }
     if !is_valid_pack_id(&manifest.pack_id) {
         return Err(format!(
-            "pack_invalid: '{}' is not a valid pack_id (must match ^[A-Za-z0-9][A-Za-z0-9._-]*$)",
+            "pack_invalid: '{}' is not a valid pack_id (letters, digits, '.', '_' and '-' only; must start with a letter or digit; at most {PACK_ID_MAX_LEN} characters; not a reserved system name such as CON or NUL)",
             manifest.pack_id
         ));
     }
@@ -110,6 +130,16 @@ pub(super) fn parse_pack_manifest(raw: &[u8]) -> Result<PackManifest, String> {
 /// helper needed.
 pub(super) fn pack_manifest_path(plugin_dir: &Path, pack_id: &str) -> PathBuf {
     plugin_dir.join(format!("{pack_id}.aerini-pack.json"))
+}
+
+/// The `pack_id` of the installed pack that lists `filename` as a member, if
+/// any. Case-insensitive: on case-insensitive filesystems two spellings are
+/// one file.
+pub(super) fn pack_owning_member<'a>(packs: &'a HashMap<String, PackManifest>, filename: &str) -> Option<&'a str> {
+    packs
+        .iter()
+        .find(|(_, m)| m.files.iter().any(|f| f.eq_ignore_ascii_case(filename)))
+        .map(|(id, _)| id.as_str())
 }
 
 /// Scans `plugin_dir` for `*.aerini-pack.json` manifests and returns every

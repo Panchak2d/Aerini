@@ -107,7 +107,7 @@ Run a JavaScript snippet with a full Node.js runtime and return its result.
 
 **Ports:** In → Out, Error.
 
-**Output:** `result` (whatever you passed to `output()`), `stdout` (the text the code printed, such as `console.log` output), `duration_ms`, `truncated`, and `_sandbox_partial` (present and `true` on macOS when the code sandbox is active: ESM import restrictions are enforced there, but the CPU/memory limits are Linux-only and don't apply on macOS).
+**Output:** `result` (whatever you passed to `output()`), `stdout` (the text the code printed, such as `console.log` output), `duration_ms`, `truncated`, and `_sandbox_partial` (present and `true` on macOS and Windows when the code sandbox is active: import and permission restrictions are enforced there, but the CPU/memory limits are Linux-only and don't apply).
 
 **Gotcha:** counted among the "dangerous" nodes (see Shell Command above); triggers the same confirmation dialog and canvas badge. `process.env` never includes variables whose names start with `AERINI_` unless `aerini-server api` lists them in `--allow-env-vars`.
 

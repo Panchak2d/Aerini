@@ -18,6 +18,14 @@ import { showConfirm } from "../confirm";
 import { checkChatReadiness, type ChatGraphEdge, type ChatGraphNode, type ReadinessIssue } from "../chat/readiness";
 import { chatMessageExpr } from "../chat/chat-defaults";
 
+// Chat text is model/attacker-influenced. Only absolute http(s) links survive (a relative or
+// non-web href would navigate the app webview away); form controls are dropped (phishing UI).
+const CHAT_SANITIZE_CONFIG = {
+  ALLOWED_URI_REGEXP: /^https?:/i,
+  FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "option"],
+  FORBID_ATTR: ["style"],
+};
+
 type Toast = (msg: string, type?: "success" | "error" | "info") => void;
 
 /** How long a reply may take before the typing bubble gains a "still working" note. Not a failure threshold. */
@@ -1188,9 +1196,9 @@ export class ChatPanel {
 
   private renderMarkdown(text: string): string {
     try {
-      return DOMPurify.sanitize(marked.parse(text) as string);
+      return DOMPurify.sanitize(marked.parse(text) as string, CHAT_SANITIZE_CONFIG);
     } catch {
-      return DOMPurify.sanitize(`<p>${escapeHtml(text)}</p>`);
+      return DOMPurify.sanitize(`<p>${escapeHtml(text)}</p>`, CHAT_SANITIZE_CONFIG);
     }
   }
 

@@ -123,11 +123,11 @@ enum Command {
         #[arg(long)]
         file_sandbox_dir: Option<PathBuf>,
 
-        /// Required to start with --allow-code --code-sandbox on macOS.
-        /// --code-sandbox on macOS only applies ESM module import restrictions;
-        /// CPU/memory setrlimit() resource caps are Linux-only. Passing this flag
-        /// acknowledges that a runaway Code node can exhaust host CPU/memory on
-        /// macOS and that the per-node timeout is the only effective cap.
+        /// Required to start with --allow-code --code-sandbox on macOS or Windows.
+        /// --code-sandbox there applies module import and permission restrictions
+        /// only; CPU/memory setrlimit() resource caps are Linux-only. Passing this
+        /// flag acknowledges that a runaway Code node can exhaust host CPU/memory
+        /// and that the per-node timeout is the only effective cap.
         #[arg(long, default_value_t = false)]
         i_acknowledge_partial_sandbox: bool,
 
@@ -631,16 +631,17 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
         );
     }
 
-    // Only consulted on macOS; avoid an unused-variable warning on other platforms.
+    // Only consulted off Linux; avoid an unused-variable warning on Linux.
     let _ = i_acknowledge_partial_sandbox;
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     if allow_code && code_sandbox && !i_acknowledge_partial_sandbox {
         tracing::error!(
-            "Refusing to start: --allow-code --code-sandbox is set on macOS, where \
-             --code-sandbox is PARTIAL. ESM module restrictions apply, but CPU/memory \
-             setrlimit() resource limits are Linux-only — a runaway script can exhaust \
-             host CPU and memory. Pass --i-acknowledge-partial-sandbox to start anyway, \
-             or deploy on Linux for full sandboxing."
+            "Refusing to start: --allow-code --code-sandbox is set on {}, where \
+             --code-sandbox is PARTIAL. Module import and permission restrictions apply, \
+             but CPU/memory setrlimit() resource limits are Linux-only — a runaway script \
+             can exhaust host CPU and memory. Pass --i-acknowledge-partial-sandbox to start \
+             anyway, or deploy on Linux for full sandboxing.",
+            std::env::consts::OS
         );
         std::process::exit(1);
     }
@@ -864,7 +865,7 @@ async fn serve_mode(ServeArgs { config_path, port_override, bind, trusted_proxy_
     let listener = tokio::net::TcpListener::bind(&addr).await
         .unwrap_or_else(|e| { tracing::error!("Cannot bind {}: {}", addr, e); std::process::exit(1); });
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("Status server error");
+    util::serve_http(listener, app, std::future::pending::<()>()).await.expect("Status server error");
 }
 
 async fn api_mode(cfg: api_server::ServerConfig) {
@@ -940,11 +941,11 @@ async fn api_mode(cfg: api_server::ServerConfig) {
         eprintln!("└─────────────────────────────────────────────────────────────────────┘");
         eprintln!();
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     if !code_exec_disabled && cfg.code_sandbox {
         eprintln!();
-        eprintln!("WARNING: --code-sandbox is PARTIAL on macOS.");
-        eprintln!("  ESM module restrictions apply, but CPU/memory setrlimit() is Linux-only.");
+        eprintln!("WARNING: --code-sandbox is PARTIAL on {}.", std::env::consts::OS);
+        eprintln!("  Module import and permission restrictions apply, but CPU/memory setrlimit() is Linux-only.");
         eprintln!("  A runaway script can exhaust system resources. Deploy on Linux for full sandboxing.");
         eprintln!();
     }

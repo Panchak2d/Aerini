@@ -83,3 +83,6 @@ docs/.vitepress/dist/
 
 # Python bytecode
 __pycache__/
+
+# Local Docker smoke-test output.
+smoke.log

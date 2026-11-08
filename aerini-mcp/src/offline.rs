@@ -102,14 +102,10 @@ mod imp {
 
     fn write_file(dir: &Path, path: &Path, content: &str, overwrite: bool) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("Not written: cannot create {}: {e}", dir.display()))?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true);
         if overwrite {
-            options.create(true).truncate(true);
-        } else {
-            options.create_new(true);
+            return replace_file(path, content);
         }
-        let mut file = options.open(path).map_err(|e| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 format!("Not written: {} already exists; pass overwrite=true to replace it.", path.display())
             } else {
@@ -120,9 +116,31 @@ mod imp {
             .map_err(|e| format!("Not written: cannot write {}: {e}", path.display()))
     }
 
+    /// Stages the content in a new file beside `path` and renames it into place, so a symlink
+    /// already sitting at `path` is replaced rather than written through, and a failed write
+    /// never leaves a truncated workflow behind.
+    fn replace_file(path: &Path, content: &str) -> Result<(), String> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let staging = path.with_file_name(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
+        let staged = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .and_then(|mut f| f.write_all(content.as_bytes()).and_then(|()| f.sync_all()))
+            .and_then(|()| std::fs::rename(&staging, path));
+        staged.map_err(|e| {
+            let _ = std::fs::remove_file(&staging);
+            format!("Not written: cannot write {}: {e}", path.display())
+        })
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::file_name;
+        use super::{file_name, write_file};
 
         #[test]
         fn file_names_are_flat_safe_and_never_empty() {
@@ -133,6 +151,39 @@ mod imp {
             assert_eq!(file_name("NUL"), "_NUL.aerini");
             assert_eq!(file_name("com1.v2"), "_com1.v2.aerini");
             assert_eq!(file_name("com10"), "com10.aerini");
+        }
+
+        fn scratch_dir(tag: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!("aerini-mcp-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        }
+
+        #[test]
+        fn overwrite_replaces_the_file_and_leaves_no_staging_file() {
+            let dir = scratch_dir("replace");
+            let path = dir.join("w.aerini");
+            write_file(&dir, &path, "one", false).unwrap();
+            assert!(write_file(&dir, &path, "two", false).is_err());
+            write_file(&dir, &path, "two", true).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn overwrite_replaces_a_symlink_instead_of_writing_through_it() {
+            let dir = scratch_dir("symlink");
+            std::fs::create_dir_all(&dir).unwrap();
+            let victim = dir.join("victim.txt");
+            std::fs::write(&victim, "keep").unwrap();
+            let path = dir.join("w.aerini");
+            std::os::unix::fs::symlink(&victim, &path).unwrap();
+            write_file(&dir, &path, "workflow", true).unwrap();
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "workflow");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

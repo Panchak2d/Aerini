@@ -4,6 +4,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,13 @@ use crate::nodes::util::{scrub_url_in_error, Replay, SsrfPolicy, SsrfRedisResolv
 const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REDIS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a pool dialled at a pinned IP address is reused before its host name is resolved and
+/// checked again, so a moved or failed address is followed within this time.
+const PINNED_POOL_TTL: Duration = Duration::from_secs(300);
+
+/// Most addresses of one host name tried, in order, when the pool is first dialled.
+const MAX_PINNED_ADDRS: usize = 3;
 
 /// Most pools or connections cached per backend. A workflow that dials a
 /// different URL or file each run replaces the least recently used entry
@@ -49,6 +57,7 @@ fn redis_pool_key(url: &str, policy: SsrfPolicy) -> String {
 struct PoolEntry<P> {
     pool:      P,
     last_used: Instant,
+    expires:   Option<Instant>,
 }
 
 /// SQLite pools are evicted on the same idle-timeout schedule as the other
@@ -84,7 +93,12 @@ impl<P: Clone> PoolCache<P> {
     }
 
     fn touch(&self, key: &str) -> Option<P> {
-        self.ready().get_mut(key).map(|entry| {
+        let mut ready = self.ready();
+        if ready.get(key).is_some_and(|entry| entry.expires.is_some_and(|at| Instant::now() >= at)) {
+            ready.remove(key);
+            return None;
+        }
+        ready.get_mut(key).map(|entry| {
             entry.last_used = Instant::now();
             entry.pool.clone()
         })
@@ -104,6 +118,15 @@ impl<P: Clone> PoolCache<P> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<P, String>>,
     {
+        self.get_or_connect_for(key, None, connect).await
+    }
+
+    /// Like `get_or_connect`, but a pool dialled here is dropped from the cache after `ttl`.
+    async fn get_or_connect_for<F, Fut>(&self, key: String, ttl: Option<Duration>, connect: F) -> Result<P, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<P, String>>,
+    {
         if let Some(pool) = self.touch(&key) {
             return Ok(pool);
         }
@@ -115,7 +138,8 @@ impl<P: Clone> PoolCache<P> {
                 None => connect().await.inspect(|pool| {
                     let mut ready = self.ready();
                     make_room(&mut ready);
-                    ready.insert(key.clone(), PoolEntry { pool: pool.clone(), last_used: Instant::now() });
+                    let now = Instant::now();
+                    ready.insert(key.clone(), PoolEntry { pool: pool.clone(), last_used: now, expires: ttl.map(|t| now + t) });
                 }),
             }
         };
@@ -135,25 +159,80 @@ static REDIS_CONNS: Lazy<PoolCache<redis::aio::MultiplexedConnection>> = Lazy::n
 
 // ── Connection target check ───────────────────────────────────────────────────
 
+/// What the Postgres or MySQL driver may dial for a checked target.
+pub(super) struct SqlxTarget {
+    /// Validated addresses to dial in order, in place of the host name. Empty means the driver
+    /// dials the URL's host as written.
+    pub(super) pinned: Vec<IpAddr>,
+    /// The URL's host is a DNS name that `pinned` replaces.
+    pub(super) from_name: bool,
+}
+
+impl SqlxTarget {
+    /// Pools dialled at different addresses must not share a cache entry.
+    fn cache_key(&self, url: &str) -> String {
+        if self.pinned.is_empty() {
+            return pool_key(url);
+        }
+        let addrs: Vec<String> = self.pinned.iter().map(|ip| ip.to_string()).collect();
+        pool_key(&format!("{url}\0{}", addrs.join(",")))
+    }
+
+    fn pool_ttl(&self) -> Option<Duration> {
+        self.from_name.then_some(PINNED_POOL_TTL)
+    }
+
+    fn connect_hint(&self) -> &'static str {
+        if self.from_name {
+            " (the connection was made to the resolved IP address, so no TLS server name was sent; \
+             a service that routes by server name needs sslmode=verify-full or ssl-mode=VERIFY_IDENTITY)"
+        } else {
+            ""
+        }
+    }
+}
+
+/// The addresses a driver is told to dial instead of `host`, or none when the driver must keep the
+/// name. The driver resolves the host name again when it connects, so a DNS server that answers
+/// differently the second time could steer the connection to an internal address. Dialling the
+/// validated address closes that, but the driver also uses the host as the TLS server name, so a
+/// name is kept only when the TLS mode verifies it (`verify-full`, `VERIFY_IDENTITY`): there a
+/// rebound host fails the certificate check. Addresses are sorted and capped so the same host
+/// maps to one cache entry however its answers are ordered.
+pub(super) fn pinned_addresses(addrs: &[IpAddr], is_domain: bool, verifies_hostname: bool) -> Vec<IpAddr> {
+    if is_domain && verifies_hostname {
+        return Vec::new();
+    }
+    let mut pinned = addrs.to_vec();
+    pinned.sort();
+    pinned.dedup();
+    pinned.truncate(MAX_PINNED_ADDRS);
+    pinned
+}
+
 /// SSRF check on the host and port the Postgres or MySQL driver will dial. The
 /// driver lets query parameters (`?host=`, `?hostaddr=`, `?port=`, `?socket=`)
 /// override the URL's own host, so the URL host alone proves nothing. Unix
 /// sockets are refused: they bypass every network check.
-pub(super) async fn check_sqlx_target(url: &str, mysql: bool, policy: SsrfPolicy) -> Result<(), String> {
+pub(super) async fn check_sqlx_target(url: &str, mysql: bool, policy: SsrfPolicy) -> Result<SqlxTarget, String> {
     use std::str::FromStr;
-    let (host, port, socket) = if mysql {
+    let (host, port, socket, verifies_hostname) = if mysql {
         let o = sqlx::mysql::MySqlConnectOptions::from_str(url)
             .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
-        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some())
+        let verifies = matches!(o.get_ssl_mode(), sqlx::mysql::MySqlSslMode::VerifyIdentity);
+        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some(), verifies)
     } else {
         let o = sqlx::postgres::PgConnectOptions::from_str(url)
             .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
-        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some() || o.get_host().starts_with('/'))
+        let verifies = matches!(o.get_ssl_mode(), sqlx::postgres::PgSslMode::VerifyFull);
+        (o.get_host().to_string(), o.get_port(), o.get_socket().is_some() || o.get_host().starts_with('/'), verifies)
     };
     if socket {
         return Err("Unix socket connections are not permitted. Use a host name or IP address.".to_string());
     }
-    crate::nodes::util::check_db_host_ssrf(&host, port, policy).await
+    let validated = crate::nodes::util::resolve_db_host_validated(&host, port, policy).await?;
+    let pinned = pinned_addresses(&validated.addrs, validated.is_domain, verifies_hostname);
+    Ok(SqlxTarget { from_name: validated.is_domain && !pinned.is_empty(), pinned })
 }
 
 // ── SQLite helpers ────────────────────────────────────────────────────────────
@@ -205,7 +284,7 @@ pub(super) fn get_sqlite_pool(path: &str) -> Result<Pool<SqliteConnectionManager
             SQLITE_POOLS.remove(&key);
         }
     }
-    SQLITE_POOLS.insert(path.to_string(), PoolEntry { pool: pool.clone(), last_used: Instant::now() });
+    SQLITE_POOLS.insert(path.to_string(), PoolEntry { pool: pool.clone(), last_used: Instant::now(), expires: None });
     Ok(pool)
 }
 
@@ -236,24 +315,58 @@ pub fn start_pool_eviction_task(rt: &tokio::runtime::Handle) {
     });
 }
 
-pub(super) async fn get_pg_pool(url: &str) -> Result<sqlx::PgPool, String> {
-    PG_POOLS.get_or_connect(pool_key(url), || async {
-        sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(POOL_CONNECT_TIMEOUT)
-            .connect(url)
-            .await
-            .map_err(|e| scrub_url_in_error(&format!("Postgres connection failed: {}", e)))
+pub(super) async fn get_pg_pool(url: &str, target: &SqlxTarget) -> Result<sqlx::PgPool, String> {
+    PG_POOLS.get_or_connect_for(target.cache_key(url), target.pool_ttl(), || async {
+        use std::str::FromStr;
+        let base = sqlx::postgres::PgConnectOptions::from_str(url)
+            .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
+        let attempts: Vec<_> = if target.pinned.is_empty() {
+            vec![base]
+        } else {
+            target.pinned.iter().map(|ip| base.clone().host(&ip.to_string())).collect()
+        };
+        let mut last_error = String::new();
+        for options in attempts {
+            match sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(POOL_CONNECT_TIMEOUT)
+                .connect_with(options)
+                .await
+            {
+                Ok(pool) => return Ok(pool),
+                Err(e) => {
+                    last_error = scrub_url_in_error(&format!("Postgres connection failed: {}{}", e, target.connect_hint()));
+                }
+            }
+        }
+        Err(last_error)
     })
     .await
 }
 
-pub(super) async fn get_mysql_pool(url: &str) -> Result<sqlx::MySqlPool, String> {
-    MYSQL_POOLS.get_or_connect(pool_key(url), || async {
-        sqlx::mysql::MySqlPoolOptions::new()
-            .acquire_timeout(POOL_CONNECT_TIMEOUT)
-            .connect(url)
-            .await
-            .map_err(|e| scrub_url_in_error(&format!("MySQL connection failed: {}", e)))
+pub(super) async fn get_mysql_pool(url: &str, target: &SqlxTarget) -> Result<sqlx::MySqlPool, String> {
+    MYSQL_POOLS.get_or_connect_for(target.cache_key(url), target.pool_ttl(), || async {
+        use std::str::FromStr;
+        let base = sqlx::mysql::MySqlConnectOptions::from_str(url)
+            .map_err(|e| scrub_url_in_error(&format!("Invalid connection URL: {}", e)))?;
+        let attempts: Vec<_> = if target.pinned.is_empty() {
+            vec![base]
+        } else {
+            target.pinned.iter().map(|ip| base.clone().host(&ip.to_string())).collect()
+        };
+        let mut last_error = String::new();
+        for options in attempts {
+            match sqlx::mysql::MySqlPoolOptions::new()
+                .acquire_timeout(POOL_CONNECT_TIMEOUT)
+                .connect_with(options)
+                .await
+            {
+                Ok(pool) => return Ok(pool),
+                Err(e) => {
+                    last_error = scrub_url_in_error(&format!("MySQL connection failed: {}{}", e, target.connect_hint()));
+                }
+            }
+        }
+        Err(last_error)
     })
     .await
 }
@@ -343,7 +456,7 @@ mod cache_cap_tests {
     fn filled_map() -> HashMap<String, PoolEntry<()>> {
         let base = Instant::now();
         (0..MAX_CACHED_POOLS)
-            .map(|i| (i.to_string(), PoolEntry { pool: (), last_used: base + Duration::from_millis(i as u64) }))
+            .map(|i| (i.to_string(), PoolEntry { pool: (), last_used: base + Duration::from_millis(i as u64), expires: None }))
             .collect()
     }
 
@@ -407,6 +520,20 @@ mod cache_cap_tests {
         assert_eq!(slow.await.unwrap(), Ok(1));
         assert_eq!(waiter.await.unwrap(), Ok(1));
         assert_eq!(dials.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pool_with_a_ttl_is_dialled_again_once_it_expires() {
+        use super::PoolCache;
+
+        let cache: PoolCache<u32> = PoolCache::new();
+        let ttl = Some(Duration::from_millis(30));
+        let first = cache.get_or_connect_for("k".to_string(), ttl, || async { Ok(1) }).await;
+        let reused = cache.get_or_connect_for("k".to_string(), ttl, || async { Ok(2) }).await;
+        assert_eq!((first, reused), (Ok(1), Ok(1)));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let again = cache.get_or_connect_for("k".to_string(), ttl, || async { Ok(3) }).await;
+        assert_eq!(again, Ok(3));
     }
 
     #[test]

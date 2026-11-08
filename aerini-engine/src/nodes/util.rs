@@ -518,7 +518,8 @@ impl SsrfPolicy {
 /// `AllowLocal` permits those.
 ///
 /// An IPv6 address that embeds an IPv4 address (IPv4-mapped, NAT64
-/// `64:ff9b::/96`, 6to4 `2002::/16`, IPv4-compatible `::a.b.c.d`) is judged
+/// `64:ff9b::/96`, 6to4 `2002::/16`, SIIT `::ffff:0:a.b.c.d`, IPv4-compatible
+/// `::a.b.c.d`) is judged
 /// by the same IPv4 rules applied to the embedded address, so a public IPv4
 /// target reached through NAT64 still passes. `198.18.0.0/15` is deliberately
 /// not blocked: fake-IP proxy tools resolve every domain into it.
@@ -558,6 +559,9 @@ fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     if upper_zero && s[5] == 0xffff {
         return Some(from(s[6], s[7]));
     }
+    if s[..4].iter().all(|&x| x == 0) && s[4] == 0xffff && s[5] == 0 {
+        return Some(from(s[6], s[7]));
+    }
     if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
         return Some(from(s[6], s[7]));
     }
@@ -595,7 +599,8 @@ fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), Str
             let always_blocked = v6 == aws_imds_v6
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || v6.is_unicast_link_local();
+                || v6.is_unicast_link_local()
+                || (v6.segments()[0] & 0xffc0) == 0xfec0;
             let local_only_blocked = !allow_local && (v6.is_loopback() || v6.is_unique_local());
             if always_blocked || local_only_blocked {
                 return Err(format!(
@@ -621,10 +626,14 @@ fn check_ssrf_ip_impl(ip: std::net::IpAddr, allow_local: bool) -> Result<(), Str
 /// is the address that is dialled. Redis, SMTP and custom S3 endpoints get the
 /// same filter through their own connection hooks (`resolve_validated_addrs`).
 /// Plugin `wasi:http` requests are pinned the same way (`plugin_http`).
-/// Postgres and MySQL connections (sqlx) cannot be pinned without breaking TLS
-/// host verification and server-name indication, and keep the gap. A
-/// verifying TLS mode (`verify-full`, `VERIFY_IDENTITY`) makes a rebound host
-/// fail the handshake; a host-level egress firewall covers the other modes.
+/// Postgres and MySQL connections (sqlx 0.8 has no resolver hook and no
+/// separate dial address) are pinned by passing the validated IP as the host
+/// whenever the TLS mode does not check the host name (see
+/// [`resolve_db_host_validated`] and `database::pool::check_sqlx_target`). A
+/// hostname with a verifying mode (`verify-full`, `VERIFY_IDENTITY`) must stay
+/// a name for certificate checking, so it is not pinned: a rebound host fails
+/// the handshake, but the TCP connect itself still reaches the rebound address,
+/// and a host-level egress firewall is the only control for that.
 pub async fn check_host_ssrf(host: url::Host<&str>, port: u16, policy: SsrfPolicy) -> Result<(), String> {
     check_host_ssrf_impl(host, port, policy.allow_local()).await
 }
@@ -995,22 +1004,53 @@ pub async fn check_db_url_ssrf(raw_url: &str, policy: SsrfPolicy) -> Result<(), 
     check_host_ssrf_impl(host, port, policy.allow_local()).await
 }
 
-/// SSRF check for a host and port a database driver has already resolved from a
+/// A database host that passed the SSRF policy, with the addresses it passed as.
+pub(crate) struct ValidatedDbHost {
+    /// Every address the host resolves to; a single one for an IP literal.
+    pub(crate) addrs: Vec<std::net::IpAddr>,
+    /// True when the host is a DNS name, so a later lookup could answer differently.
+    pub(crate) is_domain: bool,
+}
+
+/// Resolves and validates a host and port a database driver has already taken from a
 /// connection URL, including any query-parameter override. Numeric spellings
 /// such as `2130706433` or `0x7f.1` are read the way URL hosts are, and an
-/// unbracketed IPv6 literal is accepted.
-pub async fn check_db_host_ssrf(host: &str, port: u16, policy: SsrfPolicy) -> Result<(), String> {
+/// unbracketed IPv6 literal is accepted. One blocked address rejects a DNS name.
+pub(crate) async fn resolve_db_host_validated(
+    host: &str,
+    port: u16,
+    policy: SsrfPolicy,
+) -> Result<ValidatedDbHost, String> {
+    let allow_local = policy.allow_local();
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        return check_ssrf_ip_impl(ip, policy.allow_local());
+        check_ssrf_ip_impl(ip, allow_local)?;
+        return Ok(ValidatedDbHost { addrs: vec![ip], is_domain: false });
     }
-    let parsed = url::Host::parse(host).map_err(|e| format!("Invalid database host: {}", e))?;
-    let borrowed = match &parsed {
-        url::Host::Domain(d) => url::Host::Domain(d.as_str()),
-        url::Host::Ipv4(ip) => url::Host::Ipv4(*ip),
-        url::Host::Ipv6(ip) => url::Host::Ipv6(*ip),
-    };
-    check_host_ssrf_impl(borrowed, port, policy.allow_local()).await
+    match url::Host::parse(host).map_err(|e| format!("Invalid database host: {}", e))? {
+        url::Host::Ipv4(ip) => {
+            let ip = std::net::IpAddr::V4(ip);
+            check_ssrf_ip_impl(ip, allow_local)?;
+            Ok(ValidatedDbHost { addrs: vec![ip], is_domain: false })
+        }
+        url::Host::Ipv6(ip) => {
+            let ip = std::net::IpAddr::V6(ip);
+            check_ssrf_ip_impl(ip, allow_local)?;
+            Ok(ValidatedDbHost { addrs: vec![ip], is_domain: false })
+        }
+        url::Host::Domain(domain) => {
+            let addrs = resolve_public_addrs(&domain, port, allow_local)
+                .await
+                .map_err(DnsCheck::into_message)?;
+            Ok(ValidatedDbHost { addrs: addrs.iter().map(|a| a.ip()).collect(), is_domain: true })
+        }
+    }
+}
+
+/// SSRF check for a host and port a database driver has already resolved from a
+/// connection URL. See [`resolve_db_host_validated`].
+pub async fn check_db_host_ssrf(host: &str, port: u16, policy: SsrfPolicy) -> Result<(), String> {
+    resolve_db_host_validated(host, port, policy).await.map(|_| ())
 }
 
 /// Renders a `reqwest::Error` as a message that is safe to store and show.
@@ -2145,6 +2185,14 @@ mod ssrf_embedded_ipv4_tests {
         }
         assert!(!local(v6("::ffff:240.0.0.1")));
         assert!(!local(v6("64:ff9b::f000:1")));
+    }
+
+    #[test]
+    fn siit_embedding_and_site_local_blocked() {
+        assert!(!strict(v6("::ffff:0:a00:1")));
+        assert!(!local(v6("::ffff:0:a9fe:a9fe")));
+        assert!(strict(v6("::ffff:0:808:808")));
+        assert!(!local(v6("fec0::1")));
     }
 
     #[test]

@@ -14,7 +14,7 @@ The check reads a small manifest from the latest published release on GitHub and
 
 Click **Install and restart** to update. Aerini downloads the installer for your platform from the release, shows a progress bar (with **Cancel** while it downloads), verifies its signature, installs it, and restarts. Your workflows, credentials, and settings aren't touched; they live in a separate per-OS data folder that the app bundle never overwrites (see [Installation §Uninstalling](../getting-started/installation.md#uninstalling) for exactly where). After the restart, a short message confirms the version you're now on.
 
-Aerini only installs a package whose signature checks out against a public key built into the app. A download that fails verification is discarded and nothing is installed. How this is protected is covered in [Security §Updates and the network](../guide/security.md#updates-and-the-network).
+Aerini only installs a package whose signature checks out against a public key built into the app. A download that fails verification is discarded and nothing is installed. A download that grows past 512 MiB is stopped and discarded the same way; no real installer comes close, so this only happens with a misbehaving server. How this is protected is covered in [Security §Updates and the network](../guide/security.md#updates-and-the-network).
 
 ### Before it installs
 

@@ -23,7 +23,7 @@ Two ways to install a `.wasm` file (a single node) or an `.aerinipkg` file (a bu
 
 Either way, Aerini copies the file into your plugin directory (and its signature file, if it has one); each file is written whole or not at all, so a full disk or a closed app never leaves a truncated plugin. If an install is interrupted between the two files, the plugin and its signature file no longer match and Aerini refuses to load it; install it again and reloads the node registry immediately, so the new node is available on the canvas without restarting the app. If installing over an existing plugin with the same identity, Aerini recognizes that and asks whether you want to update it rather than silently overwriting or refusing.
 
-An `.aerinipkg` installs as a group: its member nodes appear together under one heading in the installed list, with a single **Remove pack** action instead of removing each node individually.
+An `.aerinipkg` installs as a group: its member nodes appear together under one heading in the installed list, with a single **Remove pack** action instead of removing each node individually. For the same reason a pack's nodes can't be replaced or removed one at a time: installing a single `.wasm` over one of them, or removing one on its own, is refused. Install the newer `.aerinipkg`, or remove the pack first.
 
 ## The installed plugins list
 

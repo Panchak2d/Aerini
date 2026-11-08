@@ -70,7 +70,7 @@ use aerini_engine::{
     EventSink,
 };
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     path::PathBuf,
     sync::Arc,
 };
@@ -805,10 +805,7 @@ pub async fn run(cfg: ServerConfig) {
             std::future::pending::<()>().await;
         }
     };
-    let serve = std::future::IntoFuture::into_future(
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(shutdown),
-    );
+    let serve = crate::util::serve_http(listener, app, shutdown);
     tokio::select! {
         res = serve => res.unwrap_or_else(|e| tracing::error!("Server error: {}", e)),
         _ = drain_deadline => tracing::warn!(

@@ -1089,6 +1089,7 @@ mod generated_name_tests {
             method: method.to_string(),
             secret: secret.to_string(),
             dedup_window_secs: 0,
+            validate_timestamp: false,
         }
     }
 

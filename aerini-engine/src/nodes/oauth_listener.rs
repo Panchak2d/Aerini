@@ -530,6 +530,12 @@ fn pct_encode(s: &str) -> String {
 /// `cmd /C start`: cmd treats the `&` between query parameters as a command
 /// separator and would cut the URL after the first parameter.
 fn open_browser(url: &str) -> std::io::Result<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "browser launch refused: URL is not http(s)",
+        ));
+    }
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut c = std::process::Command::new("open");
@@ -878,6 +884,14 @@ pub async fn get_tokens(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn open_browser_refuses_non_http_schemes() {
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "ms-msdt:/id", ""] {
+            let err = open_browser(url).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{url}");
+        }
+    }
 
     #[test]
     fn build_auth_url_google_sheets_has_correct_scope_and_params() {

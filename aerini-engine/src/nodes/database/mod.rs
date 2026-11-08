@@ -1310,8 +1310,9 @@ mod input_tests {
 
 #[cfg(test)]
 mod connection_target_tests {
-    use super::pool::check_sqlx_target;
+    use super::pool::{check_sqlx_target, pinned_addresses};
     use crate::nodes::util::SsrfPolicy;
+    use std::net::IpAddr;
 
     #[tokio::test]
     async fn query_parameters_cannot_redirect_the_connection_past_the_check() {
@@ -1343,5 +1344,39 @@ mod connection_target_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_host_name_is_pinned_unless_the_tls_mode_verifies_it() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let answers = [ip("93.184.216.35"), ip("93.184.216.34"), ip("93.184.216.34")];
+        assert_eq!(pinned_addresses(&answers, true, false), vec![ip("93.184.216.34"), ip("93.184.216.35")]);
+        assert!(pinned_addresses(&answers, true, true).is_empty());
+        assert_eq!(pinned_addresses(&[ip("93.184.216.34")], false, true), vec![ip("93.184.216.34")]);
+        let many: Vec<IpAddr> = (1..=6).map(|n| ip(&format!("93.184.216.{n}"))).collect();
+        assert_eq!(pinned_addresses(&many, true, false).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_tls_mode_decides_whether_the_driver_dials_the_name_or_the_checked_address() {
+        let cases = [
+            ("postgres://u@localhost/db?sslmode=verify-full", false, false),
+            ("postgres://u@localhost/db?sslmode=require", false, true),
+            ("postgres://u@localhost/db?sslmode=disable", false, true),
+            ("postgres://u@localhost/db", false, true),
+            ("mysql://u@localhost/db?ssl-mode=VERIFY_IDENTITY", true, false),
+            ("mysql://u@localhost/db?ssl-mode=REQUIRED", true, true),
+        ];
+        for (url, mysql, pinned) in cases {
+            let target = check_sqlx_target(url, mysql, SsrfPolicy::AllowLocal).await.unwrap();
+            assert_eq!(!target.pinned.is_empty(), pinned, "{url}");
+            assert_eq!(target.from_name, pinned, "{url}");
+            assert!(target.pinned.iter().all(|ip| ip.is_loopback()), "{url}");
+        }
+        let literal = check_sqlx_target("postgres://u@8.8.8.8/db?sslmode=verify-full", false, SsrfPolicy::Strict)
+            .await
+            .unwrap();
+        assert_eq!(literal.pinned, [IpAddr::from([8, 8, 8, 8])]);
+        assert!(!literal.from_name);
     }
 }

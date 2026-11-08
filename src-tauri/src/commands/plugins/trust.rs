@@ -12,7 +12,9 @@ pub(super) fn trust_store_path(plugin_dir: &Path) -> PathBuf {
 }
 
 /// Serializes trust-store read-modify-write across concurrent
-/// `install_plugin_from_path`/`remove_plugin` calls in this process. Without
+/// `install_plugin_from_path`/`install_plugin_pack_from_path`/`remove_plugin`
+/// calls in this process. An install holds it from its trust decision until
+/// the pin is written, so the decision cannot go stale in between. Without
 /// this, two simultaneous installs of different plugins could each read the
 /// store before the other's write lands, and one's freshly-pinned key would
 /// be silently dropped. A plain in-process static, not a `reload_lock`-style
@@ -57,6 +59,22 @@ pub(super) fn save_trust_store(plugin_dir: &Path, store: &HashMap<String, String
         let _ = std::fs::remove_file(&staged);
         format!("Failed to write plugin trust store: {e}")
     })
+}
+
+/// Pins `key_b64` for `trust_key`. Called only once an install has fully
+/// succeeded, with `TRUST_STORE_LOCK` still held from the decision that found
+/// no existing pin, so a failed or rejected install never leaves a key
+/// trusted. A write failure is logged rather than returned: the files are
+/// already installed, and the plugin list reports the missing pin as "not yet
+/// trusted" until the next reinstall establishes it.
+pub(super) fn commit_pin(plugin_dir: &Path, trust_key: &str, key_b64: String) {
+    let result = read_trust_store(plugin_dir).and_then(|mut store| {
+        store.insert(trust_key.to_string(), key_b64);
+        save_trust_store(plugin_dir, &store)
+    });
+    if let Err(e) = result {
+        tracing::warn!("installed '{trust_key}' but could not record its publisher key: {e}");
+    }
 }
 
 /// Human-readable status for `list_installed_plugins`'s `signature_status`

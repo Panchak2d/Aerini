@@ -63,19 +63,15 @@ This is a living document. Items move as priorities and capacity change.
 
 ---
 
-## v0.4.5 — Canvas smoothness and Feed Parser
+## v0.4.5 — Beginner-friendly canvas (shipped — v0.4.5)
 
-- [x] Canvas repaints only when something changes, so an idle canvas uses no CPU, and nodes and wires off screen are not drawn
-- [x] Resizing the sidebar, drawer or window no longer flashes the canvas blank
-- [x] Smooth, proportional scroll zoom, with a Scroll wheel setting (Auto, Zoom, Pan); trackpad scrolling pans, and pinch and Ctrl+scroll zoom
-- [x] Fit to screen and centring glide into place, and skip the motion when your system asks for reduced motion
-- [x] Dragging, hovering and placing nodes stay responsive in large workflows; a placed node stays under the cursor; box select takes every node it touches; switching away mid-drag no longer leaves a stuck gesture
-- [x] The view you last used in a workflow is saved once you stop moving it
-- [x] The window opens once the first frame is ready, with no empty shell, and node icons are ready when a workflow opens and stay sharp when zoomed in
-- [x] The bundled JetBrains Mono font loads in installed builds
-- [x] Minimap repaints only when it changes and zooms in proportion to the wheel
-- [x] Notifications stack instead of overlapping
-- [x] Feed Parser node: read RSS, Atom and JSON Feed into normalized items, with filters and an option to emit only items not seen in earlier runs
+- [x] Onboarding: working examples with difficulty and requirements on the welcome dialog and empty canvas, a Getting started checklist, and a one-line description and Beginner filter for every node
+- [x] Point-and-click data: Insert data picker, pick mode, drop a wire on a field, labelled reference chips and a Use data switch
+- [x] Problems list before a run, and a plain-language explanation and fix for common errors
+- [x] Node Test reuses earlier steps' results; Describe it drafts a text field from earlier nodes' data
+- [x] Notes and group frames, right-click menus, and copy, cut and paste on the canvas
+- [x] Smoother canvas: idle repaint, off-screen culling, proportional scroll zoom with a Scroll wheel setting
+- [x] Feed Parser node: read RSS, Atom and JSON Feed, with an option to emit only new items
 
 ---
 

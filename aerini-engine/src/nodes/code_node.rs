@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::process::Command;
 
 use crate::error::NodeError;
@@ -30,105 +32,72 @@ const NODE_ADDRESS_SPACE_OVERHEAD_MB: u64 = 4096;
 const STDERR_KEEP_BYTES: usize = 64 * 1024;
 
 static NODE_BIN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-/// Guards the macOS partial-sandbox warning so it fires once per process, not once per execution.
-#[cfg(target_os = "macos")]
-static MACOS_SANDBOX_PARTIAL_WARNED: OnceLock<()> = OnceLock::new();
+/// Guards the partial-sandbox warning so it fires once per process, not once per execution.
+#[cfg(not(target_os = "linux"))]
+static PARTIAL_SANDBOX_WARNED: OnceLock<()> = OnceLock::new();
+/// Set once the sandbox flags have been seen to enforce their restrictions on this host.
+static SANDBOX_VERIFIED: AtomicBool = AtomicBool::new(false);
 
-/// ESM loader script injected when sandbox mode is active.
-/// Intercepts `import` resolution and blocks dangerous built-in modules.
-/// Written to a temp file because Node.js loaders cannot be passed inline.
-///
-/// Blocked modules: child_process, fs, fs/promises, net, http, https, dgram, dns, os, module,
-/// v8, inspector, tls, wasi, trace_events, sqlite, test
-/// These cover: subprocess spawning, filesystem access, raw network access, and — via
-/// `module`'s `createRequire()` — a CommonJS `require()` that would otherwise reach every
-/// other entry on this list. `v8` is blocked because `v8.writeHeapSnapshot(path)` writes a
-/// heap dump — containing arbitrary script-controlled string data — to any filesystem path,
-/// an arbitrary-file-write primitive independent of `fs`. `inspector` is blocked because
-/// `inspector.open()` starts a debugger session whose `Runtime.evaluate` executes code
-/// without going through `eval`/`new Function`, bypassing `--disallow-code-generation-from-strings`.
-/// `process.getBuiltinModule()` reaches the same builtins without an `import` and so never
-/// hits this hook; `execute()`'s sandbox prelude overrides it with the same blocklist.
-/// `tls` is blocked because `tls.connect()` opens raw network connections without importing
-/// `net`; `wasi` maps host directories into a guest; `trace_events` and `sqlite` write files;
-/// `node:test` can spawn processes.
-/// Allowed: crypto, util, path, stream, events, url, buffer, string_decoder, querystring
-///
-/// Compatibility: --experimental-loader works on all Node.js 18+ versions.
-/// The API moved to a worker thread in 18.19 but the flag is not removed.
-#[cfg(not(windows))]
-const SANDBOX_LOADER_CONTENT: &str = r#"
-// Aerini Code Node sandbox loader.
-// Blocks import of dangerous built-in modules. Do not modify — auto-generated.
-const BLOCKED = new Set([
-  'node:child_process', 'child_process',
-  'node:fs',            'fs',
-  'node:fs/promises',   'fs/promises',
-  'node:net',           'net',
-  'node:http',          'http',
-  'node:https',         'https',
-  'node:http2',         'http2',
-  'node:dgram',         'dgram',
-  'node:dns',           'dns',
-  'node:dns/promises',  'dns/promises',
-  'node:os',            'os',
-  'node:cluster',       'cluster',
-  'node:worker_threads','worker_threads',
-  'node:vm',            'vm',
-  'node:repl',          'repl',
-  'node:domain',        'domain',
-  'node:module',        'module',
-  'node:v8',            'v8',
-  'node:inspector',     'inspector',
-  'node:inspector/promises', 'inspector/promises',
-  'node:tls',           'tls',
-  'node:wasi',          'wasi',
-  'node:trace_events',  'trace_events',
-  'node:sqlite',        'sqlite',
-  'node:test',          'test',
-  'node:test/reporters', 'test/reporters',
-]);
-
-export async function resolve(specifier, context, nextResolve) {
-  if (BLOCKED.has(specifier)) {
-    throw new Error(
-      `[Aerini sandbox] Import of '${specifier}' is blocked. ` +
-      `Filesystem, module-imported network access, subprocess access, CommonJS require() ` +
-      `(via the 'module' builtin), heap-snapshot file writes (via 'v8'), and debugger-based ` +
-      `code execution (via 'inspector') are all blocked in sandboxed Code nodes. ` +
-      `Global fetch() and WebSocket are also disabled. ` +
-      `Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments.`
-    );
-  }
-  return nextResolve(specifier, context);
-}
-"#;
-
-/// Prelude injected into the wrapper script before user code, when sandbox mode
-/// is active. Removes globals that reach the same capabilities
-/// `SANDBOX_LOADER_CONTENT`'s resolve hook blocks, without going through an
-/// `import` at all: `fetch`/`WebSocket`/`XMLHttpRequest` are built-in globals
-/// since Node 18, and `process.getBuiltinModule()` returns any builtin module
-/// directly from the `process` global. Blocking `module` here (mirroring the
-/// loader's own list) is what matters most: `module.createRequire()` hands
-/// back a full CommonJS `require()`, which reaches every other blocked
-/// builtin regardless of what the loader hook does.
-///
-/// `process.binding()`, `process._linkedBinding()`, and `process.dlopen()` are deleted
-/// outright rather than blocklisted by name: they hand back raw internal Node bindings
-/// (`process.binding('fs')`, `process.binding('spawn_sync')`) or load native addons
-/// directly, bypassing the ESM loader hook entirely regardless of which module names it
-/// blocks. Verified: with only the module-import blocklist in place, sandboxed code could
-/// call `process.binding('spawn_sync').spawn(...)` to execute arbitrary OS commands with
-/// the host process's own privileges. No sandboxed workflow snippet has a legitimate use
-/// for any of the three, so they are removed unconditionally rather than name-filtered.
 /// Node writes to a pipe asynchronously on Unix: a write the pipe cannot take is queued in
 /// Node's memory, and anything still queued is lost when the script calls `process.exit()`. Blocking mode
 /// makes each write wait for this process to read it, so a script cannot grow Node's memory faster than it
 /// is drained and a failing script's last stderr lines always arrive.
 const STDIO_BLOCKING: &str = "for (const s of [process.stdout, process.stderr]) { try { s._handle?.setBlocking?.(true); } catch {} }\n";
 
-const SANDBOX_GLOBALS_HARDENING: &str = r#"delete globalThis.fetch;
+/// Script text injected ahead of user code when sandbox mode is active. It is the same on every
+/// platform: it travels over stdin with the script, so there is no temp file, file URL or path quoting.
+///
+/// Blocked builtins, by `import`, `import()` and `process.getBuiltinModule()`: `child_process`, `fs`,
+/// `net`, `http*`, `dgram`, `dns`, `os`, `cluster`, `worker_threads`, `vm`, `repl`, `domain`, `tls`,
+/// `wasi`, `trace_events`, `sqlite` and `test` reach subprocesses, files and raw sockets.
+/// `module` hands back `createRequire()`, a `require()` that reaches every other entry. `v8` writes
+/// heap snapshots to any path. `inspector` runs code through a debugger session, bypassing
+/// `--disallow-code-generation-from-strings`. The resolve hook judges both the specifier and the
+/// resolved `node:` URL, so alternate spellings cannot slip past a name match.
+///
+/// `fetch`, `WebSocket` and `XMLHttpRequest` are globals that reach the network without an import.
+/// `process.binding()`, `process._linkedBinding()` and `process.dlopen()` return raw internal
+/// bindings or native addons, so they are deleted rather than name-filtered, as are `process.kill`
+/// and `process.report`.
+///
+/// The hooks are registered inside a block so no binding for `registerHooks` is left in scope for
+/// user code, and `module` itself is unreachable from the script.
+///
+/// Node's permission model (`--permission`, see `apply_sandbox_flags`) enforces the file system,
+/// child process, worker, native addon and WASI limits again in Node itself. It does not restrict
+/// the network, which is why the import and global blocks above remain.
+const SANDBOX_PRELUDE: &str = r#"{
+  const blockedModules = new Set([
+    'child_process', 'fs', 'fs/promises', 'net', 'http', 'https', 'http2', 'dgram',
+    'dns', 'dns/promises', 'os', 'cluster', 'worker_threads', 'vm', 'repl', 'domain',
+    'module', 'v8', 'inspector', 'inspector/promises', 'tls', 'wasi', 'trace_events',
+    'sqlite', 'test', 'test/reporters',
+  ]);
+  const isBlocked = (id) => blockedModules.has(id.startsWith('node:') ? id.slice(5) : id);
+  const refusal = (id, how) => new Error(
+    `[Aerini sandbox] ${how} of '${id}' is blocked. ` +
+    `Filesystem, module-imported network access, subprocess access, CommonJS require() ` +
+    `(via the 'module' builtin), heap-snapshot file writes (via 'v8'), and debugger-based ` +
+    `code execution (via 'inspector') are all blocked in sandboxed Code nodes. ` +
+    `Global fetch() and WebSocket are also disabled. ` +
+    `Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments.`
+  );
+  const { registerHooks } = process.getBuiltinModule('node:module');
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (isBlocked(specifier)) throw refusal(specifier, 'Import');
+      const resolved = nextResolve(specifier, context);
+      if (typeof resolved.url === 'string' && isBlocked(resolved.url)) throw refusal(specifier, 'Import');
+      return resolved;
+    },
+  });
+  const originalGetBuiltinModule = process.getBuiltinModule.bind(process);
+  process.getBuiltinModule = (id) => {
+    if (typeof id === 'string' && isBlocked(id)) throw refusal(id, 'Access');
+    return originalGetBuiltinModule(id);
+  };
+}
+delete globalThis.fetch;
 delete globalThis.WebSocket;
 delete globalThis.XMLHttpRequest;
 delete process.binding;
@@ -137,42 +106,45 @@ delete process.dlopen;
 delete process.kill;
 delete process.report;
 {
-  const __sandboxBlockedBuiltins = new Set([
-    'node:child_process', 'child_process',
-    'node:fs',            'fs',
-    'node:fs/promises',   'fs/promises',
-    'node:net',           'net',
-    'node:http',          'http',
-    'node:https',         'https',
-    'node:http2',         'http2',
-    'node:dgram',         'dgram',
-    'node:dns',           'dns',
-    'node:dns/promises',  'dns/promises',
-    'node:os',            'os',
-    'node:cluster',       'cluster',
-    'node:worker_threads','worker_threads',
-    'node:vm',            'vm',
-    'node:repl',          'repl',
-    'node:domain',        'domain',
-    'node:module',        'module',
-    'node:v8',            'v8',
-    'node:inspector',     'inspector',
-    'node:inspector/promises', 'inspector/promises',
-    'node:tls',           'tls',
-    'node:wasi',          'wasi',
-    'node:trace_events',  'trace_events',
-    'node:sqlite',        'sqlite',
-    'node:test',          'test',
-    'node:test/reporters', 'test/reporters',
-  ]);
-  const __sandboxOriginalGetBuiltinModule = process.getBuiltinModule.bind(process);
-  process.getBuiltinModule = (id) => {
-    if (__sandboxBlockedBuiltins.has(id)) {
-      throw new Error(`[Aerini sandbox] Access to '${id}' via process.getBuiltinModule is blocked.`);
-    }
-    return __sandboxOriginalGetBuiltinModule(id);
+  const refuseConnect = function connect() {
+    throw new Error(
+      "[Aerini sandbox] Outbound sockets are blocked in sandboxed Code nodes. " +
+      "Use the HTTP Request node for outbound HTTP, or disable sandboxing for trusted deployments."
+    );
   };
+  for (const stream of [process.stdout, process.stderr]) {
+    for (let proto = Object.getPrototypeOf(stream); proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+      if (Object.prototype.hasOwnProperty.call(proto, 'connect') && proto.connect !== refuseConnect) {
+        Object.defineProperty(proto, 'connect', { value: refuseConnect, writable: false, configurable: false });
+      }
+    }
+  }
 }
+"#;
+
+const SANDBOX_PROBE_MARKER: &str = "__AERINI_SANDBOX_PROBE__";
+
+/// Runs after `SANDBOX_PRELUDE` with the real sandbox flags and reports every restriction that
+/// failed to hold, as a JSON array. An empty array means the sandbox is enforced on this host.
+const SANDBOX_PROBE: &str = r#"
+const unenforced = [];
+for (const id of ['node:child_process', 'node:fs', 'fs', 'node:module', 'node:net']) {
+  try { await import(id); unenforced.push('import ' + id); } catch {}
+}
+for (const id of ['node:fs', 'child_process']) {
+  try { process.getBuiltinModule(id); unenforced.push('getBuiltinModule ' + id); } catch {}
+}
+try {
+  const probeSocket = new (process.stdout.constructor)();
+  probeSocket.on('error', () => {});
+  probeSocket.connect(1, '127.0.0.1');
+  probeSocket.destroy();
+  unenforced.push('socket connect');
+} catch {}
+if (typeof fetch !== 'undefined') unenforced.push('fetch');
+if (typeof process.binding !== 'undefined') unenforced.push('process.binding');
+if (process.permission?.has('fs.read') !== false) unenforced.push('permission model');
+process.stdout.write('\n__AERINI_SANDBOX_PROBE__' + JSON.stringify(unenforced) + '\n');
 "#;
 
 /// Code node — runs a JavaScript snippet using Aerini's bundled Node.js runtime.
@@ -219,7 +191,7 @@ impl Node for CodeNode {
                 "duration_ms":      { "type": "number" },
                 "_sandbox_partial": {
                     "type": "boolean",
-                    "description": "Present and true on macOS when --code-sandbox is active. ESM module import restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied."
+                    "description": "Present and true on macOS and Windows when --code-sandbox is active. Module import and permission restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied."
                 }
             }
         })
@@ -272,29 +244,7 @@ impl CodeNode {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // On Windows, neither the ESM module loader nor setrlimit() resource
-        // limits are implemented. Reporting "sandbox active" while providing no
-        // actual isolation is a security lie. Fail loudly so operators know their
-        // deployment is not protected, rather than silently running unsandboxed.
-        #[cfg(windows)]
-        if sandbox_enabled {
-            return NodeOutput::failure(NodeError::unrecoverable(
-                "SANDBOX_NOT_SUPPORTED",
-                "--code-sandbox is not supported on Windows. \
-                 The ESM module loader (which blocks fs/net/child_process imports) \
-                 and OS-level resource limits (setrlimit) are both unavailable on \
-                 this platform. Run without --code-sandbox for trusted deployments, \
-                 or deploy on Linux where full sandboxing is implemented.",
-            ));
-        }
-
-        // When sandbox is enabled, remove globals that reach the same capabilities the
-        // ESM loader hook blocks, without going through it at all.
-        let sandbox_globals_hardening = if sandbox_enabled {
-            SANDBOX_GLOBALS_HARDENING
-        } else {
-            ""
-        };
+        let sandbox_prelude = if sandbox_enabled { SANDBOX_PRELUDE } else { "" };
 
         let empty_obj = serde_json::Value::Object(Default::default());
         let direct_input = input.context.metadata.get("__direct_input").unwrap_or(&empty_obj);
@@ -322,7 +272,7 @@ function output(v) {{ __result = v; }}
   process.stdout.write("\n{marker}" + JSON.stringify({{ ok: false, error: err?.message ?? String(err) }}) + "\n");
 }});
 "#,
-            sandbox_globals_hardening,
+            sandbox_prelude,
             STDIO_BLOCKING,
             serde_json::to_string(direct_input).unwrap_or_else(|_| "{}".to_string()),
             serde_json::to_string(name_outputs).unwrap_or_else(|_| "{}".to_string()),
@@ -342,33 +292,19 @@ function output(v) {{ __result = v; }}
             },
         };
 
-        // In sandbox mode, write the loader to a temp file.
-        // Temp file is cleaned up when the guard drops at end of scope.
-        // If the write fails (read-only /tmp, disk full, restrictive umask — all
-        // common in hardened containers), hard-fail rather than silently running
-        // without module restrictions. The caller explicitly requested sandboxing;
-        // proceeding unsandboxed violates that contract.
-        #[cfg(not(windows))]
-        let loader_tempfile: Option<tempfile::NamedTempFile> = if sandbox_enabled {
-            match write_sandbox_loader() {
-                Ok(f)  => Some(f),
-                Err(e) => {
-                    return NodeOutput::failure(NodeError::unrecoverable(
-                        "SANDBOX_INIT_FAILED",
-                        format!(
-                            "Code sandbox loader could not be written to temp directory: {}. \
-                             Cannot proceed unsandboxed when --code-sandbox is active. \
-                             Ensure /tmp is writable, or remove --code-sandbox for trusted deployments.",
-                            e
-                        ),
-                    ));
-                }
+        if sandbox_enabled {
+            if let Err(reason) = verify_sandbox(node_bin).await {
+                return NodeOutput::failure(NodeError::unrecoverable(
+                    "SANDBOX_UNAVAILABLE",
+                    format!(
+                        "The Code node sandbox cannot be enforced on this host: {}. \
+                         Refusing to run unsandboxed while --code-sandbox is active. \
+                         Remove --code-sandbox only for trusted deployments.",
+                        reason
+                    ),
+                ));
             }
-        } else {
-            None
-        };
-        #[cfg(windows)]
-        let _loader_tempfile: Option<()> = None;
+        }
 
         let mut cmd = Command::new(node_bin);
         // kill_on_drop ensures the subprocess is killed on ANY drop path
@@ -378,24 +314,8 @@ function output(v) {{ __result = v; }}
         cmd.process_group(0);
         cmd.arg("--input-type=module");
         if sandbox_enabled {
-            // Blocks eval() and new Function() from generating executable code.
-            cmd.arg("--disallow-code-generation-from-strings");
-        }
-        #[cfg(not(windows))]
-        if let Some(ref lf) = loader_tempfile {
-            // ESM loader intercepts import resolution to block dangerous modules.
-            cmd.arg(format!("--experimental-loader={}", loader_url(lf.path())));
-            // Suppress the loader experimental warning — it's noise for end users.
-            cmd.arg("--no-warnings");
-        }
-        // In sandbox mode, clear the inherited environment so process.env
-        // cannot expose server secrets. Re-add PATH (required for Node to find its own
-        // binaries) and any operator-approved vars from --allow-env-vars.
-        if sandbox_enabled {
-            cmd.env_clear();
-            if let Ok(path_val) = std::env::var("PATH") {
-                cmd.env("PATH", path_val);
-            }
+            apply_sandbox_flags(&mut cmd);
+            apply_sandbox_env(&mut cmd);
             // __allowed_env_vars is injected by the executor from --allow-env-vars.
             if let Some(Value::Array(allowed)) = input.context.metadata.get("__allowed_env_vars") {
                 for entry in allowed {
@@ -446,9 +366,9 @@ function output(v) {{ __result = v; }}
         } else {
             cmd.spawn()
         };
-        // Track whether the sandbox is partial (macOS: module restrictions apply
-        // but setrlimit CPU/memory caps are Linux-only). Surfaced in node output
-        // as `_sandbox_partial: true` so API callers can detect and alert.
+        // Off Linux the module and permission restrictions apply but the setrlimit CPU/memory
+        // caps do not. Surfaced in node output as `_sandbox_partial: true` so API callers can
+        // detect and alert.
         #[cfg(target_os = "linux")]
         let sandbox_partial = false;
         #[cfg(not(target_os = "linux"))]
@@ -456,20 +376,16 @@ function output(v) {{ __result = v; }}
 
         #[cfg(not(target_os = "linux"))]
         let spawn_result = {
-            // On macOS, the ESM module loader applies but setrlimit() is Linux-only —
-            // CPU/memory are uncapped. Windows is rejected above with SANDBOX_NOT_SUPPORTED.
-            // Warn once per process so operators know the sandbox is partial without
-            // flooding logs on every workflow execution.
-            #[cfg(target_os = "macos")]
             if sandbox_enabled {
-                MACOS_SANDBOX_PARTIAL_WARNED.get_or_init(|| {
+                PARTIAL_SANDBOX_WARNED.get_or_init(|| {
                     tracing::warn!(
-                        "Code node sandbox is PARTIAL on macOS. \
-                         ESM module import restrictions (fs/net/child_process) are enforced, \
-                         but CPU and memory resource limits (setrlimit) are Linux-only and \
-                         are NOT applied. A runaway script can exhaust system resources. \
+                        "Code node sandbox is PARTIAL on {}. \
+                         Module import and permission restrictions (fs/net/child_process) are \
+                         enforced, but CPU and memory resource limits (setrlimit) are Linux-only \
+                         and are NOT applied. A runaway script can exhaust system resources. \
                          The per-node timeout_secs (max 60 s) is the only effective resource \
-                         cap on this platform. For full sandboxing, deploy on Linux."
+                         cap on this platform. For full sandboxing, deploy on Linux.",
+                        std::env::consts::OS
                     );
                 });
             }
@@ -496,9 +412,13 @@ function output(v) {{ __result = v; }}
             Err(e) => return NodeOutput::failure(
                 NodeError::unrecoverable(
                     "SANDBOX_INIT_FAILED",
-                    format!("Code node sandbox failed to initialise: {}. \
-                             Resource limits could not be applied — check that the process \
-                             hard limits (RLIMIT_CPU, RLIMIT_AS) allow the requested values.", e)
+                    format!("Code node sandbox failed to initialise: {}.{}", e,
+                        if cfg!(target_os = "linux") {
+                            " Resource limits could not be applied — check that the process \
+                             hard limits (RLIMIT_CPU, RLIMIT_AS) allow the requested values."
+                        } else {
+                            ""
+                        })
                 )
             ),
         };
@@ -769,26 +689,69 @@ fn count_unsafe_integers(value: &Value) -> usize {
     count
 }
 
-#[cfg(not(windows))]
-fn loader_url(path: &Path) -> String {
-    url::Url::from_file_path(path)
-        .map(|u| u.to_string())
-        .unwrap_or_else(|()| format!("file://{}", path.display()))
+/// Flags that make a Node.js process enforce the sandbox: no string-to-code generation, and the
+/// permission model with nothing granted, which denies file system access, child processes, workers,
+/// native addons and WASI inside Node itself. The same flags apply on every platform.
+fn apply_sandbox_flags(cmd: &mut Command) {
+    cmd.arg("--disallow-code-generation-from-strings");
+    cmd.arg("--permission");
 }
 
-/// Write the sandbox ESM loader script to a named temp file.
-/// The caller is responsible for keeping the returned `NamedTempFile` alive until
-/// the Node.js subprocess exits — drop = delete.
-#[cfg(not(windows))]
-fn write_sandbox_loader() -> std::io::Result<tempfile::NamedTempFile> {
-    use std::io::Write;
-    let mut f = tempfile::Builder::new()
-        .prefix("aerini-sandbox-")
-        .suffix(".mjs")
-        .tempfile()?;
-    f.write_all(SANDBOX_LOADER_CONTENT.as_bytes())?;
-    f.flush()?;
-    Ok(f)
+/// Clears the inherited environment so `process.env` cannot expose server secrets, then restores
+/// `PATH`, which Node needs to find its own binaries, and on Windows `SystemRoot` and `windir`,
+/// without which Node cannot start its networking and crypto stacks.
+fn apply_sandbox_env(cmd: &mut Command) {
+    cmd.env_clear();
+    #[cfg(windows)]
+    for name in ["SystemRoot", "windir"] {
+        if let Ok(value) = std::env::var(name) {
+            cmd.env(name, value);
+        }
+    }
+    if let Ok(path_val) = std::env::var("PATH") {
+        cmd.env("PATH", path_val);
+    }
+}
+
+/// Runs the sandbox prelude with the real sandbox flags and confirms the restrictions hold, once
+/// per process. A host where they do not hold (an unsupported `--permission` flag, a hook that
+/// does not run) gets an error instead of a Code node that runs unsandboxed. Failures are not
+/// cached, so a transient spawn error does not disable the sandbox until restart.
+async fn verify_sandbox(node_bin: &Path) -> Result<(), String> {
+    if SANDBOX_VERIFIED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    probe_sandbox(node_bin).await?;
+    SANDBOX_VERIFIED.store(true, Ordering::Release);
+    Ok(())
+}
+
+async fn probe_sandbox(node_bin: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(node_bin);
+    cmd.kill_on_drop(true).arg("--input-type=module");
+    apply_sandbox_flags(&mut cmd);
+    apply_sandbox_env(&mut cmd);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Node.js did not start for the sandbox check ({e})"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let script = format!("{SANDBOX_PRELUDE}{SANDBOX_PROBE}");
+        let _ = stdin.write_all(script.as_bytes()).await;
+    }
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .map_err(|_| "the sandbox check timed out".to_string())?
+        .map_err(|e| format!("the sandbox check could not be read ({e})"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.lines().find_map(|line| line.strip_prefix(SANDBOX_PROBE_MARKER)) {
+        Some("[]") => Ok(()),
+        Some(unenforced) => Err(format!("these restrictions did not hold: {unenforced}")),
+        None => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr.trim().chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+            Err(format!("the sandbox check did not finish (exit {:?}): {}", output.status.code(), tail))
+        }
+    }
 }
 
 // tokio::process::Command exposes pre_exec() directly on Unix — no CommandExt import needed.
@@ -800,12 +763,6 @@ mod tests {
         let value = json!({"a": 42, "b": [9007199254740992u64, 9007199254740993u64], "c": {"d": -9007199254740993i64, "e": 1.5e300}});
         assert_eq!(count_unsafe_integers(&value), 2);
         assert_eq!(count_unsafe_integers(&json!({"n": 7, "list": [1, 2.5]})), 0);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn loader_path_is_percent_encoded_in_its_url() {
-        assert_eq!(loader_url(Path::new("/tmp/a b/#x.mjs")), "file:///tmp/a%20b/%23x.mjs");
     }
 
     use super::*;
@@ -834,71 +791,42 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn sandbox_loader_blocks_module_builtin() {
-        assert!(SANDBOX_LOADER_CONTENT.contains("'node:module'"));
-        assert!(SANDBOX_LOADER_CONTENT.contains("'module'"));
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn sandbox_loader_blocks_v8_and_inspector() {
-        // v8.writeHeapSnapshot(path) writes an attacker-influenced file to an
-        // arbitrary path; inspector.open() starts a debugger whose Runtime.evaluate
-        // bypasses --disallow-code-generation-from-strings. Both bypass the loader
-        // hook's module-name blocklist without touching fs/child_process at all,
-        // so both must be blocked by name like every other dangerous builtin.
-        assert!(SANDBOX_LOADER_CONTENT.contains("'node:v8'"));
-        assert!(SANDBOX_LOADER_CONTENT.contains("'v8'"));
-        assert!(SANDBOX_LOADER_CONTENT.contains("'node:inspector'"));
-        assert!(SANDBOX_LOADER_CONTENT.contains("'inspector'"));
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn sandbox_blocks_network_and_file_capable_builtins_beyond_net_and_fs() {
-        for id in ["tls", "wasi", "trace_events", "sqlite", "test"] {
-            let prefixed = format!("'node:{id}'");
-            assert!(SANDBOX_LOADER_CONTENT.contains(&prefixed), "loader misses {id}");
-            assert!(SANDBOX_GLOBALS_HARDENING.contains(&prefixed), "prelude misses {id}");
+    fn sandbox_prelude_blocks_every_dangerous_builtin_by_name() {
+        let list_start = SANDBOX_PRELUDE.find("new Set([").expect("blocklist start");
+        let list = &SANDBOX_PRELUDE[list_start..list_start + SANDBOX_PRELUDE[list_start..].find("]);").expect("blocklist end")];
+        for id in [
+            "child_process", "fs", "fs/promises", "net", "http", "https", "http2", "dgram", "dns",
+            "dns/promises", "os", "cluster", "worker_threads", "vm", "repl", "domain", "module", "v8",
+            "inspector", "inspector/promises", "tls", "wasi", "trace_events", "sqlite", "test",
+            "test/reporters",
+        ] {
+            assert!(list.contains(&format!("'{id}'")), "blocklist misses {id}");
         }
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.kill;"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.report;"));
+        assert!(SANDBOX_PRELUDE.contains("registerHooks("));
+        assert!(SANDBOX_PRELUDE.contains("process.getBuiltinModule = "));
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn loader_and_prelude_block_the_same_modules() {
-        fn quoted(src: &str) -> std::collections::BTreeSet<String> {
-            let start = src.find("new Set([").expect("blocklist start");
-            let end = start + src[start..].find("]);").expect("blocklist end");
-            src[start..end].split('\'').skip(1).step_by(2).map(str::to_owned).collect()
+    fn sandbox_prelude_deletes_raw_binding_and_network_globals() {
+        for removed in [
+            "fetch", "WebSocket", "XMLHttpRequest", "process.binding", "process._linkedBinding",
+            "process.dlopen", "process.kill", "process.report",
+        ] {
+            let removal = if removed.starts_with("process.") {
+                format!("delete {removed};")
+            } else {
+                format!("delete globalThis.{removed};")
+            };
+            assert!(SANDBOX_PRELUDE.contains(&removal), "prelude keeps {removed}");
         }
-        let in_loader = quoted(SANDBOX_LOADER_CONTENT);
-        assert!(in_loader.contains("node:child_process"));
-        assert_eq!(in_loader, quoted(SANDBOX_GLOBALS_HARDENING));
     }
 
     #[test]
-    fn sandbox_globals_hardening_overrides_get_builtin_module() {
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("process.getBuiltinModule = "));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("'module'"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:child_process'"));
-    }
-
-    #[test]
-    fn sandbox_globals_hardening_deletes_raw_binding_access() {
-        // process.binding('spawn_sync').spawn(...) and process.binding('fs') hand back
-        // raw internal Node bindings that bypass the ESM loader hook entirely -- verified
-        // empirically to execute arbitrary OS commands when only the module-import
-        // blocklist was in place. process.dlopen/_linkedBinding load native addons
-        // directly, same bypass class. All three must be removed unconditionally,
-        // since neither reaches the module-name blocklist above.
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.binding;"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process._linkedBinding;"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("delete process.dlopen;"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:v8'"));
-        assert!(SANDBOX_GLOBALS_HARDENING.contains("'node:inspector'"));
+    fn sandbox_flags_apply_the_same_arguments_on_every_platform() {
+        let mut cmd = Command::new("node");
+        apply_sandbox_flags(&mut cmd);
+        let args: Vec<_> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--disallow-code-generation-from-strings", "--permission"]);
     }
 
     #[tokio::test]
@@ -1108,6 +1036,37 @@ mod tests {
         let out = run_code(&node, json!({ "code": "output(1 + 1);" }), metadata).await;
         assert!(out.success, "{:?}", out.error);
         assert_eq!(out.output.unwrap()["result"], 2);
+    }
+
+    #[tokio::test]
+    async fn sandboxed_code_blocks_imports_and_reports_partial_off_linux() {
+        let node = require_node!();
+        let mut metadata = HashMap::new();
+        metadata.insert("__code_sandbox".to_string(), Value::Bool(true));
+        let code = r#"
+            const blocked = [];
+            for (const id of ['node:fs', 'fs', 'node:child_process', 'node:module', 'node:net']) {
+              try { await import(id); } catch { blocked.push(id); }
+            }
+            try { process.getBuiltinModule('node:fs'); } catch { blocked.push('getBuiltinModule'); }
+            output({ blocked: blocked.length, fetch: typeof fetch });
+        "#;
+        let out = run_code(&node, json!({ "code": code }), metadata).await;
+        assert!(out.success, "{:?}", out.error);
+        let data = out.output.unwrap();
+        assert_eq!(data["result"], json!({ "blocked": 6, "fetch": "undefined" }));
+        assert_eq!(data.get("_sandbox_partial").is_some(), !cfg!(target_os = "linux"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_probe_accepts_a_node_that_enforces_and_rejects_one_that_does_not() {
+        let node = require_node!();
+        probe_sandbox(&node).await.expect("real Node.js enforces the sandbox flags");
+        #[cfg(unix)]
+        {
+            let err = probe_sandbox(Path::new("/bin/true")).await.unwrap_err();
+            assert!(err.contains("did not finish"), "{err}");
+        }
     }
 
     #[cfg(target_os = "linux")]

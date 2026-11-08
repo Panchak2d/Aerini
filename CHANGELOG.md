@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 
 ## [Unreleased]
 
+---
+
+## [0.4.5] - 2026-11-08
+
 ### Added
 - Canvas (desktop): **frames light up as a drop target.** While you drag nodes, the smallest frame that fully contains everything you are dragging gets a solid, thicker border. Right-click empty canvas also offers **Add section frame here** and **Add to-do note here**, and a new **Notes** button in the sidebar lists every note and frame (hidden ones too); click one to jump to it.
 - Canvas (desktop): **copy, cut and paste.** `Ctrl+C`, `Ctrl+X` and `Ctrl+V` work on the selected nodes, notes and group frames, keeping the wires between them. Paste lands under the pointer when it is over the canvas, and right-clicking empty canvas offers **Paste** at that spot. Wires to items you did not select are left behind, and saved-connection bindings are not copied, so choose the connection again on a pasted node. The clipboard stays inside Aerini; nothing is written to the system clipboard. One `Ctrl+Z` undoes a paste.
@@ -54,6 +58,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 - Canvas (desktop): scroll zoom is now smooth and proportional, so a trackpad no longer races through the zoom range and a mouse wheel steps evenly. Two-finger trackpad scrolling now pans the canvas instead of zooming it
 - Canvas (desktop): fit to screen and centring on a node now glide into place and stop the moment you scroll, drag or press a key; they jump at once when your system asks for reduced motion
 - Canvas (desktop): box select (`Shift`-drag) now selects every node the box touches, not only those whose top-left corner it contains
+- **Breaking** for Postgres and MySQL (Database node): unless the TLS mode checks the host name (`sslmode=verify-full` or `ssl-mode=VERIFY_IDENTITY`), Aerini now connects to the address it validated instead of letting the driver look the name up again, which closes DNS rebinding for those connections. No TLS server name is sent in those modes, so a service that routes by server name now fails to connect, and the error says to use `verify-full` or `VERIFY_IDENTITY`. A pool dialled this way is reused for 5 minutes at most. With `verify-full` or `VERIFY_IDENTITY`, a rebound address still fails the handshake but is not pinned; use a host-level egress firewall.
+- **Breaking** on Windows: `--code-sandbox` now enforces the module-import and permission restrictions instead of refusing every Code node with `SANDBOX_NOT_SUPPORTED`, and `aerini-server serve` refuses to start with `--allow-code --code-sandbox` there unless `--i-acknowledge-partial-sandbox` is passed, as on macOS. CPU and memory caps stay Linux-only, so Windows output carries `_sandbox_partial: true`.
+- Code (JS) with `--code-sandbox`: the sandbox uses Node's permission model (`--permission`) and one `module.registerHooks()` script for all platforms instead of a temp-file `--experimental-loader`. File system, child process, worker, native addon and WASI access and imports of local files are now denied inside Node itself, and alternate spellings of a blocked builtin are refused. Scripts that imported local `.js` files in the sandbox stop working. The first sandboxed run checks that the restrictions hold and fails with `SANDBOX_UNAVAILABLE` and the reason if they do not.
 
 ### Fixed
 - Canvas (desktop): the **Problems** list opened from the status bar is no longer hidden behind the output drawer; it opens above the drawer, stays clear of the chat panel and scrolls when the space is short.
@@ -75,6 +82,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 - Canvas (desktop): dragging nodes, hovering over wires and scrolling stay responsive in large workflows, and the view you last used in a workflow is saved once you stop moving it instead of on every scroll tick
 - Canvas (desktop): switching to another window or app in the middle of a drag no longer leaves the canvas stuck mid-gesture; a dragged node returns to where it started
 - Canvas (desktop): the minimap shows every node's icon, shrinking it to fit small marks instead of dropping it, and no longer draws your view as a blue outline. The view is now a faint lifted area with a neutral frame, with a grab cursor over it
+- Plugins (desktop): a pack ID can be at most 64 characters and can no longer be a Windows device name such as `CON`, `NUL`, `COM1` or `LPT1` (with or without a suffix like `.example`), because `<pack_id>.aerini-pack.json` would not be a usable file on Windows. Member filenames now also refuse `COM0`, `LPT0`, superscript-digit variants and `CONIN$`/`CONOUT$`. A pack already installed with an ID over 64 characters is no longer listed; reinstall it under a shorter ID.
+
+### Security
+- **Breaking** for Webhook triggers (Active / background): the Webhook node's **Validate Timestamp** setting is now enforced when the scheduler holds the listener. Before, it was applied only to a manual Run, so an active webhook accepted requests with no or a stale `x-webhook-timestamp`. A request without the header now gets 400 and one more than five minutes off gets 401. A value that is not true or false now stops the job from starting. The embeddable widget relay sends the header itself, so it keeps working. A job that was already Active or Always on before this version is re-armed from its saved row, which has no such setting, so it keeps accepting requests without the header until you stop and start it.
+- Chat panel (desktop): a link in a reply now opens only if it is an absolute `http` or `https` address. Relative links, `file:`, `mailto:` and other schemes are removed, so a reply cannot navigate the app window away, and form controls and inline styles in a reply are dropped.
+- MCP (offline mode): `save_workflow` with `overwrite=true` now writes a new file beside the target and renames it into place, so a symlink already at that path is replaced rather than written through, and a failed write no longer leaves a truncated file.
+- Network checks: an IPv6 address that embeds an IPv4 address in the SIIT form (`::ffff:0:a.b.c.d`) is now judged as that IPv4 address, and deprecated site-local IPv6 addresses (`fec0::/10`) are blocked under both policies.
+- Desktop: opening a workflow file by path now refuses anything that is not a regular file, and files over 64 MB.
+- Plugins (desktop): installing a single `.wasm` over a file that belongs to an installed `.aerinipkg` pack, or into a filename a pack lists, is now refused whether or not the pack is signed. Before, an unsigned file installed with **Update** could replace one member of a signed pack and get past the pack's signature and trusted-publisher check. Removing one pack member on its own is refused the same way. Update the pack with the newer `.aerinipkg`, or remove the pack first.
+- Plugins (desktop): a publisher key is now remembered as trusted only after the install succeeds. Before, an install that was then refused (already installed, or a name clash) still left its key trusted, so the same publisher's later files were held to a key the user never accepted.
+- Updates (desktop): a download larger than 512 MiB is stopped and discarded. The updater held the whole download in memory and checked its signature only at the end, so a misbehaving server could exhaust memory first.
 
 ---
 

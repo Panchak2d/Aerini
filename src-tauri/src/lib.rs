@@ -438,18 +438,37 @@ impl EventSink for TauriEventSink {
     }
 }
 
+const MAX_WORKFLOW_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Read a .aerini or .json workflow file from an absolute path.
-/// Restricted to those two extensions.
+/// Restricted to those two extensions, regular files, and a size cap.
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
+    use std::io::Read;
     let canonical = std::fs::canonicalize(&path)
         .map_err(|e| format!("Could not resolve path '{}': {}", path, e))?;
     let canonical_str = canonical.to_string_lossy();
     if !canonical_str.ends_with(".aerini") && !canonical_str.ends_with(".json") {
         return Err("Only .aerini or .json files can be opened this way.".to_string());
     }
-    std::fs::read_to_string(&canonical)
-        .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))
+    let file = std::fs::File::open(&canonical)
+        .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))?;
+    let meta = file.metadata()
+        .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))?;
+    if !meta.is_file() {
+        return Err("Only regular files can be opened this way.".to_string());
+    }
+    if meta.len() > MAX_WORKFLOW_FILE_BYTES {
+        return Err(format!("File is too large (limit {} MB).", MAX_WORKFLOW_FILE_BYTES / (1024 * 1024)));
+    }
+    let mut text = String::new();
+    file.take(MAX_WORKFLOW_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("Could not read file '{}': {}", canonical_str, e))?;
+    if text.len() as u64 > MAX_WORKFLOW_FILE_BYTES {
+        return Err(format!("File is too large (limit {} MB).", MAX_WORKFLOW_FILE_BYTES / (1024 * 1024)));
+    }
+    Ok(text)
 }
 
 /// Argument the autostart entry passes so a login launch opens in the tray.

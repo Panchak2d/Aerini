@@ -19,6 +19,9 @@ tokio-util   = { version = "0.7", features = ["rt"] }
 
 # HTTP
 axum       = { version = "0.8", features = ["tokio"] }
+hyper      = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+tower      = "0.5"
 tower-http = { version = "0.7.0", features = ["cors"] }
 
 # HTTP client (for control commands)

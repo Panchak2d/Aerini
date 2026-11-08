@@ -201,7 +201,7 @@ export function buildSidebarPalette(
       item.className = "palette-item palette-preset";
       item.dataset.search = preset.label.toLowerCase();
       item.dataset.cat = "preset";
-      item.innerHTML = `${iconHtml}<span class="palette-name">${preset.label}</span><span class="palette-preset-tag">preset</span>`;
+      item.innerHTML = `${iconHtml}<span class="palette-name">${escapeHtml(preset.label)}</span><span class="palette-preset-tag">preset</span>`;
 
       item.addEventListener("click", () => {
         blurSearch();

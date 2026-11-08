@@ -20,7 +20,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use super::{install_plugin_pack_from_path, PLUGIN_DIR_SETTING, remove_plugin_pack};
 use super::install::install_pack_blocking;
-use super::pack::{check_pack_signature, extract_pack_zip, is_valid_pack_id, PACK_MANIFEST_MAX_BYTES, PACK_MAX_ENTRIES, PACK_SCHEMA_VERSION, parse_pack_manifest, read_entry_bounded, scan_installed_packs};
+use super::pack::{check_pack_signature, extract_pack_zip, is_valid_pack_id, PACK_ID_MAX_LEN, pack_owning_member, PACK_MANIFEST_MAX_BYTES, PACK_MAX_ENTRIES, PACK_SCHEMA_VERSION, parse_pack_manifest, read_entry_bounded, scan_installed_packs};
 use super::remove::remove_pack_files;
 use super::staging::{read_bounded, write_atomic};
 use super::trust::{read_trust_store, save_trust_store, trust_store_path};
@@ -62,7 +62,7 @@ fn sample_manifest_json(pack_id: &str, files: &[&str]) -> Vec<u8> {
 
 #[test]
 fn parse_pack_manifest_rejects_device_and_stream_member_names() {
-    for bad in ["CON.wasm", "nul.wasm", "com1.wasm", "a:b.wasm", "a<b.wasm", "a .wasm", ".wasm"] {
+    for bad in ["CON.wasm", "nul.wasm", "com1.wasm", "COM0.wasm", "lpt3.wasm", "CONIN$.wasm", "a:b.wasm", "a<b.wasm", "a .wasm", ".wasm"] {
         let manifest = sample_manifest_json("pack", &[bad]);
         assert!(parse_pack_manifest(&manifest).is_err(), "{bad} should be rejected");
     }
@@ -146,6 +146,33 @@ fn is_valid_pack_id_rejects_bad_starts_and_disallowed_chars() {
     for id in ["", ".starts-with-dot", "-starts-with-dash", "has space", "has/slash", "has\\backslash", "has:colon"] {
         assert!(!is_valid_pack_id(id), "expected '{id}' to be rejected as an invalid pack_id");
     }
+}
+
+#[test]
+fn is_valid_pack_id_rejects_windows_device_names_in_any_case_or_with_dotted_suffix() {
+    for id in ["CON", "con", "Nul", "PRN", "aux", "COM1", "com9", "COM0", "LPT3", "lpt0", "CON.example", "nul.v2", "com1.example.pack"] {
+        assert!(!is_valid_pack_id(id), "expected '{id}' to be rejected as a reserved device name");
+    }
+    for id in ["console", "com10", "com.example.pack", "lpt", "aux1", "connect.pack"] {
+        assert!(is_valid_pack_id(id), "expected '{id}' to be accepted — only exact device names are reserved");
+    }
+}
+
+#[test]
+fn is_valid_pack_id_enforces_the_length_cap() {
+    assert!(is_valid_pack_id(&"a".repeat(PACK_ID_MAX_LEN)));
+    assert!(!is_valid_pack_id(&"a".repeat(PACK_ID_MAX_LEN + 1)));
+}
+
+#[test]
+fn pack_owning_member_matches_listed_members_ignoring_case() {
+    let mut packs = HashMap::new();
+    let raw = sample_manifest_json("com.example.pack", &["a.wasm", "b.wasm"]);
+    packs.insert("com.example.pack".to_string(), parse_pack_manifest(&raw).expect("manifest parse failed"));
+
+    assert_eq!(pack_owning_member(&packs, "a.wasm"), Some("com.example.pack"));
+    assert_eq!(pack_owning_member(&packs, "B.WASM"), Some("com.example.pack"));
+    assert_eq!(pack_owning_member(&packs, "standalone.wasm"), None);
 }
 
 // --- parse_pack_manifest ---
@@ -529,6 +556,29 @@ fn install_plugin_pack_from_path_rejects_signature_downgrade_even_with_overwrite
     assert!(err.starts_with("pack_signature_downgrade:"));
 }
 
+#[test]
+fn rejected_pack_install_does_not_pin_the_publisher_key() {
+    let pack_id = "com.example.pack";
+    let dir = tempfile::tempdir().expect("tempdir create failed");
+    std::fs::write(dir.path().join(format!("{pack_id}.aerini-pack.json")), sample_manifest_json(pack_id, &["a.wasm"])).expect("manifest write failed");
+    std::fs::write(dir.path().join("a.wasm"), b"existing-wasm").expect("member write failed");
+
+    let manifest = sample_manifest_json(pack_id, &["a.wasm"]);
+    let entries = vec![
+        SignedFileEntry { name: "pack.json".to_string(), blake3: blake3::hash(&manifest).to_hex().to_string() },
+        SignedFileEntry { name: "a.wasm".to_string(), blake3: blake3::hash(b"new-wasm").to_hex().to_string() },
+    ];
+    let sig = sig_file_json(&signing_key_fixture(), &entries);
+    let tmp = write_pack_file(&[("pack.json", &manifest), ("pack.json.sig", &sig), ("a.wasm", b"new-wasm")]);
+
+    // Validly signed, but already installed and no overwrite: the install
+    // fails after signature verification, so no key may be recorded.
+    let result = install_pack_blocking(tmp.path().display().to_string(), dir.path().display().to_string(), false);
+    let err = result.expect_err("reinstalling without overwrite should be rejected");
+    assert!(err.starts_with("pack_already_installed:"), "got: {err}");
+    assert!(read_trust_store(dir.path()).expect("trust store read failed").is_empty());
+}
+
 // --- configured plugin folder guard, through managed State ---
 
 fn mock_app_with_db(configured_dir: Option<&Path>) -> (tauri::App<tauri::test::MockRuntime>, tempfile::TempDir) {
@@ -592,5 +642,17 @@ async fn pack_commands_refuse_when_no_plugin_dir_is_configured() {
 
     let result = remove_plugin_pack("com.example.pack".to_string(), dir.path().display().to_string(), app.state()).await;
     assert!(matches!(&result, Err(e) if e.contains("No plugin folder is set")), "got: {result:?}");
+    assert!(manifest_path.exists());
+}
+
+#[tokio::test]
+async fn remove_plugin_refuses_a_file_that_belongs_to_a_pack() {
+    let dir = tempfile::tempdir().expect("tempdir create failed");
+    let manifest_path = install_sample_pack(dir.path(), "com.example.pack");
+    let (app, _db_dir) = mock_app_with_db(Some(dir.path()));
+
+    let result = remove_plugin("a.wasm".to_string(), dir.path().display().to_string(), app.state()).await;
+    assert!(matches!(&result, Err(e) if e.contains("belongs to the plugin pack")), "got: {result:?}");
+    assert!(dir.path().join("a.wasm").exists(), "a refused removal must leave the member in place");
     assert!(manifest_path.exists());
 }

@@ -14,11 +14,10 @@
 #   - LTS-to-LTS boundary (e.g. this line's LTS window ending): planned bump,
 #     not urgent by itself.
 #
-# Forward blocker for any bump past Node 24 LTS:
-#   aerini-engine/src/nodes/code_node.rs's sandbox loader (write_sandbox_loader)
-#   declares its module resolution hook as `export async function resolve(...)`,
-#   run via --experimental-loader. That mechanism's replacement, Node's
-#   module.registerHooks(), only accepts synchronous hooks -- an async resolve
-#   hook cannot move to registerHooks() without first being rewritten to
-#   synchronous I/O. Node 24 LTS does not force this yet, but bumping past it
-#   (Node 26+) requires that rewrite first, or the loader breaks.
+# Sandbox dependencies on the bundled Node:
+#   aerini-engine/src/nodes/code_node.rs relies on module.registerHooks() (a synchronous,
+#   in-thread resolve hook; available from Node 22.15 and 24.0) and on the permission model
+#   flag --permission (fs/child-process/worker flags stable from Node 22.17 and 24.2).
+#   It no longer uses --experimental-loader or module.register(), the latter deprecated
+#   (DEP0205) in favour of registerHooks(). Before bumping, confirm both still exist and that
+#   the Code node sandbox self-check still passes (the first sandboxed run reports why if not).
