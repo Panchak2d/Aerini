@@ -86,6 +86,58 @@ pub(crate) fn withhold_server_env(
     }
 }
 
+/// A Linux AppImage starts Aerini with its own GLib, GTK and GIO first on the
+/// library search path (`LD_LIBRARY_PATH` and similar variables, all pointing
+/// into `APPDIR`). A program Aerini launches inherits them, and a system tool
+/// built against a newer GLib then dies with an `undefined symbol` error.
+/// Returns what each affected variable must become for a child: its entries
+/// without the ones inside `appdir`, or `None` to remove it when none are
+/// left. Variables that do not mention `appdir`, and `APPDIR` itself, are not
+/// listed.
+#[cfg(any(target_os = "linux", test))]
+fn host_env_overrides(vars: &[(String, String)], appdir: &str) -> Vec<(String, Option<String>)> {
+    let appdir = appdir.trim_end_matches('/');
+    if appdir.is_empty() {
+        return Vec::new();
+    }
+    let inside = |entry: &str| {
+        entry == appdir || entry.strip_prefix(appdir).is_some_and(|rest| rest.starts_with('/'))
+    };
+    vars.iter()
+        .filter_map(|(name, value)| {
+            let entries: Vec<&str> = value.split(':').collect();
+            if name == "APPDIR" || !entries.iter().any(|&e| inside(e)) {
+                return None;
+            }
+            let kept: Vec<&str> = entries.into_iter().filter(|&e| !e.is_empty() && !inside(e)).collect();
+            Some((name.clone(), if kept.is_empty() { None } else { Some(kept.join(":")) }))
+        })
+        .collect()
+}
+
+/// Gives a child process the environment it would have had without the
+/// AppImage launcher (see [`host_env_overrides`]). Does nothing outside an
+/// AppImage.
+#[cfg(target_os = "linux")]
+pub(crate) fn restore_host_library_env(cmd: &mut tokio::process::Command) {
+    let Some(appdir) = std::env::var_os("APPDIR").and_then(|v| v.into_string().ok()) else {
+        return;
+    };
+    let vars: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    for (name, value) in host_env_overrides(&vars, &appdir) {
+        match value {
+            Some(v) => {
+                cmd.env(name, v);
+            }
+            None => {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
 /// Owns a Windows Job Object holding a command and its descendants. The handle
 /// is kept as an integer so the guard stays `Send` across the node's awaits.
 #[cfg(windows)]
@@ -2500,5 +2552,44 @@ mod secrets_equal_tests {
         assert!(!secrets_equal("abc", "abcd"));
         assert!(!secrets_equal("", "abc"));
         assert!(secrets_equal("", ""));
+    }
+}
+
+#[cfg(test)]
+mod host_env_tests {
+    use super::host_env_overrides;
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn appimage_entries_are_dropped_and_the_hosts_own_are_kept_in_order() {
+        let appdir = "/tmp/.mount_AerinicDjCJb";
+        let got = host_env_overrides(
+            &vars(&[
+                ("LD_LIBRARY_PATH", "/tmp/.mount_AerinicDjCJb/usr/lib/:/opt/x/lib:/tmp/.mount_AerinicDjCJb/lib64/:"),
+                ("GTK_EXE_PREFIX", "/tmp/.mount_AerinicDjCJb//usr"),
+                ("APPDIR", appdir),
+                ("HOME", "/home/u"),
+            ]),
+            appdir,
+        );
+        assert_eq!(
+            got,
+            [
+                ("LD_LIBRARY_PATH".to_string(), Some("/opt/x/lib".to_string())),
+                ("GTK_EXE_PREFIX".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sibling_directory_sharing_the_prefix_is_not_the_appdir() {
+        let got = host_env_overrides(
+            &vars(&[("LD_LIBRARY_PATH", "/tmp/.mount_AerinicDjCJbX/lib")]),
+            "/tmp/.mount_AerinicDjCJb",
+        );
+        assert!(got.is_empty());
     }
 }
