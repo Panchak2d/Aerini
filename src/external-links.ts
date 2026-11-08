@@ -4,6 +4,7 @@ import { isTauri } from "./utils";
 export const EXTERNAL_URL_SCOPE: readonly string[] = [
   "https://github.com/Panchak2d/**",
   "https://www.patreon.com/**",
+  "https://docs.aerini.org/**",
   "https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/",
   "https://ngrok.com/",
   "https://console.cloud.google.com/",

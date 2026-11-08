@@ -41,6 +41,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 - Sidebar (desktop): every node shows a one-line description under its name, a **Beginner** filter keeps the common nodes, and Code, Shell Command and Database carry an **Advanced** tag.
 
 - Canvas (desktop): **Test** and **Run this node** now use the results of the steps before the node instead of running them again. A step is reused only while it and everything before it is unchanged; the node's settings show which steps are reused and how old their results are, with a choice between **Use last results** and **Run everything**. Reused nodes are marked `cached` on the canvas. Loops, and the steps inside them, always run. If a step before the node would send an email or message, change data elsewhere or use your AI account, Test lists them and asks before running them. Results are kept in memory only, never saved in the workflow or run history, and are dropped when you switch workflows. The desktop `run_workflow` command accepts an optional reserved variable, `__aerini_preset_node_outputs`, that lists recorded outputs to reuse; nothing changes for callers that do not send it
+- Settings (desktop): **Documentation** under About opens docs.aerini.org in your browser. The site shows the newest version, so a page can describe something your version doesn't have yet.
+- Docs: the docs site can now publish a frozen copy of each release at `docs.aerini.org/vMAJOR.MINOR/` (for example `/v0.4/`), marked `noindex`, while the unversioned site stays the newest. Nothing in the app links to these copies yet.
 
 ### Changed
 - Canvas (desktop): right-clicking a wire no longer deletes it at once; it opens a menu with **Delete connection**. The **×** button on a hovered wire, and `Del` on a selected wire, still delete it, and `Ctrl+Z` undoes either.
@@ -93,6 +95,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — versioning:
 - Plugins (desktop): installing a single `.wasm` over a file that belongs to an installed `.aerinipkg` pack, or into a filename a pack lists, is now refused whether or not the pack is signed. Before, an unsigned file installed with **Update** could replace one member of a signed pack and get past the pack's signature and trusted-publisher check. Removing one pack member on its own is refused the same way. Update the pack with the newer `.aerinipkg`, or remove the pack first.
 - Plugins (desktop): a publisher key is now remembered as trusted only after the install succeeds. Before, an install that was then refused (already installed, or a name clash) still left its key trusted, so the same publisher's later files were held to a key the user never accepted.
 - Updates (desktop): a download larger than 512 MiB is stopped and discarded. The updater held the whole download in memory and checked its signature only at the end, so a misbehaving server could exhaust memory first.
+- Desktop: the list of addresses the webview may open now includes `https://docs.aerini.org/**`.
 
 ---
 
