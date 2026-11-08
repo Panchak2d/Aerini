@@ -333,6 +333,7 @@ pub async fn trigger_widget(
     let relay_result = relay_client()
         .post(&target)
         .header("x-webhook-secret", secret_header)
+        .header("x-webhook-timestamp", chrono::Utc::now().timestamp().to_string())
         .json(&b.body)
         .send()
         .await;

@@ -181,7 +181,7 @@ async fn status_page(State(s): State<StatusState>) -> Html<String> {
         match result {
             Ok(runs) if !runs.is_empty() => {
                 let rows: String = runs.iter().map(|r| {
-                    let ts    = &r.ran_at[..19.min(r.ran_at.len())];
+                    let ts    = r.ran_at.get(..19).unwrap_or(&r.ran_at);
                     let ts    = ts.replace('T', " ");
                     let color_class = if r.success { "run-success" } else { "run-failed" };
                     let label = if r.success { "success" } else { "failed" };
@@ -725,7 +725,7 @@ mod tests {
         let db_path = dir.join("history.db");
         let _ = std::fs::remove_file(&db_path);
         let db = Arc::new(WorkflowDb::open(&db_path, 2).expect("open workflow db"));
-        for (id, ran_at, success) in [("r1", "2026-01-01T10:00:00Z", true), ("r2", "2026-01-01T11:00:00Z", false)] {
+        for (id, ran_at, success) in [("r1", "2026-01-01T10:00:00Z", true), ("r2", "2026-01-01T11:00:00Z", false), ("r3", "2026-01-01T09:00:0\u{e9}00Z", true)] {
             db.save_run(&aerini_engine::db::RunRecord {
                 id: id.to_string(),
                 workflow_id: "wf-test".to_string(),
@@ -751,6 +751,7 @@ mod tests {
         let ok_at = html.find("2026-01-01 10:00:00").expect("older run listed");
         assert!(failed_at < ok_at, "newest run comes first");
         assert!(html.contains("run-failed") && html.contains("2.5s"));
+        assert!(html.contains("2026-01-01 09:00:0\u{e9}00Z"), "a timestamp that cannot be cut at byte 19 is shown whole");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

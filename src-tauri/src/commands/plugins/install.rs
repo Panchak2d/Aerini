@@ -5,9 +5,9 @@ use aerini_engine::plugin_loader::PluginLoader;
 use aerini_engine::plugin_loader::signature::{check_signature, sig_sidecar_path, SigCheckResult, SignedFileEntry};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
-use super::pack::{check_pack_signature, extract_pack_zip, PACK_MANIFEST_ENTRY_NAME, pack_manifest_path, PACK_MAX_MEMBER_BYTES, parse_pack_manifest, scan_installed_packs};
+use super::pack::{check_pack_signature, extract_pack_zip, PACK_MANIFEST_ENTRY_NAME, pack_manifest_path, pack_owning_member, PACK_MAX_MEMBER_BYTES, parse_pack_manifest, scan_installed_packs};
 use super::staging::{read_bounded, scan_type_ids, SIDECAR_MAX_BYTES, STAGED_PREFIX, StagedSidecar, sweep_stale_installs, write_atomic};
-use super::trust::{read_trust_store, save_trust_store, TRUST_STORE_LOCK};
+use super::trust::{commit_pin, read_trust_store, TRUST_STORE_LOCK};
 
 pub(super) fn install_plugin_blocking(src_path: String, plugin_dir: String, overwrite: bool) -> Result<String, String> {
     let src = Path::new(&src_path);
@@ -59,61 +59,58 @@ pub(super) fn install_plugin_blocking(src_path: String, plugin_dir: String, over
     // invalid signature, or a publisher key that differs from the one trusted
     // for this type_id blocks.
     let sig_check = check_signature(&staged_path, &wasm_bytes);
-    {
-        // Holds TRUST_STORE_LOCK for the whole read-decide-write section.
-        // Everything inside is synchronous, so the guard is never held across
-        // an `.await`.
-        let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        match sig_check {
-            SigCheckResult::IntegrityMismatch => {
-                return Err(
-                    "plugin_integrity_failed: the plugin file does not match its signed checksum (corrupted or tampered download)"
-                        .to_string(),
-                );
-            }
-            SigCheckResult::SignatureInvalid => {
-                return Err("plugin_signature_invalid: the plugin's signature file is present but does not verify".to_string());
-            }
-            SigCheckResult::Malformed(reason) => {
-                return Err(format!("plugin_signature_invalid: the plugin's signature file is malformed ({reason})"));
-            }
-            SigCheckResult::Valid(verifying_key) => {
-                if let Some(type_id) = &incoming_type_id {
-                    let mut store = read_trust_store(&dir)?;
-                    let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
-                    match store.get(type_id) {
-                        Some(pinned) if *pinned != incoming_key_b64 => {
-                            return Err(format!(
-                                "plugin_key_mismatch: '{type_id}' is signed by a different publisher key than the one \
-                                 previously trusted for this plugin. Remove the existing install first if you intend to \
-                                 trust the new key."
-                            ));
-                        }
-                        Some(_) => {}
-                        None => {
-                            // First valid signature seen for this type_id — trust on first use.
-                            store.insert(type_id.clone(), incoming_key_b64);
-                            save_trust_store(&dir, &store)?;
-                        }
-                    }
-                }
-                // No type_id (plugin failed to describe): signature verified
-                // but there's no identity to pin it to — proceed without
-                // touching the trust store.
-            }
-            SigCheckResult::Unsigned | SigCheckResult::Unrecognized => {
-                // Downgrade guard: a type_id previously trusted with a
-                // verified signature can't silently update to an
-                // unsigned/unrecognized file — that would let an attacker
-                // who can't forge a new signature just ship a plain
-                // unsigned "update" instead.
-                if let Some(type_id) = &incoming_type_id {
-                    if read_trust_store(&dir)?.contains_key(type_id) {
+
+    // Held until the install is finished and any new key is pinned. Everything
+    // below is synchronous, so the guard is never held across an `.await`.
+    let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // `(type_id, key)` to pin once the install has succeeded. A key is never
+    // pinned for an install that is rejected or fails part-way.
+    let mut pending_pin: Option<(String, String)> = None;
+    match sig_check {
+        SigCheckResult::IntegrityMismatch => {
+            return Err(
+                "plugin_integrity_failed: the plugin file does not match its signed checksum (corrupted or tampered download)"
+                    .to_string(),
+            );
+        }
+        SigCheckResult::SignatureInvalid => {
+            return Err("plugin_signature_invalid: the plugin's signature file is present but does not verify".to_string());
+        }
+        SigCheckResult::Malformed(reason) => {
+            return Err(format!("plugin_signature_invalid: the plugin's signature file is malformed ({reason})"));
+        }
+        SigCheckResult::Valid(verifying_key) => {
+            if let Some(type_id) = &incoming_type_id {
+                let store = read_trust_store(&dir)?;
+                let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
+                match store.get(type_id) {
+                    Some(pinned) if *pinned != incoming_key_b64 => {
                         return Err(format!(
-                            "plugin_signature_downgrade: '{type_id}' was previously installed with a verified publisher \
-                             signature; this file has none. Remove the existing install first if this is intentional."
+                            "plugin_key_mismatch: '{type_id}' is signed by a different publisher key than the one \
+                             previously trusted for this plugin. Remove the existing install first if you intend to \
+                             trust the new key."
                         ));
                     }
+                    Some(_) => {}
+                    None => pending_pin = Some((type_id.clone(), incoming_key_b64)),
+                }
+            }
+            // No type_id (plugin failed to describe): signature verified
+            // but there's no identity to pin it to — proceed without
+            // touching the trust store.
+        }
+        SigCheckResult::Unsigned | SigCheckResult::Unrecognized => {
+            // Downgrade guard: a type_id previously trusted with a
+            // verified signature can't silently update to an
+            // unsigned/unrecognized file — that would let an attacker
+            // who can't forge a new signature just ship a plain
+            // unsigned "update" instead.
+            if let Some(type_id) = &incoming_type_id {
+                if read_trust_store(&dir)?.contains_key(type_id) {
+                    return Err(format!(
+                        "plugin_signature_downgrade: '{type_id}' was previously installed with a verified publisher \
+                         signature; this file has none. Remove the existing install first if this is intentional."
+                    ));
                 }
             }
         }
@@ -123,6 +120,20 @@ pub(super) fn install_plugin_blocking(src_path: String, plugin_dir: String, over
         Some(id) => scan_type_ids(&dir, loader).into_iter().find(|(_, tid)| tid == id).map(|(f, _)| f),
         None => dir.join(&filename).is_file().then(|| filename.clone()),
     };
+
+    // A pack's members are installed, verified, updated and removed as one
+    // unit under the pack's own signature and trust pin. Replacing or taking
+    // over one on its own would sidestep both, so it is refused whether or
+    // not the pack is signed.
+    let installed_packs = scan_installed_packs(&dir);
+    for target in existing_filename.iter().map(String::as_str).chain(std::iter::once(filename.as_str())) {
+        if let Some(pack_id) = pack_owning_member(&installed_packs, target) {
+            return Err(format!(
+                "plugin_pack_member: '{target}' belongs to the plugin pack '{pack_id}' and can't be replaced on its own. \
+                 Install an updated copy of the whole pack, or remove the pack first."
+            ));
+        }
+    }
 
     let dest = dir.join(&filename);
     let conflict_err = || Err(format!(
@@ -180,6 +191,9 @@ pub(super) fn install_plugin_blocking(src_path: String, plugin_dir: String, over
         }
     }
 
+    if let Some((type_id, key)) = pending_pin {
+        commit_pin(&dir, &type_id, key);
+    }
     Ok(filename)
 }
 
@@ -219,54 +233,51 @@ pub(super) fn install_pack_blocking(src_path: String, plugin_dir: String, overwr
     let dir = PathBuf::from(&plugin_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
+    // A `pack:` prefix on the trust-store key keeps pack identity in a
+    // disjoint namespace from plain `type_id` pins sharing the same flat
+    // store, since a `pack_id` and a `type_id` both pass the same charset
+    // check and could otherwise collide on the same string.
     let trust_key = format!("pack:{}", manifest.pack_id);
-    {
-        // Same lock, same read-decide-write shape as `install_plugin_from_path`
-        // above — see `TRUST_STORE_LOCK`'s doc comment. A `pack:` prefix on
-        // the trust-store key keeps pack identity in a disjoint namespace
-        // from plain `type_id` pins sharing the same flat store, since a
-        // `pack_id` and a `type_id` both pass the same charset check and
-        // could otherwise collide on the same string.
-        let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        match sig_check {
-            SigCheckResult::IntegrityMismatch => {
-                return Err(
-                    "pack_integrity_failed: the package's contents do not match its signed checksums (corrupted or tampered download)"
-                        .to_string(),
-                );
-            }
-            SigCheckResult::SignatureInvalid => {
-                return Err("pack_signature_invalid: the package's signature file is present but does not verify".to_string());
-            }
-            SigCheckResult::Malformed(reason) => {
-                return Err(format!("pack_signature_invalid: the package's signature file is malformed ({reason})"));
-            }
-            SigCheckResult::Valid(verifying_key) => {
-                let mut store = read_trust_store(&dir)?;
-                let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
-                match store.get(&trust_key) {
-                    Some(pinned) if *pinned != incoming_key_b64 => {
-                        return Err(format!(
-                            "pack_key_mismatch: '{}' is signed by a different publisher key than the one previously \
-                             trusted for this pack. Remove the existing install first if you intend to trust the new key.",
-                            manifest.pack_id
-                        ));
-                    }
-                    Some(_) => {}
-                    None => {
-                        store.insert(trust_key.clone(), incoming_key_b64);
-                        save_trust_store(&dir, &store)?;
-                    }
-                }
-            }
-            SigCheckResult::Unsigned | SigCheckResult::Unrecognized => {
-                if read_trust_store(&dir)?.contains_key(&trust_key) {
+    // Same lock and decide-then-pin shape as `install_plugin_blocking`: held
+    // until the install is finished, and the new key is pinned only after it
+    // succeeded.
+    let _trust_guard = TRUST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending_pin: Option<String> = None;
+    match sig_check {
+        SigCheckResult::IntegrityMismatch => {
+            return Err(
+                "pack_integrity_failed: the package's contents do not match its signed checksums (corrupted or tampered download)"
+                    .to_string(),
+            );
+        }
+        SigCheckResult::SignatureInvalid => {
+            return Err("pack_signature_invalid: the package's signature file is present but does not verify".to_string());
+        }
+        SigCheckResult::Malformed(reason) => {
+            return Err(format!("pack_signature_invalid: the package's signature file is malformed ({reason})"));
+        }
+        SigCheckResult::Valid(verifying_key) => {
+            let store = read_trust_store(&dir)?;
+            let incoming_key_b64 = BASE64.encode(verifying_key.as_bytes());
+            match store.get(&trust_key) {
+                Some(pinned) if *pinned != incoming_key_b64 => {
                     return Err(format!(
-                        "pack_signature_downgrade: '{}' was previously installed with a verified publisher signature; \
-                         this package has none. Remove the existing install first if this is intentional.",
+                        "pack_key_mismatch: '{}' is signed by a different publisher key than the one previously \
+                         trusted for this pack. Remove the existing install first if you intend to trust the new key.",
                         manifest.pack_id
                     ));
                 }
+                Some(_) => {}
+                None => pending_pin = Some(incoming_key_b64),
+            }
+        }
+        SigCheckResult::Unsigned | SigCheckResult::Unrecognized => {
+            if read_trust_store(&dir)?.contains_key(&trust_key) {
+                return Err(format!(
+                    "pack_signature_downgrade: '{}' was previously installed with a verified publisher signature; \
+                     this package has none. Remove the existing install first if this is intentional.",
+                    manifest.pack_id
+                ));
             }
         }
     }
@@ -373,5 +384,8 @@ pub(super) fn install_pack_blocking(src_path: String, plugin_dir: String, overwr
         None => {}
     }
 
+    if let Some(key) = pending_pin {
+        commit_pin(&dir, &trust_key, key);
+    }
     Ok(manifest.pack_id)
 }

@@ -63,7 +63,7 @@ const SIGNED_TOKEN_PREFIX: &str = "awh1.";
 /// bounds the damage of a minting bug or an overly generous caller-chosen TTL.
 const SIGNED_TOKEN_MAX_LIFETIME_SECS: i64 = 24 * 60 * 60;
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -90,10 +90,14 @@ pub fn mint_signed_token(secret: &str, path: &str, ttl_secs: i64) -> String {
     format!("{SIGNED_TOKEN_PREFIX}{expiry}.{sig_b64}")
 }
 
+/// Largest age or lead, in seconds, an `x-webhook-timestamp` may have when
+/// `validate_timestamp` is on.
+pub(crate) const TIMESTAMP_WINDOW_SECS: u64 = 300;
+
 /// True when `ts` is within `window_secs` of `now` in either direction.
 /// `abs_diff` cannot overflow, so a hostile header such as `i64::MIN` is
 /// rejected like any other out-of-window value instead of panicking.
-fn timestamp_within_window(now: i64, ts: i64, window_secs: u64) -> bool {
+pub(crate) fn timestamp_within_window(now: i64, ts: i64, window_secs: u64) -> bool {
     now.abs_diff(ts) <= window_secs
 }
 
@@ -650,7 +654,6 @@ async fn handle_request(
     // replay by sending a fresh timestamp with any body. For body integrity, verify
     // a platform HMAC header in a downstream Code node.
     if st.validate_timestamp {
-        const WINDOW_SECS: u64 = 300; // 5 minutes
         let provided_ts = headers
             .get("x-webhook-timestamp")
             .and_then(|v| v.as_str())
@@ -663,7 +666,7 @@ async fn handle_request(
                     .expect("static response builder parameters are infallible")));
             }
             Some(ts) => {
-                if !timestamp_within_window(unix_now(), ts, WINDOW_SECS) {
+                if !timestamp_within_window(unix_now(), ts, TIMESTAMP_WINDOW_SECS) {
                     return Ok(with_cors(Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
                         .body(Full::new(Bytes::from_static(b"Timestamp too old or too far in future")))

@@ -11,6 +11,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use install::{install_pack_blocking, install_plugin_blocking};
 use list::list_installed_plugins_blocking;
+use pack::{pack_owning_member, scan_installed_packs};
 use remove::remove_pack_files;
 use trust::{load_trust_store, save_trust_store, TRUST_STORE_LOCK, warn_on_untrusted_plugins};
 
@@ -229,6 +230,13 @@ pub async fn remove_plugin(
 
     if !target.is_file() {
         return Err(format!("Plugin '{filename}' not found"));
+    }
+
+    // A pack member is removed with its pack, which also clears the pack's
+    // manifest, signature file and trust pin. Removing one alone would leave
+    // the pack listing a file that is gone.
+    if let Some(pack_id) = pack_owning_member(&scan_installed_packs(&dir), &filename) {
+        return Err(format!("'{filename}' belongs to the plugin pack '{pack_id}'. Remove the whole pack instead."));
     }
 
     // Confirm the resolved path is actually inside plugin_dir (defense in

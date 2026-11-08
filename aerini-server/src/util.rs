@@ -1,5 +1,82 @@
 use axum::extract::{ConnectInfo, Request};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::pin;
+use std::time::Duration;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tower::Service;
+
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serves `app` over HTTP/1.1 and drops any connection that has not delivered a
+/// complete request head within `HEADER_READ_TIMEOUT`. `axum::serve` sets no hyper
+/// timer, so hyper's default 30 s header timeout never arms there and a client
+/// that trickles bytes can hold a connection open forever. Once `shutdown`
+/// resolves, no new connections are accepted and open ones finish gracefully.
+/// Dropping the returned future aborts every connection still open.
+pub(crate) async fn serve_http<F>(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()>,
+{
+    let mut connections: JoinSet<()> = JoinSet::new();
+    let stop = CancellationToken::new();
+    let mut shutdown = pin!(shutdown);
+
+    loop {
+        let (stream, remote_addr) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(e) => {
+                    if !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                    ) {
+                        tracing::warn!("accept failed: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    continue;
+                }
+            },
+            _ = &mut shutdown => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+        };
+
+        let app = app.clone();
+        let stop = stop.clone();
+        connections.spawn(async move {
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                req.extensions_mut().insert(ConnectInfo(remote_addr));
+                let mut app = app.clone();
+                async move { app.call(req).await }
+            });
+            let mut conn = pin!(http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT)
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades());
+            tokio::select! {
+                _ = conn.as_mut() => return,
+                _ = stop.cancelled() => conn.as_mut().graceful_shutdown(),
+            }
+            let _ = conn.await;
+        });
+    }
+
+    stop.cancel();
+    while connections.join_next().await.is_some() {}
+    Ok(())
+}
 
 /// Extracts the real client IP from X-Forwarded-For when behind trusted proxies.
 ///

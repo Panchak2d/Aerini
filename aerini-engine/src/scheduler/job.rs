@@ -41,6 +41,11 @@ pub enum TriggerKind {
         /// unchanged behavior.
         #[serde(default)]
         dedup_window_secs: u64,
+        /// Requires an `x-webhook-timestamp` header within five minutes of
+        /// now, as the Webhook node's `validate_timestamp` setting. Absent
+        /// in rows persisted before this field existed, which read as off.
+        #[serde(default)]
+        validate_timestamp: bool,
     },
     /// No automatic trigger — only fires via manual Run press.
     /// Background scheduling is not supported for this trigger type.
@@ -137,7 +142,7 @@ impl ScheduledJobRow {
     /// reply — where the raw secret would otherwise leak.
     pub fn redacted(&self) -> Self {
         let mut row = self.clone();
-        if let Ok(TriggerKind::Webhook { port, path, method, dedup_window_secs, .. }) =
+        if let Ok(TriggerKind::Webhook { port, path, method, dedup_window_secs, validate_timestamp, .. }) =
             serde_json::from_str::<TriggerKind>(&row.trigger_kind)
         {
             let redacted_trigger = TriggerKind::Webhook {
@@ -146,6 +151,7 @@ impl ScheduledJobRow {
                 method,
                 secret: REDACTED_WEBHOOK_SECRET.to_string(),
                 dedup_window_secs,
+                validate_timestamp,
             };
             if let Ok(json) = serde_json::to_string(&redacted_trigger) {
                 row.trigger_kind = json;
@@ -249,6 +255,7 @@ mod tests {
             method: "POST".to_string(),
             secret: "super-secret-value".to_string(),
             dedup_window_secs: 0,
+            validate_timestamp: false,
         };
         let row      = row_with_trigger(&trigger);
         let redacted = row.redacted();
@@ -280,7 +287,10 @@ mod tests {
         let trigger: TriggerKind = serde_json::from_str(legacy_json)
             .expect("pre-dedup persisted rows must still deserialize");
         match trigger {
-            TriggerKind::Webhook { dedup_window_secs, .. } => assert_eq!(dedup_window_secs, 0),
+            TriggerKind::Webhook { dedup_window_secs, validate_timestamp, .. } => {
+                assert_eq!(dedup_window_secs, 0);
+                assert!(!validate_timestamp);
+            }
             other => panic!("expected Webhook trigger, got {:?}", other),
         }
     }

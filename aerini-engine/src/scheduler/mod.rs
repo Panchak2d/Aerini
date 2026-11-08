@@ -333,11 +333,11 @@ impl SchedulerDaemon {
         }
 
         let trigger = match trigger {
-            TriggerKind::Webhook { port, path, method, secret, dedup_window_secs } => {
+            TriggerKind::Webhook { port, path, method, secret, dedup_window_secs, validate_timestamp } => {
                 let effective_port = port_override.unwrap_or(port);
                 check_webhook_port(&*self.db, &self.webhook_ports, workflow_id, effective_port)?;
                 probe_port_is_free(effective_port)?;
-                TriggerKind::Webhook { port: effective_port, path, method, secret, dedup_window_secs }
+                TriggerKind::Webhook { port: effective_port, path, method, secret, dedup_window_secs, validate_timestamp }
             }
             other => other,
         };
@@ -841,7 +841,10 @@ pub fn extract_trigger(workflow: &Workflow) -> Result<TriggerKind, String> {
             let method = crate::nodes::webhook::normalize_method(node.config["method"].as_str());
             let secret = node.config["secret"].as_str().unwrap_or("").to_string();
             let dedup_window_secs = node.config["dedup_window_secs"].as_u64().unwrap_or(0);
-            Ok(TriggerKind::Webhook { port, path, method, secret, dedup_window_secs })
+            let validate_timestamp = crate::nodes::util::cfg_bool_opt(&node.config["validate_timestamp"], "validate_timestamp")
+                .map_err(|e| e.message)?
+                .unwrap_or(false);
+            Ok(TriggerKind::Webhook { port, path, method, secret, dedup_window_secs, validate_timestamp })
         }
         "manual_trigger" => Ok(TriggerKind::Manual),
         // Any other node type is a candidate plugin-sourced trigger, using the
@@ -1153,5 +1156,46 @@ mod tests {
             settings: Default::default(),
         };
         assert!(matches!(extract_trigger(&wf), Ok(TriggerKind::Manual)));
+    }
+
+    #[test]
+    fn webhook_validate_timestamp_is_read_from_node_config_and_bad_values_are_rejected() {
+        use crate::migration::CURRENT_VERSION;
+        use crate::model::{NodeType, Workflow, WorkflowNode};
+
+        let wf_with = |config: serde_json::Value| Workflow {
+            annotations: vec![],
+            schema_version: CURRENT_VERSION.to_string(),
+            id: "wf".to_string(),
+            name: "wf".to_string(),
+            description: String::new(),
+            nodes: vec![WorkflowNode {
+                id: "hook".to_string(),
+                node_type_id: "webhook".to_string(),
+                node_type: NodeType::Utility,
+                name: "hook".to_string(),
+                config,
+                credentials: HashMap::new(),
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                retry: Default::default(),
+                fallback_node: None,
+                disabled: false,
+                position: Default::default(),
+            }],
+            edges: vec![],
+            metadata: Default::default(),
+            max_duration_secs: None,
+            unlimited_duration: false,
+            parallel_execution: false,
+            max_concurrent_nodes: None,
+            settings: Default::default(),
+        };
+
+        let on = extract_trigger(&wf_with(serde_json::json!({"port": 3456, "validate_timestamp": true})));
+        assert!(matches!(on, Ok(TriggerKind::Webhook { validate_timestamp: true, .. })), "got {on:?}");
+        let unset = extract_trigger(&wf_with(serde_json::json!({"port": 3456})));
+        assert!(matches!(unset, Ok(TriggerKind::Webhook { validate_timestamp: false, .. })), "got {unset:?}");
+        assert!(extract_trigger(&wf_with(serde_json::json!({"port": 3456, "validate_timestamp": "maybe"}))).is_err());
     }
 }

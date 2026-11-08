@@ -67,18 +67,19 @@ pub(super) async fn execute_sqlx(input: NodeInput) -> NodeOutput {
     }
 
     let mysql = db_type == "mysql";
-    if let Err(e) = super::pool::check_sqlx_target(&url, mysql, ssrf_policy).await {
-        return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e));
-    }
+    let target = match super::pool::check_sqlx_target(&url, mysql, ssrf_policy).await {
+        Ok(target) => target,
+        Err(e) => return NodeOutput::failure(NodeError::unrecoverable("SSRF_BLOCKED", e)),
+    };
     let cancellable = input.cancel_token.is_some();
     let operation = if is_execute { super::Operation::Execute } else { super::Operation::Query };
     let mut output = if mysql {
-        match super::pool::get_mysql_pool(&url).await {
+        match super::pool::get_mysql_pool(&url, &target).await {
             Err(e) => NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
             Ok(pool) => super::mysql::mysql_run(&pool, &query, &params, operation, cancellable).await,
         }
     } else {
-        match super::pool::get_pg_pool(&url).await {
+        match super::pool::get_pg_pool(&url, &target).await {
             Err(e) => NodeOutput::failure(NodeError::unrecoverable("POOL_ERROR", e)),
             Ok(pool) => pg_run(&pool, &query, &params, operation, cancellable).await,
         }

@@ -286,7 +286,7 @@ pub(super) async fn run_job_loop(
             emit_done_async(&event_sink, &db, &workflow_id).await;
         }
 
-        TriggerKind::Webhook { port, path, method, secret, dedup_window_secs } => {
+        TriggerKind::Webhook { port, path, method, secret, dedup_window_secs, validate_timestamp } => {
             let listener = match tokio::net::TcpListener::bind(
                 format!("127.0.0.1:{}", port)
             ).await {
@@ -379,7 +379,7 @@ pub(super) async fn run_job_loop(
                 let handle = tokio::spawn(async move {
                     let payload = match tokio::time::timeout(
                         std::time::Duration::from_secs(10),
-                        parse_http_request(&mut stream, &path, &method, &secret),
+                        parse_http_request(&mut stream, &path, &method, &secret, validate_timestamp),
                     ).await {
                         Ok(Ok(p))  => p,
                         Ok(Err(e)) => {
@@ -1307,6 +1307,7 @@ async fn parse_http_request(
     expected_path:   &str,
     expected_method: &str,
     secret:          &str,
+    validate_timestamp: bool,
 ) -> Result<std::collections::HashMap<String, Value>, String> {
     use tokio::io::{AsyncReadExt, BufReader};
 
@@ -1377,6 +1378,23 @@ async fn parse_http_request(
             .unwrap_or("");
         if !crate::nodes::webhook::credential_valid(secret, expected_path, provided) {
             return Err(format!("HTTP/1.1 401 Unauthorized\r\n{CORS_HEADER_LINES}\r\n"));
+        }
+    }
+
+    if validate_timestamp {
+        let provided_ts = headers.get("x-webhook-timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<i64>().ok());
+        match provided_ts {
+            None => {
+                return Err(format!("HTTP/1.1 400 Bad Request\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n"));
+            }
+            Some(ts) if !crate::nodes::webhook::timestamp_within_window(
+                crate::nodes::webhook::unix_now(), ts, crate::nodes::webhook::TIMESTAMP_WINDOW_SECS,
+            ) => {
+                return Err(format!("HTTP/1.1 401 Unauthorized\r\n{CORS_HEADER_LINES}Content-Length: 0\r\n\r\n"));
+            }
+            Some(_) => {}
         }
     }
 
@@ -2488,6 +2506,10 @@ mod request_parsing_tests {
     use tokio::net::{TcpListener, TcpStream};
 
     async fn parse(raw: &'static [u8], secret: &str) -> Result<HashMap<String, Value>, String> {
+        parse_with(raw, secret, false).await
+    }
+
+    async fn parse_with(raw: &'static [u8], secret: &str, validate_timestamp: bool) -> Result<HashMap<String, Value>, String> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = tokio::spawn(async move {
@@ -2497,7 +2519,7 @@ mod request_parsing_tests {
             c
         });
         let (mut server, _) = listener.accept().await.unwrap();
-        let out = parse_http_request(&mut server, "/hook", "POST", secret).await;
+        let out = parse_http_request(&mut server, "/hook", "POST", secret, validate_timestamp).await;
         let _ = client.await;
         out
     }
@@ -2526,6 +2548,20 @@ mod request_parsing_tests {
         let bytes: &'static [u8] = Box::leak(raw.into_bytes().into_boxed_slice());
         let err = parse(bytes, "s3").await.unwrap_err();
         assert!(err.starts_with("HTTP/1.1 401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn timestamp_header_is_required_and_bounded_only_when_validation_is_on() {
+        let leak = |raw: String| -> &'static [u8] { Box::leak(raw.into_bytes().into_boxed_slice()) };
+        let now = crate::nodes::webhook::unix_now();
+        let with_ts = |ts: i64| leak(format!("POST /hook HTTP/1.1\r\nX-Webhook-Timestamp: {ts}\r\nContent-Length: 2\r\n\r\n{{}}"));
+
+        let err = parse_with(b"POST /hook HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", "", true).await.unwrap_err();
+        assert!(err.starts_with("HTTP/1.1 400"), "got: {err}");
+        let err = parse_with(with_ts(now - 3600), "", true).await.unwrap_err();
+        assert!(err.starts_with("HTTP/1.1 401"), "got: {err}");
+        assert!(parse_with(with_ts(now), "", true).await.is_ok());
+        assert!(parse_with(b"POST /hook HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", "", false).await.is_ok());
     }
 
     #[tokio::test]

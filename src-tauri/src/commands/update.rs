@@ -24,6 +24,11 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// `DOWNLOAD_STALL_LIMIT`, so this only bounds a connection that keeps trickling.
 const DOWNLOAD_HARD_LIMIT: Duration = Duration::from_secs(30 * 60);
 const DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(45);
+/// Largest update package accepted. The updater plugin buffers the whole
+/// download in memory and verifies the signature only once it has all of it,
+/// so without a cap a hostile or misconfigured server could exhaust memory
+/// before verification ever runs. Well above any real installer.
+const DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const STALL_POLL: Duration = Duration::from_secs(5);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RUN_DRAIN_GRACE: Duration = Duration::from_secs(3);
@@ -479,6 +484,8 @@ async fn download(
     let last_progress_ms = Arc::new(AtomicU64::new(0));
     let progress_clock = Arc::clone(&last_progress_ms);
     let progress_app = app.clone();
+    let oversize = CancellationToken::new();
+    let oversize_trip = oversize.clone();
     let mut received: u64 = 0;
     let mut last_emit: Option<Instant> = None;
 
@@ -487,6 +494,10 @@ async fn download(
         move |chunk, total| {
             received += chunk as u64;
             progress_clock.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            if exceeds_download_limit(received, total) {
+                oversize_trip.cancel();
+                return;
+            }
             let finished = total.is_some_and(|t| received >= t);
             if finished || last_emit.is_none_or(|t| t.elapsed() >= PROGRESS_INTERVAL) {
                 last_emit = Some(Instant::now());
@@ -496,16 +507,30 @@ async fn download(
         || {},
     );
 
+    // The plugin's download future has no size limit of its own and its chunk
+    // callback cannot abort it, so the callback trips `oversize` and dropping
+    // `fetch` here closes the connection and frees what was buffered.
     tokio::select! {
         res = fetch => match res {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) => Err(user_message(&e)),
         },
         _ = token.cancelled() => Ok(None),
+        _ = oversize.cancelled() => {
+            tracing::warn!(limit = DOWNLOAD_MAX_BYTES, "update download exceeded the size limit");
+            Err("The update download is larger than expected and was stopped. Nothing was installed.".to_string())
+        }
         _ = stall_watch(&last_progress_ms, started) => {
             Err("The download stalled. Check your connection and try again.".to_string())
         }
     }
+}
+
+/// True once the server's declared length, or the bytes received so far,
+/// pass the cap. A declared length is checked first so an honest oversized
+/// response is refused after its first chunk instead of after 512 MiB.
+fn exceeds_download_limit(received: u64, declared_total: Option<u64>) -> bool {
+    received > DOWNLOAD_MAX_BYTES || declared_total.is_some_and(|t| t > DOWNLOAD_MAX_BYTES)
 }
 
 #[tauri::command]
@@ -841,5 +866,13 @@ mod tests {
         assert_eq!(notice_from_marker(raw, "0.5.0", 1000 + MARKER_MAX_AGE_SECS + 1), None);
         assert!(notice_from_marker(raw, "0.5.0", 1000 + MARKER_MAX_AGE_SECS).is_some());
         assert_eq!(notice_from_marker("not json", "0.5.0", 1100), None);
+    }
+
+    #[test]
+    fn download_limit_trips_on_declared_length_or_received_bytes_past_the_cap() {
+        assert!(!exceeds_download_limit(0, None));
+        assert!(!exceeds_download_limit(DOWNLOAD_MAX_BYTES, Some(DOWNLOAD_MAX_BYTES)));
+        assert!(exceeds_download_limit(1, Some(DOWNLOAD_MAX_BYTES + 1)));
+        assert!(exceeds_download_limit(DOWNLOAD_MAX_BYTES + 1, None));
     }
 }

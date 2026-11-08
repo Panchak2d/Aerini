@@ -1,5 +1,5 @@
 {
-  "engine_version": "0.4.4",
+  "engine_version": "0.4.5",
   "nodes": [
     {
       "author": "",
@@ -523,7 +523,7 @@
       "output_schema": {
         "properties": {
           "_sandbox_partial": {
-            "description": "Present and true on macOS when --code-sandbox is active. ESM module import restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied.",
+            "description": "Present and true on macOS and Windows when --code-sandbox is active. Module import and permission restrictions are enforced but CPU/memory resource limits (setrlimit) are Linux-only and not applied.",
             "type": "boolean"
           },
           "duration_ms": {
