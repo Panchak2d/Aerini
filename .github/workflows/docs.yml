@@ -11,10 +11,6 @@ on:
       - 'v[0-9]*.[0-9]*.[0-9]*'
   workflow_dispatch:
     inputs:
-      ref:
-        description: 'Git ref to build (branch, tag or SHA)'
-        required: true
-        default: 'main'
       target:
         description: '"latest" for the site root, or a minor version such as v0.4 for its snapshot'
         required: true
@@ -34,7 +30,6 @@ jobs:
     permissions: {}
     outputs:
       skip: ${{ steps.resolve.outputs.skip }}
-      ref: ${{ steps.resolve.outputs.ref }}
       target: ${{ steps.resolve.outputs.target }}
       base: ${{ steps.resolve.outputs.base }}
     steps:
@@ -44,21 +39,20 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          INPUT_REF: ${{ inputs.ref }}
           INPUT_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
           skip=false
           if [ "$EVENT" = workflow_dispatch ]; then
-            ref="$INPUT_REF"
             target="$INPUT_TARGET"
+            if [ "$target" = latest ] && { [ "$REF_TYPE" != branch ] || [ "$REF_NAME" != main ]; }; then
+              echo "::error::the site root is published only from main; run this workflow from main, or set target to a version such as v0.4"
+              exit 1
+            fi
           elif [ "$REF_TYPE" = tag ]; then
-            ref="$REF_NAME"
             target="$(printf '%s' "$REF_NAME" | sed -E 's/^(v[0-9]+\.[0-9]+)\.[0-9]+$/\1/')"
             if [[ "$REF_NAME" == *-* ]]; then skip=true; target=latest; fi
           else
-            ref="$SHA"
             target=latest
           fi
           if ! [[ "$target" =~ ^(latest|v[0-9]+\.[0-9]+)$ ]]; then
@@ -69,7 +63,6 @@ jobs:
           if [ "$target" != latest ]; then base="/$target/"; fi
           {
             echo "skip=$skip"
-            echo "ref=$ref"
             echo "target=$target"
             echo "base=$base"
           } >> "$GITHUB_OUTPUT"
@@ -82,7 +75,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.ref }}
           persist-credentials: false
 
       - name: Set up Node.js
