@@ -9,6 +9,7 @@ function setupDom(): void {
       <div class="confirm-backdrop"></div>
       <div class="confirm-message" id="confirm-message"></div>
       <button id="confirm-cancel">Cancel</button>
+      <button id="confirm-alt" class="hidden"></button>
       <button id="confirm-ok">Continue</button>
     </div>`;
 }
@@ -60,5 +61,44 @@ describe("showConfirm keyboard behavior", () => {
     key("Escape");
     await result;
     window.removeEventListener("keydown", seen);
+  });
+
+  it("showChoice returns ok / alt / cancel, and Esc is cancel, never the alt action", async () => {
+    const { showChoice } = await import("../confirm");
+    const alt = document.getElementById("confirm-alt")!;
+    const cancel = document.getElementById("confirm-cancel")!;
+
+    const a = showChoice("Pick", { okLabel: "Open", altLabel: "Run Once" });
+    await flush();
+    expect(alt.textContent).toBe("Run Once");
+    expect(alt.classList.contains("hidden")).toBe(false);
+    alt.click();
+    expect(await a).toBe("alt");
+
+    const b = showChoice("Pick", { okLabel: "Open", altLabel: "Run Once" });
+    await flush();
+    key("Escape");
+    expect(await b).toBe("cancel");
+
+    const c = showChoice("Pick", { okLabel: "Open", altLabel: "Run Once", cancelLabel: "Never mind" });
+    await flush();
+    expect(cancel.textContent).toBe("Never mind");
+    document.getElementById("confirm-ok")!.click();
+    expect(await c).toBe("ok");
+  });
+
+  it("a plain showConfirm after showChoice hides the alt button and restores Cancel", async () => {
+    const { showChoice, showConfirm } = await import("../confirm");
+    const first = showChoice("Pick", { okLabel: "Open", altLabel: "Run Once", cancelLabel: "Never mind" });
+    await flush();
+    document.getElementById("confirm-cancel")!.click();
+    await first;
+
+    const second = showConfirm("Sure?", true);
+    await flush();
+    expect(document.getElementById("confirm-alt")!.classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("confirm-cancel")!.textContent).toBe("Cancel");
+    document.getElementById("confirm-cancel")!.click();
+    expect(await second).toBe(false);
   });
 });

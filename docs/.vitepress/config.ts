@@ -1,10 +1,16 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig, type HeadConfig } from 'vitepress'
 
 const DOCS_BASE = process.env.DOCS_BASE ?? '/'
 if (!/^\/(v\d+\.\d+\/)?$/.test(DOCS_BASE)) {
   throw new Error(`DOCS_BASE must be "/" or "/vMAJOR.MINOR/", got "${DOCS_BASE}"`)
 }
 const isSnapshot = DOCS_BASE !== '/'
+
+const head: HeadConfig[] = [
+  ['link', { rel: 'icon', href: `${DOCS_BASE}favicon.ico`, sizes: '32x32' }],
+  ['link', { rel: 'icon', type: 'image/svg+xml', href: `${DOCS_BASE}favicon.svg` }],
+]
+if (isSnapshot) head.push(['meta', { name: 'robots', content: 'noindex' }])
 
 export default defineConfig({
   title: isSnapshot ? `Aerini Docs (${DOCS_BASE.slice(1, -1)})` : 'Aerini Docs',
@@ -13,7 +19,7 @@ export default defineConfig({
   cleanUrls: true,
   base: DOCS_BASE as `/${string}/`,
 
-  head: isSnapshot ? [['meta', { name: 'robots', content: 'noindex' }]] : [],
+  head,
 
   sitemap: isSnapshot ? undefined : { hostname: 'https://docs.aerini.org' },
 

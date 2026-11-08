@@ -19,6 +19,9 @@ function stack(): HTMLElement {
     el = document.createElement("div");
     el.id = "toast-stack";
     el.className = "toast-stack";
+    // Announced politely by screen readers without taking focus.
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
     document.body.appendChild(el);
   }
   return el;

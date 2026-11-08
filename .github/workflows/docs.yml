@@ -7,17 +7,69 @@ on:
       - 'docs/**'
       - 'package.json'
       - 'package-lock.json'
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
   workflow_dispatch:
+    inputs:
+      target:
+        description: '"latest" for the site root, or a minor version such as v0.4 for its snapshot'
+        required: true
+        default: 'latest'
 
 concurrency:
-  group: pages
+  group: docs-gh-pages
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+      target: ${{ steps.resolve.outputs.target }}
+      base: ${{ steps.resolve.outputs.base }}
+    steps:
+      - name: Resolve what to build
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            target="$INPUT_TARGET"
+            if [ "$target" = latest ] && { [ "$REF_TYPE" != branch ] || [ "$REF_NAME" != main ]; }; then
+              echo "::error::the site root is published only from main; run this workflow from main, or set target to a version such as v0.4"
+              exit 1
+            fi
+          elif [ "$REF_TYPE" = tag ]; then
+            target="$(printf '%s' "$REF_NAME" | sed -E 's/^(v[0-9]+\.[0-9]+)\.[0-9]+$/\1/')"
+            if [[ "$REF_NAME" == *-* ]]; then skip=true; target=latest; fi
+          else
+            target=latest
+          fi
+          if ! [[ "$target" =~ ^(latest|v[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::target must be 'latest' or vMAJOR.MINOR, got '$target'"
+            exit 1
+          fi
+          base=/
+          if [ "$target" != latest ]; then base="/$target/"; fi
+          {
+            echo "skip=$skip"
+            echo "target=$target"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -29,7 +81,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-          cache: 'npm'
+          package-manager-cache: false
 
       - name: Install dependencies
         env:
@@ -37,24 +89,72 @@ jobs:
         run: npm ci
 
       - name: Build docs
+        env:
+          DOCS_BASE: ${{ needs.plan.outputs.base }}
         run: npm run docs:build
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Check the build used the requested base
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          grep -q "src=\"${BASE}assets/" docs/.vitepress/dist/index.html \
+            || { echo "::error::build ignored DOCS_BASE=$BASE (does this ref predate DOCS_BASE support?)"; exit 1; }
+
+      - name: Upload site
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          name: docs-site
           path: docs/.vitepress/dist
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
 
   deploy:
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      contents: write
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      - name: Download site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: docs-site
+          path: new-site
+
+      - name: Publish to gh-pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ needs.plan.outputs.target }}
+          REMOTE_URL: https://github.com/${{ github.repository }}.git
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          g() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+
+          if g ls-remote --exit-code --heads "$REMOTE_URL" gh-pages >/dev/null 2>&1; then
+            g clone --quiet --depth 1 --branch gh-pages "$REMOTE_URL" site
+          else
+            git init --quiet site
+          fi
+          cd site
+
+          if [ "$TARGET" = latest ]; then
+            find . -mindepth 1 -maxdepth 1 ! -name .git ! -name 'v[0-9]*' -exec rm -rf {} +
+            cp -a ../new-site/. .
+          else
+            rm -rf "./$TARGET"
+            mkdir "./$TARGET"
+            cp -a ../new-site/. "./$TARGET/"
+          fi
+          touch .nojekyll
+          printf 'docs.aerini.org\n' > CNAME
+
+          git checkout --quiet --orphan publish
+          git add -A
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit --quiet -m "docs: publish $TARGET from $SOURCE_SHA"
+          g push --force "$REMOTE_URL" publish:gh-pages

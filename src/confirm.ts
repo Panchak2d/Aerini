@@ -12,12 +12,24 @@
 // correct answer — nothing is skipped or merged, only serialized.
 let _queue: Promise<void> = Promise.resolve();
 
-function showConfirmNow(message: string, isDanger: boolean, okLabel: string, iconVariant: "danger" | "neutral"): Promise<boolean> {
+export type ChoiceResult = "ok" | "alt" | "cancel";
+
+interface DialogOptions {
+  isDanger:    boolean;
+  okLabel:     string;
+  iconVariant: "danger" | "neutral";
+  cancelLabel: string;
+  altLabel?:   string;
+}
+
+function showConfirmNow(message: string, o: DialogOptions): Promise<ChoiceResult> {
+  const { isDanger, okLabel, iconVariant, cancelLabel, altLabel } = o;
   return new Promise(resolve => {
     const modal      = document.getElementById("confirm-modal")!;
     const msgEl      = document.getElementById("confirm-message")!;
     const okBtn      = document.getElementById("confirm-ok")! as HTMLButtonElement;
     const cancelBtn  = document.getElementById("confirm-cancel")!;
+    const altBtn     = document.getElementById("confirm-alt");
     const backdrop   = modal.querySelector(".confirm-backdrop")!;
     const iconDanger  = modal.querySelector(".confirm-icon--danger");
     const iconNeutral = modal.querySelector(".confirm-icon--neutral");
@@ -26,6 +38,12 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
 
     msgEl.textContent = message;
     okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
+    modal.classList.toggle("confirm--choice", altLabel !== undefined);
+    if (altBtn) {
+      altBtn.textContent = altLabel ?? "";
+      altBtn.classList.toggle("hidden", altLabel === undefined);
+    }
     okBtn.classList.toggle("confirm-danger", isDanger);
     // Both icons are set explicitly every call, not just for "neutral" — the
     // modal's DOM is shared and reused (see module doc comment above), so a
@@ -34,18 +52,20 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
     iconNeutral?.classList.toggle("hidden", iconVariant !== "neutral");
     modal.classList.remove("hidden");
 
-    const cleanup = (result: boolean) => {
+    const cleanup = (result: ChoiceResult) => {
       modal.classList.add("hidden");
       okBtn.removeEventListener("click", onOk);
       cancelBtn.removeEventListener("click", onCancel);
+      altBtn?.removeEventListener("click", onAlt);
       backdrop.removeEventListener("click", onCancel);
       document.removeEventListener("keydown", onKey, true);
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
       resolve(result);
     };
 
-    const onOk     = () => cleanup(true);
-    const onCancel = () => cleanup(false);
+    const onOk     = () => cleanup("ok");
+    const onAlt    = () => cleanup("alt");
+    const onCancel = () => cleanup("cancel");
 
     // Capture phase, and every key is stopped from reaching the rest of the
     // app: while the dialog is up, Ctrl+Enter, Ctrl+N and the other global
@@ -66,6 +86,7 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
 
     okBtn.addEventListener("click", onOk);
     cancelBtn.addEventListener("click", onCancel);
+    if (altLabel !== undefined) altBtn?.addEventListener("click", onAlt);
     backdrop.addEventListener("click", onCancel);
     document.addEventListener("keydown", onKey, true);
 
@@ -75,9 +96,24 @@ function showConfirmNow(message: string, isDanger: boolean, okLabel: string, ico
 }
 
 // Confirm dialog — replaces window.confirm, which Tauri webview suppresses.
-// Returns Promise<boolean>: true on OK, false on Cancel / backdrop click.
+// Returns Promise<boolean>: true on OK, false on Cancel / Esc / backdrop click.
 export function showConfirm(message: string, isDanger = false, okLabel = "Continue", iconVariant: "danger" | "neutral" = "danger"): Promise<boolean> {
-  const result = _queue.then(() => showConfirmNow(message, isDanger, okLabel, iconVariant));
+  return enqueue(message, { isDanger, okLabel, iconVariant, cancelLabel: "Cancel" }).then(r => r === "ok");
+}
+
+// Three-way dialog: a primary action, a secondary action that is also a
+// deliberate "go ahead" (altLabel), and a real cancel. Esc and a backdrop
+// click always mean "cancel" -- never the secondary action -- so dismissing
+// the dialog can never start something.
+export function showChoice(
+  message: string,
+  opts: { okLabel: string; altLabel: string; cancelLabel?: string },
+): Promise<ChoiceResult> {
+  return enqueue(message, { isDanger: false, iconVariant: "neutral", okLabel: opts.okLabel, altLabel: opts.altLabel, cancelLabel: opts.cancelLabel ?? "Cancel" });
+}
+
+function enqueue(message: string, o: DialogOptions): Promise<ChoiceResult> {
+  const result = _queue.then(() => showConfirmNow(message, o));
   // Advance the queue regardless of this call's own outcome, so the next
   // queued call always waits for this dialog to close, not for its answer.
   _queue = result.then(() => undefined, () => undefined);

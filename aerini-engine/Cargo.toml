@@ -230,10 +230,12 @@ rustls-webpki = "0.103.16"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Session-bus queries (session_bus.rs). zbus 5, the same copy tauri-plugin-opener
-# uses on desktop; keyring has its own zbus 4. The tokio feature is the one it enables.
+# Session-bus queries (session_bus.rs). zbus 6, separate from the zbus 5 copy
+# tauri-plugin-opener uses on desktop and the zbus 4 copy keyring uses. "tokio" runs the
+# connection on the caller's tokio runtime; "proxy" enables zbus::proxy, which zbus 6 no
+# longer builds without it.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+zbus = { version = "6.2", default-features = false, features = ["tokio", "proxy"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
