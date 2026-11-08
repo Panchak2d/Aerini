@@ -137,3 +137,63 @@ describe("initTooltips — dynamic content", () => {
     expect(document.getElementById("aria-tt")?.hidden).toBe(true);
   });
 });
+
+describe("initTooltips — placement and native title", () => {
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+
+  async function hover(el: HTMLElement): Promise<HTMLElement> {
+    vi.useFakeTimers();
+    el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(500);
+    vi.useRealTimers();
+    return document.getElementById("aria-tt")!;
+  }
+
+  function mockRects(trigger: HTMLElement, triggerRect: DOMRect): void {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this === trigger ? triggerRect : rect(0, 0, 300, 40);
+    });
+  }
+
+  it("places the tooltip beside the trigger when there is room", async () => {
+    const el = document.createElement("button");
+    el.setAttribute("data-tooltip", "Roomy");
+    document.body.appendChild(el);
+    mockRects(el, rect(100, 100, 40, 24));
+    initTooltips();
+
+    const tip = await hover(el);
+
+    expect(tip.style.left).toBe("148px");
+    expect(tip.style.top).toBe("92px");
+    vi.restoreAllMocks();
+  });
+
+  it("falls back to below the trigger, inside the window, when a trigger sits at the right edge", async () => {
+    const el = document.createElement("button");
+    el.setAttribute("data-tooltip", "Edge");
+    document.body.appendChild(el);
+    mockRects(el, rect(window.innerWidth - 60, 10, 50, 24));
+    initTooltips();
+
+    const tip = await hover(el);
+
+    expect(tip.style.top).toBe("42px");
+    expect(parseFloat(tip.style.left) + 300).toBeLessThanOrEqual(window.innerWidth - 8);
+    expect(parseFloat(tip.style.left)).toBeGreaterThanOrEqual(8);
+    vi.restoreAllMocks();
+  });
+
+  it("drops a native title set after bind, so it cannot stack a second tooltip", async () => {
+    const el = document.createElement("button");
+    el.setAttribute("data-tooltip", "Refreshed label");
+    document.body.appendChild(el);
+    initTooltips();
+
+    el.setAttribute("title", "Refreshed label");
+    await hover(el);
+
+    expect(el.hasAttribute("title")).toBe(false);
+  });
+});

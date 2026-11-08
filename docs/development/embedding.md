@@ -12,13 +12,13 @@
 
 ```toml
 [dependencies]
-aerini-engine = { git = "https://github.com/Panchak2d/aerini", tag = "v0.4.4" }
+aerini-engine = { git = "https://github.com/Panchak2d/aerini", tag = "v0.4.5" }
 tokio         = { version = "1", features = ["full"] }
 async-trait   = "0.1"
 serde_json    = "1.0"
 ```
 
-Pin a release `tag`, as above, and use the [latest release](https://github.com/Panchak2d/aerini/releases/latest) rather than `v0.4.4` if it is newer. Without a `tag` Cargo follows the default branch, which changes between releases, and versions before 1.0 can change the engine's API from one release to the next.
+Pin a release `tag`, as above, and use the [latest release](https://github.com/Panchak2d/aerini/releases/latest) rather than `v0.4.5` if it is newer. Without a `tag` Cargo follows the default branch, which changes between releases, and versions before 1.0 can change the engine's API from one release to the next.
 
 The crate has one optional feature, `schema`, which derives JSON Schema for the workflow file types in `model.rs`. It exists to generate `docs/reference/workflow.schema.json`, is off by default, and adds nothing to a build that doesn't enable it.
 

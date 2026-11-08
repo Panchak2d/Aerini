@@ -288,7 +288,10 @@ export class ChatPanel {
     this.el.classList.add("chat-open");
     document.body.classList.add("chat-panel-open");
     this.refreshRunningState();
-    this.inputEl.focus();
+    // While the workflow isn't live the composer can't send, so land on the
+    // Start button instead: one Enter then gets a first-time user chatting.
+    if (this.startBtn.classList.contains("hidden")) this.inputEl.focus();
+    else this.startBtn.focus();
   }
 
   hide(): void {

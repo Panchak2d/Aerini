@@ -23,9 +23,9 @@ async fn proxy_for(
     interface: &'static str,
 ) -> Option<Proxy<'static>> {
     Builder::<Proxy<'static>>::new(conn)
-        .destination(destination).ok()?
-        .path(path).ok()?
-        .interface(interface).ok()?
+        .destination(destination)
+        .path(path)
+        .interface(interface)
         .cache_properties(CacheProperties::No)
         .build()
         .await

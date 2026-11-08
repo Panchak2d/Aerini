@@ -8,7 +8,7 @@ import { getAutostart, setAutostart } from "./ipc/autostart";
 import { bindUpdateUi } from "./update-ui";
 import { invoke } from "@tauri-apps/api/core";
 import { validateWorkflow, checkDangerousNodes } from "./validation";
-import { showConfirm } from "./confirm";
+import { showConfirm, showChoice } from "./confirm";
 import { bindWfSettings } from "./wf-settings";
 import { bindAlwaysOnToggle, updateAlwaysOnBtn } from "./always-on";
 import { activateZone } from "./sidebar-sections";
@@ -155,6 +155,10 @@ export function bindToolbar(
   const $ = (id: string) => document.getElementById(id)!;
 
   const approvedForExecution = new Set<string>();
+  // Workflows where the person already chose "Run Once" over opening Chat
+  // this session; asking again on every Run would only be friction.
+  const runOnceChosen = new Set<string>();
+  const isChatAvailable = () => document.getElementById("btn-chat")?.classList.contains("hidden") === false;
 
   const runWithValidation = async () => {
     if (runManager.isRunning) return;
@@ -165,13 +169,21 @@ export function bindToolbar(
     }
     const triggerIsWebhook = findTriggerNodeTypeId(canvas.nodes.values()) === NODE_IDS.WEBHOOK;
     if (triggerIsWebhook && chatPanel.isOpen()) {
-      const startInstead = await showConfirm(
-        "This runs once and waits up to 60s for a single webhook call \u2014 Chat won't get a reply this way. Start the workflow instead for an interactive session?",
-        false,
-        "Start Instead",
-        "neutral",
+      const choice = await showChoice(
+        "Run waits up to 60s for one webhook call, so Chat can't get a reply this way.\nStart the workflow to chat with it.",
+        { okLabel: "Start Instead", altLabel: "Run Once" },
       );
-      if (startInstead) { chatPanel.startForChat(); return; }
+      if (choice === "cancel") return;
+      if (choice === "ok") { chatPanel.startForChat(); return; }
+    } else if (triggerIsWebhook && isChatAvailable() && !runOnceChosen.has(wfManager.currentId)) {
+      const wfId = wfManager.currentId;
+      const choice = await showChoice(
+        "This workflow looks like a chat bot. Run only waits up to 60s for one webhook call and won't start a conversation.\nOpen Chat to talk to it instead.",
+        { okLabel: "Open Chat", altLabel: "Run Once" },
+      );
+      if (choice === "cancel") return;
+      if (choice === "ok") { chatPanel.toggle(); return; }
+      runOnceChosen.add(wfId);
     }
     if (!await checkDangerousNodes(wfManager.currentId, canvas.nodes.values(), approvedForExecution, showConfirm)) return;
     runManager.handleRun(wfManager.currentId, wfManager.currentName);
@@ -188,12 +200,11 @@ export function bindToolbar(
     runMainBtn.textContent = isRunning ? "Stop" : "Run";
     runMainBtn.classList.toggle("btn-run-stop", isRunning);
     const triggerIsWebhook = findTriggerNodeTypeId(canvas.nodes.values()) === NODE_IDS.WEBHOOK;
-    runMainBtn.title = schedulerRunning && !runManager.isRunning
+    runMainBtn.setAttribute("data-tooltip", schedulerRunning && !runManager.isRunning
       ? "Stop this scheduled background run"
       : !isRunning && triggerIsWebhook
-      ? "Runs once — waits up to 60s for a single webhook request, then stops. For Chat or a persistent listener, use Start in the Chat panel instead."
-      : "";
-    runMainBtn.setAttribute("data-tooltip", runMainBtn.title);
+      ? "Runs once and waits up to 60s for one webhook request. For Chat or a persistent listener, use Start in the Chat panel."
+      : "");
   };
 
   const runWrap = document.getElementById("run-dropdown-wrap");

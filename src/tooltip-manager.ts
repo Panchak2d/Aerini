@@ -56,17 +56,41 @@ function doHide(): void {
   }
 }
 
+const GAP  = 8;
+const EDGE = 8;
+
 function positionTooltip(tt: HTMLElement, trigger: HTMLElement, side: string): void {
-  const r = trigger.getBoundingClientRect();
-  tt.style.top       = `${r.top + r.height / 2}px`;
-  tt.style.transform = "translateY(-50%)";
-  if (side === "left") {
-    tt.style.left  = "";
-    tt.style.right = `${window.innerWidth - r.left + 8}px`;
+  const r  = trigger.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  // Measure at the origin first so the tooltip's size does not depend on
+  // where it was last placed.
+  tt.style.right     = "";
+  tt.style.transform = "";
+  tt.style.left      = "0px";
+  tt.style.top       = "0px";
+  const { width: w, height: h } = tt.getBoundingClientRect();
+
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
+  const fits = side === "left"
+    ? r.left - GAP - w >= EDGE
+    : r.right + GAP + w + EDGE <= vw;
+
+  let left: number;
+  let top: number;
+  if (fits) {
+    left = side === "left" ? r.left - GAP - w : r.right + GAP;
+    top  = clamp(r.top + r.height / 2 - h / 2, EDGE, vh - h - EDGE);
   } else {
-    tt.style.right = "";
-    tt.style.left  = `${r.right + 8}px`;
+    // Not enough room on the requested side (e.g. a toolbar button at the
+    // window's right edge): go below the trigger, or above when there is
+    // no room below, centred on it and kept inside the window.
+    left = clamp(r.left + r.width / 2 - w / 2, EDGE, vw - w - EDGE);
+    top  = r.bottom + GAP + h + EDGE <= vh ? r.bottom + GAP : Math.max(EDGE, r.top - GAP - h);
   }
+  tt.style.left = `${left}px`;
+  tt.style.top  = `${top}px`;
 }
 
 function showFor(trigger: HTMLElement): void {
@@ -91,13 +115,19 @@ function bindTrigger(el: HTMLElement): void {
   // leftover is dropped here once, centrally, rather than trusting every
   // call site (current or future) to never set it.
   if (el.hasAttribute("title")) el.removeAttribute("title");
+  // A call site that sets `title` after bind (e.g. a label refreshed on
+  // every state change) would otherwise bring the native tooltip back
+  // beside this one, so it is dropped again whenever the trigger is
+  // entered or focused, before the browser's own delay can show it.
+  const dropTitle = () => { if (el.hasAttribute("title")) el.removeAttribute("title"); };
   el.addEventListener("mouseenter", () => {
+    dropTitle();
     cancelHide();
     cancelShow();
     showTimer = setTimeout(() => { showTimer = null; showFor(el); }, SHOW_DELAY_MS);
   });
   el.addEventListener("mouseleave", () => { cancelShow(); scheduleHide(); });
-  el.addEventListener("focus",      () => { cancelShow(); cancelHide(); showFor(el); });
+  el.addEventListener("focus",      () => { dropTitle(); cancelShow(); cancelHide(); showFor(el); });
   el.addEventListener("blur",       () => scheduleHide());
 }
 

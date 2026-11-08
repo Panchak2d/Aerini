@@ -31,7 +31,7 @@ The **Chat** button in the toolbar appears once the canvas has a Webhook and an 
 The workflow has to be running in the background before it can reply. A notice in the panel has a **Start** button. Click it. It does the same as the toolbar's **Schedule Run**: it saves the workflow if needed and hands it to the scheduler. If port `3456` is taken, Chat tries the next few ports and tells you which one it used.
 
 > [!NOTE]
-> Don't use the plain **Run** button with a Webhook trigger. It waits for one request that Chat can never send. If you press it while Chat is open, Aerini offers **Start Instead**.
+> Don't use the plain **Run** button with a Webhook trigger. It waits for one request that Chat can never send. If you press it, Aerini offers **Start Instead** (Chat open) or **Open Chat** (Chat closed).
 
 ## 3. Send a message
 
