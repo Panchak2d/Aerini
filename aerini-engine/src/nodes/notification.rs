@@ -9,6 +9,9 @@ use crate::error::NodeError;
 use crate::model::{NodeInput, NodeOutput, NodeType};
 use crate::node::Node;
 
+#[cfg(target_os = "linux")]
+use super::util::restore_host_library_env;
+
 pub struct NotificationNode;
 
 #[async_trait]
@@ -252,6 +255,7 @@ async fn send_notification(title: &str, body: &str, #[allow(unused_variables)] u
         let markup = crate::session_bus::notification_body_markup().await.unwrap_or(true);
         let mut cmd = Command::new("notify-send");
         cmd.args(notify_send_args(title, body, urgency, markup));
+        restore_host_library_env(&mut cmd);
         run_notifier(cmd, "notify-send", NOTIFY_TIMEOUT).await?;
         return Ok("notify-send");
     }
