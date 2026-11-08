@@ -1,0 +1,1 @@
+import{_ as t,o,c as r,a2 as a}from"./chunks/framework.DYPTBNgj.js";const p=JSON.parse('{"title":"Aerini Documentation","description":"","frontmatter":{},"headers":[],"relativePath":"index.md","filePath":"index.md"}'),n={name:"index.md"};function i(s,e,d,l,h,u){return o(),r("div",null,[...e[0]||(e[0]=[a("",25)])])}const g=t(n,[["render",i]]);export{p as __pageData,g as default};

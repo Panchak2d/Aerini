@@ -1,0 +1,1 @@
+import{_ as o,o as n,c as t,a2 as a}from"./chunks/framework.DYPTBNgj.js";const p=JSON.parse('{"title":"FAQ","description":"","frontmatter":{},"headers":[],"relativePath":"faq.md","filePath":"faq.md"}'),r={name:"faq.md"};function i(s,e,h,l,d,u){return n(),t("div",null,[...e[0]||(e[0]=[a("",27)])])}const f=o(r,[["render",i]]);export{p as __pageData,f as default};

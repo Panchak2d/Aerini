@@ -1,0 +1,1 @@
+import{_ as a,o,c as r,a2 as n}from"./chunks/framework.ecJ-2P1q.js";const p=JSON.parse('{"title":"Glossary","description":"","frontmatter":{},"headers":[],"relativePath":"glossary.md","filePath":"glossary.md"}'),t={name:"glossary.md"};function i(s,e,h,d,l,u){return o(),r("div",null,[...e[0]||(e[0]=[n("",92)])])}const f=a(t,[["render",i]]);export{p as __pageData,f as default};
