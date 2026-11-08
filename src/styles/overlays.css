@@ -304,6 +304,8 @@
 .btn-sm { padding: 4px 10px; background: var(--bg4); border: 1px solid var(--bd); border-radius: 6px; color: var(--t1); font-size: 12px; font-family: inherit; cursor: pointer; transition: background var(--trans), border-color var(--trans); white-space: nowrap; }
 .btn-sm:hover { background: var(--bg3); border-color: var(--t3); }
 .btn-sm:disabled { opacity: .4; cursor: not-allowed; }
+a.btn-sm { display: inline-block; text-decoration: none; }
+a.btn-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .btn-sm-primary { background: var(--color-action-nav); border-color: transparent; color: var(--color-on-action); font-weight: 600; }
 .btn-sm-primary:hover { background: var(--color-action-nav); border-color: transparent; opacity: .88; }
 

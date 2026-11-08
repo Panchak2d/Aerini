@@ -1,14 +1,21 @@
 import { defineConfig } from 'vitepress'
 
+const DOCS_BASE = process.env.DOCS_BASE ?? '/'
+if (!/^\/(v\d+\.\d+\/)?$/.test(DOCS_BASE)) {
+  throw new Error(`DOCS_BASE must be "/" or "/vMAJOR.MINOR/", got "${DOCS_BASE}"`)
+}
+const isSnapshot = DOCS_BASE !== '/'
+
 export default defineConfig({
-  title: 'Aerini Docs',
+  title: isSnapshot ? `Aerini Docs (${DOCS_BASE.slice(1, -1)})` : 'Aerini Docs',
   description: 'Documentation for Aerini, a local-first visual workflow automation engine.',
   lang: 'en-US',
   cleanUrls: true,
+  base: DOCS_BASE as `/${string}/`,
 
-  sitemap: {
-    hostname: 'https://docs.aerini.org'
-  },
+  head: isSnapshot ? [['meta', { name: 'robots', content: 'noindex' }]] : [],
+
+  sitemap: isSnapshot ? undefined : { hostname: 'https://docs.aerini.org' },
 
   markdown: {
     // Aerini's own {{...}} expression syntax appears throughout docs/ as
@@ -30,6 +37,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/workflow-file-format', activeMatch: '/reference/' },
       { text: 'Operations', link: '/operations/server-deploy', activeMatch: '/operations/' },
       { text: 'Development', link: '/development/architecture', activeMatch: '/development/' },
+      ...(isSnapshot ? [{ text: 'Latest docs', link: 'https://docs.aerini.org/' }] : []),
       { text: 'GitHub', link: 'https://github.com/Panchak2d/Aerini' }
     ],
 

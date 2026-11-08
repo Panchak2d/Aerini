@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({ openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 
-import { bindExternalLinks, EXTERNAL_URL_SCOPE } from "../external-links";
+import { bindExternalLinks, EXTERNAL_URL_SCOPE, isAllowedExternalUrl } from "../external-links";
 
 const toast = vi.fn();
 let preventedBeforeWindow = false;
@@ -53,6 +53,7 @@ describe("bindExternalLinks in Tauri", () => {
     for (const href of [
       "https://github.com/Panchak2d/aerini/releases/latest",
       "https://www.patreon.com/14702118/join",
+      "https://docs.aerini.org/guide/nodes#code",
       "https://www.youtube.com/watch?v=abc123",
     ]) {
       expect(click(href, { target: "_blank" })).toBe(true);
@@ -72,17 +73,27 @@ describe("bindExternalLinks in Tauri", () => {
       "https://github.com/Panchak2dx/aerini",
       "https://www.patreon.com.evil.example/x",
       "http://github.com/Panchak2d/aerini",
+      "https://docs.aerini.org.evil.example/",
     ]) {
       expect(click(href, { target: "_blank" })).toBe(true);
     }
-    expect(toast).toHaveBeenCalledTimes(4);
+    expect(toast).toHaveBeenCalledTimes(5);
 
     expect(click("#section")).toBe(false);
     expect(click("/relative")).toBe(false);
     expect(click("http://asset.localhost/file.png", { download: "file.png" })).toBe(false);
     expect(click("mailto:someone@example.com")).toBe(false);
     expect(mocks.openUrl).not.toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledTimes(4);
+    expect(toast).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe("Settings documentation link", () => {
+  it("points at an address the opener scope allows", () => {
+    const html = readFileSync("src/index.html", "utf8");
+    const href = /<a [^>]*id="btn-open-docs"[^>]*>/.exec(html)?.[0].match(/href="([^"]+)"/)?.[1];
+    expect(href).toBe("https://docs.aerini.org/");
+    expect(isAllowedExternalUrl(href as string)).toBe(true);
   });
 });
 
