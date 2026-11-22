@@ -50,4 +50,6 @@ ignore = [
     # Transitive via futures-util and the tauri/wry stack; no direct use. Remove once
     # futures-util drops it.
     "RUSTSEC-2026-0441",
+    # RUSTSEC-2026-0543: chrono unmaintained. No patched version exists; chrono is a direct dependency.
+    "RUSTSEC-2026-0543",
 ]
