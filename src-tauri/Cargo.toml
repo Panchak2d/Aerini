@@ -67,7 +67,7 @@ tracing = "0.1"
 # are default-on upstream but unused here (a single process's own memory
 # needs none of them), matching this file's existing minimal-features
 # convention (see reqwest, aws-sdk-s3 in aerini-engine/Cargo.toml).
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 
 # Staging area for multi-node package installs (commands/plugins.rs::install_plugin_pack_from_path):
 # each member needs a real path on disk for PluginLoader::describe_plugin (&Path,
