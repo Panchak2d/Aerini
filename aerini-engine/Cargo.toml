@@ -27,9 +27,9 @@ serde_json = "1.0"
 petgraph = "0.8"
 
 # SQLite
-rusqlite    = { version = "0.38", features = ["bundled"] }
+rusqlite    = { version = "0.41", features = ["bundled"] }
 r2d2        = "0.8"
-r2d2_sqlite = { version = "0.32", features = ["bundled"] }
+r2d2_sqlite = { version = "0.36", features = ["bundled"] }
 dashmap     = "6.1"
 
 # Encryption (credential store)
@@ -245,7 +245,7 @@ serial_test = "4"
 # force get_next_seq's SELECT to fail without a trigger (triggers don't fire
 # on SELECT). Test-only: unified into the dev-profile build alongside the
 # main rusqlite dependency above, does not affect the non-test feature set.
-rusqlite = { version = "0.38", features = ["hooks"] }
+rusqlite = { version = "0.41", features = ["hooks"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

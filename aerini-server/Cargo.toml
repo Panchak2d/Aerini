@@ -48,7 +48,7 @@ argon2  = "0.5"
 sha2    = "0.11"
 
 # SQLite (for TokenStore; SQLite already bundled via aerini-engine)
-rusqlite    = { version = "0.38", features = ["bundled"] }
+rusqlite    = { version = "0.41", features = ["bundled"] }
 
 # Utils
 chrono      = { version = "0.4", features = ["serde"] }

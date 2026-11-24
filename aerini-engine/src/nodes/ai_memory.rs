@@ -934,7 +934,7 @@ mod tests {
         // denied — then install the authorizer on that same connection.
         {
             let pool = node.get_pool().expect("pool init failed");
-            let conn = pool.get().expect("get conn failed");
+            let mut conn = pool.get().expect("get conn failed");
             conn.authorizer(Some(|ctx: rusqlite::hooks::AuthContext<'_>| {
                 use rusqlite::hooks::{AuthAction, Authorization};
                 match ctx.action {
@@ -958,7 +958,7 @@ mod tests {
         // (which only touches role/content, not seq) isn't itself denied.
         {
             let pool = node.get_pool().expect("pool init failed");
-            let conn = pool.get().expect("get conn failed");
+            let mut conn = pool.get().expect("get conn failed");
             conn.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)
                 .expect("authorizer clear failed");
         }

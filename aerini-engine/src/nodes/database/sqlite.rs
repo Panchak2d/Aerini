@@ -194,7 +194,7 @@ fn sqlite_read_rows(
     operation: super::Operation,
 ) -> Result<Value, String> {
     let column_names: Vec<String> = stmt.column_names()
-        .iter().map(|s| s.to_string()).collect();
+        .map(|s| s.to_string()).collect();
     let cols = column_names.clone();
     let mapped = stmt
         .query_map(params, move |row| {
