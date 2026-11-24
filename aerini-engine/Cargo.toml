@@ -199,14 +199,14 @@ aws-smithy-runtime-api = "1"
 # wasmtime's default feature set minus `cache`: that feature pulls in the zstd crates, and nothing in
 # this crate configures a module cache. Re-enable it only once the zstd crates it needs have no open
 # RUSTSEC advisories.
-wasmtime           = { version = "=50.0.1", default-features = false, features = [
+wasmtime           = { version = "=50.0.3", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser",
 ] }
-wasmtime-wasi      = { version = "=50.0.1", features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "=50.0.1", features = ["p2", "p3"] }
+wasmtime-wasi      = { version = "=50.0.3", features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.3", features = ["p2", "p3"] }
 
 # plugin_http.rs needs these directly. They are declared the way
-# wasmtime-wasi-http 50.0.1 declares them (ring, no default features), so no
+# wasmtime-wasi-http 50.0.3 declares them (ring, no default features), so no
 # second crypto backend is pulled in. The tree also links aws-lc-rs, so
 # plugin_http.rs names the ring provider explicitly instead of relying on a
 # process-wide default.
