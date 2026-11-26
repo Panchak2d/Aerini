@@ -19,14 +19,14 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.4",
+    "@tauri-apps/cli": "^2.12.6",
     "@types/node": "^26.6.6",
     "husky": "^9.1.7",
     "jsdom": "^30.1.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5",
+    "vite": "^8.3.8",
     "vitepress": "^1.6.4",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.1"
   },
   "overrides": {
     "vitepress": {
@@ -34,10 +34,10 @@
     }
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-opener": "^2.7.2",
-    "dompurify": "^3.4.16",
-    "marked": "^18.1.2"
+    "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-opener": "^2.7.3",
+    "dompurify": "^3.4.18",
+    "marked": "^18.2.1"
   },
   "allowScripts": {
     "esbuild@0.25.12": true
